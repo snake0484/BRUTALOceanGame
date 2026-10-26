@@ -124,6 +124,25 @@ public sealed class ZoneFlowSim
     /// <summary>Open-sea surface height at a world xz (swell); null means flat sea level.</summary>
     public Func<float, float, float>? SeaSurface;
 
+    /// <summary>
+    /// The open sea at a world xz: x = swell height (m), yz = its surface velocity (the orbital motion, m/s). New sea cells
+    /// start from it, sampled every <see cref="SeedSpacing"/> and interpolated between; null means flat and still.
+    /// </summary>
+    public Func<float, float, Vector3>? SeaState;
+
+    /// <summary>
+    /// Lattice (m) the open sea is sampled on to seed new cells: the swell varies over metres, and a sample a cell cost a
+    /// 14 ms tick when two discs grew at once.
+    /// </summary>
+    private const float SeedSpacing = 4f;
+
+    /// <summary>
+    /// Wave period (s) the exchange with the open sea is averaged over. Each wave flows in over the zone's sea edge and
+    /// back out within a period, a pour keeps flowing in, so growth and calm read the net inflow averaged twice over this
+    /// (<see cref="_sustained"/>), not its swing: read raw, every crest of a 1 m swell (about 3 m²/s) grew the zone.
+    /// </summary>
+    public float WavePeriod = 8f;
+
     public float SeaLevel;
 
     private Vector2 _origin;
@@ -149,6 +168,8 @@ public sealed class ZoneFlowSim
     public float BoreQuiet = 2f;
     private float[] _flux = [];      // 4 per cell: -X, +X, -Z, +Z outflow (m^3/s)
     private float[] _inflow = [];    // 4 per cell: inflow from an open-sea boundary on that side
+    private float[] _exchange = [];  // 4 per cell: net inflow from the open sea on that side, averaged over a wave period ...
+    private float[] _sustained = []; // ... and averaged again (m^3/s per metre of edge)
     private float[] _velX = [];
     private float[] _velZ = [];
     private float[] _seaLevelAt = [];
@@ -156,6 +177,9 @@ public sealed class ZoneFlowSim
     private readonly List<Vector3> _discs = new();
     private readonly List<bool> _grown = new();
     private readonly List<float> _calm = new();
+
+    // Grown discs handed back to the ocean, still simulated while the ocean fades them out (RemoveDisc ends them).
+    private readonly List<bool> _leaving = new();
     private readonly List<(int X, int Z, float Bed)> _dryCells = new(1024);
     private float _calmTimer;
 
@@ -289,8 +313,9 @@ public sealed class ZoneFlowSim
     }
 
     /// <summary>
-    /// Adds a zone disc. New cells start with sea water up to sea level over the bed as it is now (before the edit
-    /// lands), so a hole dug later reads as the bed dropping under the water, which then flows in.
+    /// Adds a zone disc. New sea cells start as the open sea stands there now, its swell height and orbital flow, over
+    /// the bed as it is now (before the edit lands), so the sim takes the waves over where they are (starting from flat
+    /// sea level popped every wave in the disc flat) and a hole dug later reads as the bed dropping under the water.
     /// </summary>
     /// <param name="grown">Added by growth rather than an edit: it remerges into the ocean once its water is calm.</param>
     public void AddDisc(Vector3 disc, BathymetryGrid grid, bool grown = false)
@@ -298,6 +323,21 @@ public sealed class ZoneFlowSim
         _discs.Add(disc);
         _grown.Add(grown);
         _calm.Add(0f);
+        _leaving.Add(false);
+        ResizeToDiscs(grid);
+    }
+
+    /// <summary>Ends a disc the ocean has finished fading out (see <see cref="Remerged"/>).</summary>
+    public void RemoveDisc(Vector3 disc, BathymetryGrid grid)
+    {
+        var d = _discs.IndexOf(disc);
+        if (d < 0)
+            return;
+
+        _discs.RemoveAt(d);
+        _grown.RemoveAt(d);
+        _calm.RemoveAt(d);
+        _leaving.RemoveAt(d);
         ResizeToDiscs(grid);
     }
 
@@ -317,8 +357,9 @@ public sealed class ZoneFlowSim
     }
 
     /// <summary>
-    /// Every <see cref="CalmCheck"/> s: a grown disc whose water sits at the swell with slow flow, little foam and no strong
-    /// inflow for <see cref="RemergeTime"/> s is handed back to the ocean (one per check). Edit discs stay.
+    /// Every <see cref="CalmCheck"/> s: a grown disc whose water sits at the swell with slow flow, little foam and no
+    /// sustained inflow for <see cref="RemergeTime"/> s is handed back to the ocean (one per check), which fades it out
+    /// before <see cref="RemoveDisc"/> ends it. Edit discs stay.
     /// </summary>
     public void CheckRemerge(BathymetryGrid grid, float dt)
     {
@@ -330,7 +371,7 @@ public sealed class ZoneFlowSim
 
         for (var d = _discs.Count - 1; d >= 0; d--)
         {
-            if (!_grown[d])
+            if (!_grown[d] || _leaving[d])
                 continue;
 
             _calm[d] = DiscCalm(_discs[d]) ? _calm[d] + CalmCheck : 0f;
@@ -338,14 +379,11 @@ public sealed class ZoneFlowSim
 
         for (var d = _discs.Count - 1; d >= 0; d--)
         {
-            if (!_grown[d] || _calm[d] < RemergeTime)
+            if (!_grown[d] || _leaving[d] || _calm[d] < RemergeTime)
                 continue;
 
             Remerged.Add(_discs[d]);
-            _discs.RemoveAt(d);
-            _grown.RemoveAt(d);
-            _calm.RemoveAt(d);
-            ResizeToDiscs(grid);
+            _leaving[d] = true;
             return;
         }
     }
@@ -380,7 +418,7 @@ public sealed class ZoneFlowSim
                     return false;
 
                 for (var s = 0; s < 4; s++)
-                    if (_inflow[i * 4 + s] > GrowFlux * 0.5f)
+                    if (_sustained[i * 4 + s] > GrowFlux * 0.5f)
                         return false;
             }
         }
@@ -408,6 +446,8 @@ public sealed class ZoneFlowSim
         var oldOrigin = _origin;
         var (oldNx, oldNz) = (_nx, _nz);
         var (oldDepth, oldFoam, oldFlux, oldKind, oldTurbulence) = (_depth, _foam, _flux, _kind, _turbulence);
+        var (oldExchange, oldSustained) = (_exchange, _sustained);
+        var lattice = new Seeds(min, nx * CellSize, nz * CellSize, SeaState);
 
         _origin = min;
         _nx = nx;
@@ -422,6 +462,8 @@ public sealed class ZoneFlowSim
         _packed = new uint[2 * n];
         _flux = new float[n * 4];
         _inflow = new float[n * 4];
+        _exchange = new float[n * 4];
+        _sustained = new float[n * 4];
         _velX = new float[n];
         _velZ = new float[n];
         _seaLevelAt = new float[n];
@@ -446,11 +488,20 @@ public sealed class ZoneFlowSim
                     _foam[i] = oldFoam[old];
                     _turbulence[i] = oldTurbulence[old];
                     oldFlux.AsSpan(old * 4, 4).CopyTo(_flux.AsSpan(i * 4, 4));
+                    oldExchange.AsSpan(old * 4, 4).CopyTo(_exchange.AsSpan(i * 4, 4));
+                    oldSustained.AsSpan(old * 4, 4).CopyTo(_sustained.AsSpan(i * 4, 4));
                 }
                 else if (_kind[i] == 1 && grid.IsSea(world.X, world.Y))
                 {
-                    // Only open sea starts full; dry ground and inland pits the zone grows over start dry and fill by flow.
-                    _depth[i] = MathF.Max(0f, SeaLevel - _bed[i]);
+                    // Only open sea starts full, as the swell has it now; dry ground and inland pits the zone grows over
+                    // start dry and fill by flow.
+                    var sea = lattice.At(world);
+                    _depth[i] = MathF.Max(0f, SeaLevel + sea.X - _bed[i]);
+                    var flow = new Vector2(sea.Y, sea.Z) * (_depth[i] * CellSize);
+                    _flux[i * 4] = MathF.Max(-flow.X, 0f);
+                    _flux[i * 4 + 1] = MathF.Max(flow.X, 0f);
+                    _flux[i * 4 + 2] = MathF.Max(-flow.Y, 0f);
+                    _flux[i * 4 + 3] = MathF.Max(flow.Y, 0f);
                 }
             }
         }
@@ -532,6 +583,7 @@ public sealed class ZoneFlowSim
         var area = CellSize * CellSize;
         var pipe = dt * Gravity;
         var damping = MathF.Exp(-FluxDampingRate * dt);
+        var settle = 1f - MathF.Exp(-dt / MathF.Max(WavePeriod, 1f));
 
         // 1. Outflow fluxes from height differences (momentum carried in the fluxes), limited to the water available.
         // Each pipe's cross-section is the water standing over the higher of the two beds (hydrostatic reconstruction):
@@ -600,11 +652,16 @@ public sealed class ZoneFlowSim
                     var (dx, dz) = Sides[s];
                     var j = Neighbour(x + dx, z + dz);
                     var into = 0f;
+                    var k = i * 4 + s;
 
                     if (j >= 0 && _kind[j] == 1)
                         into = _flux[j * 4 + (s ^ 1)];
                     else if (j >= 0 && _kind[j] == 2)
-                        into = _inflow[i * 4 + s];
+                        into = _inflow[k];
+
+                    var exchange = j >= 0 && _kind[j] == 2 ? into - _flux[k] : 0f;
+                    _exchange[k] += (exchange - _exchange[k]) * settle;
+                    _sustained[k] += (_exchange[k] - _sustained[k]) * settle;
 
                     flowIn += into;
                     flowOut += _flux[i * 4 + s];
@@ -820,7 +877,7 @@ public sealed class ZoneFlowSim
                     float score;
                     if (_kind[j] == 2)
                     {
-                        score = _inflow[i * 4 + s] / GrowFlux;
+                        score = _sustained[i * 4 + s] / GrowFlux;
                     }
                     else
                     {
@@ -919,6 +976,38 @@ public sealed class ZoneFlowSim
     }
 
     private int Neighbour(int x, int z) => (uint)x < (uint)_nx && (uint)z < (uint)_nz ? x + z * _nx : -1;
+
+    /// <summary>The open sea (<see cref="SeaState"/>) on a <see cref="SeedSpacing"/> lattice over a resized domain, sampled where first needed, bilinear between.</summary>
+    private sealed class Seeds(Vector2 origin, float width, float depth, Func<float, float, Vector3>? sea)
+    {
+        private readonly int _columns = (int)(width / SeedSpacing) + 2;
+        private readonly Vector3[] _values = new Vector3[((int)(width / SeedSpacing) + 2) * ((int)(depth / SeedSpacing) + 2)];
+        private readonly bool[] _sampled = new bool[((int)(width / SeedSpacing) + 2) * ((int)(depth / SeedSpacing) + 2)];
+
+        public Vector3 At(Vector2 world)
+        {
+            if (sea is null)
+                return Vector3.Zero;
+
+            var f = (world - origin) / SeedSpacing;
+            var x = Math.Clamp((int)f.X, 0, _columns - 2);
+            var z = Math.Clamp((int)f.Y, 0, _values.Length / _columns - 2);
+            var t = Vector2.Clamp(f - new Vector2(x, z), Vector2.Zero, Vector2.One);
+            return Vector3.Lerp(Vector3.Lerp(Point(x, z), Point(x + 1, z), t.X), Vector3.Lerp(Point(x, z + 1), Point(x + 1, z + 1), t.X), t.Y);
+        }
+
+        private Vector3 Point(int x, int z)
+        {
+            var k = x + z * _columns;
+            if (!_sampled[k])
+            {
+                _values[k] = sea!(origin.X + x * SeedSpacing, origin.Y + z * SeedSpacing);
+                _sampled[k] = true;
+            }
+
+            return _values[k];
+        }
+    }
 
     private static float Ramp(float t)
     {

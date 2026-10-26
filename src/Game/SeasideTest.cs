@@ -63,7 +63,7 @@ public sealed class SeasideTest(TerrainWorld world, VoxelWaterSystem water, Phys
 
         if (_stage == 2 && time >= _nextLog)
         {
-            Log.Info($"t+{time - _start - 1.0:F1}s zone discs {water.ZoneDiscs} cells {water.Zones.Cells}, volume {water.Zones.Volume:F0} m3, breakers in {water.Zones.InjectedVolume:F0} m3, foam {water.Zones.MeanFoam:F2}, max flow {water.Zones.MaxSpeed:F2} m/s at {water.Zones.MaxSpeedAt - new Vector3(_hole.X, 0f, _hole.Z)}, zone {water.LastZoneMs:F2} ms, voxel step {water.LastStepMs:F2} ms");
+            Log.Info($"t+{time - _start - 1.0:F1}s zone discs {water.ZoneDiscs} cells {water.Zones.Cells}, volume {water.Zones.Volume:F0} m3, breakers in {water.Zones.InjectedVolume:F0} m3, foam {water.Zones.MeanFoam:F2}, max flow {water.Zones.MaxSpeed:F2} m/s at {water.Zones.MaxSpeedAt - new Vector3(_hole.X, 0f, _hole.Z)}, zone {water.LastZoneMs:F2} ms (peak {water.TakePeakZoneMs():F2}); voxel {(water.Pipes ? "pipes" : "automaton")}: blocks {water.Blocks}, awake {water.AwakeBlocks}, step {water.LastStepMs:F3} ms");
             Probe("hole", _hole);
             Probe("sea", _hole + new Vector3(-10f, 0f, 0f));
             _nextLog = time + 1.0;

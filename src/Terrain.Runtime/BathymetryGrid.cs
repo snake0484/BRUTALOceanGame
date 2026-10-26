@@ -40,12 +40,23 @@ public sealed class BathymetryGrid
 
     /// <summary>Width (m) inside a disc edge over which the sim surface blends into the open-sea swell.</summary>
     public float ZoneBlendWidth = 5f;
+
+    /// <summary>
+    /// Seconds over which a disc's zone weight fades in when it is added and out when it goes back to the ocean, so the
+    /// drawn surface hands over between the swell and the sim instead of switching in a tick (a new disc a second
+    /// popped the sea around a dig).
+    /// </summary>
+    public float ZoneFadeSeconds = 1.5f;
     private readonly bool[] _zoneWet = new bool[Resolution * Resolution];
     private readonly float[] _zoneOffset = new float[Resolution * Resolution];
     private readonly float[] _zoneDepth = new float[Resolution * Resolution];
 
     private readonly float[] _zoneWhite = new float[Resolution * Resolution];
     private readonly List<Vector3> _discs = new();
+
+    // Per disc: its zone weight's fade (0..1) and which way it is going (+1 in, -1 out, 0 settled).
+    private readonly List<float> _fades = new();
+    private readonly List<sbyte> _fading = new();
     private readonly Region[] _changed = new Region[MaxChanged];
 
     // The cells of the region being re-merged as they were before (BeginRegion), so EndRegion reports only real changes.
@@ -166,10 +177,10 @@ public sealed class BathymetryGrid
         if (Math.Abs(Shift.X) >= Resolution || Math.Abs(Shift.Z) >= Resolution)
             ChangedAll = true;
 
-        foreach (var disc in _discs)
+        for (var d = 0; d < _discs.Count; d++)
         {
-            StampDisc(disc);
-            MarkChanged(DiscRegion(disc));
+            StampDisc(_discs[d], _fades[d], Region.All);
+            MarkChanged(DiscRegion(_discs[d]));
         }
 
         return true;
@@ -418,13 +429,67 @@ public sealed class BathymetryGrid
         LastRebuildMs = (float)elapsedMs;
     }
 
-    /// <summary>Marks a disc (world x, world z, radius) as simulated sea.</summary>
+    /// <summary>Marks a disc (world x, world z, radius) as simulated sea; its zone weight fades in (<see cref="ZoneFadeSeconds"/>).</summary>
     public void AddSimulatedDisc(float x, float z, float radius)
     {
         var disc = new Vector3(x, z, radius);
         _discs.Add(disc);
-        StampDisc(disc);
+        _fades.Add(0f);
+        _fading.Add(1);
+        StampDisc(disc, 0f, Region.All);
         MarkChanged(DiscRegion(disc));
+    }
+
+    /// <summary>Starts handing a disc back to the open sea: its zone weight fades out, then <see cref="AdvanceZoneFades"/> removes it.</summary>
+    public void FadeOutDisc(Vector3 disc)
+    {
+        var d = _discs.IndexOf(disc);
+        if (d >= 0)
+            _fading[d] = -1;
+    }
+
+    /// <summary>
+    /// Once a tick: moves fading discs' zone weights on and re-stamps the cells they cover, which go up with the zone's
+    /// levels. Discs that have faded out are removed and listed in <paramref name="gone"/>.
+    /// </summary>
+    public void AdvanceZoneFades(float dt, List<Vector3> gone)
+    {
+        var step = dt / MathF.Max(ZoneFadeSeconds, 1e-3f);
+        var region = new Region(Resolution, Resolution, 0, 0);
+
+        for (var d = _discs.Count - 1; d >= 0; d--)
+        {
+            if (_fading[d] == 0)
+                continue;
+
+            var disc = _discs[d];
+            _fades[d] = Math.Clamp(_fades[d] + _fading[d] * step, 0f, 1f);
+
+            if (_fades[d] <= 0f)
+            {
+                gone.Add(disc);
+                RemoveSimulatedDisc(disc);
+                continue;
+            }
+
+            if (_fades[d] >= 1f)
+                _fading[d] = 0;
+
+            var cells = DiscRegion(disc);
+            region = new Region(Math.Min(region.X0, cells.X0), Math.Min(region.Z0, cells.Z0), Math.Max(region.X1, cells.X1), Math.Max(region.Z1, cells.Z1));
+        }
+
+        if (region.Empty)
+            return;
+
+        for (var gz = region.Z0; gz < region.Z1; gz++)
+            _zoneWeight.AsSpan(region.X0 + gz * Resolution, region.X1 - region.X0).Clear();
+
+        for (var d = 0; d < _discs.Count; d++)
+            StampDisc(_discs[d], _fades[d], region);
+
+        MarkLevel(region.X0, region.Z0);
+        MarkLevel(region.X1 - 1, region.Z1 - 1);
     }
 
     private Region DiscRegion(Vector3 disc)
@@ -436,8 +501,13 @@ public sealed class BathymetryGrid
     /// <summary>Hands a disc back to the open sea: clears the zone state under it and re-stamps the remaining discs.</summary>
     public void RemoveSimulatedDisc(Vector3 disc)
     {
-        if (!_discs.Remove(disc))
+        var d = _discs.IndexOf(disc);
+        if (d < 0)
             return;
+
+        _discs.RemoveAt(d);
+        _fades.RemoveAt(d);
+        _fading.RemoveAt(d);
 
         var cells = CellsInDisc(disc.X, disc.Y, disc.Z);
         for (var gz = cells.MinZ; gz <= cells.MaxZ; gz++)
@@ -450,17 +520,21 @@ public sealed class BathymetryGrid
             _zoneWhite.AsSpan(row, count).Clear();
         }
 
-        foreach (var other in _discs)
-            StampDisc(other);
+        for (var i = 0; i < _discs.Count; i++)
+            StampDisc(_discs[i], _fades[i], Region.All);
 
         MarkChanged(DiscRegion(disc));
     }
 
-    private void StampDisc(Vector3 disc)
+    /// <summary>Marks a disc's cells inside <paramref name="clip"/> simulated and raises their zone weight to its ramp times its fade.</summary>
+    private void StampDisc(Vector3 disc, float fade, in Region clip)
     {
         var cells = CellsInDisc(disc.X, disc.Y, disc.Z);
-        for (var gz = cells.MinZ; gz <= cells.MaxZ; gz++)
-            for (var gx = cells.MinX; gx <= cells.MaxX; gx++)
+        var x0 = Math.Max(cells.MinX, clip.X0);
+        var x1 = Math.Min(cells.MaxX, clip.X1 - 1);
+
+        for (var gz = Math.Max(cells.MinZ, clip.Z0); gz <= Math.Min(cells.MaxZ, clip.Z1 - 1); gz++)
+            for (var gx = x0; gx <= x1; gx++)
             {
                 var distance = Vector2.Distance(CellCentre(gx, gz), new Vector2(disc.X, disc.Y));
                 if (distance > disc.Z)
@@ -468,7 +542,7 @@ public sealed class BathymetryGrid
 
                 var i = gx + gz * Resolution;
                 _simulated[i] = true;
-                _zoneWeight[i] = MathF.Max(_zoneWeight[i], Math.Clamp((disc.Z - distance) / ZoneBlendWidth, 0f, 1f));
+                _zoneWeight[i] = MathF.Max(_zoneWeight[i], fade * Math.Clamp((disc.Z - distance) / ZoneBlendWidth, 0f, 1f));
             }
     }
 

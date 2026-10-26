@@ -23,11 +23,14 @@ public static class WaterPipes
     /// <summary>Background flux damping (1/s) on every face, so a closed pool stops sloshing (the zone sim's).</summary>
     public const float DampingRate = 0.2f;
 
+    /// <summary>
+    /// Damping (1/s) of a vertical face over full water. Water is incompressible: the overfill that stands for its pressure
+    /// should settle, not ring as a pressure wave (about 4 Hz in a 3 m pond) that the background damping let run for good.
+    /// </summary>
+    public const float PressureDampingRate = 6f;
+
     /// <summary>Quadratic bed drag over a solid floor: deceleration Cd u² / h, so films slow and deep water glides (the zone sim's).</summary>
     public const float BedDrag = 0.01f;
-
-    /// <summary>A block may sleep only while every flux it holds is under this (m³/s): a steady stream changes no fill.</summary>
-    public const float FluxEpsilon = 1e-4f;
 
     /// <summary>Falling water falls at most this fast (m/s): free fall from about 45 m.</summary>
     public const float MaxFallSpeed = 30f;
@@ -60,6 +63,7 @@ public static class WaterPipes
         WaterFlow.BuildWetRows(block);
         var pipe = dt * Gravity;
         var damping = MathF.Exp(-DampingRate * dt);
+        var settling = MathF.Exp(-PressureDampingRate * dt);
 
         fixed (float* w = block.Water)
         fixed (float* os = block.OutScale)
@@ -103,13 +107,13 @@ public static class WaterPipes
                             fx[i - 1] = Horizontal(w, fl, fx[i - 1], i - 1, 1, seam, pipe, damping, dt);
 
                         if (y == 0)
-                            fy[i - P] = Vertical(w, fl, v, fy[i - P], i - P, pipe, damping, dt);
+                            fy[i - P] = Vertical(w, fl, v, fy[i - P], i - P, pipe, settling, dt);
 
                         if (z == 0)
                             fz[i - A] = Horizontal(w, fl, fz[i - A], i - A, A, seam, pipe, damping, dt);
 
                         fx[i] = Horizontal(w, fl, fx[i], i, 1, seam && x == S - 1, pipe, damping, dt);
-                        fy[i] = Vertical(w, fl, v, fy[i], i, pipe, damping, dt);
+                        fy[i] = Vertical(w, fl, v, fy[i], i, pipe, settling, dt);
                         fz[i] = Horizontal(w, fl, fz[i], i, A, seam && z == S - 1, pipe, damping, dt);
 
                         var sent = dt * (MathF.Max(fx[i], 0f) + MathF.Max(-fx[i - 1], 0f) + MathF.Max(fy[i], 0f)

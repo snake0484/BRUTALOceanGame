@@ -68,7 +68,7 @@ public sealed class CaveTest(TerrainWorld world, VoxelWaterSystem water, Physics
                 fastest = splash.PositionSpeed.W > fastest.W ? splash.PositionSpeed : fastest;
             }
 
-            Log.Info($"t+{time - _start - 1.0:F0}s zone discs {water.ZoneDiscs} cells {water.Zones.Cells}, {water.LastZoneMs:F2} ms (agitate {water.LastAgitateMs:F3}), max flow {water.Zones.MaxSpeed:F2} m/s; splashes: wall {walls}, pour {pours}, fastest {fastest.W:F2} m/s at {fastest.X:F0},{fastest.Y:F1},{fastest.Z:F0}; turbulence mean {water.Zones.MeanTurbulence:F2} max {water.Zones.MaxTurbulence:F2}, foam {water.Zones.MeanFoam:F2}; cover rebuild {cover.LastBuildMs:F3} ms ({cover.Builds})");
+            Log.Info($"t+{time - _start - 1.0:F0}s zone discs {water.ZoneDiscs} cells {water.Zones.Cells}, {water.LastZoneMs:F2} ms (peak {water.TakePeakZoneMs():F2}, agitate {water.LastAgitateMs:F3}), max flow {water.Zones.MaxSpeed:F2} m/s; splashes: wall {walls}, pour {pours}, fastest {fastest.W:F2} m/s at {fastest.X:F0},{fastest.Y:F1},{fastest.Z:F0}; turbulence mean {water.Zones.MeanTurbulence:F2} max {water.Zones.MaxTurbulence:F2}, foam {water.Zones.MeanFoam:F2}; cover rebuild {cover.LastBuildMs:F3} ms ({cover.Builds}); voxel {(water.Pipes ? "pipes" : "automaton")}: blocks {water.Blocks}, awake {water.AwakeBlocks}, step {water.LastStepMs:F3} ms");
             if (site is "all" or "cave")
             {
                 Wind("cave mouth", _cave);

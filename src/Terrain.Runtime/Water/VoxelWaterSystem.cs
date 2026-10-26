@@ -46,6 +46,7 @@ public sealed class VoxelWaterSystem : IDisposable
 
     /// <summary>Sea zone discs: (world x, world z, radius). Kept forever, like brush ops.</summary>
     private readonly List<Vector3> _zones = new(256);
+    private readonly List<Vector3> _fadedOut = new(16);
 
     /// <summary>Shallow-water sim of the sea inside zone discs (the 3D automaton treats those cells as clamped sea).</summary>
     public readonly ZoneFlowSim Zones = new();
@@ -53,6 +54,16 @@ public sealed class VoxelWaterSystem : IDisposable
     private int _bedVersion = -1;
 
     public float LastZoneMs { get; private set; }
+
+    /// <summary>The slowest zone tick since the last <see cref="TakePeakZoneMs"/> (growth and remerge ticks resize the sim).</summary>
+    public float TakePeakZoneMs()
+    {
+        var peak = _peakZoneMs;
+        _peakZoneMs = 0f;
+        return peak;
+    }
+
+    private float _peakZoneMs;
 
     /// <summary>Part of <see cref="LastZoneMs"/>: splashes, turbulence and packing the flow for the GPU.</summary>
     public float LastAgitateMs { get; private set; }
@@ -118,6 +129,39 @@ public sealed class VoxelWaterSystem : IDisposable
 
     public bool Pipes { get; }
 
+    /// <summary>Diagnostics: the voxel water (m³) in the 1 m column at (x, z) between heights y0 and y1, over loaded blocks.</summary>
+    public float ColumnWater(float x, float z, float y0, float y1)
+    {
+        // A voxel's sample point is its integer world position.
+        var (cx, cz) = (MathF.Round(x), MathF.Round(z));
+        var sum = 0f;
+
+        for (var y = MathF.Ceiling(y0); y <= y1; y += 1f)
+        {
+            var coord = ChunkCoord.FromWorld(new Vector3(cx, y, cz));
+            if (!_blocks.TryGetValue(coord, out var slot))
+                continue;
+
+            var o = coord.WorldOrigin;
+            sum += slot.Block.Water[ChunkConstants.Index((int)(cx - o.X), (int)(y - o.Y), (int)(cz - o.Z))];
+        }
+
+        return sum;
+    }
+
+    /// <summary>Diagnostics: activations and refreshes waiting to be dispatched, blocks being (re)activated, blocks being meshed.</summary>
+    public (int Queued, int Pending, int Meshing) Activity
+    {
+        get
+        {
+            var pending = 0;
+            foreach (var (_, slot) in _blocks)
+                pending += slot.Pending ? 1 : 0;
+
+            return (_activationRequests.Count, pending, _meshing.Count);
+        }
+    }
+
     public int Blocks => _blocks.Count;
 
     public int AwakeBlocks { get; private set; }
@@ -141,9 +185,97 @@ public sealed class VoxelWaterSystem : IDisposable
 
         // Let the nearby sea drain into a dig: a disc of sea around it is run by the zone shallow-water sim (and drawn by
         // the ocean at the sim surface). The open sea beyond the disc is its boundary. Placing material only displaces
-        // water; existing zones see it through their bed refresh, and no new zone is needed.
-        if (op.Mode == BrushMode.Dig)
+        // water; existing zones see it through their bed refresh, and no new zone is needed. A dig that stays above sea
+        // level can't reach the sea: its water is the voxels' (a zone there handed a hillside pond to the zone sim, and
+        // the voxel mesh skips zone cells, so it vanished).
+        if (op.Mode == BrushMode.Dig && op.Centre.Y - op.Radius < _terrain.Params.SeaLevel)
             AddZone(new Vector3(op.Centre.X, op.Centre.Z, op.Radius + SeaZoneMargin));
+    }
+
+    /// <summary>
+    /// Fills every open cell inside a sphere and at or below <paramref name="top"/> (world y) with water: a pond, a
+    /// flooded room. The blocks it touches are created if needed; the water lands in each at the start of the first step
+    /// it is ready in (never while a mesh job reads it). Not for per-frame use.
+    /// </summary>
+    public void Fill(Vector3 centre, float radius, float top)
+    {
+        var fill = new PendingFill(centre, radius, top);
+        var min = ChunkCoord.FromWorld(centre - new Vector3(radius));
+        var max = ChunkCoord.FromWorld(centre + new Vector3(radius));
+
+        for (var z = min.Z; z <= max.Z; z++)
+            for (var y = min.Y; y <= max.Y; y++)
+                for (var x = min.X; x <= max.X; x++)
+                {
+                    var coord = new ChunkCoord(x, y, z);
+                    Request(coord, refresh: false);
+                    fill.Waiting.Add(coord);
+                }
+
+        _fills.Add(fill);
+    }
+
+    private sealed class PendingFill(Vector3 centre, float radius, float top)
+    {
+        public readonly Vector3 Centre = centre;
+        public readonly float Radius = radius;
+        public readonly float Top = top;
+        public readonly HashSet<ChunkCoord> Waiting = new();
+    }
+
+    private readonly List<PendingFill> _fills = new(4);
+
+    /// <summary>Pours pending fills into the blocks that are ready; a fill is done once every block it touches has had it.</summary>
+    private void ApplyFills()
+    {
+        for (var f = _fills.Count - 1; f >= 0; f--)
+        {
+            var fill = _fills[f];
+            _scratch.Clear();
+
+            foreach (var coord in fill.Waiting)
+            {
+                if (!_blocks.TryGetValue(coord, out var slot) || slot.Pending || slot.Meshing)
+                    continue;
+
+                FillBlock(slot, fill);
+                _scratch.Add(coord);
+            }
+
+            foreach (var coord in _scratch)
+                fill.Waiting.Remove(coord);
+
+            if (fill.Waiting.Count == 0)
+                _fills.RemoveAt(f);
+        }
+    }
+
+    private static void FillBlock(Slot slot, PendingFill fill)
+    {
+        const byte held = (byte)(WaterFlags.Solid | WaterFlags.Reservoir);
+        var block = slot.Block;
+        var origin = block.Coord.WorldOrigin;
+        var poured = false;
+
+        for (var z = 0; z < ChunkConstants.Size; z++)
+            for (var y = 0; y < ChunkConstants.Size; y++)
+                for (var x = 0; x < ChunkConstants.Size; x++)
+                {
+                    var world = origin + new Vector3(x, y, z);
+                    var i = ChunkConstants.Index(x, y, z);
+                    if (world.Y > fill.Top || Vector3.DistanceSquared(world, fill.Centre) > fill.Radius * fill.Radius || (block.Flags[i] & held) != 0)
+                        continue;
+
+                    block.Water[i] = MathF.Max(block.Water[i], 1f);
+                    poured = true;
+                }
+
+        if (!poured)
+            return;
+
+        block.Asleep = false;
+        block.QuietSteps = 0;
+        slot.MeshDirty = true;
     }
 
     /// <summary>Adds a sea zone disc (world x, world z, radius): grid mask, zone sim domain, and clamped cells for the 3D automaton.</summary>
@@ -156,11 +288,14 @@ public sealed class VoxelWaterSystem : IDisposable
         SimulateDisc(disc);
     }
 
-    /// <summary>A calm grown disc goes back to the open ocean: drop it from the mask and re-clamp its blocks.</summary>
-    private void RemergeZone(Vector3 disc)
+    /// <summary>A calm grown disc goes back to the open ocean once the ocean has faded it out (<see cref="EndZone"/>).</summary>
+    private void RemergeZone(Vector3 disc) => _bathymetry.FadeOutDisc(disc);
+
+    /// <summary>A faded-out disc leaves the sim and the mask, and its blocks are re-clamped.</summary>
+    private void EndZone(Vector3 disc)
     {
         _zones.Remove(disc);
-        _bathymetry.RemoveSimulatedDisc(disc);
+        Zones.RemoveDisc(disc, _bathymetry);
         SimulateDisc(disc);
     }
 
@@ -314,15 +449,19 @@ public sealed class VoxelWaterSystem : IDisposable
         if (_accumulator >= stepTime)
             _accumulator = 0.0;
 
-        StartMeshing();
-        StepZones(dt);
-
+        // The voxel steps alone: the zone sim below has its own timing (LastZoneMs).
         if (steps > 0)
             LastStepMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds / steps;
+
+        StartMeshing();
+        StepZones(dt);
     }
 
     private void Step()
     {
+        if (_fills.Count > 0)
+            ApplyFills();
+
         WakeNeighboursOfAwake();
 
         _awake.Clear();
@@ -363,14 +502,17 @@ public sealed class VoxelWaterSystem : IDisposable
         RunPass(Pipes ? WaterStepJob.Kind.PipeApply : WaterStepJob.Kind.ApplyFlows);
 
         var mass = 0f;
+        var stepTime = 1f / StepsPerSecond;
         foreach (var slot in _awake)
         {
             var block = slot.Block;
             WaterFlow.Swap(block);
             mass += block.Mass();
 
-            // With momentum a steady stream changes no fill, so the pipe model also waits for its fluxes to die down.
-            if (block.MaxDelta > SleepDelta || block.MaxFlux > WaterPipes.FluxEpsilon)
+            // With momentum a steady stream changes no fill, so the pipe model also waits until no face moves more than
+            // SleepDelta of a cell in a step. (A fixed 1e-4 m³/s kept a pond awake for over a minute on millimetre sloshing,
+            // and its blocks, remeshed every tick, starved the refresh a breach needed.)
+            if (block.MaxDelta > SleepDelta || block.MaxFlux * stepTime > SleepDelta)
             {
                 block.QuietSteps = 0;
                 slot.MeshDirty = true;
@@ -463,12 +605,19 @@ public sealed class VoxelWaterSystem : IDisposable
             RemergeZone(disc);
 
         Zones.Remerged.Clear();
+        _bathymetry.AdvanceZoneFades((float)dt, _fadedOut);
+
+        foreach (var disc in _fadedOut)
+            EndZone(disc);
+
+        _fadedOut.Clear();
 
         var pack = Stopwatch.GetTimestamp();
         Zones.PackFlow();
         LastAgitateMs += (float)Stopwatch.GetElapsedTime(pack).TotalMilliseconds;
         Zones.Publish(_bathymetry);
         LastZoneMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+        _peakZoneMs = MathF.Max(_peakZoneMs, LastZoneMs);
     }
 
     /// <summary>
@@ -508,7 +657,9 @@ public sealed class VoxelWaterSystem : IDisposable
 
         foreach (var (_, slot) in _blocks)
         {
-            if (!slot.MeshDirty || slot.Pending)
+            // A block with a refresh waiting is left for it: one meshed every tick never got its edit (its slot was always
+            // meshing when activations were dispatched), and a breach next to always-moving water never opened.
+            if (!slot.MeshDirty || slot.Pending || slot.RefreshQueued)
                 continue;
 
             slot.MeshDirty = false;
@@ -557,11 +708,10 @@ public sealed class VoxelWaterSystem : IDisposable
                 if (FaceClamped(neighbour, Opposite((Face)f)))
                     continue;
 
+                // Its quiet count carries on: if its water really moves its own changes reset it. (Resetting it here, two
+                // quiet blocks sharing a pond took turns waking each other and neither ever slept.)
                 if (slot.Block.AnyWaterOnFace((Face)f) || neighbour.AnyWaterOnFace(Opposite((Face)f)))
-                {
                     neighbour.Asleep = false;
-                    neighbour.QuietSteps = 0;
-                }
             }
         }
     }

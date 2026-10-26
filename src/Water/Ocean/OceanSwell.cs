@@ -703,6 +703,10 @@ public sealed class OceanSwell
         };
     }
 
+    // Fully optimised from its first call: few callers sample the whole wave (a sea zone seeding the cells it grows over),
+    // so tiered compilation left it in its slow early tiers and promoted it on whichever tick crossed the threshold
+    // (10 samples took 13 ms on a zone's first growth, against 0.05 ms once promoted).
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private WaveSample SampleOf(in Waves w, float x, float z)
     {
         Invert(w, x, z, out var x0, out var z0);

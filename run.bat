@@ -11,6 +11,7 @@ rem   run.bat --surf-test --wind 4 --swell 1.8 15 0   (groundswell: height m, pe
 rem   run.bat --weather-offset 120          (weather starts 120 min into its timeline; --wind pins the sea and turns weather off, --weather forces it on)
 rem   run.bat --weather-offset 725 --rain 0.9 (rain at 0.9 whatever the weather; --roof-test floats a roof over the camera, --bench-rain benches rain on/off)
 rem   run.bat --seaside-test --water-pipes   (voxel water as the 3D pipe model with momentum instead of the cell automaton)
+rem   run.bat --pond-test [--water-pipes]    (a pond dug in the hillside, filled, then breached: voxel water alone, no sea zone)
 setlocal
 cd /d "%~dp0"
 

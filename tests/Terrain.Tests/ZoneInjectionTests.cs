@@ -116,14 +116,20 @@ public sealed class ZoneInjectionTests(ITestOutputHelper output)
         return moment;
     }
 
-    /// <summary>Surf is the ocean's normal state: bores hammering a zone's edge must not grow it (a control run shows they would).</summary>
+    /// <summary>
+    /// Surf is the ocean's normal state: bores hammering a zone's edge must not grow it. The quiet time after a bore keeps
+    /// them from it, and so does reading the exchange with the open sea averaged over a wave period, which a bore's
+    /// in-and-out doesn't sustain; a control run with neither (a period short enough to read it nearly raw) shows they would.
+    /// </summary>
     [Theory]
-    [InlineData(2f, false)]
-    [InlineData(0f, true)]
-    public void Bores_DoNotGrowTheZone(float quiet, bool expectGrowth)
+    [InlineData(2f, 8f, false)]
+    [InlineData(0f, 8f, false)]
+    [InlineData(0f, 1f, true)]
+    public void Bores_DoNotGrowTheZone(float quiet, float period, bool expectGrowth)
     {
         var zones = Zone();
         zones.BoreQuiet = quiet;
+        zones.WavePeriod = period;
         var edge = Centre + new Vector2(26f, 0f);
         var grew = false;
 
@@ -138,7 +144,7 @@ public sealed class ZoneInjectionTests(ITestOutputHelper output)
             zones.Growth.Clear();
         }
 
-        output.WriteLine($"quiet {quiet} s: grew {grew}");
+        output.WriteLine($"quiet {quiet} s, period {period} s: grew {grew}");
         Assert.Equal(expectGrowth, grew);
     }
 

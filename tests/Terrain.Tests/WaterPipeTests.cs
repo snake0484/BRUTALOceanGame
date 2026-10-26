@@ -72,7 +72,7 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
         public bool Quiet()
         {
             foreach (var block in Blocks.Values)
-                if (block.MaxDelta >= 1e-4f || block.MaxFlux >= WaterPipes.FluxEpsilon)
+                if (block.MaxDelta >= 1e-4f || block.MaxFlux * Dt >= 1e-4f)
                     return false;
 
             return true;
@@ -342,6 +342,41 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
 
         output.WriteLine($"settled depth {mean:F2} m, peak at the far wall {peak:F2} m");
         Assert.True(peak > 1.15 * mean, $"the surge should overshoot the settled depth {mean:F2} m (peak {peak:F2} m)");
+    }
+
+    /// <summary>
+    /// The --pond-test scene in small: a pond at rest goes quiet (so its blocks can sleep), then pours out through a breach
+    /// in its wall and down a channel whose bed falls a cell every six.
+    /// </summary>
+    [Fact]
+    public void PondSettlesThenDrainsThroughABreach()
+    {
+        var sim = new Sim();
+        var b = sim.Add(new ChunkCoord(0, 0, 0));
+        CarveBox(b, 4, 3, 4, 13, S - 1, 13);
+
+        for (var x = 15; x <= 30; x++)
+            for (var y = 4 - (x - 14) / 6; y < S; y++)
+                for (var z = 8; z <= 9; z++)
+                    b.Flags[I(x, y, z)] = 0;
+
+        FillWater(b, 4, 3, 4, 13, 5, 13);
+        sim.LinkFlags();
+        var mass = sim.Mass();
+
+        var settled = StepUntilSettled(sim, 720);
+        output.WriteLine($"pond quiet after {settled * Dt:F2} s");
+        Assert.InRange(settled, 1, 720);
+
+        for (var y = 3; y < S; y++)
+            for (var z = 8; z <= 9; z++)
+                b.Flags[I(14, y, z)] = 0;
+
+        sim.Step(2400);
+        var pond = Sum(b, 4, 3, 4, 13, S - 1, 13);
+        output.WriteLine($"pond after 10 s of breach {pond:F1} of 300 m3, mass drift {sim.Mass() - mass:E1}");
+        Assert.True(pond < 260.0, $"the pond should pour out through the breach, still holds {pond:F1} m3");
+        Assert.True(Math.Abs(sim.Mass() - mass) < 1e-3, $"mass drifted {sim.Mass() - mass}");
     }
 
     [Fact]

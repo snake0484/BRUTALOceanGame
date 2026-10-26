@@ -383,18 +383,22 @@ public sealed unsafe class BathymetryTexture : IDisposable
                 var level = 0f;
                 var zone = 0f;
 
-                if (simulated[i])
-                {
-                    depth = zoneWet[i] ? zoneDepth[i] : ZoneDry;
-                    level = zoneOffset[i];
-                    zone = zoneWeight[i];
-                }
-                else if (float.IsNaN(ground))
+                if (float.IsNaN(ground))
                     depth = BathymetryGrid.UnknownDepth;
                 else if (sea[i] == BathymetryGrid.SeaState.Dry && ground < BathymetryGrid.SeaLevel - SeaVoxel(seaLods[i]) && _reach[i] == 0)
                     depth = Pit;
                 else
                     depth = MathF.Max(MinLandDepth, BathymetryGrid.SeaLevel - ground);
+
+                // A zone cell's depth is the sim's, blended in by its zone weight as the shader blends the surface, so a
+                // disc fading in or out changes the depth with the surface, not at once (a pit has no open-sea depth).
+                if (simulated[i])
+                {
+                    var simDepth = zoneWet[i] ? zoneDepth[i] : ZoneDry;
+                    level = zoneOffset[i];
+                    zone = zoneWeight[i];
+                    depth = depth == Pit ? simDepth : float.Lerp(depth, simDepth, zone);
+                }
 
                 var t = i * Channels;
                 current[t] = (Half)depth;

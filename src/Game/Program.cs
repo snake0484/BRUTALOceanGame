@@ -19,6 +19,7 @@ int? waterRate = null;
 var waterPipes = false;
 var hideUi = false;
 var seasideTest = false;
+var pondTest = false;
 var coastal = true;
 var benchSeconds = 0.0;
 var breakers = false;
@@ -132,6 +133,8 @@ for (var i = 0; i < args.Length; i++)
         coastal = false;
     else if (args[i] == "--seaside-test")
         seasideTest = true;
+    else if (args[i] == "--pond-test")
+        pondTest = true;
     else if (args[i] == "--water-pipes")
         waterPipes = true;
     else if (args[i] == "--water-rate" && i + 1 < args.Length)
@@ -144,5 +147,5 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
-using var app = new GameApp(windSpeed, foamDebug, editTest, camera, floodTest, waterRate ?? (waterPipes ? 60 : 240), hideUi, seasideTest, coastal, benchSeconds, breakers, surfTest, faces, lips, flyTest, surfCam, surfSide, swell, foldLip, surfBack, chainLips, weather ?? true, weatherOffset, rain, benchRain, roofTest, caveTest, waterPipes);
+using var app = new GameApp(windSpeed, foamDebug, editTest, camera, floodTest, waterRate ?? (waterPipes ? 60 : 240), hideUi, seasideTest, coastal, benchSeconds, breakers, surfTest, faces, lips, flyTest, surfCam, surfSide, swell, foldLip, surfBack, chainLips, weather ?? true, weatherOffset, rain, benchRain, roofTest, caveTest, waterPipes, pondTest);
 app.Run();

@@ -52,11 +52,13 @@ public sealed class GameApp : IDisposable
     private readonly CaveTest? _caveTest;
     private readonly FloodTest? _floodTest;
     private readonly SeasideTest? _seasideTest;
+    private readonly PondTest? _pondTest;
     private FixedClock _clock = new(TickRate);
     private readonly int _oceanScope;
     private readonly int _waterScope;
     private readonly VoxelWaterSystem _water;
     private readonly CoastalSystem _coastal = new();
+    private bool _seaSamplerWarm;
     private readonly GpuBenchmark? _bench;
     private readonly bool _benchRain;
     private readonly BreakerSet _breakers = new();
@@ -76,7 +78,7 @@ public sealed class GameApp : IDisposable
     private readonly int _uploadScope;
 
     /// <param name="camera">Optional start pose: x, y, z, yaw degrees, pitch degrees.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool floodTest = false, int waterRate = 240, bool hideUi = false, bool seasideTest = false, bool coastal = true, double benchSeconds = 0.0, bool breakers = false, bool surfTest = false, bool faces = true, bool lips = true, bool flyTest = false, bool surfCam = false, bool surfSide = false, float[]? swell = null, bool foldLip = false, bool surfBack = false, bool chainLips = false, bool weather = true, float weatherOffset = 0f, float rain = -1f, bool benchRain = false, bool roofTest = false, string? caveTest = null, bool waterPipes = false)
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool floodTest = false, int waterRate = 240, bool hideUi = false, bool seasideTest = false, bool coastal = true, double benchSeconds = 0.0, bool breakers = false, bool surfTest = false, bool faces = true, bool lips = true, bool flyTest = false, bool surfCam = false, bool surfSide = false, float[]? swell = null, bool foldLip = false, bool surfBack = false, bool chainLips = false, bool weather = true, float weatherOffset = 0f, float rain = -1f, bool benchRain = false, bool roofTest = false, string? caveTest = null, bool waterPipes = false, bool pondTest = false)
     {
         if (camera is not null)
         {
@@ -123,10 +125,16 @@ public sealed class GameApp : IDisposable
         // Waves physically enter sea zones through their open-sea boundary. The bare swell, not the surface: breakers
         // reach zones as bores (BreakerBores), and their drawn faces fade out inside zones, so the faces would count twice.
         _water.Zones.SeaSurface = (x, z) => _swell.SampleHeight(x, z);
+        _water.Zones.SeaState = (x, z) =>
+        {
+            var s = _swell.Sample(x, z);
+            return new System.Numerics.Vector3(s.Height, s.Velocity.X, s.Velocity.Z);
+        };
         _surface = new OceanSurface(_swell, _breakers) { FacesEnabled = faces };
         _waterRenderer = new VoxelWaterRenderer(_renderer, _rainCover);
         _floodTest = floodTest ? new FloodTest(_terrain, _water, _physics, _brush, _camera) : null;
         _seasideTest = seasideTest ? new SeasideTest(_terrain, _water, _physics, _camera) : null;
+        _pondTest = pondTest ? new PondTest(_terrain, _water, _physics, _camera) : null;
         _caveTest = caveTest is not null ? new CaveTest(_terrain, _water, _physics, _rainCover, caveTest) : null;
         _surfTest = surfTest || surfCam ? new SurfTest(_terrain, _camera, _swell, camera is not null || surfCam) { FollowCurl = surfCam, SideView = surfSide, BackView = surfBack } : null;
         _breakerFaces.Enabled = faces;
@@ -211,6 +219,7 @@ public sealed class GameApp : IDisposable
             _roofTest?.Update();
             _floodTest?.Update(_clock.SimTime);
             _seasideTest?.Update(_clock.SimTime);
+            _pondTest?.Update(_clock.SimTime);
             _caveTest?.Update(_clock.SimTime);
             _surfTest?.Update(_clock.SimTime);
             _surfTest?.Follow(_breakers, _surface, (float)frameSeconds);
@@ -221,6 +230,15 @@ public sealed class GameApp : IDisposable
             _sections.Water = Lap(ref mark);
             UpdateWeather();
             _coastal.Update(_terrain, _swell, _clock.SimTime, _oceanPanel.CoastalEnabled);
+
+            // The full swell sample's first call compiles it (OceanSwell.SampleOf): pay that while loading, not on the
+            // tick a sea zone first seeds the cells it grows over.
+            if (!_seaSamplerWarm && _coastal.Builds > 0)
+            {
+                _water.Zones.SeaState?.Invoke(_camera.Position.X, _camera.Position.Z);
+                _seaSamplerWarm = true;
+            }
+
             _oceanPanel.CoastalBuildMs = _coastal.LastBuildMs;
             _oceanPanel.CoastalBuilds = _coastal.Builds;
             UpdateBench();
@@ -351,6 +369,7 @@ public sealed class GameApp : IDisposable
     private void Tick(long tickIndex, double dt)
     {
         _physics.Step((float)dt);
+        _water.Zones.WavePeriod = _swell.PeakPeriod;
         _water.Tick(dt);
 
         var start = Stopwatch.GetTimestamp();
