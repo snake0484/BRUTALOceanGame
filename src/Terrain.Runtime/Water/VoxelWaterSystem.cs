@@ -60,6 +60,9 @@ public sealed class VoxelWaterSystem : IDisposable
     public int ZoneDiscs => _zones.Count;
     private readonly WaterStepJob[] _stepJobs = new WaterStepJob[MaxBlocks];
     private readonly List<Slot> _awake = new(MaxBlocks);
+
+    /// <summary>The blocks the last step ran, so a block stepping again after a pause takes their shared fluxes (pipe model).</summary>
+    private readonly List<Slot> _stepped = new(MaxBlocks);
     private readonly List<ChunkCoord> _scratch = new(MaxBlocks);
 
     // Surface meshing runs in the background: the tick never waits on it. Blocks being meshed are not stepped,
@@ -69,9 +72,12 @@ public sealed class VoxelWaterSystem : IDisposable
     private readonly List<Slot> _meshing = new(MaxBlocks);
     private double _accumulator;
 
-    private sealed class Slot
+    private sealed class Slot(bool pipes)
     {
-        public readonly WaterBlock Block = new();
+        public readonly WaterBlock Block = new(pipes);
+
+        /// <summary>Ran in the last step.</summary>
+        public bool Stepped;
 
         /// <summary>Drawn mesh, and the one a background mesh job is filling; swapped when the job finishes.</summary>
         public WaterMesh Mesh = new();
@@ -85,8 +91,10 @@ public sealed class VoxelWaterSystem : IDisposable
         public bool Simulated;
     }
 
-    public VoxelWaterSystem(TerrainWorld terrain)
+    /// <param name="pipes">Run the 3D pipe model with momentum (<see cref="WaterPipes"/>) instead of the cell automaton.</param>
+    public VoxelWaterSystem(TerrainWorld terrain, bool pipes = false)
     {
+        Pipes = pipes;
         _terrain = terrain;
         _bathymetry = terrain.Bathymetry;
         var workers = (uint)Math.Max(1, Environment.ProcessorCount - 2);
@@ -97,7 +105,7 @@ public sealed class VoxelWaterSystem : IDisposable
 
         for (var i = 0; i < MaxBlocks; i++)
         {
-            _slotPool.Push(new Slot());
+            _slotPool.Push(new Slot(pipes));
             _stepJobs[i] = new WaterStepJob();
             _meshJobs[i] = new WaterStepJob { Pass = WaterStepJob.Kind.Mesh };
         }
@@ -107,6 +115,8 @@ public sealed class VoxelWaterSystem : IDisposable
 
         terrain.EditApplied += OnEdit;
     }
+
+    public bool Pipes { get; }
 
     public int Blocks => _blocks.Count;
 
@@ -209,6 +219,7 @@ public sealed class VoxelWaterSystem : IDisposable
         var created = _slotPool.Pop();
         created.Block.Reset(coord);
         created.Pending = true;
+        created.Stepped = false;
         created.MeshDirty = false;
         created.RefreshQueued = false;
         created.Simulated = false;
@@ -321,7 +332,14 @@ public sealed class VoxelWaterSystem : IDisposable
 
         AwakeBlocks = _awake.Count;
         if (_awake.Count == 0)
+        {
+            MarkStepped();
             return;
+        }
+
+        if (Pipes)
+            SyncResumedFluxes();
+
         foreach (var slot in _awake)
         {
             for (var f = 0; f < 6; f++)
@@ -333,13 +351,16 @@ public sealed class VoxelWaterSystem : IDisposable
 
                 WaterHalo.CopyWater(slot.Block, neighbour, (Face)f);
             }
+
+            if (Pipes)
+                WaterHalo.CopyFallAbove(slot.Block, Neighbour(slot.Block.Coord, (int)Face.PosY));
         }
-        RunPass(WaterStepJob.Kind.OutflowScale);
+        RunPass(Pipes ? WaterStepJob.Kind.PipeFluxes : WaterStepJob.Kind.OutflowScale);
 
         foreach (var slot in _awake)
             for (var f = 0; f < 6; f++)
                 WaterHalo.CopyOutScale(slot.Block, Neighbour(slot.Block.Coord, f), (Face)f);
-        RunPass(WaterStepJob.Kind.ApplyFlows);
+        RunPass(Pipes ? WaterStepJob.Kind.PipeApply : WaterStepJob.Kind.ApplyFlows);
 
         var mass = 0f;
         foreach (var slot in _awake)
@@ -348,7 +369,8 @@ public sealed class VoxelWaterSystem : IDisposable
             WaterFlow.Swap(block);
             mass += block.Mass();
 
-            if (block.MaxDelta > SleepDelta)
+            // With momentum a steady stream changes no fill, so the pipe model also waits for its fluxes to die down.
+            if (block.MaxDelta > SleepDelta || block.MaxFlux > WaterPipes.FluxEpsilon)
             {
                 block.QuietSteps = 0;
                 slot.MeshDirty = true;
@@ -356,6 +378,7 @@ public sealed class VoxelWaterSystem : IDisposable
             else if (++block.QuietSteps >= QuietStepsToSleep)
             {
                 block.Asleep = true;
+                block.ClearFluxes();
             }
 
             if (block.BorderActive)
@@ -363,6 +386,44 @@ public sealed class VoxelWaterSystem : IDisposable
         }
 
         Mass = mass;
+        MarkStepped();
+    }
+
+    /// <summary>
+    /// Pipe model: a block stepping again after sleeping, activating or refreshing takes the fluxes of the faces it shares
+    /// with blocks that kept stepping, and zeroes those it shares with blocks that didn't (as they hold none), so both
+    /// copies of each shared face agree again.
+    /// </summary>
+    private void SyncResumedFluxes()
+    {
+        foreach (var slot in _awake)
+        {
+            if (slot.Stepped)
+                continue;
+
+            var c = slot.Block.Coord;
+
+            for (var f = 0; f < 6; f++)
+            {
+                var (dx, dy, dz) = FaceOffsets[f];
+                var kept = _blocks.TryGetValue(new ChunkCoord(c.X + dx, c.Y + dy, c.Z + dz), out var neighbour) && !neighbour.Pending && neighbour.Stepped;
+                WaterHalo.SyncFluxes(slot.Block, kept ? neighbour!.Block : null, (Face)f);
+            }
+        }
+    }
+
+    private void MarkStepped()
+    {
+        foreach (var slot in _stepped)
+            slot.Stepped = false;
+
+        _stepped.Clear();
+
+        foreach (var slot in _awake)
+        {
+            slot.Stepped = true;
+            _stepped.Add(slot);
+        }
     }
 
     /// <summary>Fixed-rate shallow-water substeps for sea zones, then publish to the ocean's bathymetry map.</summary>
@@ -417,12 +478,14 @@ public sealed class VoxelWaterSystem : IDisposable
     private void RunPass(WaterStepJob.Kind pass)
     {
         var inline = _awake.Count <= InlineBlocks;
+        var dt = 1f / StepsPerSecond;
 
         for (var i = 0; i < _awake.Count; i++)
         {
             var job = _stepJobs[i];
             job.Block = _awake[i].Block;
             job.Pass = pass;
+            job.Dt = dt;
 
             if (inline)
                 job.Run();

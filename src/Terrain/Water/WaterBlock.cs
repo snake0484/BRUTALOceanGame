@@ -39,7 +39,25 @@ public sealed class WaterBlock
     public float[] Next = new float[ChunkConstants.PaddedVolume];
     public readonly float[] OutScale = new float[ChunkConstants.PaddedVolume];
     public readonly byte[] Flags = new byte[ChunkConstants.PaddedVolume];
+
+    /// <summary>
+    /// Face fluxes of the pipe model (<see cref="WaterPipes"/>), m³/s, positive from the lower-index cell: FluxX[i] is the
+    /// face between i and i + 1, FluxY[i] between i and the cell above, FluxZ[i] between i and i + PaddedArea. Null when
+    /// the block runs the automaton.
+    /// </summary>
+    public readonly float[]? FluxX;
+    public readonly float[]? FluxY;
+    public readonly float[]? FluxZ;
+
+    /// <summary>
+    /// Pipe model: per cell, how fast its water falls (m/s, down negative), carried with the water from cell to cell; 0 for
+    /// water at rest on a floor. The +Y halo plane holds the block above's bottom layer (<see cref="WaterHalo.CopyFallAbove"/>).
+    /// </summary>
+    public readonly float[]? FallSpeed;
     public float MaxDelta;
+
+    /// <summary>Largest flux (m³/s) that moved water through a face the block holds in the last pipe step.</summary>
+    public float MaxFlux;
     public bool BorderActive;
     public int QuietSteps;
     public bool Asleep;
@@ -51,8 +69,16 @@ public sealed class WaterBlock
     internal readonly byte[] WetRows = new byte[ChunkConstants.PaddedArea];
     private byte _openFaces;
 
-    public WaterBlock()
+    public WaterBlock(bool pipes = false)
     {
+        if (pipes)
+        {
+            FluxX = new float[ChunkConstants.PaddedVolume];
+            FluxY = new float[ChunkConstants.PaddedVolume];
+            FluxZ = new float[ChunkConstants.PaddedVolume];
+            FallSpeed = new float[ChunkConstants.PaddedVolume];
+        }
+
         Reset(default);
     }
 
@@ -65,6 +91,7 @@ public sealed class WaterBlock
         OutScale.AsSpan().Fill(1f);
         Flags.AsSpan().Fill((byte)WaterFlags.Solid);
         WetRows.AsSpan().Clear();
+        ClearFluxes();
 
         for (var z = 0; z < S; z++)
             for (var y = 0; y < S; y++)
@@ -76,6 +103,16 @@ public sealed class WaterBlock
         Asleep = false;
         ReservoirTopY = -1;
         _openFaces = 0;
+    }
+
+    /// <summary>Zeroes the pipe model's fluxes (a block going to sleep carries none).</summary>
+    public void ClearFluxes()
+    {
+        FluxX?.AsSpan().Clear();
+        FluxY?.AsSpan().Clear();
+        FluxZ?.AsSpan().Clear();
+        FallSpeed?.AsSpan().Clear();
+        MaxFlux = 0f;
     }
 
     /// <summary>Chunk generated + ops replayed at LOD 0. Solid where density &lt; 0, Reservoir where byte water ≥ 128 (open, generated sea).</summary>

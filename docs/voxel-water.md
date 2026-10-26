@@ -240,33 +240,78 @@ Coupling the bathymetry and sea mask to sim water, buoyancy against sim water, s
   - The zone sim is a heightfield: overhangs and caves inside a disc are not represented.
   - Water leaving a zone into the 3D automaton isn't exchanged in mass yet: zone cells act as clamped sea for it.
 
-## Flow simulation, full model (design, not implemented)
+## Flow simulation v2: 3D virtual pipes (`--water-pipes`)
 
-The goal is physically plausible flow with momentum, exact mass conservation, and a cost proportional to active water only.
+The automaton has no momentum: water spreads diffusively, a fill's time grows with the distance squared (the seaside pit was still rising at 60 s), and nothing sloshes, overshoots or runs. v2 replaces it with the virtual pipe model the sea-zone sim uses, in 3D on the same blocks, so voxel water pours, fills and runs with momentum wherever it is: a breached pond, a lake on a cliff, a flooded cave, later a hull (`WaterPipes`, `src/Terrain/Water/WaterPipes.cs`). It sits behind `--water-pipes` until it has been judged in game; the automaton stays the default.
 
-### State, in awake chunks only
+**Status (2026-10-26, branch `voxel-water-3d`):** built and unit-tested (`WaterPipeTests`, 11 tests, at 240 and at 60 steps a second); not yet run or judged in game.
 
-- `Water` fill per voxel, stored as a float internally while the chunk is awake and quantised back to bytes when it sleeps.
-- Flux per voxel face (+X, +Y, +Z owned by the cell), in m³/s. This is the virtual pipe model, extended to 3D.
-- Double-buffered fill, so jobs read the previous state and write the next one.
+### State (per `WaterBlock`, the automaton's layout)
 
-### Step, a fixed sub-step inside the sim tick
+- `Water` fill per cell, as now (1 = full). Over 1 is pressure (below).
+- A signed flux per face, m³/s, positive from the lower-index cell to the higher: `FluxX[i]` between i and i + 1, `FluxY[i]` between i and the cell above, `FluxZ[i]` between i and i + `PaddedArea`. The flux is the momentum: it persists from step to step and only the head difference, drag and the mass limit change it.
+- `FallSpeed` per cell (m/s, down negative): how fast its water falls, carried with the water from cell to cell; 0 for water resting on a floor.
+- A block's faces on its −X, −Y and −Z sides are held in the halo cells' slots, its +X, +Y, +Z faces in its border cells'. A face shared by two blocks is held by both and computed identically by both, as the automaton's transfers are, so no fluxes are exchanged per step. The one thing copied in is the fall speeds of the block above's bottom layer, into the +Y halo plane (`WaterHalo.CopyFallAbove`).
 
-CFL-limited: dt ≤ cell / sqrt(g·h_max) for horizontal flow.
+### Head
 
-1. **Head:** each water cell has hydrostatic head = cell height + the pressure from water stacked above it within the connected column. Columns of full cells pass pressure down, which gives communicating vessels and fountains.
-2. **Flux update:** flux += dt · A · g · Δhead / L for each open face. Faces into solids (density < 0) have zero flux. A bed friction factor from the solid neighbour's material damps the flux.
-3. **Gravity priority:** the downward face drains first, so water falls before it spreads. This gives waterfalls without a separate particle system.
-4. **Mass limit:** scale a cell's outgoing fluxes so it can't send more than it holds. This keeps mass exact.
-5. **Apply:** fill += Σ inflow − Σ outflow. Clamp tiny negatives from float error and keep a per-chunk mass ledger for debugging.
-6. **Sea boundary:** cells at or below sea level that touch reservoir (sea) cells are clamped to full. Flux into them disappears and flux out of them is unlimited. That's how a channel to the sea floods a pit.
+- A cell's head (m, relative to its centre) is its free surface while it has room, `W − 0.5`, and over full the pressure its overfill stands for, `0.5 + (W − 1) / κ` with κ = `WaterFlow.Compression` (0.02 per metre of water above). That is the automaton's and the reservoirs' equilibrium (`WaterBlock.ReservoirFill`), so a column at rest has the same fills in both models and pits level with the sea in both.
+- The head is a function of the cell alone, so pressure needs no column scan: it travels through full cells as a weakly compressible pressure wave at √(g / κ) ≈ 22 m/s, which is what makes communicating vessels, a pit filled from below through a pipe, and a breach at the foot of a dam spurt.
 
-### Activity and cost
+### Step (fixed dt = 1 / `StepsPerSecond`)
 
-- A chunk wakes when an edit touches it, when a neighbour sends flux across its border, or when a body splashes into it.
-- It sleeps when max |flux| < ε for N ticks, then compresses its water back to bytes (palette/RLE). Fully-sea and fully-dry chunks store one value.
-- Each awake chunk runs as one job per sub-step. Halo exchange reads neighbour borders from the previous buffer, so jobs never share mutable state.
-- **Budget:** about 1 ms per tick across jobs for 64 awake chunks. Measured once implemented, shown in the Terrain panel.
+1. **Fluxes** (pass 1, per awake block, needs fresh `Water` halos and the fall speeds above): each face touching the interior, once.
+   - Sideways: `f ← f · drag + dt · g · A · Δhead`, `Δhead = head(lo) − head(hi)`. The face area A is the upwind cell's water, at most 1, and 0 unless the upwind cell is supported (solid or ≥ 0.99 full below), the automaton's rule: water in free fall has no pressure to spread with. Faces in the bottom layer across an X or Z block face count as supported, as in the automaton (their "below" is an edge halo cell no block carries).
+   - Vertically, over a full cell (≥ 0.99), the same with `Δhead = head(lo) − 1 − head(hi)` and A = 1: pressure, rising and sinking water.
+   - Vertically, over a cell with room, the water above is falling into space and crosses at its own fall speed: `f = FallSpeed(hi) · min(W(hi), 1)`. A falling speck too small to move at that speed in a step drops whole, or it would hang in the air.
+   - Drag: the background `DampingRate` (0.2/s, the zone sim's) on every face, and over a bed (the upwind cell's floor is solid) the zone sim's implicit quadratic bed drag (`BedDrag` 0.01, deceleration Cd u² / h).
+   - Faces touching a solid, and faces between two dry cells, hold no flux. So a row that is dry with its four neighbouring rows is skipped, as in the automaton.
+   - Then each interior cell's outflow limit `OutScale`, the automaton's rule: a cell that would keep less than `SnapEpsilon` sends all it has.
+2. **Apply** (pass 2, needs fresh `OutScale` halos):
+   - Each face is scaled once by its source cell's limit and stored back scaled: the limited flux is the momentum carried on.
+   - A face moves water only when it would move at least `SnapEpsilon` in the step; below that its momentum stays on the face and builds until it does. Zeroing it instead left a 12 cm head dead zone between cells: a settled pool stayed 9 cm uneven across 8 m.
+   - `W += dt · (Σ in − Σ out)`. Reservoir cells are held at their fill (the sea as source and sink), solids at 0. There is no snap: a speck left behind can't spread (its transfers are under the minimum) and drops whole when it falls, while snapping specks lost 0.01 m³ of 1872 over 10 s.
+   - Fall speed: a cell held up by full water falls as fast as its floor carries it (so a column that starts to fall keeps its speed); a cell with room under it mixes the water it kept and the water that fell in from above by volume and gains g dt; at most 30 m/s. A pipe model carries flow across a face but not from one face to the next, so without this every cell restarts the fall from rest (27 m in about 12 s, against 2.3 s of free fall). Carrying the face flux instead of the speed drained a falling blob down a cell-a-step tube into the floor in 0.43 s.
+3. **Swap**, as the automaton.
+
+Mass is exact as in the automaton (each face is one value both cells read). Stable for √(g / κ) dt ≲ 0.58 m (the 3D pressure wave): 1 / 240 s gives 0.09, 1 / 60 s 0.37. The pipe model runs at 60 steps a second by default (`--water-rate` overrides it); the automaton keeps 240.
+
+### Sleep and wake
+
+- A block sleeps after `QuietStepsToSleep` steps with its fill changes under `SleepDelta` **and** the flux that moved water under `FluxEpsilon` (1e-4 m³/s): a steady stream through a block changes no fill and must not sleep, while momentum too small to move water lingers on faces over head differences of a tenth of a millimetre. Going to sleep zeroes its fluxes and fall speeds.
+- A block that steps for the first time after sleeping, activating or refreshing takes the fluxes of the faces it shares with blocks that stepped the step before, and zeroes those it shares with blocks that didn't (they hold none), so the two copies agree from then on (`WaterHalo.SyncFluxes`).
+
+### Measured (unit tests, Release, 2026-10-26)
+
+| Test | Pipe model | Automaton |
+| --- | --- | --- |
+| A blob falling 27 m: half of it on the floor | 2.33 s (free fall 2.35 s; 2.37 s at 60 steps/s) | no fall speed |
+| U-tube legs | 4.974 / 4.973 m after 62 s | 4.982 / 4.964 m after 15,000 steps |
+| Pit beside the sea, mean fill after 40 s | 1.069, far top cell 0.988 | levels after 8,000 steps |
+| Dam break, peak at the far wall | 4.27 m over a settled 2.67 m | monotone |
+| 32 m³ falling onto an 8 × 8 floor | level to 0.5000–0.5003, asleep after 67 s | |
+| Seam against a single block | bit for bit | bit for bit |
+| Step, empty block | 7.6 µs | 5.4 µs |
+| Step, busy block (dam break) | 352 µs (scalar) | 65 µs (AVX2) |
+
+A busy block costs about 5.4 times the automaton's step, but needs a quarter of the steps: per second about 1.3 times.
+
+### Not yet
+
+- **Sideways momentum is not advected:** only falling water carries its speed on. A jet leaving a ledge falls straight down rather than flying out; carrying sideways speed through unsupported cells would add it, at the cost of X and Z planes from the neighbours.
+- **Bottom-layer seams have no bed drag:** across an X or Z block face in a block's bottom layer the upwind cell's floor is an edge halo cell neither block holds, so those faces count as supported without drag.
+- **SIMD:** the in-place sweep reads faces and fall speeds the cells before it updated, so lanes need a different order.
+- **Specks:** without a snap, a speck stranded on a floor keeps its row (and the rows around it) from being skipped while its block is awake.
+- The sea-zone coupling, persistence across eviction, and the settle rule from the plan below.
+- **Memory:** each block carries four more padded float arrays (629 KB), allocated with the system's 512 pooled blocks only when `--water-pipes` is on: about 320 MB more. Pooling them for awake blocks only would remove it.
+
+### Plan after v2
+
+1. Sea-zone bed from the 1 m voxel columns (the zone sim already runs on 1 m cells but reads the 2 m grid).
+2. Sim water persisted across eviction: a sparse, compressed per-chunk record of fills that generation and ops can't reproduce, reloaded on activation, with a per-chunk mass ledger for the float ↔ byte round trip.
+3. Settle: when moving water goes calm, flood from the open sea through open voxels at or below sea level; connected water returns to the ocean, the rest is stored and sleeps.
+4. Zone ↔ voxel exchange at disc edges, column for column.
+5. Still voxel water shaded like the ocean, so a pool doesn't change look when it settles.
 
 ### Coupling
 

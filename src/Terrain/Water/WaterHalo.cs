@@ -15,6 +15,40 @@ public static class WaterHalo
 
     public static void CopyFlags(WaterBlock dst, WaterBlock? src, Face face) => Copy(dst.Flags, src?.Flags, face, (byte)WaterFlags.Solid);
 
+    /// <summary>
+    /// Pipe model: dst takes the fluxes of the faces it shares with src (on dst's <c>face</c> side), which stepped while dst
+    /// did not, so both copies of every shared face agree again. A null <c>src</c> (no neighbour that kept stepping) zeroes
+    /// them: a neighbour that slept holds none. A −side face is held in dst's halo slots and src's border cells, a +side
+    /// face in dst's border cells and src's halo slots.
+    /// </summary>
+    public static void SyncFluxes(WaterBlock dst, WaterBlock? src, Face face)
+    {
+        var axis = (int)face >> 1;
+        var to = axis == 0 ? dst.FluxX : axis == 1 ? dst.FluxY : dst.FluxZ;
+        var from = src is null ? null : axis == 0 ? src.FluxX : axis == 1 ? src.FluxY : src.FluxZ;
+
+        if (to is null)
+            return;
+
+        var negative = ((int)face & 1) == 0;
+        WaterBlock.Plane(face, halo: negative, out var t, out var su, out var sv);
+        WaterBlock.Plane((Face)((int)face ^ 1), halo: !negative, out var f, out _, out _);
+
+        for (var v = 0; v < S; v++)
+            for (var u = 0; u < S; u++)
+                to[t + u * su + v * sv] = from is null ? 0f : from[f + u * su + v * sv];
+    }
+
+    /// <summary>
+    /// Pipe model, before each step: the fall speeds of src's bottom layer into dst's +Y halo plane (src above dst), which
+    /// dst's top faces and top cells read (<see cref="WaterPipes"/>). Zero without a block above.
+    /// </summary>
+    public static void CopyFallAbove(WaterBlock dst, WaterBlock? src)
+    {
+        if (dst.FallSpeed is not null)
+            Copy(dst.FallSpeed, src?.FallSpeed, Face.PosY, 0f);
+    }
+
     /// <summary>Same-block copy of all six halo planes, used by Swap so the halo of the new state stays meaningful.</summary>
     internal static void CopyHaloPlanes(float[] from, float[] to)
     {

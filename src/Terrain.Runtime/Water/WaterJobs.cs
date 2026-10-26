@@ -72,13 +72,15 @@ internal sealed class WaterActivationJob : IJob
     }
 }
 
-/// <summary>One pass of the two-pass flow step, or a surface remesh, for one block.</summary>
+/// <summary>One pass of the two-pass flow step (automaton or pipe model), or a surface remesh, for one block.</summary>
 internal sealed class WaterStepJob : IJob
 {
     public enum Kind
     {
         OutflowScale,
         ApplyFlows,
+        PipeFluxes,
+        PipeApply,
         Mesh,
     }
 
@@ -86,6 +88,9 @@ internal sealed class WaterStepJob : IJob
     public WaterBlock? Block;
     public WaterMesh? Mesh;
     public Kind Pass;
+
+    /// <summary>Step length (s) for the pipe model's passes.</summary>
+    public float Dt;
 
     public void Run()
     {
@@ -96,6 +101,12 @@ internal sealed class WaterStepJob : IJob
                 break;
             case Kind.ApplyFlows:
                 WaterFlow.ApplyFlows(Block!);
+                break;
+            case Kind.PipeFluxes:
+                WaterPipes.UpdateFluxes(Block!, Dt);
+                break;
+            case Kind.PipeApply:
+                WaterPipes.ApplyFluxes(Block!, Dt);
                 break;
             case Kind.Mesh:
                 _mesher.Build(Block!, Mesh!);

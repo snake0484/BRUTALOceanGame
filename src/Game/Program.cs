@@ -11,7 +11,12 @@ float[] swell = [1.2f, 13f, 0f];
 var foamDebug = false;
 var editTest = false;
 var floodTest = false;
-var waterRate = 240;
+// Voxel water steps per second; by default 240 for the automaton (it spreads diffusively) and 60 for the pipe model,
+// which is stable there (docs/voxel-water.md, v2).
+int? waterRate = null;
+
+// 3D pipe model with momentum for voxel water (docs/voxel-water.md, v2) instead of the cell automaton.
+var waterPipes = false;
 var hideUi = false;
 var seasideTest = false;
 var coastal = true;
@@ -127,6 +132,8 @@ for (var i = 0; i < args.Length; i++)
         coastal = false;
     else if (args[i] == "--seaside-test")
         seasideTest = true;
+    else if (args[i] == "--water-pipes")
+        waterPipes = true;
     else if (args[i] == "--water-rate" && i + 1 < args.Length)
         waterRate = int.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture);
     else if (args[i] == "--cam" && i + 5 < args.Length)
@@ -137,5 +144,5 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
-using var app = new GameApp(windSpeed, foamDebug, editTest, camera, floodTest, waterRate, hideUi, seasideTest, coastal, benchSeconds, breakers, surfTest, faces, lips, flyTest, surfCam, surfSide, swell, foldLip, surfBack, chainLips, weather ?? true, weatherOffset, rain, benchRain, roofTest, caveTest);
+using var app = new GameApp(windSpeed, foamDebug, editTest, camera, floodTest, waterRate ?? (waterPipes ? 60 : 240), hideUi, seasideTest, coastal, benchSeconds, breakers, surfTest, faces, lips, flyTest, surfCam, surfSide, swell, foldLip, surfBack, chainLips, weather ?? true, weatherOffset, rain, benchRain, roofTest, caveTest, waterPipes);
 app.Run();

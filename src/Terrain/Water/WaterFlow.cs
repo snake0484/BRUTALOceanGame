@@ -240,14 +240,14 @@ public static partial class WaterFlow
 
     /// <summary>A row whose cells and 4 neighbouring rows are all dry exchanges nothing.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe bool RowQuiet(byte* wet, int y, int z)
+    internal static unsafe bool RowQuiet(byte* wet, int y, int z)
     {
         var r = (y + 1) + (z + 1) * P;
         return (wet[r] | wet[r - 1] | wet[r + 1] | wet[r - P] | wet[r + P]) == 0;
     }
 
     /// <summary>Any non-zero bits in each padded row of 34 cells (4 vectors + 2 scalars).</summary>
-    private static unsafe void BuildWetRows(WaterBlock block)
+    internal static unsafe void BuildWetRows(WaterBlock block)
     {
         fixed (float* water = block.Water)
         fixed (byte* wet = block.WetRows)

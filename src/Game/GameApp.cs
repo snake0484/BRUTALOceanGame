@@ -76,7 +76,7 @@ public sealed class GameApp : IDisposable
     private readonly int _uploadScope;
 
     /// <param name="camera">Optional start pose: x, y, z, yaw degrees, pitch degrees.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool floodTest = false, int waterRate = 240, bool hideUi = false, bool seasideTest = false, bool coastal = true, double benchSeconds = 0.0, bool breakers = false, bool surfTest = false, bool faces = true, bool lips = true, bool flyTest = false, bool surfCam = false, bool surfSide = false, float[]? swell = null, bool foldLip = false, bool surfBack = false, bool chainLips = false, bool weather = true, float weatherOffset = 0f, float rain = -1f, bool benchRain = false, bool roofTest = false, string? caveTest = null)
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool floodTest = false, int waterRate = 240, bool hideUi = false, bool seasideTest = false, bool coastal = true, double benchSeconds = 0.0, bool breakers = false, bool surfTest = false, bool faces = true, bool lips = true, bool flyTest = false, bool surfCam = false, bool surfSide = false, float[]? swell = null, bool foldLip = false, bool surfBack = false, bool chainLips = false, bool weather = true, float weatherOffset = 0f, float rain = -1f, bool benchRain = false, bool roofTest = false, string? caveTest = null, bool waterPipes = false)
     {
         if (camera is not null)
         {
@@ -118,7 +118,7 @@ public sealed class GameApp : IDisposable
         _brush = new TerrainBrush(_terrain, _physics, _camera);
         _editTest = editTest ? new EditTest(_terrain, _physics, _brush, _camera) : null;
         _roofTest = roofTest ? new RoofTest(_terrain, _camera) : null;
-        _water = new VoxelWaterSystem(_terrain) { StepsPerSecond = waterRate };
+        _water = new VoxelWaterSystem(_terrain, waterPipes) { StepsPerSecond = waterRate };
 
         // Waves physically enter sea zones through their open-sea boundary. The bare swell, not the surface: breakers
         // reach zones as bores (BreakerBores), and their drawn faces fade out inside zones, so the faces would count twice.
