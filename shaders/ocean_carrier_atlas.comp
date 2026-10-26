@@ -1,0 +1,58 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Carrier atlas (docs/breaking-waves.md, nineteenth pass): per coastal texel, what the surf carrier reads from the
+// layer B maps, interpolated to the carrier's reference once here instead of in every surfCarrierAt: the lag, water
+// depth, shoal amplitude and active flag (layer 2 tap), and the lag's central differences a cell apart (layer
+// 2 tap + 1), which carrierDirection used to take with four lag lookups per call. Rebuilt only when a field or the
+// carrier's wavenumber changes (OceanRenderer.Prepare, RecordSpray). One thread per texel of tap params.x's field.
+
+#define CARRIER_ATLAS_WRITABLE
+#include "ocean_common.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform Push {
+    vec4 params; // x = tap
+} pc;
+
+// Reference j of the texel whose first vec4 is t, in buffer s: (lag, amp).
+vec2 refOf(int s, int t, int j)
+{
+    vec4 q = coastal[s].texels[t + 1 + j / 2];
+    return (j & 1) != 0 ? q.zw : q.xy;
+}
+
+// The carrier's lag and shoal amplitude at texel (x, z): its two references mixed by the carrier's reference coordinate.
+vec2 carrierOf(int s, int res, int x, int z)
+{
+    int t = (x + z * res) * TEXEL_VEC4S;
+    int jc = int(frame.carrier.y);
+    return mix(refOf(s, t, jc), refOf(s, t, jc + 1), frame.carrier.y - float(jc));
+}
+
+void main()
+{
+    int tap = int(pc.params.x);
+    vec4 rect;
+    int s;
+    vec2 dir;
+    carrierField(tap, rect, s, dir);
+    int res = int(rect.w);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (res <= 0 || p.x >= res || p.y >= res)
+        return;
+
+    vec4 head = coastal[s].texels[(p.x + p.y * res) * TEXEL_VEC4S];
+    vec2 c = carrierOf(s, res, p.x, p.y);
+
+    // One-sided at the map's edge; inside, a bilinear sample of these equals the central differences of the bilinear lag.
+    int x0 = max(p.x - 1, 0);
+    int x1 = min(p.x + 1, res - 1);
+    int z0 = max(p.y - 1, 0);
+    int z1 = min(p.y + 1, res - 1);
+    float gx = (carrierOf(s, res, x1, p.y).x - carrierOf(s, res, x0, p.y).x) / (float(x1 - x0) * rect.z);
+    float gz = (carrierOf(s, res, p.x, z1).x - carrierOf(s, res, p.x, z0).x) / (float(z1 - z0) * rect.z);
+
+    imageStore(carrierAtlas, ivec3(p, 2 * tap), vec4(c.x, head.x, c.y, head.y));
+    imageStore(carrierAtlas, ivec3(p, 2 * tap + 1), vec4(gx, gz, 0.0, 0.0));
+}

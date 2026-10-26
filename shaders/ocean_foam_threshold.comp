@@ -1,0 +1,64 @@
+#version 450
+
+// Whitecap thresholds (docs/ocean-gpu-contract.md, foam): for each whitecapping cascade, the Jacobian below which the
+// target share of its surface lies (fft.foam.y, from the measured whitecap coverage for this wind), read off the
+// histogram ocean_fft.comp's column pass built this frame and eased toward over a few frames. The column pass seeds
+// foam below it next frame. Then the histogram is cleared for the next frame. One invocation: two cascades of FOAM_BINS
+// bins.
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(std140, set = 0, binding = 0) uniform Fft {
+    vec4 cascadeL;
+    vec4 cascadeKLo;
+    vec4 cascadeKHi;
+    vec4 wind;
+    vec4 spectrum;
+    vec4 params;
+    vec4 foam;         // x = decay factor this frame, y = target whitecap share, z = frame dt seconds, w = threshold ease per frame
+    uvec4 seed;
+} fft;
+
+const int FOAM_BINS = 128;
+const int WHITECAP_CASCADES = 2;
+const float FOAM_J_LOW = 0.4;  // histogram range on J
+const float FOAM_J_HIGH = 1.4;
+
+layout(std430, set = 0, binding = 8) buffer FoamStats {
+    uint histogram[WHITECAP_CASCADES * FOAM_BINS];
+    float threshold[4];
+} stats;
+
+void main()
+{
+    const float width = (FOAM_J_HIGH - FOAM_J_LOW) / float(FOAM_BINS);
+
+    for (int c = 0; c < WHITECAP_CASCADES; ++c)
+    {
+        uint total = 0u;
+        for (int b = 0; b < FOAM_BINS; ++b)
+            total += stats.histogram[c * FOAM_BINS + b];
+
+        // The quantile: where the running count passes the target share, interpolated within that bin.
+        float target = fft.foam.y * float(total);
+        float below = 0.0;
+        float found = FOAM_J_LOW;
+        for (int b = 0; b < FOAM_BINS; ++b)
+        {
+            float count = float(stats.histogram[c * FOAM_BINS + b]);
+            if (below + count >= target)
+            {
+                found = FOAM_J_LOW + (float(b) + (target - below) / max(count, 1.0)) * width;
+                break;
+            }
+
+            below += count;
+        }
+
+        if (total > 0u)
+            stats.threshold[c] = mix(stats.threshold[c], found, fft.foam.w);
+
+        for (int b = 0; b < FOAM_BINS; ++b)
+            stats.histogram[c * FOAM_BINS + b] = 0u;
+    }
+}

@@ -1,0 +1,18 @@
+﻿<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Debug/Debug.csproj" />
+    <Project Path="src/Engine/Engine.csproj" />
+    <Project Path="src/Game/Game.csproj" />
+    <Project Path="src/Physics/Physics.csproj" />
+    <Project Path="src/Terrain/Terrain.csproj" />
+    <Project Path="src/Terrain.Runtime/Terrain.Runtime.csproj" />
+    <Project Path="src/Water/Water.csproj" />
+    <Project Path="src/Weather/Weather.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Physics.Tests/Physics.Tests.csproj" />
+    <Project Path="tests/Terrain.Tests/Terrain.Tests.csproj" />
+    <Project Path="tests/Water.Tests/Water.Tests.csproj" />
+    <Project Path="tests/Weather.Tests/Weather.Tests.csproj" />
+  </Folder>
+</Solution>

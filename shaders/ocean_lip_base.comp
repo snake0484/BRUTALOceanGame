@@ -1,0 +1,136 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Breaker lip bases (docs/breaking-waves.md): the drawn surface at each lip base slot, one per crossed edge of the
+// crest's marching squares (BreakerFaces.SlotRefs), shared by the two segments meeting there, evaluated once here
+// instead of in every lip vertex (66 per segment) and every spray particle: the crest point the tongue grows from and
+// the face's foot it falls to. One workgroup per slot splits the two swell sums across its threads: a few thousand
+// single-threaded evaluations leave the GPU idle while each thread walks every wave component, so the dispatch would
+// take as long as one whole surface evaluation. Lane 0 seats and states the point; a slot whose state is under the lip
+// thresholds (halved, so a segment's last end, where the ribbon tapers to nothing, still has its point) is written as
+// holding no lip, but still with its crest point: the fine patch tapers a tongue to a lipless end from it
+// (ocean_patch.vert), and evaluating it here adds warps to one dispatch rather than a second evaluation to every
+// patch vertex of such a segment. Only a slot out of the lips' range skips the sums.
+
+#define LIP_BASES_WRITABLE
+#include "ocean_common.glsl"
+
+const int LANES = 32;
+
+layout(local_size_x = LANES) in;
+
+shared float parts[LANES * 16];
+shared vec2 sQ;
+shared vec4 sState;
+shared vec3 sLife;     // reach, plunge, rest distance
+shared vec4 sPoint[2]; // lane 0: the crest (position, zone); lane 1: the landing sample (position)
+shared vec4 sPartials; // the crest's CPU-band partials
+shared vec2 sExtra;    // the crest's cpuDxz and face whitewater
+
+Swell gather(int o)
+{
+    return Swell(parts[o], parts[o + 1], parts[o + 2], parts[o + 3], parts[o + 4], parts[o + 5], parts[o + 6], parts[o + 7]);
+}
+
+void scatter(int o, Swell part)
+{
+    parts[o] = part.height;
+    parts[o + 1] = part.hx;
+    parts[o + 2] = part.hz;
+    parts[o + 3] = part.Dx;
+    parts[o + 4] = part.Dz;
+    parts[o + 5] = part.jxx;
+    parts[o + 6] = part.jzz;
+    parts[o + 7] = part.jxz;
+}
+
+void main()
+{
+    uint id = gl_WorkGroupID.x;
+    int lane = int(gl_LocalInvocationID.x);
+    if (id >= uint(breakers.slots.x))
+        return;
+
+    uint owner = breakers.slotRef[id];
+    BreakerSegment s = breakers.segments[owner >> 1];
+    int end = int(owner & 1u);
+    vec2 n = end == 0 ? s.normals.xy : s.normals.zw;
+
+    // The end sits on the drawn crest: the segment's end, advanced to render time, then seated where the carrier's phase
+    // is 0 (seatOnCrest). The crossing is contoured on the coastal grid once a tick, within decimetres of that crest,
+    // and the peaked, pitched crest already slopes steeply that close. The surf state comes from the carrier too
+    // (lipStateAt), so the lip grows and falls with the face it sits on; a chain's end taper narrows it off.
+    if (lane == 0)
+    {
+        vec2 e = end == 0 ? s.ends.xy : s.ends.zw;
+        float taper = end == 0 ? s.heights.z : s.heights.w;
+        sQ = seatOnCrest(e + n * (s.dir.z * breakers.grid.w));
+        float reach, plunge, rest, flowRoot, close;
+        sState = lipStateAt(sQ, reach, plunge, rest, flowRoot, close) * vec4(1.0, 1.0, taper, 1.0);
+        sState.w = flowRoot;
+        sLife = vec3(reach, plunge * (1.0 - close), rest); // a landed tongue's throw closes onto the face (lipClose)
+    }
+
+    barrier();
+
+    vec2 q = sQ;
+    vec4 state = sState;
+    float reach = sLife.x;
+    float plunge = sLife.y;
+    bool empty = state.x < LIP_SLOT_CURL || state.z < LIP_SLOT_HEIGHT || reach < LIP_SLOT_REACH;
+    if (!lipInRange(s))
+    {
+        if (lane == 0)
+            lipBases.ends[id] = LipBase(vec4(0.0, 0.0, 0.0, 1.0), vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0));
+
+        return;
+    }
+
+    // The crest point and, down the wall's rest span, the landing the tongue falls to, the landing with the chop filtered
+    // out (LIP_LANDING_SPACING: the lip's shape is built from it). The root stays on the carrier
+    // crest: measured (BreakerLipTests.Lip_RootSitsOnTheDrawnCrest), the face's peak makes it the drawn surface's own
+    // crest too, and seating it by the surface's slope cost two more swell sums per end for 8% -> 6% of roots on a flank.
+    int o = lane * 16;
+    vec2 land = q + n * sLife.z;
+    scatter(o, swellShare(q, LIP_BASE_SPACING, lane, LANES));
+    scatter(o + 8, swellShare(land, LIP_LANDING_SPACING, lane, LANES));
+    barrier();
+
+    for (int span = LANES / 2; span > 0; span >>= 1)
+    {
+        if (lane < span)
+            for (int k = 0; k < 16; ++k)
+                parts[o + k] += parts[o + span * 16 + k];
+
+        barrier();
+    }
+
+    // The landing only needs its position, but both lanes call the same oceanFinish on purpose: lanes of one warp run
+    // the same code together, and giving the landing a lighter function of its own made the warp run both in series.
+    if (lane < 2)
+    {
+        OceanPoint pt = oceanFinish(lane == 0 ? q : land, lane == 0 ? LIP_BASE_SPACING : LIP_LANDING_SPACING, gather(lane * 8));
+        sPoint[lane] = vec4(pt.position, pt.zone);
+        if (lane == 0)
+        {
+            sPartials = pt.cpuPartials;
+            sExtra = vec2(pt.cpuDxz, pt.breakerFoam);
+        }
+    }
+
+    barrier();
+    if (lane != 0)
+        return;
+
+    // The surface normal at the crest (ocean.frag's formula on the CPU band), so the tongue's root shades as the water
+    // it grows from.
+    vec4 p = sPartials;
+    float dxx = 1.0 + p.z;
+    float dzz = 1.0 + p.w;
+    float dxz = sExtra.x;
+    vec3 normal = normalize(vec3(p.y * dxz - dzz * p.x, dzz * dxx - dxz * dxz, dxz * p.x - p.y * dxx));
+
+    vec3 crest = sPoint[0].xyz;
+    vec3 landing = lipThrowLanding(crest, lipClampLanding(crest, sPoint[1].xyz, n), n, plunge, s.dir.z);
+    lipBases.ends[id] = LipBase(vec4(crest, empty ? 1.0 : min(sPoint[0].w, 0.999)), vec4(max(dot(landing.xz - crest.xz, n), 0.05), sExtra.y, q), state,
+        vec4(landing, reach), vec4(normal, plunge));
+}

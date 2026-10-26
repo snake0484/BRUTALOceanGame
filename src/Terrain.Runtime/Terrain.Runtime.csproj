@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>BrutalGame.Terrain.Runtime</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Ahwoo.BRUTAL.Concurrency" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Engine\Engine.csproj" />
+    <ProjectReference Include="..\Terrain\Terrain.csproj" />
+    <ProjectReference Include="..\Physics\Physics.csproj" />
+  </ItemGroup>
+</Project>

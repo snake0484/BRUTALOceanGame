@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>BrutalGame.Physics</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Ahwoo.BRUTAL.Jolt" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Physics.Tests" />
+  </ItemGroup>
+</Project>

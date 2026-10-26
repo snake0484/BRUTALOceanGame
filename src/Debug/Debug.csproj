@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>BrutalGame.Debug</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Ahwoo.BRUTAL.ImGui" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Engine\Engine.csproj" />
+    <ProjectReference Include="..\Water\Water.csproj" />
+    <ProjectReference Include="..\Terrain.Runtime\Terrain.Runtime.csproj" />
+    <ProjectReference Include="..\Weather\Weather.csproj" />
+  </ItemGroup>
+</Project>

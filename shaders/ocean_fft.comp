@@ -1,0 +1,184 @@
+#version 450
+
+// One line of the 2D inverse FFT, with the passes either side fused in (docs/ocean-gpu-contract.md).
+// Rows (pass.direction 0): the cached spectrum (h0Map, omegaMap: ocean_h0.comp) is evolved to the frame's time straight
+// into shared memory, transformed along x and written to specA/specB. Columns (direction 1): specA/specB are transformed
+// along y and resolved in place: undo the centred-spectrum shift with (-1)^(x+y), apply choppiness, write dispMap /
+// derivMap and update the persistent foam from this cascade's Jacobian. Whitecaps: the two larger cascades seed foam
+// where J is below this cascade's threshold (ocean_foam_threshold.comp: the J under which the measured whitecap share of
+// the surface lies, for this wind) and add J to this frame's histogram for the next threshold. The 3 m cascade's ripples
+// don't whitecap. Radix-2 Stockham, natural-order output, twiddle e^{+2 pi i ...}, no 1/N scale.
+// Workgroup x = line index, z = cascade.
+
+// Hardcoded: N = 256, LOG2N = 8. Must equal fft.cascadeL.w (fixed in C#).
+#define N 256
+#define LOG2N 8
+#define HALF_N 128
+
+layout(local_size_x = HALF_N, local_size_y = 1, local_size_z = 1) in;
+
+layout(std140, set = 0, binding = 0) uniform Fft {
+    vec4 cascadeL;     // xyz = patch size L per cascade (m), w = N
+    vec4 cascadeKLo;   // xyz = band low |k|
+    vec4 cascadeKHi;   // xyz = band high |k|
+    vec4 wind;         // x = U10 m/s, y = direction rad (waves travel toward), z = fetch m, w = depth m (>= 1e5 means deep)
+    vec4 spectrum;     // x = alpha, y = peak omega, z = gamma, w = spread exponent s
+    vec4 params;       // x = spread norm Ns, y = choppiness, z = looped time t, w = loop period T
+    vec4 foam;         // x = decay factor this frame, y = target whitecap share, z = frame dt seconds, w = threshold ease per frame
+    uvec4 seed;        // x = seed
+} fft;
+layout(set = 0, binding = 1, rgba32f) uniform image2DArray specA;             // (A.re, A.im, B.re, B.im)
+layout(set = 0, binding = 2, rgba32f) uniform image2DArray specB;             // (C.re, C.im, D.re, D.im)
+layout(set = 0, binding = 3, rgba16f) writeonly uniform image2DArray dispMap; // (λDx, h, λDz, λDxz)
+layout(set = 0, binding = 4, rgba16f) writeonly uniform image2DArray derivMap; // (hx, hz, λDxx, λDzz)
+layout(set = 0, binding = 5, rgba16f) uniform image2DArray foamMap;           // r = persistent foam 0..1
+layout(set = 0, binding = 6, rgba32f) readonly uniform image2DArray h0Map;    // (h0(k).re, h0(k).im, h0(-k).re, h0(-k).im)
+layout(set = 0, binding = 7, r32f) readonly uniform image2DArray omegaMap;    // omega, quantised to the loop
+layout(push_constant) uniform Pass { int direction; } pass;
+
+const float TAU = 6.28318530717959;
+const int FOAM_BINS = 128;        // = HALF_N: one bin per thread
+const int WHITECAP_CASCADES = 2;
+const float FOAM_J_LOW = 0.4;     // histogram range on J (ocean_foam_threshold.comp)
+const float FOAM_J_HIGH = 1.4;
+const float FOAM_RAMP = 0.01;     // J over which seeding goes from none to full: whitecaps are patches with edges, not a haze
+
+layout(std430, set = 0, binding = 8) buffer FoamStats {
+    uint histogram[WHITECAP_CASCADES * FOAM_BINS];
+    float threshold[4];
+} stats;
+
+// Ping-pong buffers: [buffer * N + element]. 2 x 2 x 256 x vec4 = 16 KB.
+shared vec4 sA[2 * N]; // (A, B)
+shared vec4 sB[2 * N]; // (C, D)
+shared uint bins[FOAM_BINS];
+
+vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
+vec2 mulI(vec2 a) { return vec2(-a.y, a.x); }
+vec4 cmul2(vec4 a, vec2 w) { return vec4(cmul(a.xy, w), cmul(a.zw, w)); }
+
+// Row pass load: the four packed spectra at texel (x, y) of the cascade, at time t.
+//   A = Dx + i Dz, B = h + i Dxz, C = hx + i hz, D = Dxx + i Dzz (no choppiness).
+void evolve(int x, int y, int cascade, out vec4 a, out vec4 b)
+{
+    ivec3 coord = ivec3(x, y, cascade);
+    vec4 h0 = imageLoad(h0Map, coord);
+    float L = fft.cascadeL[cascade];
+    vec2 k = (vec2(x, y) - 0.5 * float(N)) * (TAU / max(L, 1e-6)); // (kx, kz); texel y maps to world z
+    float kLen = length(k);
+    a = vec4(0.0);
+    b = vec4(0.0);
+    if (kLen <= 0.0 || L <= 0.0 || all(equal(h0, vec4(0.0))))
+        return;
+
+    // h(k,t) = h0(k) e^{-i w t} + conj(h0(-k)) e^{+i w t}
+    float phase = imageLoad(omegaMap, coord).r * fft.params.z;
+    vec2 e = vec2(cos(phase), sin(phase));
+    vec2 h = cmul(h0.xy, vec2(e.x, -e.y)) + cmul(vec2(h0.z, -h0.w), e);
+
+    float invK = 1.0 / kLen;
+    vec2 ih = mulI(h);
+    vec2 dx = ih * (k.x * invK);
+    vec2 dz = ih * (k.y * invK);
+    vec2 hx = ih * k.x;
+    vec2 hz = ih * k.y;
+    vec2 dxx = h * (-k.x * k.x * invK);
+    vec2 dzz = h * (-k.y * k.y * invK);
+    vec2 dxz = h * (-k.x * k.y * invK);
+
+    a = vec4(dx + mulI(dz), h + mulI(dxz));
+    b = vec4(hx + mulI(hz), dxx + mulI(dzz));
+}
+
+// Column pass store: texel (x, y) of the cascade from its transformed line.
+void resolve(int x, int y, int cascade, vec4 a, vec4 b, bool whitecaps)
+{
+    ivec3 coord = ivec3(x, y, cascade);
+    float sgn = ((x + y) & 1) == 0 ? 1.0 : -1.0;
+    a *= sgn; // (Dx, Dz, h, Dxz)
+    b *= sgn; // (hx, hz, Dxx, Dzz)
+
+    float lambda = fft.params.y;
+    float dxz = lambda * a.w;
+    float dxx = lambda * b.z;
+    float dzz = lambda * b.w;
+    imageStore(dispMap, coord, vec4(lambda * a.x, a.z, lambda * a.y, dxz));
+    imageStore(derivMap, coord, vec4(b.x, b.y, dxx, dzz));
+
+    float J = (1.0 + dxx) * (1.0 + dzz) - dxz * dxz;
+    float decayed = imageLoad(foamMap, coord).r * fft.foam.x;
+    float inject = whitecaps ? clamp((stats.threshold[cascade] - J) / FOAM_RAMP + 0.5, 0.0, 1.0) : 0.0;
+    imageStore(foamMap, coord, vec4(max(decayed, inject), 0.0, 0.0, 1.0));
+
+    if (whitecaps)
+        atomicAdd(bins[clamp(int((J - FOAM_J_LOW) / (FOAM_J_HIGH - FOAM_J_LOW) * float(FOAM_BINS)), 0, FOAM_BINS - 1)], 1u);
+}
+
+void main()
+{
+    int j = int(gl_LocalInvocationID.x);
+    int line = int(gl_WorkGroupID.x);
+    int cascade = int(gl_WorkGroupID.z);
+    bool rows = pass.direction == 0;
+    bool whitecaps = !rows && cascade < WHITECAP_CASCADES;
+
+    if (rows)
+    {
+        evolve(j, line, cascade, sA[j], sB[j]);
+        evolve(j + HALF_N, line, cascade, sA[j + HALF_N], sB[j + HALF_N]);
+    }
+    else
+    {
+        sA[j] = imageLoad(specA, ivec3(line, j, cascade));
+        sB[j] = imageLoad(specB, ivec3(line, j, cascade));
+        sA[j + HALF_N] = imageLoad(specA, ivec3(line, j + HALF_N, cascade));
+        sB[j + HALF_N] = imageLoad(specB, ivec3(line, j + HALF_N, cascade));
+        bins[j] = 0u;
+    }
+
+    barrier();
+
+    int src = 0;
+    for (int stage = 0; stage < LOG2N; stage++)
+    {
+        int Ns = 1 << stage;
+        int dst = src ^ 1;
+        int kk = j & (Ns - 1);
+        float angle = TAU * float(kk) / float(2 * Ns);
+        vec2 w = vec2(cos(angle), sin(angle));
+
+        int si = src * N;
+        vec4 a0 = sA[si + j];
+        vec4 b0 = sB[si + j];
+        vec4 a1 = cmul2(sA[si + j + HALF_N], w);
+        vec4 b1 = cmul2(sB[si + j + HALF_N], w);
+
+        int di = dst * N + (j - kk) * 2 + kk; // (j / Ns) * 2Ns + (j mod Ns)
+        sA[di] = a0 + a1;
+        sB[di] = b0 + b1;
+        sA[di + Ns] = a0 - a1;
+        sB[di + Ns] = b0 - b1;
+
+        src = dst;
+        barrier();
+    }
+
+    int si = src * N;
+    if (rows)
+    {
+        imageStore(specA, ivec3(j, line, cascade), sA[si + j]);
+        imageStore(specB, ivec3(j, line, cascade), sB[si + j]);
+        imageStore(specA, ivec3(j + HALF_N, line, cascade), sA[si + j + HALF_N]);
+        imageStore(specB, ivec3(j + HALF_N, line, cascade), sB[si + j + HALF_N]);
+        return;
+    }
+
+    resolve(line, j, cascade, sA[si + j], sB[si + j], whitecaps);
+    resolve(line, j + HALF_N, cascade, sA[si + j + HALF_N], sB[si + j + HALF_N], whitecaps);
+    if (!whitecaps)
+        return;
+
+    barrier();
+    if (bins[j] > 0u)
+        atomicAdd(stats.histogram[cascade * FOAM_BINS + j], bins[j]);
+}

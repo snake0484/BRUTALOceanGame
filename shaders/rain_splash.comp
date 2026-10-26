@@ -1,0 +1,98 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Splash crowns: one slot per impact cell in a window around the camera (rain_ripples.glsl rainEvent, the grid the
+// big rings use, so every crown sits at its ring's centre). A cell with a live impact puts its crown where the drop
+// lands: on the ocean as drawn (oceanAt at the impact's rest position, so it rides the waves with its ring), or on the
+// terrain's top where that is higher or no ocean is drawn. Stateless: every slot is rewritten each frame.
+// The surface evaluation is a long serial chain and there are few crowns to hide it behind, so each cell gets LANES
+// lanes that split the swell's components between them (as ocean_lip_base.comp does) before one finishes the point.
+
+#define RAIN_SPLASHES_WRITABLE
+#include "ocean_common.glsl"
+#include "rain_common.glsl"
+
+const int LANES = 8;
+const int GROUP = 64;
+
+layout(local_size_x = GROUP) in;
+
+const float SPLASH_LIFE = 0.32;    // s a crown lasts (its ring goes on)
+const float SPLASH_SPACING = 0.25; // the finest clipmap spacing: the surface as drawn near the camera
+
+shared float parts[GROUP * 8];
+
+void scatter(int o, Swell part)
+{
+    parts[o] = part.height;
+    parts[o + 1] = part.hx;
+    parts[o + 2] = part.hz;
+    parts[o + 3] = part.Dx;
+    parts[o + 4] = part.Dz;
+    parts[o + 5] = part.jxx;
+    parts[o + 6] = part.jzz;
+    parts[o + 7] = part.jxz;
+}
+
+Swell gather(int o)
+{
+    return Swell(parts[o], parts[o + 1], parts[o + 2], parts[o + 3], parts[o + 4], parts[o + 5], parts[o + 6], parts[o + 7]);
+}
+
+void main()
+{
+    uint slot = gl_GlobalInvocationID.x / uint(LANES);
+    int lane = int(gl_LocalInvocationIndex) % LANES;
+
+    ivec2 local = ivec2(int(slot) % SPLASH_SIDE, int(slot) / SPLASH_SIDE) - SPLASH_SIDE / 2;
+    ivec2 cell = ivec2(floor(frame.cameraPos.xz / IMPACT_CELL)) + local;
+    vec2 centre;
+    float age;
+    vec4 e;
+    float chance = min(rain.params.x * RIPPLE_DENSITY, 1.0);
+
+    // Crowns thin out toward SPLASH_FAR, where the ocean's fizz takes over (ocean.frag).
+    bool live = rainEvent(cell, IMPACT_CELL, IMPACT_SEED, IMPACT_PERIOD, rain.params.y, chance, centre, age, e) && age < SPLASH_LIFE
+        && e.z < chance * (1.0 - smoothstep(SPLASH_NEAR, SPLASH_FAR, length(centre - frame.cameraPos.xz)));
+    bool sea = live && oceanDrawnAt(centre);
+
+    // Every lane takes part in the reduction's barriers; lanes of dead or dry cells add nothing.
+    int o = int(gl_LocalInvocationIndex) * 8;
+    scatter(o, sea ? swellShare(centre, SPLASH_SPACING, lane, LANES) : Swell(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
+    barrier();
+
+    for (int span = LANES / 2; span > 0; span >>= 1)
+    {
+        if (lane < span)
+            for (int k = 0; k < 8; ++k)
+                parts[o + k] += parts[o + span * 8 + k];
+
+        barrier();
+    }
+
+    if (lane != 0)
+        return;
+
+    splashes.slot[2u * slot].w = -1.0;
+    if (!live)
+        return;
+
+    float top = rainCoverTop(centre);
+    vec3 position = vec3(centre.x, top, centre.y);
+    float ground = 1.0;
+
+    if (sea)
+    {
+        OceanPoint p = oceanFinish(centre, SPLASH_SPACING, gather(o));
+        if (p.position.y > top)
+        {
+            position = p.position;
+            ground = 0.0;
+        }
+    }
+
+    if (position.y <= NO_TOP)
+        return;
+
+    splashes.slot[2u * slot] = vec4(position, age / SPLASH_LIFE);
+    splashes.slot[2u * slot + 1u] = vec4((0.7 + 0.5 * rain.params.x) * (0.7 + 0.6 * e.w), fract(e.w * 97.13 + e.x), ground, 0.0);
+}

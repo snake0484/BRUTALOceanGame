@@ -1,0 +1,31 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Spray update: flight with each particle's own air drag and share of gravity (spray falls, mist hangs), growing at its
+// own rate as the droplets disperse, until their life runs out.
+
+#define SPRAY_WRITABLE
+#include "ocean_common.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform Push {
+    vec4 params; // x = frame seconds
+} pc;
+
+void main()
+{
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= SPRAY_MAX)
+        return;
+
+    SprayParticle p = spray.particles[id];
+    if (p.positionLife.w <= 0.0)
+        return;
+
+    float dt = pc.params.x;
+    vec3 v = p.velocitySize.xyz * exp(-p.motion.x * dt) + vec3(0.0, -9.81 * p.motion.y * dt, 0.0);
+    p.positionLife.xyz += v * dt;
+    p.positionLife.w -= dt;
+    p.velocitySize = vec4(v, p.velocitySize.w + p.motion.z * dt);
+    spray.particles[id] = p;
+}

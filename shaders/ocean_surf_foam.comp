@@ -1,0 +1,48 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Surf foam that outlives its breaker (docs/breaking-waves.md): per 2 m cell of the depth map's grid, last frame's
+// coverage decays and whatever the surf makes now is added: throwing crests and rollers, and fresh foam at the edge of a
+// swash sheet as it rushes up the beach, which the sheet leaves as a film as it drains. Whitewater lingers and fades
+// behind a crest, and where a crest ends, instead of vanishing.
+
+#define SURF_FOAM_WRITABLE
+#include "ocean_common.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(push_constant) uniform Push {
+    vec4 params; // x = frame seconds, w = 1 to clear (the map re-centred)
+} pc;
+
+const float FOAM_LIFE = 2.5;  // seconds to fall to 1/e (4 s laid a solid white sheet over the whole inner surf zone)
+const float SWASH_FOAM = 0.6;  // coverage at the up-rushing edge of a strong bore's sheet (swashSheet's front); 0.35 was lost in the lace
+
+void main()
+{
+    ivec2 c = ivec2(gl_GlobalInvocationID.xy);
+    if (c.x >= SURF_FOAM_RES || c.y >= SURF_FOAM_RES)
+        return;
+
+    int i = c.x + c.y * SURF_FOAM_RES;
+    vec2 x0 = frame.depthRect.xy + (vec2(c) + 0.5) * (frame.depthRect.z / float(SURF_FOAM_RES));
+    float before = pc.params.w > 0.5 ? 0.0 : surfFoam.values[i] * exp(-pc.params.x / FOAM_LIFE);
+
+    // Outside the surf band nothing is made: the cell only decays (surfBandAt, one atlas lookup).
+    if (!surfBandAt(x0))
+    {
+        surfFoam.values[i] = before;
+        return;
+    }
+
+    float height = 0.0, Dx = 0.0, Dz = 0.0, hx = 0.0, hz = 0.0, jxx = 0.0, jzz = 0.0, jxz = 0.0;
+    vec2 flow = vec2(0.0);
+    float made = breakerFace(0, x0, height, Dx, Dz, hx, hz, jxx, jzz, jxz, flow);
+
+    // The up-rushing edge is fresh whitewater, a line that climbs the beach with the edge and is left to fade as the
+    // sheet drains back; never over the water, where the bore's own roller is the whitewater.
+    float front;
+    swashSheet(x0, waterDepth(x0), front);
+    made = max(made, SWASH_FOAM * front);
+
+    surfFoam.values[i] = max(before, made);
+}

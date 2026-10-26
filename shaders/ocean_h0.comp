@@ -1,0 +1,146 @@
+#version 450
+
+// Spectrum cache (docs/ocean-gpu-contract.md): per texel (x, y), z = cascade, everything of the spectrum that does not
+// move with time: h0 at this texel's k and at -k, and omega quantised to the loop. Rebuilt only when the spectrum
+// parameters or the seed change (OceanFft.Record); ocean_fft.comp's row pass evolves it to the frame's time.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std140, set = 0, binding = 0) uniform Fft {
+    vec4 cascadeL;     // xyz = patch size L per cascade (m), w = N
+    vec4 cascadeKLo;   // xyz = band low |k|
+    vec4 cascadeKHi;   // xyz = band high |k|
+    vec4 wind;         // x = U10 m/s, y = direction rad (waves travel toward), z = fetch m, w = depth m (>= 1e5 means deep)
+    vec4 spectrum;     // x = alpha, y = peak omega, z = gamma, w = spread exponent s
+    vec4 params;       // x = spread norm Ns, y = choppiness, z = looped time t, w = loop period T
+    vec4 foam;         // x = decay factor this frame, y = target whitecap share, z = frame dt seconds, w = threshold ease per frame
+    uvec4 seed;        // x = seed
+} fft;
+layout(set = 0, binding = 6, rgba32f) writeonly uniform image2DArray h0Map;  // (h0(k).re, h0(k).im, h0(-k).re, h0(-k).im)
+layout(set = 0, binding = 7, r32f) writeonly uniform image2DArray omegaMap;  // omega, quantised to multiples of 2pi/T
+
+const float PI = 3.14159265358979;
+const float TAU = 6.28318530717959;
+const float G = 9.81;
+const float DEEP_DEPTH = 1e5;
+
+// pcg4d (Jarzynski & Olano, "Hash Functions for GPU Rendering", 2020).
+uvec4 pcg4d(uvec4 v)
+{
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.w; v.y += v.z * v.x; v.z += v.x * v.y; v.w += v.y * v.z;
+    v ^= v >> 16u;
+    v.x += v.y * v.w; v.y += v.z * v.x; v.z += v.x * v.y; v.w += v.y * v.z;
+    return v;
+}
+
+// Two standard normals via Box-Muller from the hash of (x, y, cascade, seed).
+vec2 gaussian2(uvec2 texel, uint cascade)
+{
+    uvec4 h = pcg4d(uvec4(texel, cascade, fft.seed.x));
+    float u1 = (float(h.x >> 8u) + 1.0) * (1.0 / 16777216.0); // (0, 1]
+    float u2 = float(h.y >> 8u) * (1.0 / 16777216.0);         // [0, 1)
+    float r = sqrt(-2.0 * log(u1));
+    float a = TAU * u2;
+    return vec2(r * cos(a), r * sin(a));
+}
+
+// Returns (omega, domega/dk).
+vec2 dispersion(float k)
+{
+    float depth = fft.wind.w;
+    if (depth >= DEEP_DEPTH)
+    {
+        float w = sqrt(G * k);
+        return vec2(w, G / max(2.0 * w, 1e-6));
+    }
+
+    float kh = min(k * depth, 20.0); // tanh saturates; avoid exp overflow in tanh
+    float t = tanh(kh);
+    float w = sqrt(G * k * t);
+    float dw = G * (t + kh * (1.0 - t * t)) / max(2.0 * w, 1e-6);
+    return vec2(w, dw);
+}
+
+float jonswap(float w)
+{
+    float alpha = fft.spectrum.x;
+    float wp = fft.spectrum.y;
+    float gamma = fft.spectrum.z;
+    if (w <= 0.0 || wp <= 0.0)
+        return 0.0;
+
+    float sigma = w <= wp ? 0.07 : 0.09;
+    float d = (w - wp) / (sigma * wp);
+    float r = exp(-0.5 * d * d);
+    float ratio = wp / w;
+    float ratio2 = ratio * ratio;
+    float w2 = w * w;
+    return alpha * G * G / (w2 * w2 * w) * exp(-1.25 * ratio2 * ratio2) * pow(max(gamma, 1e-6), r);
+}
+
+float spreading(float theta)
+{
+    float d = theta - fft.wind.y;
+    d -= TAU * round(d / TAU); // wrap to [-pi, pi] so the half angle is in [-pi/2, pi/2]
+    float c = abs(cos(0.5 * d));
+    return fft.params.x * pow(c, 2.0 * fft.spectrum.w);
+}
+
+// h0 at texel, using that texel's own k so h0(-k) is exactly what the mirrored texel computes.
+vec2 h0At(uvec2 texel, uint cascade, float N, float L, float kLo, float kHi)
+{
+    float dk = TAU / L;
+    vec2 k = (vec2(texel) - 0.5 * N) * dk;
+    float kLen = length(k);
+    if (kLen <= 0.0 || kLen < kLo || kLen >= kHi)
+        return vec2(0.0);
+
+    vec2 wd = dispersion(kLen);
+    float theta = atan(k.y, k.x);
+    float psi = jonswap(wd.x) * spreading(theta) * wd.y / kLen;
+    float amp = sqrt(max(psi, 0.0) * dk * dk * 0.5);
+    return gaussian2(texel, cascade) * amp;
+}
+
+void main()
+{
+    uint N = uint(fft.cascadeL.w);
+    uvec3 id = gl_GlobalInvocationID;
+    if (id.x >= N || id.y >= N || id.z >= 3u)
+        return;
+
+    uint cascade = id.z;
+    ivec3 coord = ivec3(id);
+    float Nf = float(N);
+    float L = fft.cascadeL[cascade];
+    float kLo = fft.cascadeKLo[cascade];
+    float kHi = fft.cascadeKHi[cascade];
+
+    float dk = TAU / max(L, 1e-6);
+    vec2 k = (vec2(id.xy) - 0.5 * Nf) * dk; // (kx, kz); texel y maps to world z
+    float kLen = length(k);
+
+    if (kLen <= 0.0 || L <= 0.0)
+    {
+        imageStore(h0Map, coord, vec4(0.0));
+        imageStore(omegaMap, coord, vec4(0.0));
+        return;
+    }
+
+    uvec2 mirror = (uvec2(N) - id.xy) % uvec2(N);
+    vec2 h0 = h0At(id.xy, cascade, Nf, L, kLo, kHi);
+    vec2 h0m = h0At(mirror, cascade, Nf, L, kLo, kHi);
+
+    // Omega quantised to multiples of 2pi/T so the loop is seamless.
+    float w = dispersion(kLen).x;
+    float T = fft.params.w;
+    if (T > 0.0)
+    {
+        float w0 = TAU / T;
+        w = floor(w / w0) * w0;
+    }
+
+    imageStore(h0Map, coord, vec4(h0, h0m));
+    imageStore(omegaMap, coord, vec4(w, 0.0, 0.0, 0.0));
+}

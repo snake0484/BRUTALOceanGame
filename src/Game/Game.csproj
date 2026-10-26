@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>BrutalGame</RootNamespace>
+    <AssemblyName>BRUTALGame</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\shaders\**\*" LinkBase="shaders" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Engine\Engine.csproj" />
+    <ProjectReference Include="..\Debug\Debug.csproj" />
+    <ProjectReference Include="..\Water\Water.csproj" />
+    <ProjectReference Include="..\Terrain.Runtime\Terrain.Runtime.csproj" />
+    <ProjectReference Include="..\Weather\Weather.csproj" />
+  </ItemGroup>
+</Project>
