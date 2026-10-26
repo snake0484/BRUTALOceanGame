@@ -41,6 +41,17 @@ public sealed class WaterBlock
     public readonly byte[] Flags = new byte[ChunkConstants.PaddedVolume];
 
     /// <summary>
+    /// Per open cell standing on solid: how far the terrain's smooth surface lies above the cell's voxel floor (y − 0.5),
+    /// in <see cref="BedUnit"/> steps, −0.5..0.5 m, from the density's zero crossing between the two samples. The voxels
+    /// turn a slope into flat terraces and one-cell stairs; water on a bed stands on this surface instead
+    /// (<see cref="BedRise"/>). <see cref="NotBed"/> elsewhere. Halo planes are copied with the flags.
+    /// </summary>
+    public readonly sbyte[] Bed = new sbyte[ChunkConstants.PaddedVolume];
+
+    public const sbyte NotBed = sbyte.MinValue;
+    public const float BedUnit = 1f / 254f;
+
+    /// <summary>
     /// Face fluxes of the pipe model (<see cref="WaterPipes"/>), m³/s, positive from the lower-index cell: FluxX[i] is the
     /// face between i and i + 1, FluxY[i] between i and the cell above, FluxZ[i] between i and i + PaddedArea. Null when
     /// the block runs the automaton.
@@ -51,9 +62,18 @@ public sealed class WaterBlock
 
     /// <summary>
     /// Pipe model: per cell, how fast its water falls (m/s, down negative), carried with the water from cell to cell; 0 for
-    /// water at rest on a floor. The +Y halo plane holds the block above's bottom layer (<see cref="WaterHalo.CopyFallAbove"/>).
+    /// water at rest on a floor. The halo planes beside and above hold the neighbours' (<see cref="WaterHalo.CopyFalling"/>).
     /// </summary>
     public readonly float[]? FallSpeed;
+
+    /// <summary>
+    /// Pipe model: per cell, the sideways speed (m/s) of its water while it falls, carried with the water like
+    /// <see cref="FallSpeed"/>; 0 for water held up, whose sideways momentum lives on its faces. Water landing on a bed or
+    /// a pool hands it to the face it moves toward, so a sheet running over a stair keeps going instead of piling up.
+    /// Halos as <see cref="FallSpeed"/>.
+    /// </summary>
+    public readonly float[]? DriftX;
+    public readonly float[]? DriftZ;
     public float MaxDelta;
 
     /// <summary>Largest flux (m³/s) that moved water through a face the block holds in the last pipe step.</summary>
@@ -77,6 +97,8 @@ public sealed class WaterBlock
             FluxY = new float[ChunkConstants.PaddedVolume];
             FluxZ = new float[ChunkConstants.PaddedVolume];
             FallSpeed = new float[ChunkConstants.PaddedVolume];
+            DriftX = new float[ChunkConstants.PaddedVolume];
+            DriftZ = new float[ChunkConstants.PaddedVolume];
         }
 
         Reset(default);
@@ -90,6 +112,7 @@ public sealed class WaterBlock
         Next.AsSpan().Clear();
         OutScale.AsSpan().Fill(1f);
         Flags.AsSpan().Fill((byte)WaterFlags.Solid);
+        Bed.AsSpan().Fill(NotBed);
         WetRows.AsSpan().Clear();
         ClearFluxes();
 
@@ -112,6 +135,8 @@ public sealed class WaterBlock
         FluxY?.AsSpan().Clear();
         FluxZ?.AsSpan().Clear();
         FallSpeed?.AsSpan().Clear();
+        DriftX?.AsSpan().Clear();
+        DriftZ?.AsSpan().Clear();
         MaxFlux = 0f;
     }
 
@@ -155,6 +180,11 @@ public sealed class WaterBlock
                     var reservoir = !solid && source[i] >= ReservoirByte;
                     Flags[i] = (byte)(solid ? WaterFlags.Solid : reservoir ? WaterFlags.Reservoir : WaterFlags.None);
                     Water[i] = reservoir ? fill : solid || !keepWater ? 0f : Water[i];
+
+                    // The surface crosses between the sample below (solid, < 0) and this one (open, >= 0); the cell's floor
+                    // is halfway between them.
+                    var under = density[i - P];
+                    Bed[i] = solid || under >= 0 ? NotBed : (sbyte)MathF.Round(((float)under / (under - density[i]) - 0.5f) * 254f);
                 }
             }
         }
@@ -184,6 +214,25 @@ public sealed class WaterBlock
 
         return false;
     }
+
+    /// <summary>
+    /// Brings the beds in line with the flags alone, for blocks built or edited by hand instead of from a chunk (tests):
+    /// an open interior cell over solid keeps its rise, or stands on a flat bed if it had none; every other cell is
+    /// <see cref="NotBed"/>. Call after the halo flags are in, then copy the halos again.
+    /// </summary>
+    public void DeriveBeds()
+    {
+        for (var z = 0; z < S; z++)
+            for (var y = 0; y < S; y++)
+                for (var i = ChunkConstants.Index(0, y, z); i < ChunkConstants.Index(S, y, z); i++)
+                    Bed[i] = (Flags[i] & (byte)WaterFlags.Solid) != 0 || (Flags[i - P] & (byte)WaterFlags.Solid) == 0 ? NotBed : Bed[i] == NotBed ? (sbyte)0 : Bed[i];
+    }
+
+    /// <summary>
+    /// How much higher water with fill <paramref name="w"/> stands on a bed than on its voxel floor: the bed's whole rise
+    /// under a film, fading to none as the cell fills, so full cells and the layers over them keep their heads.
+    /// </summary>
+    public static float BedRise(sbyte bed, float w) => bed == NotBed ? 0f : bed * BedUnit * (1f - MathF.Min(w, 1f));
 
     /// <summary>
     /// Fill a reservoir cell in interior row y is held at: 1 at the top sea layer, +Compression per layer below.

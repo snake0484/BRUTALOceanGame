@@ -112,7 +112,9 @@ public sealed class WaterSurfaceMesher
         if ((flags[topIndex] & (byte)(WaterFlags.Reservoir | WaterFlags.SeaZone)) != 0)
             return;
 
-        var surface = top - 0.5f + MathF.Min(water[topIndex], 1f);
+        // A film stands on the terrain's smooth surface, not on the voxel floor: drawn on the floor it sank under the
+        // terrain wherever the slope rose above the floor, and a sheet running down a hill showed dry holes.
+        var surface = top - 0.5f + MathF.Min(water[topIndex], 1f) + WaterBlock.BedRise(block.Bed[topIndex], water[topIndex]);
         var bottom = top;
 
         while (bottom > 0)
@@ -128,7 +130,8 @@ public sealed class WaterSurfaceMesher
         var c = Column(x, z);
         _columnWet[c] = true;
         _columnHeight[c] = surface;
-        _columnThickness[c] = surface - (bottom - 0.5f);
+        var bed = block.Bed[ChunkConstants.Index(x, bottom, z)];
+        _columnThickness[c] = surface - (bottom - 0.5f + (bed == WaterBlock.NotBed ? 0f : bed * WaterBlock.BedUnit));
     }
 
     private void BuildCorners()

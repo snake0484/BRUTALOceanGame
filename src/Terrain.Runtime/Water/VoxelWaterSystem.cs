@@ -489,10 +489,10 @@ public sealed class VoxelWaterSystem : IDisposable
                     WaterHalo.CopyFlags(slot.Block, null, (Face)f);
 
                 WaterHalo.CopyWater(slot.Block, neighbour, (Face)f);
-            }
 
-            if (Pipes)
-                WaterHalo.CopyFallAbove(slot.Block, Neighbour(slot.Block.Coord, (int)Face.PosY));
+                if (Pipes && f != (int)Face.NegY)
+                    WaterHalo.CopyFalling(slot.Block, neighbour, (Face)f);
+            }
         }
         RunPass(Pipes ? WaterStepJob.Kind.PipeFluxes : WaterStepJob.Kind.OutflowScale);
 

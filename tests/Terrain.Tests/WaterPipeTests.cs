@@ -25,23 +25,41 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
             return block;
         }
 
+        /// <summary>Halo flags, then each block's beds from them (flat: hand-built blocks have no density), then the beds' halos.</summary>
         public void LinkFlags()
         {
             foreach (var block in Blocks.Values)
                 for (var f = 0; f < 6; f++)
                     WaterHalo.CopyFlags(block, Neighbour(block, f), (Face)f);
+
+            foreach (var block in Blocks.Values)
+                block.DeriveBeds();
+
+            foreach (var block in Blocks.Values)
+                for (var f = 0; f < 6; f++)
+                    WaterHalo.CopyFlags(block, Neighbour(block, f), (Face)f);
+
+            _linked = true;
         }
+
+        private bool _linked;
 
         public void Step(int steps = 1)
         {
+            if (!_linked)
+                LinkFlags();
+
             for (var s = 0; s < steps; s++)
             {
                 foreach (var block in Blocks.Values)
                 {
                     for (var f = 0; f < 6; f++)
+                    {
                         WaterHalo.CopyWater(block, Neighbour(block, f), (Face)f);
 
-                    WaterHalo.CopyFallAbove(block, Neighbour(block, (int)Face.PosY));
+                        if (f != (int)Face.NegY)
+                            WaterHalo.CopyFalling(block, Neighbour(block, f), (Face)f);
+                    }
                 }
 
                 foreach (var block in Blocks.Values)
@@ -69,10 +87,13 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
             return sum;
         }
 
+        /// <summary>The runtime's sleep test at its 60 steps a second (1e-4 a step), scaled to this step.</summary>
         public bool Quiet()
         {
+            const float rate = 1e-4f * 60f;
+
             foreach (var block in Blocks.Values)
-                if (block.MaxDelta >= 1e-4f || block.MaxFlux * Dt >= 1e-4f)
+                if (block.MaxDelta >= rate * Dt || block.MaxFlux * Dt >= rate * Dt)
                     return false;
 
             return true;
@@ -130,6 +151,7 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
         return sum;
     }
 
+    /// <summary>Steps until the sim has been quiet for a second, as the runtime sleeps (60 quiet steps at 60 a second).</summary>
     private static int StepUntilSettled(Sim sim, int maxSteps)
     {
         var quiet = 0;
@@ -139,7 +161,7 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
             sim.Step();
             quiet = sim.Quiet() ? quiet + 1 : 0;
 
-            if (quiet >= 60)
+            if (quiet * Dt >= 1f)
                 return s;
         }
 
@@ -164,6 +186,7 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
         Assert.Equal(start, sim.Mass(), 1e-3);
         Assert.True(Sum(b, 12, 2, 12, 19, 30, 19) < 1e-3, "all water rests in the floor layer");
         Assert.Equal(start / 64.0, b.Water[I(12, 1, 12)], 1e-2);
+        Assert.Equal(start / 64.0, b.Water[I(19, 1, 19)], 1e-2);
     }
 
     /// <summary>
@@ -372,11 +395,106 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
             for (var z = 8; z <= 9; z++)
                 b.Flags[I(14, y, z)] = 0;
 
+        sim.LinkFlags();
         sim.Step(2400);
         var pond = Sum(b, 4, 3, 4, 13, S - 1, 13);
         output.WriteLine($"pond after 10 s of breach {pond:F1} of 300 m3, mass drift {sim.Mass() - mass:E1}");
         Assert.True(pond < 260.0, $"the pond should pour out through the breach, still holds {pond:F1} m3");
         Assert.True(Math.Abs(sim.Mass() - mass) < 1e-3, $"mass drifted {sim.Mass() - mass}");
+    }
+
+    /// <summary>
+    /// A breach in a long reservoir's wall: water over a broad crest 4 cells wide under 1 m of head passes about what weir
+    /// flow says, 1.705 b H^1.5 m³/s for a smooth crest. The bed's roughness (n 0.1 over the 3 m crest, about 0.3 m of head
+    /// at these speeds) costs up to a third of it.
+    /// </summary>
+    [Fact]
+    public void BreachPassesWeirFlow()
+    {
+        var sim = new Sim();
+        var b = sim.Add(new ChunkCoord(0, 0, 0));
+        FillSolid(b, 0, 0, 0, S - 1, S - 1, S - 1);
+
+        // Reservoir x 1..20, z 1..30, water y 1..5; crest x 21..23 on solid y <= 4, open z 14..17; a free fall beyond it.
+        for (var z = 1; z <= 30; z++)
+            for (var y = 1; y < S - 1; y++)
+                for (var x = 1; x <= 30; x++)
+                    if (x <= 20 || (z >= 14 && z <= 17 && (x >= 24 || y >= 5)))
+                        b.Flags[I(x, y, z)] = 0;
+
+        FillWater(b, 1, 1, 1, 20, 5, 30);
+        double Down() => Sum(b, 24, 1, 14, 30, S - 2, 17);
+        double Head() => Sum(b, 10, 1, 5, 10, S - 2, 5) + 1 - 5;
+
+        sim.Step((int)(2.5f / Dt));
+        var (down, head) = (Down(), Head());
+        sim.Step((int)(1.5f / Dt));
+        var q = (Down() - down) / 1.5;
+        var h = (head + Head()) / 2;
+        var weir = 1.705 * 4 * Math.Pow(h, 1.5);
+        output.WriteLine($"breach passes {q:F2} m3/s under {h:F2} m of head; weir flow {weir:F2} m3/s");
+        Assert.InRange(q, 0.6 * weir, 1.25 * weir);
+    }
+
+    /// <summary>
+    /// A spring feeding a sheet down a smooth 20 % slope, which the voxels turn into flat terraces and one-cell stairs. The
+    /// sheet should run as on the slope, steadily: before the bed rises, landing momentum and film roughness it dammed
+    /// behind each stair, and the surges it let go grew down the hill until it emptied between them.
+    /// </summary>
+    [Fact]
+    public void SheetRunsSteadilyDownAVoxelSlope()
+    {
+        const float slope = 0.2f;
+        var chunk = new VoxelChunk { Coord = new ChunkCoord(0, 0, 0) };
+
+        for (var z = -1; z <= S; z++)
+            for (var y = -1; y <= S; y++)
+                for (var x = -1; x <= S; x++)
+                {
+                    var d = z < 8 || z > 11 ? -127f : (y - (26f - slope * x)) / MathF.Sqrt(1f + slope * slope) * ChunkConstants.DensityScale;
+                    chunk.Density[I(x, y, z)] = (sbyte)Math.Clamp(MathF.Round(d), -127f, 127f);
+                }
+
+        var sim = new Sim();
+        var b = sim.Add(chunk.Coord);
+        b.InitFrom(chunk, seaLevel: -100f);
+
+        double Column(int x) => Sum(b, x, 0, 8, x, S - 1, 11) / 4;
+        int[] probes = [12, 18, 24];
+        var reached = new float[probes.Length];
+        var depths = probes.Select(_ => new List<double>()).ToArray();
+
+        for (var s = 1; s * Dt <= 30f; s++)
+        {
+            // A spring holds the top of the slope 0.3 m deep; the last columns drain away.
+            for (var z = 8; z <= 11; z++)
+            {
+                b.Water[I(1, 26, z)] = MathF.Max(b.Water[I(1, 26, z)], 0.3f);
+
+                for (var y = 0; y < S; y++)
+                    b.Water[I(30, y, z)] = 0f;
+            }
+
+            sim.Step();
+
+            for (var k = 0; k < probes.Length; k++)
+            {
+                var depth = Column(probes[k]);
+                reached[k] = reached[k] == 0f && depth > 0.005 ? s * Dt : reached[k];
+
+                if (s * Dt > 15f)
+                    depths[k].Add(depth);
+            }
+        }
+
+        for (var k = 0; k < probes.Length; k++)
+        {
+            var mean = depths[k].Average();
+            var spread = Math.Sqrt(depths[k].Average(d => (d - mean) * (d - mean))) / mean;
+            output.WriteLine($"x {probes[k]}: front at {reached[k]:F2} s, depth {mean:F3} m, varying by {spread:P0} ({depths[k].Min():F3} .. {depths[k].Max():F3})");
+            Assert.InRange(reached[k], 0.1f, 15f);
+            Assert.True(spread < 0.1, $"the sheet at x {probes[k]} should run steadily, its depth varies by {spread:P0}");
+        }
     }
 
     [Fact]
@@ -441,7 +559,7 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
             for (var f = 0; f < 6; f++)
                 WaterHalo.CopyWater(b, null, (Face)f);
 
-            WaterHalo.CopyFallAbove(b, null);
+            WaterHalo.CopyFalling(b, null, Face.PosY);
             WaterPipes.UpdateFluxes(b, Dt);
 
             for (var f = 0; f < 6; f++)

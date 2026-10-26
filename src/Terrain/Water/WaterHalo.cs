@@ -13,7 +13,12 @@ public static class WaterHalo
 
     public static void CopyOutScale(WaterBlock dst, WaterBlock? src, Face face) => Copy(dst.OutScale, src?.OutScale, face, 1f);
 
-    public static void CopyFlags(WaterBlock dst, WaterBlock? src, Face face) => Copy(dst.Flags, src?.Flags, face, (byte)WaterFlags.Solid);
+    /// <summary>The flags and the bed rises (<see cref="WaterBlock.Bed"/>): both static between edits.</summary>
+    public static void CopyFlags(WaterBlock dst, WaterBlock? src, Face face)
+    {
+        Copy(dst.Flags, src?.Flags, face, (byte)WaterFlags.Solid);
+        Copy(dst.Bed, src?.Bed, face, WaterBlock.NotBed);
+    }
 
     /// <summary>
     /// Pipe model: dst takes the fluxes of the faces it shares with src (on dst's <c>face</c> side), which stepped while dst
@@ -40,13 +45,19 @@ public static class WaterHalo
     }
 
     /// <summary>
-    /// Pipe model, before each step: the fall speeds of src's bottom layer into dst's +Y halo plane (src above dst), which
-    /// dst's top faces and top cells read (<see cref="WaterPipes"/>). Zero without a block above.
+    /// Pipe model, before each step: the fall speeds and drifts of src's border cells into dst's halo plane on that side,
+    /// for every face but −Y (falling water reaches a cell from above or beside, never from below). Dst's top cells read
+    /// the water falling in from above; its faces read the water about to land beside them (<see cref="WaterPipes"/>).
+    /// Zero without a neighbour.
     /// </summary>
-    public static void CopyFallAbove(WaterBlock dst, WaterBlock? src)
+    public static void CopyFalling(WaterBlock dst, WaterBlock? src, Face face)
     {
-        if (dst.FallSpeed is not null)
-            Copy(dst.FallSpeed, src?.FallSpeed, Face.PosY, 0f);
+        if (dst.FallSpeed is null)
+            return;
+
+        Copy(dst.FallSpeed, src?.FallSpeed, face, 0f);
+        Copy(dst.DriftX!, src?.DriftX, face, 0f);
+        Copy(dst.DriftZ!, src?.DriftZ, face, 0f);
     }
 
     /// <summary>Same-block copy of all six halo planes, used by Swap so the halo of the new state stays meaningful.</summary>

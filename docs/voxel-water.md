@@ -249,27 +249,33 @@ Coupling the bathymetry and sea mask to sim water, buoyancy against sim water, s
 
 The automaton has no momentum: water spreads diffusively, a fill's time grows with the distance squared (the seaside pit was still rising at 60 s), and nothing sloshes, overshoots or runs. v2 replaces it with the virtual pipe model the sea-zone sim uses, in 3D on the same blocks, so voxel water pours, fills and runs with momentum wherever it is: a breached pond, a lake on a cliff, a flooded cave, later a hull (`WaterPipes`, `src/Terrain/Water/WaterPipes.cs`). It sits behind `--water-pipes` until it has been judged in game; the automaton stays the default.
 
-**Status (2026-10-26, branch `voxel-water-3d`):** built and unit-tested (`WaterPipeTests`, 12 tests, at 240 and at 60 steps a second). Run and judged in game against the automaton with `--pond-test` (below): it settles, pours and conserves mass, but drains a breached pond about 3 times slower than the automaton, and its run-off breaks into patches on the hillside. The automaton stays the default.
+**Status (2026-10-26, branch `voxel-water-3d`):** built and unit-tested (`WaterPipeTests`, 14 tests, at 240 and at 60 steps a second). Run and judged in game against the automaton with `--pond-test` (below). It settles, pours and conserves mass. Its breach drains at about weir pace, and its run-off runs down the hillside as one steady stream. The automaton stays the default.
 
 ### State (per `WaterBlock`, the automaton's layout)
 
 - `Water` fill per cell, as now (1 = full). Over 1 is pressure (below).
 - A signed flux per face, m³/s, positive from the lower-index cell to the higher: `FluxX[i]` between i and i + 1, `FluxY[i]` between i and the cell above, `FluxZ[i]` between i and i + `PaddedArea`. The flux is the momentum: it persists from step to step and only the head difference, drag and the mass limit change it.
 - `FallSpeed` per cell (m/s, down negative): how fast its water falls, carried with the water from cell to cell; 0 for water resting on a floor.
-- A block's faces on its −X, −Y and −Z sides are held in the halo cells' slots, its +X, +Y, +Z faces in its border cells'. A face shared by two blocks is held by both and computed identically by both, as the automaton's transfers are, so no fluxes are exchanged per step. The one thing copied in is the fall speeds of the block above's bottom layer, into the +Y halo plane (`WaterHalo.CopyFallAbove`).
+- `DriftX`, `DriftZ` per cell (m/s): the sideways speed of falling water, carried with it like the fall speed; 0 for water held up, whose sideways momentum lives on its faces.
+- `Bed` per cell (both models, `sbyte`, 1/254 m): for an open cell standing on solid, how far the terrain's smooth surface lies above the cell's voxel floor (y − 0.5), −0.5..0.5 m. It is read from the density's zero crossing between the two samples in `ReadSolids`. `NotBed` elsewhere.
+- A block's faces on its −X, −Y and −Z sides are held in the halo cells' slots, its +X, +Y, +Z faces in its border cells'. A face shared by two blocks is held by both and computed identically by both, as the automaton's transfers are, so no fluxes are exchanged per step. The fall speeds and drifts of the neighbours' border cells are copied into the side and top halo planes each step (`WaterHalo.CopyFalling`); the beds go with the flags (`WaterHalo.CopyFlags`).
 
 ### Head
 
 - A cell's head (m, relative to its centre) is its free surface while it has room, `W − 0.5`, and over full the pressure its overfill stands for, `0.5 + (W − 1) / κ` with κ = `WaterFlow.Compression` (0.02 per metre of water above). That is the automaton's and the reservoirs' equilibrium (`WaterBlock.ReservoirFill`), so a column at rest has the same fills in both models and pits level with the sea in both.
 - The head is a function of the cell alone, so pressure needs no column scan: it travels through full cells as a weakly compressible pressure wave at √(g / κ) ≈ 22 m/s, which is what makes communicating vessels, a pit filled from below through a pipe, and a breach at the foot of a dam spurt.
+- **Sideways, water stands on the terrain, not on the voxels** (`SideHead`). The voxels turn a slope into flat terraces and one-cell stairs. A film on a terrace felt no slope, only its own depth, and dammed behind each stair until it was deep enough to spill. Two corrections:
+  - On a bed, the head gains the bed's rise, faded out as the cell fills: `head + Bed · (1 − min(W, 1))`. A film feels the slope the stairs stand for; full cells and the layers over them keep their heads, so a lake's bottom layer is not pushed around by its bed.
+  - A cell with room over a bed cell with room is falling and has no pressure of its own. It reads as the surface it lands on one layer down: `head(below) + rise(below) − 1 + W`. A film then runs over a stair's edge. Over a deeper drop (a cliff, a pit) a falling cell keeps its own head, so a brink is not driven by the drop's height.
 
 ### Step (fixed dt = 1 / `StepsPerSecond`)
 
 1. **Fluxes** (pass 1, per awake block, needs fresh `Water` halos and the fall speeds above): each face touching the interior, once.
-   - Sideways: `f ← f · drag + dt · g · A · Δhead`, `Δhead = head(lo) − head(hi)`. The face area A is the upwind cell's water, at most 1, and 0 unless the upwind cell is supported (solid or ≥ 0.99 full below), the automaton's rule: water in free fall has no pressure to spread with. Faces in the bottom layer across an X or Z block face count as supported, as in the automaton (their "below" is an edge halo cell no block carries).
+   - Sideways: `f ← f · drag + dt · g · A · Δhead`, `Δhead = head(lo) − head(hi)` (sideways heads, above). The face area A is the upwind cell's water, at most 1, and 0 unless the upwind cell is supported (solid or ≥ 0.99 full below), the automaton's rule: water in free fall has no pressure to spread with. Faces in the bottom layer across an X or Z block face count as supported, as in the automaton (their "below" is an edge halo cell no block carries), and stand on a bed by the cells' `Bed`.
+   - Landing: water falling into either cell from above (fall rate `−v · min(W, 1)` of the cell over it) brings its drift's momentum onto the face it moves toward, only into water held up. Without it a sheet lost all its speed at each stair, the landing cell had to fill nearly full before its own outflow got going, and every stair pooled and let go a bore. Rows are checked for falling water first, so the cost is paid only under it. A face across a block face in the top row has edge halo cells over it, so it takes none.
    - Vertically, over a full cell (≥ 0.99), the same with `Δhead = head(lo) − 1 − head(hi)` and A = 1: pressure, rising and sinking water.
    - Vertically, over a cell with room, the water above is falling into space and crosses at its own fall speed: `f = FallSpeed(hi) · min(W(hi), 1)`. A falling speck too small to move at that speed in a step drops whole, or it would hang in the air.
-   - Drag: the background `DampingRate` (0.2/s, the zone sim's) on every sideways face, and over a bed (the upwind cell's floor is solid) the zone sim's implicit quadratic bed drag (`BedDrag` 0.01, deceleration Cd u² / h). Vertical faces over full water damp at `PressureDampingRate` (6/s): water is incompressible, so the overfill that stands for its pressure should settle, not ring. At 0.2/s a 3 m pond rang at about 4 Hz and never slept. At 20/s the dam break's surge lost a quarter of its height (4.27 → 3.10 m); 6/s keeps 3.75 m. Damping sideways faces carrying overfilled water the same way flattened the dam break to 1.08 m, so they keep 0.2/s.
+   - Drag: the background `DampingRate` (0.2/s, the zone sim's) on every sideways face, and over a bed (the upwind cell's floor is solid) implicit Manning friction, deceleration g n² u² / h^⁴⁄₃ with `BedRoughness` n = 0.1, natural ground under overland flow. With the zone sim's sand-bed drag (Cd 0.01) a sheet on a 20 % slope ran at Froude 4 and its roll waves grew down the stairs until it emptied between surges; at n = 0.06 they still grew past 15 m. Under more water the layer is the bottom of a deeper flow, so the friction blends to `DeepBedDrag` (Cd 0.01) as the cell above fills: braking only the bottom layer as a 1 m film let the layers over it race ahead, and a lidded pit filling from the sea sloshed for 80 s. The cube root is a bit trick and one Newton step (`MathF.Cbrt` cost 48 µs on a busy block). Vertical faces over full water damp at `PressureDampingRate` (6/s): water is incompressible, so the overfill that stands for its pressure should settle, not ring. At 0.2/s a 3 m pond rang at about 4 Hz and never slept. At 20/s the dam break's surge lost a quarter of its height (4.27 → 3.10 m); 6/s keeps 3.75 m. Damping sideways faces carrying overfilled water the same way flattened the dam break to 1.08 m, so they keep 0.2/s.
    - Faces touching a solid, and faces between two dry cells, hold no flux. So a row that is dry with its four neighbouring rows is skipped, as in the automaton.
    - Then each interior cell's outflow limit `OutScale`, the automaton's rule: a cell that would keep less than `SnapEpsilon` sends all it has.
 2. **Apply** (pass 2, needs fresh `OutScale` halos):
@@ -277,6 +283,7 @@ The automaton has no momentum: water spreads diffusively, a fill's time grows wi
    - A face moves water only when it would move at least `SnapEpsilon` in the step; below that its momentum stays on the face and builds until it does. Zeroing it instead left a 12 cm head dead zone between cells: a settled pool stayed 9 cm uneven across 8 m.
    - `W += dt · (Σ in − Σ out)`. Reservoir cells are held at their fill (the sea as source and sink), solids at 0. There is no snap: a speck left behind can't spread (its transfers are under the minimum) and drops whole when it falls, while snapping specks lost 0.01 m³ of 1872 over 10 s.
    - Fall speed: a cell held up by full water falls as fast as its floor carries it (so a column that starts to fall keeps its speed); a cell with room under it mixes the water it kept and the water that fell in from above by volume and gains g dt; at most 30 m/s. A pipe model carries flow across a face but not from one face to the next, so without this every cell restarts the fall from rest (27 m in about 12 s, against 2.3 s of free fall). Carrying the face flux instead of the speed drained a falling blob down a cell-a-step tube into the floor in 0.43 s.
+   - Drift: a falling cell mixes the drift of the water it kept, the water that fell in and the water that flowed in sideways (at that face's flux over its source's water), by volume, at most 10 m/s; water held up has none. Dry rows keep stale drifts: they are read only under falling water, whose fall speeds are cleared.
 3. **Swap**, as the automaton.
 
 Mass is exact as in the automaton (each face is one value both cells read). Stable for √(g / κ) dt ≲ 0.58 m (the 3D pressure wave): 1 / 240 s gives 0.09, 1 / 60 s 0.37. The pipe model runs at 60 steps a second by default (`--water-rate` overrides it); the automaton keeps 240.
@@ -286,6 +293,7 @@ Mass is exact as in the automaton (each face is one value both cells read). Stab
 - A block sleeps after `QuietStepsToSleep` steps with its fill changes under `SleepDelta` **and** no face moving more than `SleepDelta` of a cell in a step (the moved flux × dt): a steady stream through a block changes no fill and must not sleep, while momentum too small to move water lingers on faces over head differences of a tenth of a millimetre. Going to sleep zeroes its fluxes and fall speeds. A fixed 1e-4 m³/s instead kept the `--pond-test` pond awake for over a minute on millimetre sloshing.
 - An awake block wakes a sleeping neighbour it shares water with, but no longer resets its quiet count: only the neighbour's own changes do. Resetting it, two quiet blocks sharing a pond took turns waking each other and neither slept (in both models).
 - Meshing skips a block with a refresh queued. An awake block remeshed every few ticks, and its refresh, which waits for the mesh job, could be starved for good.
+- The tests settle by the same rule as the runtime at its 60 steps a second (fill and moved flux under 6e-3 a second, for a second). They used to take 60 steps at 240 a second under 1e-4 a step, a quarter of the time at four times the rate, and caught a 1.5 cm seiche at its turning point.
 - A block that steps for the first time after sleeping, activating or refreshing takes the fluxes of the faces it shares with blocks that stepped the step before, and zeroes those it shares with blocks that didn't (they hold none), so the two copies agree from then on (`WaterHalo.SyncFluxes`).
 
 ### Measured (unit tests, Release, 2026-10-26)
@@ -295,38 +303,44 @@ Mass is exact as in the automaton (each face is one value both cells read). Stab
 | A blob falling 27 m: half of it on the floor | 2.33 s (free fall 2.35 s; 2.37 s at 60 steps/s) | no fall speed |
 | U-tube legs | 4.979 / 4.967 m after 62 s | 4.982 / 4.964 m after 15,000 steps |
 | Pit beside the sea, mean fill after 40 s | 1.070, far top cell 1.000 | levels after 8,000 steps |
-| Dam break, peak at the far wall | 3.75 m over a settled 2.67 m | monotone |
-| 32 m³ falling onto an 8 × 8 floor | level to 0.4869–0.5053, asleep after 42 s | |
-| 10 × 10 × 3 m pond: quiet, then 10 s through a 2 m breach | quiet after 1.3 s; 218 of 300 m³ left | |
+| Dam break, peak at the far wall | 4.23 m over a settled 2.67 m | monotone |
+| 32 m³ falling onto an 8 × 8 floor | level to 0.5003–0.5004, asleep after 55 s | |
+| 10 × 10 × 3 m pond: quiet, then 10 s through a 2 m breach | quiet after 2.6 s; 214 of 300 m³ left | |
+| Breach over a broad crest 4 m wide, 1 m of head | 4.83 m³/s, 73 % of smooth-crest weir flow (6.64) | |
+| Sheet fed 0.3 m deep down a smooth 20 % slope (voxel stairs) | front 24 m down at 12.8 s; depth steady to 1 % | |
 | Seam against a single block | bit for bit | bit for bit |
-| Step, empty block | 7.6 µs | 5.4 µs |
-| Step, busy block (dam break) | 352 µs (scalar) | 65 µs (AVX2) |
+| Step, empty block | 9 µs | 5.4 µs |
+| Step, busy block (dam break) | about 525 µs (scalar; 387 µs before the bed, landing and friction work) | 65 µs (AVX2) |
 
-A busy block costs about 5.4 times the automaton's step, but needs a quarter of the steps: per second about 1.3 times.
+A busy block costs about 8 times the automaton's step, but needs a quarter of the steps: per second about 2 times.
+
+Run-off over slopes 0.1–0.5 and springs 0.1–0.6 m deep (30 s, at 60 and 240 steps a second, n = 0.1): the depth swings under 10 % once the front has passed, except for torrents, a 0.6 m spring on 35–50 % slopes (59–95 %). Steep, deep flows do form roll waves, and without momentum advection (below) the model forms them more readily than water does. At n = 0.06 most of the sweep surged.
 
 ### In game: `--pond-test` (2026-10-26)
 
-`--pond-test` (`src/Game/PondTest.cs`) digs a 7 m bowl into the hillside above the west beach (lowest ground from 7 m up on a gentle slope; this seed: (−198, 10.9, 0)), fills it with `Fill` to 0.8 m under its lowest rim (y 4.78, 50 m³) at t+4 s, then at t+10 s cuts a channel from inside the downhill rim, 1.5 m under the water line, until it opens onto lower ground (4 cuts here). The camera looks back up the run-off path from over the beach. It logs the voxel sim every 0.5 s with the water depth down that path. Add `--water-pipes` for the pipe model and `--hide-ui` for clean captures. The pond is above sea level, so no sea zone starts and the voxel model alone moves its water.
+`--pond-test` (`src/Game/PondTest.cs`) digs a 7 m bowl into the hillside above the west beach (lowest ground from 7 m up on a gentle slope; this seed: (−198, 10.9, 0)), fills it with `Fill` to 0.8 m under its lowest rim (y 4.78, 50 m³) at t+4 s, then at t+10 s cuts a channel from inside the downhill rim until it opens onto lower ground (4 cuts here). The cut's lowest point is 1.5 m under the water line, but voxelised its floor is the cell under it: about 1 m of head over a channel about 3 cells wide. The camera looks back up the run-off path from over the beach. It logs the voxel sim every 0.5 s with the water depth down that path. Add `--water-pipes` for the pipe model and `--hide-ui` for clean captures. The pond is above sea level, so no sea zone starts and the voxel model alone moves its water.
 
-| | Pipe model (60 steps/s) | Automaton (240 steps/s) |
-| --- | --- | --- |
-| Pond at rest, before the breach | awake for the full 6 s on millimetre sloshing (fill changes 1–3e-4 a step, decaying) | asleep within 1 s |
-| Pond centre depth after the breach (2.02 m to start) | 1.86, 1.63, 1.37, 1.26 m at +1.5, 4.5, 7.5, 10.5 s; 1.10 m at +30 s | 1.51, 1.14, 1.04, 1.01 m; 1.00 m and asleep at +14.5 s |
-| Run-off | travels in surges at 1–2 m/s; reaches 28 m at +19.5 s; breaks into patches and holes on the voxel terraces | a thin sheet to 32 m within 1.5 s, into the sea soon after |
-| Blocks / awake / step | 32 / 2–5 / 0.09–0.31 ms | 32 → 40 / up to 12 / 0.19–0.50 ms |
+| | Pipe model, with beds, landing and Manning friction | Pipe model, first run | Automaton (240 steps/s) |
+| --- | --- | --- | --- |
+| Pond at rest, before the breach | awake for the full 6 s on millimetre sloshing | the same | asleep within 1 s |
+| Pond centre depth after the breach (2.02 m to start) | 1.89, 1.75, 1.63, 1.58 m at +1.5, 4.5, 7.5, 10.5 s; 1.44 m at +25 s | 1.86, 1.63, 1.37, 1.26 m; 1.10 m at +30 s | 1.51, 1.14, 1.04, 1.01 m; 1.00 m and asleep at +14.5 s |
+| Run-off | one steady stream, 0.1–0.2 m deep down the path; 28 m at +25 s | surges at 1–2 m/s that emptied between them; 28 m at +19.5 s; patches and holes | a thin sheet to 32 m within 1.5 s, into the sea soon after |
+| Run-off region, frames changing a pixel by more than 40 of 255 | 0.01–0.05 % a frame while it runs | 0.17–1.67 % | |
+| Blocks / awake / step | 32 / 2–3 / 0.13–0.45 ms | 32 / 2–5 / 0.09–0.31 ms | 32 → 40 / up to 12 / 0.19–0.50 ms |
 
-Judged in motion (200 ms bursts): the pipe model reads as water with weight. The breach forms a stream that keeps running and the pond level rocks as it drains. But it is too slow. A breach about 3 m wide under 1.5 m of head is a weir passing up to about 9 m³/s (1.7 b H^1.5), so the 40 m³ above it should be gone in roughly 5–10 s. That is the automaton's pace; the pipe model takes over 30 s. The run-off is worse: on a voxel hillside the slope exists only as one-cell drops between flat terraces. Each drop kills the water's sideways momentum, because a cell over air has no face area, and each terrace must refill before it spills. The film then moves in pulses, with dry holes in the sheet. The automaton is quick and smooth but weightless: the pond slumps out in one sheet and is gone.
+Judged in motion (200 ms bursts, `--hide-ui`): the pipe model reads as water with weight. The breach forms a stream that keeps running onto the beach as one smooth tongue, with no holes or scattered patches. The breach was never slow. Weir flow over about 1 m of head and a 3 m gap is a few m³/s. The pipe model passes 73 % of a smooth crest's weir flow (`BreachPassesWeirFlow`), the bed's roughness costing the rest. The first run passed about a smooth crest's. The automaton drained the pond to the channel's floor in a third of the time, with nothing but its transfer rate to limit it: the pond slumps out in one sheet and is gone. The first run's run-off broke into patches for two reasons. Its slope existed only as one-cell drops between flat terraces, so each terrace had to refill before it spilled. And each film was drawn on its voxel floor, under the smooth terrain wherever the slope rose above that floor. The mesher now draws a film on the true bed too (`WaterBlock.BedRise`, both models).
 
 ### Not yet
 
-- **Sideways momentum is not advected:** only falling water carries its speed on. A jet leaving a ledge falls straight down rather than flying out; carrying sideways speed through unsupported cells would add it, at the cost of X and Z planes from the neighbours. On a voxel hillside this is what makes run-off pulse: each one-cell drop stops the flow (`--pond-test`).
-- **Slow breach:** a breached pond drains about 3 times slower than weir flow says it should (`--pond-test`). Not yet traced; suspects are the upwind face area (capped at the upwind cell's own water, so the brink can't draw down to critical depth) and the 60 steps/s rate.
-- **Light seiche damping:** a pond at rest sloshes at millimetres for several seconds before it sleeps (only the 0.2/s background damping and bed drag act on it).
-- **Bottom-layer seams have no bed drag:** across an X or Z block face in a block's bottom layer the upwind cell's floor is an edge halo cell neither block holds, so those faces count as supported without drag.
+- **No momentum advection:** a face's flux changes only by head, drag and landing water, not by the momentum its neighbours carry in, d(q² / h) / dx. Shallow water without that term forms roll waves at about a third of the Froude number real water does, hence the n = 0.1 roughness. Per-layer advection was tried, with each cell's W u² differenced across the face: it halved the weir flow (2.96 against 6.68 m³/s) and slowed the pond's drain. Water rising out of a deep reservoir's lower layers carries no sideways momentum up with it, and the layer model has no term that would carry it, so the top layer was braked as it sped up onto the crest.
+- **Jets:** falling water carries its drift and hands it on when it lands, but does not move sideways while it falls: a jet leaving a ledge still falls straight down rather than flying out.
+- **One roughness:** n = 0.1 everywhere. Rock-cut channels run near 0.035, sand 0.02, grass 0.1–0.4: a bed's roughness should come from its voxel material.
+- **Sideways-fed falling cells:** a falling cell fed sideways never empties, so its fall speed builds to the 30 m/s cap and its water drops through it at once. Over a stair that helps (the brink passes the sheet), but the water under a waterfall's lip falls faster than free fall.
+- **Light seiche damping:** a pond at rest sloshes at millimetres for several seconds before it sleeps (only the 0.2/s background damping acts on it; the friction is quadratic).
 - **SIMD:** the in-place sweep reads faces and fall speeds the cells before it updated, so lanes need a different order.
 - **Specks:** without a snap, a speck stranded on a floor keeps its row (and the rows around it) from being skipped while its block is awake.
 - The sea-zone coupling, persistence across eviction, and the settle rule from the plan below.
-- **Memory:** each block carries four more padded float arrays (629 KB), allocated with the system's 512 pooled blocks only when `--water-pipes` is on: about 320 MB more. Pooling them for awake blocks only would remove it.
+- **Memory:** each block carries six more padded float arrays (943 KB), allocated with the system's 512 pooled blocks only when `--water-pipes` is on: about 480 MB more. Pooling them for awake blocks only would remove it. `Bed` adds 39 KB a block in both models (20 MB).
 
 ### Plan after v2
 
