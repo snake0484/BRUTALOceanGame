@@ -242,13 +242,23 @@ public sealed class VoxelWaterSystem : IDisposable
     private int _splashCount;
 
     /// <summary>
-    /// A pour lands this fast (m/s, a fall of about 2 m) or faster, with at least this much water a second over its
-    /// metre, to splash: at 3–5 m/s every stair of a run-off sheet counted as a pour (a falling cell fed sideways builds
-    /// its fall speed past free fall) and the whole slope stood in mist. Water runs into a wall this fast or faster.
+    /// A pour lands this fast (m/s, a fall of 0.8 m) or faster, with at least this much water a second over its metre,
+    /// into a cell at least <see cref="PourPoolFill"/> full (a pool, not a film), to splash: without the pool test every
+    /// stair of a run-off sheet counted as a pour (a falling cell fed sideways builds its fall speed past free fall) and
+    /// the whole slope stood in mist. Water runs into a wall this fast or faster.
     /// </summary>
-    public float PourSplashSpeed = 6.5f;
-    public float PourSplashDischarge = 0.5f;
+    public float PourSplashSpeed = 4f;
+    public float PourSplashDischarge = 0.3f;
+    public float PourPoolFill = 0.9f;
     public float WallSplashSpeed = 0.4f;
+
+    /// <summary>
+    /// Impact speeds handed to the spray are capped as the zone sim caps its own (12 m/s a fall, 8 m/s into a wall): the
+    /// pipe model's fall speed runs to its 30 m/s cap under a cascade (a falling cell fed sideways never empties), and
+    /// the spray launched at that threw droplets 20 m from a hole.
+    /// </summary>
+    public float PourImpactCap = 12f;
+    public float WallImpactCap = 8f;
 
     /// <summary>
     /// After a step (pipe model): the zones' splashes first, then every wet, held-up cell of an awake block that water
@@ -299,11 +309,12 @@ public sealed class VoxelWaterSystem : IDisposable
                         var surface = origin.Y + y - 0.5f + MathF.Min(wc, 1f);
                         var fall = -v[i + P];
 
-                        if (fall >= PourSplashSpeed && w[i + P] > 0.02f && (fl[i + P] & solid) == 0 && fall * MathF.Min(w[i + P], 1f) >= PourSplashDischarge)
+                        if (fall >= PourSplashSpeed && wc >= PourPoolFill && w[i + P] > 0.02f && (fl[i + P] & solid) == 0 && fall * MathF.Min(w[i + P], 1f) >= PourSplashDischarge)
                         {
                             var drift = new Vector2(block.DriftX![i + P], block.DriftZ![i + P]);
                             var along = drift.LengthSquared() > 1e-4f ? Vector2.Normalize(drift) : Vector2.UnitX;
-                            Add(new Vector4(origin.X + x, surface, origin.Z + z, fall), new Vector4(along, fall * MathF.Min(w[i + P], 1f), WaterSplash.Pour));
+                            var impact = MathF.Min(fall, PourImpactCap);
+                            Add(new Vector4(origin.X + x, surface, origin.Z + z, impact), new Vector4(along, impact * MathF.Min(w[i + P], 1f), WaterSplash.Pour));
                         }
 
                         // Into a wall on each side: the flux arriving from the far side over the cell's water.
@@ -332,6 +343,7 @@ public sealed class VoxelWaterSystem : IDisposable
         if (into < WallSplashSpeed)
             return;
 
+        into = MathF.Min(into, WallImpactCap);
         var dir = side == 1 ? Vector2.UnitX : side == -1 ? -Vector2.UnitX : side > 0 ? Vector2.UnitY : -Vector2.UnitY;
         var foot = new Vector2(origin.X + (side == 1 || side == -1 ? footX : x), origin.Z + (side == 1 || side == -1 ? z : footZ));
         Add(new Vector4(foot.X, surface, foot.Y, into), new Vector4(dir, MathF.Min(wc, 1f), WaterSplash.Wall));

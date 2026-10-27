@@ -15,8 +15,9 @@ var floodTest = false;
 // which is stable there (docs/voxel-water.md, v2).
 int? waterRate = null;
 
-// 3D pipe model with momentum for voxel water (docs/voxel-water.md, v2) instead of the cell automaton.
-var waterPipes = false;
+// Voxel water runs the 3D pipe model with momentum (docs/voxel-water.md, v2); --water-automaton runs the old cell
+// automaton instead (no momentum, no flow or foam for the renderer).
+var waterPipes = true;
 var hideUi = false;
 var seasideTest = false;
 var pondTest = false;
@@ -145,6 +146,8 @@ for (var i = 0; i < args.Length; i++)
     }
     else if (args[i] == "--water-pipes")
         waterPipes = true;
+    else if (args[i] == "--water-automaton")
+        waterPipes = false;
     else if (args[i] == "--water-rate" && i + 1 < args.Length)
         waterRate = int.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture);
     else if (args[i] == "--cam" && i + 5 < args.Length)
