@@ -45,6 +45,36 @@ public static class WaterPipes
     /// <summary>Falling water falls at most this fast (m/s): free fall from about 45 m.</summary>
     public const float MaxFallSpeed = 30f;
 
+    /// <summary>
+    /// A vertical face is a pressure face when the cell under it is full (<see cref="WaterFlow.SupportThreshold"/>), or
+    /// when the cell over it is full and the one under it holds at least this: a trough inside a column, where the cell is
+    /// a pressure cell with a deficit, not space (the head is continuous across a full cell). Otherwise the water above is
+    /// falling into the room below. The switch used to be the lower cell alone at 0.99: in a deep column under a lake a
+    /// pressure trough dipped cells under that every cycle, each flip threw the face's momentum away for a fall speed and
+    /// injected energy, and at 60 steps a second a pocket dug under the lake bed rang for good (fills of 5 where 1.2 is
+    /// hydrostatic, a mound on the surface, spray without end). Making every face over a half-full cell a pressure face
+    /// instead was worse: at the surface, a part-full top cell with a part-full mound over it alternated the stiff
+    /// pressure spring (slope 50) and the soft free-surface one (slope 1) and pumped the face to infinity.
+    /// </summary>
+    public const float FallThreshold = 0.5f;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool Pressure(float lower, float upper) => lower >= WaterFlow.SupportThreshold;
+
+    /// <summary>
+    /// Damping (1/s) of a vertical face deep in a column, reached by <see cref="DeepOverfill"/> of overfill (12 m down):
+    /// bulk water, where a pressure wave has nothing to show and, at 60 steps a second, rang for good under a lake (a
+    /// pocket dug under the bed: fills of 5 where 1.2 is hydrostatic, a mound on the surface, spray without end).
+    /// </summary>
+    public const float DeepDampingRate = 66f;
+    public const float DeepOverfill = 0.25f;
+
+    /// <summary>
+    /// Sideways faces between full cells take the deep damping only from this overfill (15 m down) to twice it: damped
+    /// from the surface down as the vertical faces are, the dam break lost its whole overshoot and the U-tube its swing.
+    /// </summary>
+    public const float DeepSidewaysOverfill = 0.3f;
+
     private const float MinFaceDepth = 0.01f;
 
     /// <summary>A supported cell's speed down through its floor is measured over at least this much water, so its last drops don't read as a jet.</summary>
@@ -84,6 +114,7 @@ public static class WaterPipes
         var pipe = dt * Gravity;
         var damping = MathF.Exp(-DampingRate * dt);
         var settling = MathF.Exp(-PressureDampingRate * dt);
+        var deepSettling = MathF.Exp(-DeepDampingRate * dt);
 
         fixed (float* w = block.Water)
         fixed (float* os = block.OutScale)
@@ -135,17 +166,17 @@ public static class WaterPipes
                         var i = row + x;
 
                         if (x == 0)
-                            fx[i - 1] = Horizontal(w, fl, bed, v, dx, fx[i - 1], i - 1, 1, seam, !top, fallsHere, pipe, damping, settling, dt);
+                            fx[i - 1] = Horizontal(w, fl, bed, v, dx, fx[i - 1], i - 1, 1, seam, !top, fallsHere, pipe, damping, settling, deepSettling, dt);
 
                         if (y == 0)
-                            fy[i - P] = Vertical(w, fl, v, fy[i - P], i - P, pipe, settling, dt);
+                            fy[i - P] = Vertical(w, fl, v, fy[i - P], i - P, pipe, settling, deepSettling, dt);
 
                         if (z == 0)
-                            fz[i - A] = Horizontal(w, fl, bed, v, dz, fz[i - A], i - A, A, seam, !top, fallsBack || fallsHere, pipe, damping, settling, dt);
+                            fz[i - A] = Horizontal(w, fl, bed, v, dz, fz[i - A], i - A, A, seam, !top, fallsBack || fallsHere, pipe, damping, settling, deepSettling, dt);
 
-                        fx[i] = Horizontal(w, fl, bed, v, dx, fx[i], i, 1, seam && x == S - 1, !(top && x == S - 1), fallsHere, pipe, damping, settling, dt);
-                        fy[i] = Vertical(w, fl, v, fy[i], i, pipe, settling, dt);
-                        fz[i] = Horizontal(w, fl, bed, v, dz, fz[i], i, A, seam && z == S - 1, !(top && z == S - 1), fallsHere || fallsFront, pipe, damping, settling, dt);
+                        fx[i] = Horizontal(w, fl, bed, v, dx, fx[i], i, 1, seam && x == S - 1, !(top && x == S - 1), fallsHere, pipe, damping, settling, deepSettling, dt);
+                        fy[i] = Vertical(w, fl, v, fy[i], i, pipe, settling, deepSettling, dt);
+                        fz[i] = Horizontal(w, fl, bed, v, dz, fz[i], i, A, seam && z == S - 1, !(top && z == S - 1), fallsHere || fallsFront, pipe, damping, settling, deepSettling, dt);
 
                         var sent = dt * (MathF.Max(fx[i], 0f) + MathF.Max(-fx[i - 1], 0f) + MathF.Max(fy[i], 0f)
                             + MathF.Max(-fy[i - P], 0f) + MathF.Max(fz[i], 0f) + MathF.Max(-fz[i - A], 0f));
@@ -246,9 +277,9 @@ public static class WaterPipes
                         }
                         else if ((fl[i - P] & SolidBit) == 0)
                         {
-                            if (w[i - P] >= WaterFlow.SupportThreshold)
+                            if (Pressure(w[i - P], wc))
                             {
-                                // Held up by full water: its speed down is whatever its floor carries, so a column that starts to
+                                // Held up by water: its speed down is whatever its floor carries, so a column that starts to
                                 // fall keeps its speed when what holds it drains away.
                                 speed = MathF.Min(floor, 0f) / MathF.Max(n, MinFallFill);
                             }
@@ -304,7 +335,7 @@ public static class WaterPipes
     /// <paramref name="falling"/>: the rows over it hold falling water.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe float Horizontal(float* w, byte* fl, sbyte* bd, float* v, float* drift, float f, int lo, int stride, bool seam, bool over, bool falling, float pipe, float damping, float settling, float dt)
+    private static unsafe float Horizontal(float* w, byte* fl, sbyte* bd, float* v, float* drift, float f, int lo, int stride, bool seam, bool over, bool falling, float pipe, float damping, float settling, float deepSettling, float dt)
     {
         var hi = lo + stride;
         var wl = w[lo];
@@ -317,6 +348,14 @@ public static class WaterPipes
         // held cell reflected it, and a pit dug beside the lake rang against it for 35 s.
         if (((fl[lo] | fl[hi]) & ReservoirBit) != 0)
             damping = settling;
+
+        // A face between two full cells deep in the water settles as a deep vertical face does (DeepDampingRate): a tunnel
+        // running full under 20 m of head rang along its length with only the background damping.
+        if (wl >= WaterFlow.SupportThreshold && wh >= WaterFlow.SupportThreshold)
+        {
+            var deep = MathF.Min(MathF.Max(MathF.Min(wl, wh) - 1f - DeepSidewaysOverfill, 0f) / DeepSidewaysOverfill, 1f);
+            damping = MathF.Min(damping, damping + (deepSettling - damping) * deep);
+        }
 
         var drive = SideHead(w, fl, bd, lo, seam) - SideHead(w, fl, bd, hi, seam);
         var up = drive > 0f ? lo : hi;
@@ -426,7 +465,7 @@ public static class WaterPipes
     /// a falling speck too small to move at that speed drops whole, or it would hang in the air.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe float Vertical(float* w, byte* fl, float* v, float f, int lo, float pipe, float damping, float dt)
+    private static unsafe float Vertical(float* w, byte* fl, float* v, float f, int lo, float pipe, float damping, float deepDamping, float dt)
     {
         var hi = lo + P;
         var wl = w[lo];
@@ -435,8 +474,12 @@ public static class WaterPipes
         if (((fl[lo] | fl[hi]) & SolidBit) != 0 || (wl == 0f && wh == 0f))
             return 0f;
 
-        if (wl >= WaterFlow.SupportThreshold)
-            return f * damping + pipe * (Head(wl) - 1f - Head(wh));
+        if (Pressure(wl, wh))
+        {
+            // Deeper faces settle harder (DeepDampingRate), by the overfill of the fuller cell.
+            var deep = MathF.Min(MathF.Max(MathF.Max(wl, wh) - 1f, 0f) / DeepOverfill, 1f);
+            return f * (damping + (deepDamping - damping) * deep) + pipe * (Head(wl) - 1f - Head(wh));
+        }
 
         if ((fl[hi] & ReservoirBit) != 0)
             return -ReservoirPour * MathF.Min(wh, 1f);

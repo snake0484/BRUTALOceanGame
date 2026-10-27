@@ -355,6 +355,34 @@ public sealed class VoxelWaterSystem : IDisposable
             _splashes[_splashCount++] = new WaterSplash { PositionSpeed = positionSpeed, Direction = direction };
     }
 
+    private bool _nanReported;
+
+    /// <summary>Diagnostics: the first cell whose water went NaN, with its faces and neighbours, to stderr once; the block is then put to sleep.</summary>
+    private void ReportNaN(WaterBlock block)
+    {
+        _nanReported = true;
+        const int P = ChunkConstants.Padded;
+        const int A = ChunkConstants.PaddedArea;
+
+        for (var z = 0; z < ChunkConstants.Size; z++)
+            for (var y = 0; y < ChunkConstants.Size; y++)
+                for (var x = 0; x < ChunkConstants.Size; x++)
+                {
+                    var i = ChunkConstants.Index(x, y, z);
+                    if (!float.IsNaN(block.Water[i]) && !float.IsInfinity(block.Water[i]))
+                        continue;
+
+                    var o = block.Coord.WorldOrigin;
+                    Console.Error.WriteLine($"NaN water at world ({o.X + x}, {o.Y + y}, {o.Z + z}) flags {block.Flags[i]} body {block.Body[i]} bed {block.Bed[i]}");
+                    Console.Error.WriteLine($"  next {block.Next[i]} os {block.OutScale[i]} fall {block.FallSpeed?[i]} drift {block.DriftX?[i]},{block.DriftZ?[i]}");
+                    Console.Error.WriteLine($"  fx- {block.FluxX?[i - 1]} fx+ {block.FluxX?[i]} fy- {block.FluxY?[i - P]} fy+ {block.FluxY?[i]} fz- {block.FluxZ?[i - A]} fz+ {block.FluxZ?[i]}");
+                    Console.Error.WriteLine($"  w -x {block.Next[i - 1]} +x {block.Next[i + 1]} -y {block.Next[i - P]} +y {block.Next[i + P]} -z {block.Next[i - A]} +z {block.Next[i + A]}; flags -y {block.Flags[i - P]} +y {block.Flags[i + P]}");
+                    Console.Error.WriteLine($"  fall +y {block.FallSpeed?[i + P]} os -x {block.OutScale[i - 1]} +x {block.OutScale[i + 1]} -y {block.OutScale[i - P]} +y {block.OutScale[i + P]}");
+                    block.Asleep = true;
+                    return;
+                }
+    }
+
     /// <summary>Diagnostics: free (not held) water over loaded blocks (m³), the largest fill of any free cell, and the count of free wet cells.</summary>
     public (float Free, float MaxFill, int Cells) FreeWater()
     {
@@ -1155,6 +1183,9 @@ public sealed class VoxelWaterSystem : IDisposable
             var block = slot.Block;
             WaterFlow.Swap(block);
             mass += block.Mass();
+
+            if (float.IsNaN(mass) && !_nanReported)
+                ReportNaN(block);
 
             // What each body's held cells gave or took this step.
             foreach (var id in block.Touched)

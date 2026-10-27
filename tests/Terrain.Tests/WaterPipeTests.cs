@@ -22,6 +22,9 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
 
         public Sim(float seaLevel = 0f) => Bodies = new WaterBodies(seaLevel);
 
+        /// <summary>Step length (s); the runtime's pipe model steps at 1/60.</summary>
+        public float StepLength = Dt;
+
         /// <summary>Registers the generator's bodies (the crater lake) so blocks read from the generator hold their water.</summary>
         public void Register(in TerrainParams p)
         {
@@ -85,14 +88,14 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
                 }
 
                 foreach (var block in Blocks.Values)
-                    WaterPipes.UpdateFluxes(block, Dt);
+                    WaterPipes.UpdateFluxes(block, StepLength);
 
                 foreach (var block in Blocks.Values)
                     for (var f = 0; f < 6; f++)
                         WaterHalo.CopyOutScale(block, Neighbour(block, f), (Face)f);
 
                 foreach (var block in Blocks.Values)
-                    WaterPipes.ApplyFluxes(block, Dt);
+                    WaterPipes.ApplyFluxes(block, StepLength);
 
                 foreach (var block in Blocks.Values)
                     WaterFlow.Swap(block);
@@ -117,7 +120,7 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
             const float rate = 1e-4f * 60f;
 
             foreach (var block in Blocks.Values)
-                if (block.MaxDelta >= rate * Dt || block.MaxFlux * Dt >= rate * Dt)
+                if (block.MaxDelta >= rate * StepLength || block.MaxFlux * StepLength >= rate * StepLength)
                     return false;
 
             return true;
@@ -719,6 +722,74 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
         Assert.Equal(level - WaterBodies.LevelStep, sim.Bodies[id].Level, 1e-4f);
         b.RefillHeld();
         Assert.Equal(0.49f, b.Water[I(10, 3, 10)], 1e-4f);
+    }
+
+    /// <summary>
+    /// A pocket dug under the lake bed, opening into the water above (a disc frees the column): the lake drops into it and
+    /// must come to rest, its fills near hydrostatic. In game it rang for good: fills of 3-4 where 1.2 is hydrostatic, a
+    /// mound on the surface, water falling into the pocket forever and spray with it.
+    /// </summary>
+    [Fact]
+    public void PocketUnderTheLakeBedSettles()
+    {
+        var p = new TerrainParams();
+        var lake = TerrainGenerator.Lake(p);
+        var shore = lake.Radius - 8f;
+        var x = 40f - shore;
+        var bed = TerrainGenerator.SurfaceHeight(x, 0f, p);
+        var centre = new Vector3(x, bed - 2f, 0f);
+        // The pocket's block and the lake's over it, stepped as the game steps the pipe model, 60 a second.
+        var coord = ChunkCoord.FromWorld(centre);
+        var above = new ChunkCoord(coord.X, coord.Y + 1, coord.Z);
+        var sim = new Sim { StepLength = 1f / 60f };
+        sim.Register(p);
+        var id = sim.Generated[0].Id;
+        var disc = new Vector4(centre.X, centre.Z, 3f + 6f, id);
+        var b = sim.Add(coord);
+        var a = sim.Add(above);
+        b.InitFrom(Chunk(p, coord, centre), sim.Bodies, sim.Generated, [disc]);
+        a.InitFrom(Chunk(p, above, centre), sim.Bodies, sim.Generated, [disc]);
+        b.RefreshFrom(Chunk(p, coord, centre, dig: true), [disc]);
+        a.RefreshFrom(Chunk(p, above, centre, dig: true), [disc]);
+        output.WriteLine($"pocket at {centre} (bed {bed:F1} m, {lake.Top - bed:F1} m of water over it)");
+
+        var dt = sim.StepLength;
+        var settled = -1;
+        var quiet = 0;
+        var peak = 0f;
+
+        for (var s = 1; s * dt <= 40f; s++)
+        {
+            sim.Step();
+            quiet = sim.Quiet() ? quiet + 1 : 0;
+            peak = MathF.Max(peak, MathF.Max(MaxFree(a), MaxFree(b)));
+
+            if (s % (int)(5f / dt) == 0)
+                output.WriteLine($"{s * dt:F0} s: max delta {MathF.Max(a.MaxDelta, b.MaxDelta):E1}, max flux {MathF.Max(a.MaxFlux, b.MaxFlux):F3} m3/s, largest free fill {MathF.Max(MaxFree(a), MaxFree(b)):F2}");
+
+            if (quiet * dt >= 1f)
+            {
+                settled = s;
+                break;
+            }
+        }
+
+        output.WriteLine($"settled after {(settled > 0 ? settled * dt : -1):F1} s; peak free fill {peak:F2}");
+        Assert.True(settled > 0, "the pocket should fill and the lake over it come to rest within 40 s");
+        Assert.True(peak < 2f, $"free fills should stay near hydrostatic, peaked at {peak}");
+    }
+
+    private static float MaxFree(WaterBlock b)
+    {
+        var max = 0f;
+
+        for (var z = 0; z < S; z++)
+            for (var y = 0; y < S; y++)
+                for (var i = I(0, y, z); i < I(S, y, z); i++)
+                    if ((b.Flags[i] & (byte)(WaterFlags.Solid | WaterFlags.Reservoir)) == 0)
+                        max = MathF.Max(max, b.Water[i]);
+
+        return max;
     }
 
     private static VoxelChunk Chunk(in TerrainParams p, ChunkCoord coord, Vector3 centre, bool dig = false)
