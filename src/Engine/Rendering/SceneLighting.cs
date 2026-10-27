@@ -12,4 +12,8 @@ public struct SceneLighting
     public Vector3 SkyZenith;
     public Vector3 SkyHorizon;
     public float FogDensity;
+
+    /// <summary>The ocean's water colours (OceanRenderer.WaterDeep, WaterScatter), so other water is shaded the same.</summary>
+    public Vector3 WaterDeep;
+    public Vector3 WaterScatter;
 }

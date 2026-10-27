@@ -15,7 +15,7 @@ namespace BrutalGame.Terrain.Runtime.Rendering;
 /// </summary>
 public sealed unsafe class VoxelWaterRenderer : IDisposable
 {
-    public const int VertexStride = 28;
+    public const int VertexStride = 40;
     public const int RegionVertexBytes = 8 << 20;
     public const int RegionIndexBytes = 8 << 20;
     public const int MaxDraws = 1024;
@@ -64,6 +64,8 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
         public Vector4 SkyHorizon;
         public Vector4 Rain;
         public Vector4 Wind;
+        public Vector4 WaterDeep;
+        public Vector4 WaterScatter;
     }
 
     public VoxelWaterRenderer(Renderer renderer, RainCover rainCover)
@@ -162,6 +164,8 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
         uniforms->SkyHorizon = new Vector4(lighting.SkyHorizon, lighting.FogDensity);
         uniforms->Rain = new Vector4(rain, 0f, 0f);
         uniforms->Wind = new Vector4(wind, 0f, 0f);
+        uniforms->WaterDeep = new Vector4(lighting.WaterDeep, 0f);
+        uniforms->WaterScatter = new Vector4(lighting.WaterScatter, 0f);
 
         commands.BindPipeline(VkPipelineBindPoint.Graphics, _pipeline);
         commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex]], []);
@@ -339,13 +343,15 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
                     new() { Location = 0, Binding = 0, Format = VkFormat.R32G32B32SFloat, Offset = (ByteSize32)0 },
                     new() { Location = 1, Binding = 0, Format = VkFormat.R32G32B32SFloat, Offset = (ByteSize32)12 },
                     new() { Location = 2, Binding = 0, Format = VkFormat.R32SFloat, Offset = (ByteSize32)24 },
+                    new() { Location = 3, Binding = 0, Format = VkFormat.R32G32SFloat, Offset = (ByteSize32)28 },
+                    new() { Location = 4, Binding = 0, Format = VkFormat.R32SFloat, Offset = (ByteSize32)36 },
                 };
 
                 var vertexInput = new VkPipelineVertexInputStateCreateInfo
                 {
                     VertexBindingDescriptionCount = 1,
                     VertexBindingDescriptions = &binding,
-                    VertexAttributeDescriptionCount = 3,
+                    VertexAttributeDescriptionCount = 5,
                     VertexAttributeDescriptions = attributes,
                 };
                 var inputAssembly = new VkPipelineInputAssemblyStateCreateInfo { Topology = VkPrimitiveTopology.TriangleList };

@@ -114,30 +114,31 @@ Mass is conserved exactly except at reservoir cells (the sea is a source and sin
 
 Coupling the bathymetry and sea mask to sim water, buoyancy against sim water, swell-driven nearshore cells, and persistence of sim water across block eviction (blocks are evicted beyond a radius and their water is lost).
 
-## Water surface rendering v1 (implemented)
+## Water surface rendering (v2, 2026-10-27)
 
 ### Mesher (`src/Terrain/Water/WaterSurfaceMesher.cs`, pure CPU)
 
 - Works per block, per interior column (x, z).
 - **Top cell:** the topmost interior cell with W > 0.02 whose cell above holds less than 0.02 or is solid.
-- **Skip the column** if that cell is Reservoir; the ocean draws open sea.
-- **Surface height** = (y − 0.5 + min(W, 1)) metres, chunk-local. A cell's volume spans [y − 0.5, y + 0.5].
-- **Thickness** = surface − (top of the solid below the water column) or the water column height, for depth tint and alpha.
-- **Corners:** each corner vertex takes the average height of the wet columns among the 4 around it. One quad per wet column.
+- **Skip the column** if that cell is the sea's (held by body 1) or a sea zone's; the ocean draws open sea. Every other body and all free water is drawn here.
+- **Surface height** = (y − 0.5 + min(W, 1)) metres plus the bed's rise under a film, chunk-local. A cell's volume spans [y − 0.5, y + 0.5].
+- **Thickness** = surface − (top of the solid below the water column), for depth tint and alpha.
+- **Flow and foam** (pipe model only): the top cell's surface speed from its four side faces' fluxes over the water they move (m/s, world x and z; a halo column from the one face it shares with the interior), and how churned the water is: water landing from above (the cell over it falling, full at 6 m/s) and fast shallow flow (Froude past 1.2, half a point per unit, at most 0.6). The automaton gives neither.
+- **Corners:** each corner vertex takes the average height, thickness, flow and foam of the wet columns among the 4 around it. One quad per wet column.
 - **Normals** come from the corner-height gradient.
-- **Output:** a `WaterVertex` (Vector3 Position, Vector3 Normal, float Thickness; 28 bytes) and uint indices in a reusable `WaterMesh`. No allocation after warm-up.
+- **Output:** a `WaterVertex` (Vector3 Position, Vector3 Normal, float Thickness, Vector2 Flow, float Foam; 40 bytes) and uint indices in a reusable `WaterMesh`. No allocation after warm-up.
 
 ### Renderer (`src/Terrain.Runtime/Rendering/VoxelWaterRenderer.cs`)
 
 - **Per frame:** `BeginFrame`, then `Add(ChunkCoord, WaterMesh)` for each block with water. Meshes are copied into this frame's host-visible vertex and index ring.
-- **Draw** comes after terrain and the ocean:
-  - alpha-blended, depth test on, depth write off;
-  - push constant = chunk origin.
-- **Shader** (`voxel_water.vert/.frag`):
-  - Fresnel sky reflection plus a sun highlight.
-  - Depth tint from thickness. Alpha rises from about 0.35 when thin to about 0.9 when thick.
-  - Wind ripple normals where the wind reaches the water ("Wind on voxel water" above); none where it is sheltered.
-  - The same ACES, gamma and display-space fog as the ocean.
+- **Draw** comes after terrain and the ocean: alpha-blended, depth test on, depth write off; push constant = chunk origin; frame uniforms carry the ocean's lighting and water colours (`SceneLighting.WaterDeep`, `WaterScatter`), the rain, and the local wind.
+- **Shader** (`voxel_water.vert/.frag`), shaded **as the ocean is**: `shadeWater` and the foam lace live in `water_shading.glsl`, shared with `ocean.frag` and `ocean_lip.frag` (moved out of `ocean_shading.glsl`, which keeps only the FFT partials), so every water in the world has the same seabed-through-shallows body, turquoise scatter, sky reflection, GGX sun, foam, tonemap and fog.
+  - **Normals:** the mesh's, plus wind ripples where the wind reaches ("Wind on voxel water"), plus **stream ripples** where the water runs: a noise slope slid along the flow by the flow map's two phases (`flowPhases`), stretched along the flow, so a stream's surface streaks and moves at its speed. Each ripple fades by the pixel's footprint against its wavelength (`resolved`), not by distance alone: by distance alone the sines aliased into moiré bands across the lake seen at a grazing angle.
+  - **Foam:** `flowingLace` at coverage 0.75 × the vertex foam, streaming with the flow and churning as fast as the water is churned, plus the rain's flashes.
+  - **Rain** rings and flashes as the ocean's, none under cover; rings finer than a pixel roughen the surface (`gRainRough`).
+  - **Alpha** rises from about 0.35 when thin to about 0.9 when thick, to 1 at grazing angles and in the fog; foam keeps thin sheets visible but fades out with them.
+- **Spray** (`VoxelWaterSystem.FindSplashes`, pipe model, once a tick after the steps): the zones' splashes, then every wet held-up cell of an awake block that water lands in from above at `PourSplashSpeed` (6.5 m/s, a fall of about 2 m) or faster with at least `PourSplashDischarge` (0.5 m³/s) over its metre (a pour: impact speed the fall's, direction the falling water's drift), and every one whose water arrives at `WallSplashSpeed` (0.4 m/s) or faster against a solid side standing a cell over the surface (a wall). They go to the ocean renderer with the zones' (`VoxelWaterSystem.Splashes`), which throws its spray there (`ocean_spray_splash.comp`). At 3–5 m/s every stair of a run-off sheet counted as a pour (a falling cell fed sideways builds its fall speed past free fall) and the whole beach stood in mist.
+- **Seen in game** (`--pond-test` and `--lake-test tunnel`, `--water-pipes`, 2026-10-27): the breach stream froths at its foot with spray thrown over the pond's lip, the sheet down the beach shows the sand through it with lace where it runs fast, the lake's hole pours with lace and spray. Before, voxel water was a flat tint with sky reflection and three fixed sine ripples, no foam and no spray.
 
 ## v1 as built: deviations and measurements
 
@@ -199,31 +200,6 @@ Coupling the bathymetry and sea mask to sim water, buoyancy against sim water, s
 ### Not in v1
 
 Coupling the bathymetry and sea mask to sim water, buoyancy against sim water, swell-driven nearshore cells, and persistence of sim water across block eviction (blocks are evicted beyond a radius and their water is lost).
-
-## Water surface rendering v1 (implemented)
-
-### Mesher (`src/Terrain/Water/WaterSurfaceMesher.cs`, pure CPU)
-
-- Works per block, per interior column (x, z).
-- **Top cell:** the topmost interior cell with W > 0.02 whose cell above holds less than 0.02 or is solid.
-- **Skip the column** if that cell is Reservoir; the ocean draws open sea.
-- **Surface height** = (y − 0.5 + min(W, 1)) metres, chunk-local. A cell's volume spans [y − 0.5, y + 0.5].
-- **Thickness** = surface − (top of the solid below the water column) or the water column height, for depth tint and alpha.
-- **Corners:** each corner vertex takes the average height of the wet columns among the 4 around it. One quad per wet column.
-- **Normals** come from the corner-height gradient.
-- **Output:** a `WaterVertex` (Vector3 Position, Vector3 Normal, float Thickness; 28 bytes) and uint indices in a reusable `WaterMesh`. No allocation after warm-up.
-
-### Renderer (`src/Terrain.Runtime/Rendering/VoxelWaterRenderer.cs`)
-
-- **Per frame:** `BeginFrame`, then `Add(ChunkCoord, WaterMesh)` for each block with water. Meshes are copied into this frame's host-visible vertex and index ring.
-- **Draw** comes after terrain and the ocean:
-  - alpha-blended, depth test on, depth write off;
-  - push constant = chunk origin.
-- **Shader** (`voxel_water.vert/.frag`):
-  - Fresnel sky reflection plus a sun highlight.
-  - Depth tint from thickness. Alpha rises from about 0.35 when thin to about 0.9 when thick.
-  - Small time-animated ripple normals.
-  - The same ACES, gamma and display-space fog as the ocean.
 
 ## v1 as built: deviations and measurements
 

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Numerics;
 using Brutal.Concurrency.Jobs;
+using BrutalGame.Engine.Rendering;
 using BrutalGame.Terrain.Runtime.Rendering;
 using BrutalGame.Terrain.Water;
 
@@ -228,6 +229,118 @@ public sealed class VoxelWaterSystem : IDisposable
         }
 
         return sum;
+    }
+
+    /// <summary>
+    /// Where voxel water slammed into a wall or landed from a pour this tick, after the sea zones' own: the ocean renderer
+    /// throws spray there (ocean_spray_splash.comp), so a waterfall's foot and a stream's wall splash as the sea's do.
+    /// </summary>
+    public ReadOnlySpan<WaterSplash> Splashes => _splashes.AsSpan(0, _splashCount);
+
+    private const int MaxSplashes = 512;
+    private readonly WaterSplash[] _splashes = new WaterSplash[MaxSplashes];
+    private int _splashCount;
+
+    /// <summary>
+    /// A pour lands this fast (m/s, a fall of about 2 m) or faster, with at least this much water a second over its
+    /// metre, to splash: at 3–5 m/s every stair of a run-off sheet counted as a pour (a falling cell fed sideways builds
+    /// its fall speed past free fall) and the whole slope stood in mist. Water runs into a wall this fast or faster.
+    /// </summary>
+    public float PourSplashSpeed = 6.5f;
+    public float PourSplashDischarge = 0.5f;
+    public float WallSplashSpeed = 0.4f;
+
+    /// <summary>
+    /// After a step (pipe model): the zones' splashes first, then every wet, held-up cell of an awake block that water
+    /// falls into from above at <see cref="PourSplashSpeed"/> or faster (a pour, impact speed the fall's, discharge the
+    /// fall rate over the cell's metre), and every one whose water arrives at <see cref="WallSplashSpeed"/> or faster
+    /// against a solid side that stands a cell over the surface (a wall it can only climb). Capped at <see cref="MaxSplashes"/>.
+    /// </summary>
+    private void FindSplashes()
+    {
+        _splashCount = 0;
+
+        foreach (var splash in Zones.Splashes)
+            if (_splashCount < MaxSplashes)
+                _splashes[_splashCount++] = splash;
+
+        if (!Pipes)
+            return;
+
+        const int P = ChunkConstants.Padded;
+        const int A = ChunkConstants.PaddedArea;
+        const byte solid = (byte)WaterFlags.Solid;
+
+        foreach (var slot in _awake)
+        {
+            var block = slot.Block;
+            var origin = block.Coord.WorldOrigin;
+            var w = block.Water;
+            var fl = block.Flags;
+            var v = block.FallSpeed!;
+
+            for (var z = 0; z < ChunkConstants.Size && _splashCount < MaxSplashes; z++)
+            {
+                for (var y = 0; y < ChunkConstants.Size; y++)
+                {
+                    if (block.WetRows[(y + 1) + (z + 1) * P] == 0)
+                        continue;
+
+                    var row = ChunkConstants.Index(0, y, z);
+
+                    for (var x = 0; x < ChunkConstants.Size; x++)
+                    {
+                        var i = row + x;
+                        var wc = w[i];
+
+                        if (wc < 0.15f || (fl[i] & solid) != 0 || ((fl[i - P] & solid) == 0 && w[i - P] < WaterFlow.SupportThreshold))
+                            continue;
+
+                        var surface = origin.Y + y - 0.5f + MathF.Min(wc, 1f);
+                        var fall = -v[i + P];
+
+                        if (fall >= PourSplashSpeed && w[i + P] > 0.02f && (fl[i + P] & solid) == 0 && fall * MathF.Min(w[i + P], 1f) >= PourSplashDischarge)
+                        {
+                            var drift = new Vector2(block.DriftX![i + P], block.DriftZ![i + P]);
+                            var along = drift.LengthSquared() > 1e-4f ? Vector2.Normalize(drift) : Vector2.UnitX;
+                            Add(new Vector4(origin.X + x, surface, origin.Z + z, fall), new Vector4(along, fall * MathF.Min(w[i + P], 1f), WaterSplash.Pour));
+                        }
+
+                        // Into a wall on each side: the flux arriving from the far side over the cell's water.
+                        Wall(block, i, 1, P, x + 0.5f, 0f, origin, x, z, surface, wc);
+                        Wall(block, i, -1, P, x - 0.5f, 0f, origin, x, z, surface, wc);
+                        Wall(block, i, A, P, 0f, z + 0.5f, origin, x, z, surface, wc);
+                        Wall(block, i, -A, P, 0f, z - 0.5f, origin, x, z, surface, wc);
+                    }
+                }
+            }
+        }
+    }
+
+    private void Wall(WaterBlock block, int i, int side, int up, float footX, float footZ, Vector3 origin, int x, int z, float surface, float wc)
+    {
+        const byte solid = (byte)WaterFlags.Solid;
+        var n = i + side;
+
+        if ((block.Flags[n] & solid) == 0 || (block.Flags[n + up] & solid) == 0)
+            return;
+
+        // The face on the far side carries what arrives; positive along +side.
+        var flux = side == 1 ? block.FluxX![i - 1] : side == -1 ? -block.FluxX![i] : side > 0 ? block.FluxZ![i - ChunkConstants.PaddedArea] : -block.FluxZ![i];
+        var into = flux / MathF.Max(MathF.Min(wc, 1f), 0.05f);
+
+        if (into < WallSplashSpeed)
+            return;
+
+        var dir = side == 1 ? Vector2.UnitX : side == -1 ? -Vector2.UnitX : side > 0 ? Vector2.UnitY : -Vector2.UnitY;
+        var foot = new Vector2(origin.X + (side == 1 || side == -1 ? footX : x), origin.Z + (side == 1 || side == -1 ? z : footZ));
+        Add(new Vector4(foot.X, surface, foot.Y, into), new Vector4(dir, MathF.Min(wc, 1f), WaterSplash.Wall));
+    }
+
+    private void Add(Vector4 positionSpeed, Vector4 direction)
+    {
+        if (_splashCount < MaxSplashes)
+            _splashes[_splashCount++] = new WaterSplash { PositionSpeed = positionSpeed, Direction = direction };
     }
 
     /// <summary>Diagnostics: free (not held) water over loaded blocks (m³), the largest fill of any free cell, and the count of free wet cells.</summary>
@@ -972,6 +1085,7 @@ public sealed class VoxelWaterSystem : IDisposable
 
         StartMeshing();
         StepZones(dt);
+        FindSplashes();
         RainOnBodies((float)dt);
 
         if (_discs.Count > 0)

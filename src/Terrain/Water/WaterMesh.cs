@@ -6,11 +6,17 @@ namespace BrutalGame.Terrain.Water;
 [StructLayout(LayoutKind.Sequential)]
 public struct WaterVertex
 {
-    public const int SizeInBytes = 28;
+    public const int SizeInBytes = 40;
 
     public Vector3 Position;
     public Vector3 Normal;
     public float Thickness;
+
+    /// <summary>The surface water's speed (m/s, world x and z): the pipe model's face fluxes over the top cell. Ripples and foam stream with it.</summary>
+    public Vector2 Flow;
+
+    /// <summary>0..1: how churned the water is here, a pour landing or fast shallow flow; drawn as foam lace.</summary>
+    public float Foam;
 }
 
 /// <summary>Reusable surface mesh for one block, sized for the worst case so it never grows.</summary>

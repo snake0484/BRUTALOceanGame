@@ -137,7 +137,7 @@ public sealed class WaterBlock
     private readonly ushort[] _generatedBody = new ushort[S * S];
 
     /// <summary>Per padded row (y, z): any water in the row's 34 cells. Built by pass 1, reused by pass 2.</summary>
-    internal readonly byte[] WetRows = new byte[ChunkConstants.PaddedArea];
+    public readonly byte[] WetRows = new byte[ChunkConstants.PaddedArea];
     private byte _openFaces;
 
     public WaterBlock(bool pipes = false)

@@ -281,7 +281,7 @@ public sealed class GameApp : IDisposable
                 _breakerFaces.UseChains = _oceanPanel.ChainLips;
                 PrepareRain(_renderer.FrameIndex, renderTime, (float)frameSeconds, extent.Height);
                 _ocean.Prepare(_renderer.FrameIndex, _swell, _breakerFaces, renderTime, (float)_clock.Alpha, viewProj, _camera.Position, _bathymetry.Rect,
-                    _water.Zones.Splashes, _water.Zones.FlowRect, _water.Zones.PackedFlow);
+                    _water.Splashes, _water.Zones.FlowRect, _water.Zones.PackedFlow);
                 _sections.Prepare = Lap(ref mark);
                 gpu.Begin(commands, _sprayScope);
                 _ocean.RecordSpray(commands, _renderer.FrameIndex, _breakerFaces.SegmentCount, _breakerFaces.SlotCount, (float)frameSeconds, _clock.TickIndex);
@@ -401,6 +401,8 @@ public sealed class GameApp : IDisposable
         SkyZenith = _ocean.SkyZenith,
         SkyHorizon = _ocean.SkyHorizon,
         FogDensity = _ocean.FogDensity,
+        WaterDeep = _ocean.WaterDeep,
+        WaterScatter = _ocean.WaterScatter,
     };
 
     private TerrainLighting TerrainLightingFromOcean() => new()

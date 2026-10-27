@@ -105,6 +105,11 @@ const float DEEP_DEPTH = 1000.0;
 const float SPENT_DEPTH_K = 0.3; // the surf carrier's wavenumber is taken at no shallower than this (BreakerFace)
 const float TWO_PI = 6.28318530718;
 
+#ifndef WATER_NOISE_GLSL
+#define WATER_NOISE_GLSL
+const float FLOW_PERIOD = 1.0;  // s: each copy of the flow map slides for this long, by speed x this, before it fades out and resets
+const float LACE_WRAP = 600.0;  // seconds: foam and lip texture clocks wrap so noise coordinates stay small
+
 float hash12(vec2 p)
 {
     vec3 p3 = fract(vec3(p.xyx) * 0.1031);
@@ -119,6 +124,7 @@ float valueNoise(vec2 p)
     vec2 u = f * f * (3.0 - 2.0 * f);
     return mix(mix(hash12(i), hash12(i + vec2(1.0, 0.0)), u.x), mix(hash12(i + vec2(0.0, 1.0)), hash12(i + 1.0), u.x), u.y);
 }
+#endif
 
 // Fold (breakerFace): the fine patch sets gFoldTongue so the tongue's rest strip is drawn as the tongue; the clipmap
 // leaves it false and collapses the strip onto the crest line instead. gFoldWeight is 1 on tongue vertices (oceanFinish
@@ -464,13 +470,11 @@ const float FLOW_CREST = 1.0;   // x celerity, at the crest top at full steepnes
 const float FLOW_BACK = 0.5;    // wavelengths behind the crest the flow rises over, from the trough
 const float FLOW_FRONT = 0.37;  // wavelengths ahead the roller's flow fades over (PITCH_FRONT + PITCH_RECOVER)
 const float FLOW_TONGUE = 0.6;  // the tongue's tip streams this much x celerity faster than its root: the pour over the lip
-const float FLOW_PERIOD = 1.0;  // s: each copy of the flow map slides for this long, by speed x this, before it fades out and resets
 const float LIP_MIN_CURL = 0.05;  // below this no lip is drawn
 const float LIP_SLOT_CURL = 0.5 * LIP_MIN_CURL;   // a lip base is evaluated from half the lip's thresholds (ocean_lip_base.comp), so a ...
 const float LIP_SLOT_REACH = 0.5 * LIP_MIN_REACH; // ... segment's last end, where the ribbon tapers to nothing, still has its point
 const float LIP_SLOT_HEIGHT = 0.025;
 const float LIP_UNDERSIDE = 0.45; // light left on the tongue's underside and the tube ceiling: the dark mouth of the tube
-const float LACE_WRAP = 600.0;    // seconds: foam and lip texture clocks wrap so noise coordinates stay small
 const float LIP_DISTANCE = 250.0; // lips (and their spray) further than this from the camera aren't built or drawn: a 1 m lip is 3 px tall there at 900 px (400 m cost 0.006 ms more in lip bases)
 const float SURF_SPACING_FULL = 4.0; // breaker faces and swash at full strength up to this grid spacing (m) ...
 const float SURF_SPACING_NONE = 8.0; // ... and gone by this one

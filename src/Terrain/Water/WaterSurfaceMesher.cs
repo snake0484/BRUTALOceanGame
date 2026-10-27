@@ -13,14 +13,19 @@ public sealed class WaterSurfaceMesher
 
     private const int S = ChunkConstants.Size;
     private const int P = ChunkConstants.Padded;
+    private const int A = ChunkConstants.PaddedArea;
     private const int K = S + 1;
     private const byte SolidBit = (byte)WaterFlags.Solid;
 
     private readonly float[] _columnHeight = new float[P * P];
     private readonly float[] _columnThickness = new float[P * P];
+    private readonly Vector2[] _columnFlow = new Vector2[P * P];
+    private readonly float[] _columnFoam = new float[P * P];
     private readonly bool[] _columnWet = new bool[P * P];
     private readonly float[] _cornerHeight = new float[K * K];
     private readonly float[] _cornerThickness = new float[K * K];
+    private readonly Vector2[] _cornerFlow = new Vector2[K * K];
+    private readonly float[] _cornerFoam = new float[K * K];
     private readonly bool[] _cornerValid = new bool[K * K];
     private readonly int[] _cornerVertex = new int[K * K];
 
@@ -131,8 +136,34 @@ public sealed class WaterSurfaceMesher
         var c = Column(x, z);
         _columnWet[c] = true;
         _columnHeight[c] = surface;
+        (_columnFlow[c], _columnFoam[c]) = FlowAndFoam(block, x, z, topIndex, water[topIndex]);
         var bed = block.Bed[ChunkConstants.Index(x, bottom, z)];
         _columnThickness[c] = surface - (bottom - 0.5f + (bed == WaterBlock.NotBed ? 0f : bed * WaterBlock.BedUnit));
+    }
+
+    /// <summary>
+    /// The pipe model's surface flow at a column's top cell (its four side faces' fluxes over the water they move, m/s)
+    /// and how churned the water is there: water landing on it from above (the cell over it falling), and fast flow over
+    /// shallow water (its Froude number past 0.8). The automaton has neither.
+    /// </summary>
+    private static (Vector2 Flow, float Foam) FlowAndFoam(WaterBlock block, int x, int z, int i, float w)
+    {
+        if (block.FluxX is null)
+            return (Vector2.Zero, 0f);
+
+        // A halo column has only the face it shares with the interior; an interior column the two on each axis.
+        var fx = block.FluxX;
+        var fz = block.FluxZ!;
+        var u = x < 0 ? fx[i] : x >= S ? fx[i - 1] : 0.5f * (fx[i - 1] + fx[i]);
+        var v = z < 0 ? fz[i] : z >= S ? fz[i - A] : 0.5f * (fz[i - A] + fz[i]);
+        var body = MathF.Max(MathF.Min(w, 1f), 0.1f);
+        var flow = new Vector2(u, v) / body;
+        var speed = flow.Length();
+        var fall = -block.FallSpeed![i + P] * MathF.Min(block.Water[i + P], 1f);
+        // Pours froth where they land; fast shallow flow froths past Froude 1.2, a thin sheet at its critical speed only a little.
+        var froude = speed / MathF.Sqrt(9.81f * MathF.Max(MathF.Min(w, 1f), 0.05f));
+        var foam = MathF.Max(MathF.Min(fall / 6f, 1f), MathF.Min(MathF.Max(froude - 1.2f, 0f) * 0.5f, 0.6f));
+        return (flow, foam);
     }
 
     private void BuildCorners()
@@ -143,6 +174,8 @@ public sealed class WaterSurfaceMesher
             {
                 var height = 0f;
                 var thickness = 0f;
+                var flow = Vector2.Zero;
+                var foam = 0f;
                 var count = 0;
 
                 for (var dz = -1; dz <= 0; dz++)
@@ -156,6 +189,8 @@ public sealed class WaterSurfaceMesher
 
                         height += _columnHeight[c];
                         thickness += _columnThickness[c];
+                        flow += _columnFlow[c];
+                        foam += _columnFoam[c];
                         count++;
                     }
                 }
@@ -164,6 +199,8 @@ public sealed class WaterSurfaceMesher
                 _cornerValid[k] = count > 0;
                 _cornerHeight[k] = count > 0 ? height / count : 0f;
                 _cornerThickness[k] = count > 0 ? thickness / count : 0f;
+                _cornerFlow[k] = count > 0 ? flow / count : Vector2.Zero;
+                _cornerFoam[k] = count > 0 ? foam / count : 0f;
             }
         }
     }
@@ -186,6 +223,8 @@ public sealed class WaterSurfaceMesher
             Position = new Vector3(cx - 0.5f, h, cz - 0.5f) * ChunkConstants.VoxelSize,
             Normal = Vector3.Normalize(new Vector3(-dhdx, 1f, -dhdz)),
             Thickness = _cornerThickness[k],
+            Flow = _cornerFlow[k],
+            Foam = _cornerFoam[k],
         };
         _cornerVertex[k] = index;
         return (uint)index;
