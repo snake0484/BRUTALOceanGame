@@ -15,7 +15,7 @@ namespace BrutalGame.Terrain.Runtime.Rendering;
 /// </summary>
 public sealed unsafe class VoxelWaterRenderer : IDisposable
 {
-    public const int VertexStride = 36;
+    public const int VertexStride = 28;
     public const int RegionVertexBytes = 8 << 20;
     public const int RegionIndexBytes = 8 << 20;
     public const int MaxDraws = 1024;
@@ -339,15 +339,13 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
                     new() { Location = 0, Binding = 0, Format = VkFormat.R32G32B32SFloat, Offset = (ByteSize32)0 },
                     new() { Location = 1, Binding = 0, Format = VkFormat.R32G32B32SFloat, Offset = (ByteSize32)12 },
                     new() { Location = 2, Binding = 0, Format = VkFormat.R32SFloat, Offset = (ByteSize32)24 },
-                    new() { Location = 3, Binding = 0, Format = VkFormat.R8G8B8A8UNorm, Offset = (ByteSize32)28 },
-                    new() { Location = 4, Binding = 0, Format = VkFormat.R8G8B8A8UNorm, Offset = (ByteSize32)32 },
                 };
 
                 var vertexInput = new VkPipelineVertexInputStateCreateInfo
                 {
                     VertexBindingDescriptionCount = 1,
                     VertexBindingDescriptions = &binding,
-                    VertexAttributeDescriptionCount = 5,
+                    VertexAttributeDescriptionCount = 3,
                     VertexAttributeDescriptions = attributes,
                 };
                 var inputAssembly = new VkPipelineInputAssemblyStateCreateInfo { Topology = VkPrimitiveTopology.TriangleList };

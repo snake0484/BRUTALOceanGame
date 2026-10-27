@@ -13,7 +13,8 @@ namespace BrutalGame;
 /// once the lake's blocks are in. <c>hole</c>: digs a small hole into the bank right at the water's edge, as a player
 /// would; a lake at rest should wake only around the hole (a lake disc frees its water there), pour into it, go back to
 /// sleep and rejoin the lake, the disc gone. <c>tunnel</c>: digs a tunnel from the sea up through the rim and breaches the
-/// lake last, then logs what the lake gives, how fast, and how deep the water stands along the tunnel. Logs the voxel sim
+/// lake last, then logs what the lake gives, how fast, and how deep the water stands along the tunnel. <c>deep</c>: the
+/// same tunnel, but it comes up through the lake bed 80 m inside the shore, under about 10 m of water. Logs the voxel sim
 /// each half second. (The tunnel exits onto the crater's outer slope: the sea is 500 m from the lake.)
 /// </summary>
 public sealed class LakeTest(TerrainWorld world, VoxelWaterSystem water, FlyCamera camera, string mode)
@@ -37,7 +38,11 @@ public sealed class LakeTest(TerrainWorld world, VoxelWaterSystem water, FlyCame
     private const float TunnelStep = 2f;
     private const float TunnelCover = 4f;
     private const float ExitDrop = 30f;
-    private const int MaxTunnelDigs = 128;
+    private const int MaxTunnelDigs = 256;
+
+    /// <summary>The deep breach: a tunnel to a point this far inside the shore, this far over the lake bed, where the lake is about 10 m deep.</summary>
+    private const float DeepInside = 80f;
+    private const float DeepOverBed = 2f;
 
     private readonly LakeInfo _lake = TerrainGenerator.Lake(world.Params);
     private readonly ushort _body = water.Generated.Length > 0 ? water.Generated[0].Id : WaterBodies.None;
@@ -53,7 +58,8 @@ public sealed class LakeTest(TerrainWorld world, VoxelWaterSystem water, FlyCame
     private float _givenAtLog;
     private int _stage;
 
-    private bool Tunnel => mode == "tunnel";
+    private bool Tunnel => mode is "tunnel" or "deep";
+    private bool Deep => mode == "deep";
 
     public void Update(double time)
     {
@@ -106,7 +112,10 @@ public sealed class LakeTest(TerrainWorld world, VoxelWaterSystem water, FlyCame
             _givenAtLog = Given;
 
             if (Tunnel && _dug >= 0.0)
-                Log.Info("   water (m) in the tunnel from the breach to the exit, every 5th dig, then 5 and 10 m down the slope:" + Profile());
+            {
+                var (free, maxFill, cells) = water.FreeWater();
+                Log.Info($"   free water {free:F0} m3 in {cells} cells, largest fill {maxFill:F2}; in the tunnel (m) from the breach to the exit, every 5th dig, then 5 and 10 m down the slope:" + Profile());
+            }
 
             _nextLog = time + 0.5;
 
@@ -115,7 +124,18 @@ public sealed class LakeTest(TerrainWorld world, VoxelWaterSystem water, FlyCame
         }
     }
 
-    private Vector3 Hole => new(_lake.Centre.X - Shore + HoleInside, _lake.Top - HoleDepth, _lake.Centre.Y);
+    private Vector3 Hole => Deep ? DeepHole : new(_lake.Centre.X - Shore + HoleInside, _lake.Top - HoleDepth, _lake.Centre.Y);
+
+    /// <summary>The breach at the lake bed: the tunnel comes up into the lake from below, under 10 m of water.</summary>
+    private Vector3 DeepHole
+    {
+        get
+        {
+            var x = _lake.Centre.X - Shore + DeepInside;
+            var bed = TerrainGenerator.SurfaceHeight(x, _lake.Centre.Y, world.Params);
+            return new Vector3(x, bed + DeepOverBed, _lake.Centre.Y);
+        }
+    }
 
     private float Level => _body == WaterBodies.None ? float.NaN : water.Bodies[_body].Level;
 
@@ -148,6 +168,16 @@ public sealed class LakeTest(TerrainWorld world, VoxelWaterSystem water, FlyCame
             at.Y = i == 0 || i == count ? at.Y : MathF.Max(exit.Y, MathF.Min(at.Y, cover));
             _tunnel[_tunnelCount++] = at;
         }
+
+        // The digs must overlap: from the breach back, no dig more than TunnelStep under the next (a 45° climb at most).
+        for (var i = _tunnelCount - 1; i > 0; i--)
+            _tunnel[i - 1].Y = MathF.Max(_tunnel[i - 1].Y, _tunnel[i].Y - TunnelStep);
+
+        // The deep breach drains down: from the breach the tunnel falls at 45° to the exit's height and runs level from
+        // there (the rock is deep enough under the lake bed and the rim), so it is never a siphon over a sill.
+        if (Deep)
+            for (var i = 0; i < _tunnelCount - 1; i++)
+                _tunnel[i].Y = MathF.Max(exit.Y, breach.Y - (_tunnelCount - 1 - i) * TunnelStep);
 
         Log.Info($"tunnel: {_tunnelCount} digs of {TunnelRadius} m from the exit at {exit} (ground {ground:F1} m) to the breach at {breach}, {length:F0} m");
     }

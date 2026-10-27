@@ -22,7 +22,6 @@ layout(set = 0, binding = 0, std140) uniform Frame {
 layout(location = 0) in vec3 vWorldPos;
 layout(location = 1) in vec3 vNormal;
 layout(location = 2) in float vThickness;
-layout(location = 3) in float vExposure; // the wind's reach here for the way it blows: 0 sheltered .. 1 open with fetch
 
 layout(location = 0) out vec4 outColor;
 
@@ -65,8 +64,52 @@ vec2 ripple(vec2 p, float t, vec2 d, vec2 n, float ang, float lambda, float stee
     return k * (steep * smoothstep(u0, u1, U)) * cos(dot(k, p) * kk - w * t);
 }
 
-// Wind ripples (docs/voxel-water.md "Wind on voxel water"): four short waves spread about the wind, raised by its speed
-// and scaled by how far the wind reaches this water. Sheltered water (e = 0) has none and lies as glass.
+// How far the wind reaches water at p, 0 sheltered .. 1 open (docs/voxel-water.md "Wind on voxel water"): a march
+// upwind over the cover map's column tops (rain_cover.glsl, the same world-space data for every block, so block seams
+// agree). A top standing over the water is a wall that shelters SHELTER_PER_HEIGHT times its height; the first top at
+// or over the water's level ends the fetch, which raises full ripples over FULL_FETCH of open water. Past the window
+// the wind is taken as open.
+const float SHELTER_STEP = 2.0;
+const int SHELTER_STEPS = 8;
+const float SHELTER_PER_HEIGHT = 6.0;
+const float MAX_WALL = 6.0;
+const float FULL_FETCH = 6.0;
+
+float windReach(vec3 p, vec2 wind)
+{
+    float U = length(wind);
+    if (U < 1.0)
+        return 0.0;
+
+    vec2 d = wind / U;
+    float reach = 1.0;
+    float shore = SHELTER_STEP * float(SHELTER_STEPS);
+
+    for (int i = 1; i <= SHELTER_STEPS; i++)
+    {
+        float dist = SHELTER_STEP * float(i);
+        float top = rainCoverTop(p.xz - d * dist);
+        if (top == NO_TOP)
+            break;
+
+        float h = top - p.y;
+        if (h > 0.25)
+        {
+            reach = min(reach, dist / (SHELTER_PER_HEIGHT * min(h, MAX_WALL)));
+            shore = min(shore, dist);
+        }
+        else if (h > -0.5)
+            shore = min(shore, dist);
+
+        if (reach <= 0.0)
+            break;
+    }
+
+    return reach * min(shore / FULL_FETCH, 1.0);
+}
+
+// Wind ripples: four short waves spread about the wind, raised by its speed and scaled by how far the wind reaches
+// this water. Sheltered water (e = 0) has none and lies as glass.
 vec2 windRippleSlope(vec2 p, float t, vec2 wind, float e)
 {
     float U = length(wind);
@@ -91,11 +134,11 @@ void main()
     float intensity = frame.sunDir.w;
     float time = frame.cameraPos.w;
 
-    // Wind ripples where the wind reaches: the mesher's shelter at this corner (walls, shore, roofs in the block) and the
-    // cover map's exposure (roofs and caves beyond it, rain_cover.glsl). They fade with distance so they don't alias.
+    // Wind ripples where the wind reaches: the walls and shore upwind (windReach) and the cover map's exposure (roofs
+    // and caves, rain_cover.glsl). They fade with distance so they don't alias.
     vec3 N = normalize(vNormal);
     float rippleFade = 1.0 - smoothstep(30.0, 120.0, dist);
-    float exposure = vExposure * windCover(vWorldPos.xz).x;
+    float exposure = rippleFade > 0.0 ? windReach(vWorldPos, frame.wind.xy) * windCover(vWorldPos.xz).x : 0.0;
     vec2 slope = windRippleSlope(vWorldPos.xz, time, frame.wind.xy, exposure) * rippleFade;
     N = normalize(N + vec3(-slope.x, 0.0, -slope.y));
 

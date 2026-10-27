@@ -529,46 +529,6 @@ public sealed class WaterSimTests(ITestOutputHelper output)
         Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
     }
 
-    /// <summary>
-    /// The wind's reach per corner (docs/voxel-water.md "Wind on voxel water"): water in the lee of a 4 m wall is
-    /// sheltered for the wind blowing from the wall and open for the wind blowing toward it, water in the open is open all
-    /// round, and water under a roof is sheltered from every direction.
-    /// </summary>
-    [Fact]
-    public void MesherSheltersWaterBehindAWallAndUnderARoof()
-    {
-        var b = new WaterBlock();
-        FillSolid(b, 0, 0, 0, S - 1, 0, S - 1);
-        FillWater(b, 4, 1, 4, 27, 1, 27, 0.5f);
-        FillSolid(b, 2, 1, 0, 3, 4, S - 1);
-        FillSolid(b, 20, 6, 0, 27, 6, S - 1);
-
-        var mesh = new WaterMesh();
-        new WaterSurfaceMesher().Build(b, mesh);
-
-        var lee = Corner(mesh, 4.5f, 16.5f);
-        var open = Corner(mesh, 12.5f, 16.5f);
-        var roofed = Corner(mesh, 24.5f, 16.5f);
-        output.WriteLine($"lee of the wall: toward +X {lee.Shelter(0)}, toward -X {lee.Shelter(4)}; open: {open.Shelter(0)} {open.Shelter(2)} {open.Shelter(4)}; roofed: {roofed.Shelter(0)}");
-
-        Assert.True(lee.Shelter(0) < 30, $"wind blowing from the wall should be sheltered, reach {lee.Shelter(0)}");
-        Assert.True(lee.Shelter(4) >= 250, $"wind blowing toward the wall crosses open water first, reach {lee.Shelter(4)}");
-        Assert.True(open.Shelter(2) >= 250 && open.Shelter(4) >= 250, "open water is open");
-        Assert.InRange(open.Shelter(0), 60, 200);
-
-        for (var k = 0; k < 8; k++)
-            Assert.Equal(0, roofed.Shelter(k));
-    }
-
-    private static WaterVertex Corner(WaterMesh mesh, float x, float z)
-    {
-        foreach (var v in mesh.VertexSpan)
-            if (MathF.Abs(v.Position.X - x) < 1e-4f && MathF.Abs(v.Position.Z - z) < 1e-4f)
-                return v;
-
-        throw new InvalidOperationException($"no corner at {x}, {z}");
-    }
-
     [Fact]
     public void VertexLayoutMatchesGpu()
     {

@@ -96,7 +96,9 @@ public sealed class VoxelWaterSystem : IDisposable
     public float GrowFlux = 0.05f;
     public float GrowStep = 4f;
     public float GrowCooldown = 0.5f;
-    public float MaxDiscRadius = 48f;
+
+    /// <summary>A disc frees the body's water to its full depth, so unlike a sea zone (a heightfield) it costs 3D cells: 24 m is about 18,000 cells over 10 m of water.</summary>
+    public float MaxDiscRadius = 24f;
     private const float FlowSmoothing = 2f;
 
     /// <summary>A disc's flow at least this (m³/s), within <see cref="OutletSteadiness"/> of its average for <see cref="OutletSeconds"/>, is an outlet.</summary>
@@ -228,6 +230,38 @@ public sealed class VoxelWaterSystem : IDisposable
         return sum;
     }
 
+    /// <summary>Diagnostics: free (not held) water over loaded blocks (m³), the largest fill of any free cell, and the count of free wet cells.</summary>
+    public (float Free, float MaxFill, int Cells) FreeWater()
+    {
+        var free = 0.0;
+        var max = 0f;
+        var cells = 0;
+
+        foreach (var (_, slot) in _blocks)
+        {
+            if (slot.Pending)
+                continue;
+
+            var block = slot.Block;
+
+            for (var z = 0; z < ChunkConstants.Size; z++)
+                for (var y = 0; y < ChunkConstants.Size; y++)
+                    for (var i = ChunkConstants.Index(0, y, z); i < ChunkConstants.Index(ChunkConstants.Size, y, z); i++)
+                    {
+                        var w = block.Water[i];
+
+                        if (w <= 0f || (block.Flags[i] & Held) != 0)
+                            continue;
+
+                        free += w;
+                        max = MathF.Max(max, w);
+                        cells++;
+                    }
+        }
+
+        return ((float)free, max, cells);
+    }
+
     /// <summary>Diagnostics: activations and refreshes waiting to be dispatched, blocks being (re)activated, blocks being meshed.</summary>
     public (int Queued, int Pending, int Meshing) Activity
     {
@@ -271,20 +305,52 @@ public sealed class VoxelWaterSystem : IDisposable
         // only displaces water. A dig that reaches neither stays as it is.
         if (op.Centre.Y - op.Radius < _terrain.Params.SeaLevel)
             AddZone(new Vector3(op.Centre.X, op.Centre.Z, op.Radius + SeaZoneMargin));
-        else if (TouchedBody(op) is var body && body > WaterBodies.Sea)
-            AddDisc(new Vector4(op.Centre.X, op.Centre.Z, op.Radius + SeaZoneMargin, body));
+        else
+            _digs.Add(op);
     }
 
+    /// <summary>Digs above the sea not yet tested for the body they reach: their blocks must have finished regenerating first.</summary>
+    private readonly List<BrushOp> _digs = new(16);
+
     /// <summary>
-    /// The body whose held cells the brush's sphere reaches in loaded blocks, or none. Blocks mid-refresh can't be read
-    /// (a dig a frame earlier has them regenerating), so a generated body is also found by its record: its fill disc
-    /// covers the dig and the dig reaches under its level.
+    /// Once a dig's blocks are no longer mid-refresh, the body whose held cells its sphere reaches gets a disc around it.
+    /// (Testing at the dig, while the blocks regenerated, read stale cells; a geometric fallback to the generator's record
+    /// made a disc for every dig of a tunnel running under the lake bed in rock and freed a hundred metres of lake.)
     /// </summary>
+    private void TestDigs()
+    {
+        for (var d = _digs.Count - 1; d >= 0; d--)
+        {
+            var op = _digs[d];
+
+            if (AnyPending(op))
+                continue;
+
+            _digs.RemoveAt(d);
+            var body = TouchedBody(op);
+
+            if (body > WaterBodies.Sea)
+                AddDisc(new Vector4(op.Centre.X, op.Centre.Z, op.Radius + SeaZoneMargin, body));
+        }
+    }
+
+    private bool AnyPending(in BrushOp op)
+    {
+        var min = ChunkCoord.FromWorld(op.Centre - new Vector3(op.Radius));
+        var max = ChunkCoord.FromWorld(op.Centre + new Vector3(op.Radius));
+
+        for (var cz = min.Z; cz <= max.Z; cz++)
+            for (var cy = min.Y; cy <= max.Y; cy++)
+                for (var cx = min.X; cx <= max.X; cx++)
+                    if (_blocks.TryGetValue(new ChunkCoord(cx, cy, cz), out var slot) && (slot.Pending || slot.RefreshQueued))
+                        return true;
+
+        return false;
+    }
+
+    /// <summary>The body whose held cells the brush's sphere reaches in loaded blocks, or none.</summary>
     private ushort TouchedBody(in BrushOp op)
     {
-        foreach (var info in Generated)
-            if (info.Contains(op.Centre.X, op.Centre.Z) && op.Centre.Y - op.Radius <= Bodies[info.Id].Level)
-                return info.Id;
 
         var min = ChunkCoord.FromWorld(op.Centre - new Vector3(op.Radius));
         var max = ChunkCoord.FromWorld(op.Centre + new Vector3(op.Radius));
@@ -786,6 +852,10 @@ public sealed class VoxelWaterSystem : IDisposable
         }
 
         _activationsInFlight.Clear();
+
+        if (_digs.Count > 0)
+            TestDigs();
+
         Evict(cameraPos);
         RequestGenerated(cameraPos);
 
