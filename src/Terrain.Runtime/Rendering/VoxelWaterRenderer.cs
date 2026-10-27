@@ -40,6 +40,10 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
     private readonly VkPipeline _pipeline;
     private readonly DrawEntry[] _draws = new DrawEntry[MaxDraws];
 
+    /// <summary>The visible draws, sorted far to near each frame: water is blended, so a near surface drawn before a far one sat behind it.</summary>
+    private readonly int[] _order = new int[MaxDraws];
+    private readonly float[] _distance = new float[MaxDraws];
+
     private int _frameIndex = -1;
     private int _drawCount;
     private int _vertexCursor;
@@ -179,6 +183,7 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
         var meshes = 0;
         var indices = 0;
         var push = Vector4.Zero;
+        var visible = 0;
 
         for (var i = 0; i < _drawCount; i++)
         {
@@ -187,6 +192,16 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
             if (!Visible(planes, draw.Origin, draw.Size))
                 continue;
 
+            // Far to near (the key is negated so the ascending sort puts the farthest first).
+            _order[visible] = i;
+            _distance[visible++] = -Vector3.DistanceSquared(cameraPos, draw.Origin + new Vector3(draw.Size * 0.5f));
+        }
+
+        Array.Sort(_distance, _order, 0, visible);
+
+        for (var k = 0; k < visible; k++)
+        {
+            ref var draw = ref _draws[_order[k]];
             push = new Vector4(draw.Origin, 0f);
             commands.PushConstants(_layout, VkShaderStageFlags.VertexBit, 0, new ReadOnlySpan<byte>(&push, PushConstantSize));
             commands.DrawIndexed(draw.IndexCount, 1, draw.FirstIndex, draw.VertexOffset, 0);
@@ -315,7 +330,8 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
         }
     }
 
-    // Alpha blended, reverse-Z depth test without writes, no culling so the surface shows from below too.
+    // Alpha blended, reverse-Z depth test with writes (a nearer water fragment wins over a farther one, within a mesh and
+    // across them: a tower of water once sat behind the lake's far surface), no culling so the surface shows from below too.
     private VkPipeline CreatePipeline(VkRenderPass renderPass)
     {
         var vert = ShaderLoader.Load(_device, "voxel_water.vert", ShaderKind.VertexShader);
@@ -367,7 +383,7 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
                 var depth = new VkPipelineDepthStencilStateCreateInfo
                 {
                     DepthTestEnable = true,
-                    DepthWriteEnable = false,
+                    DepthWriteEnable = true,
                     DepthCompareOp = VkCompareOp.Greater,
                 };
                 var blendAttachment = new VkPipelineColorBlendAttachmentState
