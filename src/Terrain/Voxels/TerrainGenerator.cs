@@ -1,6 +1,27 @@
+using System.Numerics;
 using System.Runtime.CompilerServices;
+using BrutalGame.Terrain.Water;
 
 namespace BrutalGame.Terrain;
+
+/// <summary>
+/// The main island's crater lake (<see cref="TerrainParams.LakeRadius"/>): every open voxel at or under <see cref="Top"/>
+/// within <see cref="Radius"/> of <see cref="Centre"/> is generated full of lake water. Its surface stands at Top + 0.5.
+/// </summary>
+public readonly record struct LakeInfo(Vector2 Centre, float Radius, int Top, int Bottom)
+{
+    public bool Exists => Radius > 0f;
+
+    /// <summary>
+    /// World y of the water's surface as generated: the middle of the top layer, which is half full. At the layer's top
+    /// the top cells sat full, where a cell's head turns from its surface to its pressure and grows 50 times as steep,
+    /// and water meeting the lake there (a pit filling from it) chattered between the two and never settled.
+    /// </summary>
+    public float Surface => Top;
+
+    /// <summary>The water's area at that surface (m²).</summary>
+    public float Area => MathF.PI * Radius * Radius;
+}
 
 public static class TerrainGenerator
 {
@@ -18,6 +39,20 @@ public static class TerrainGenerator
     private const float OverhangStartHeight = 3f;
     private const float OverhangRampHeight = 10f;
     private const int MaxIslands = 4;
+
+    /// <summary>The lake bed's noise at its centre (m), fading to none at the shore; its banks take the island's full detail over this run.</summary>
+    private const float LakeBedDetail = 1.5f;
+    private const float LakeBankRamp = 40f;
+
+    /// <summary>
+    /// Lake water fills this far past the shore radius: the voxels the shoreline crosses, and every nook of the bank the
+    /// detail noise sinks under the water line. Left dry, those seeped full through films for minutes once the lake woke.
+    /// </summary>
+    private const float LakeShoreCells = 8f;
+
+    /// <summary>No overhang caves within this distance of the shore, so none opens under the rim below the water line.</summary>
+    private const float LakeSolidRim = 20f;
+    private const float LakeSolidRamp = 30f;
 
     private const uint SeabedSalt = 0x1B873593u;
     private const uint CoastSalt = 0xCC9E2D51u;
@@ -45,6 +80,13 @@ public static class TerrainGenerator
         public IslandBuffer Items;
         public int Count;
         public uint Seed;
+
+        /// <summary>The crater lake, centred on the main island: its shore radius, surface height and depth; reach is where its banks clear any ground.</summary>
+        public float LakeRadius;
+        public float LakeSurface;
+        public float LakeDepth;
+        public float LakeBank;
+        public float LakeReach;
     }
 
     public static float MaxHeight(in TerrainParams p) => p.IslandHeight + p.DetailHeight + 1f;
@@ -57,6 +99,32 @@ public static class TerrainGenerator
         return Height(x, z, p, islands);
     }
 
+    public static LakeInfo Lake(in TerrainParams p)
+    {
+        var s = CreateIslands(p);
+
+        if (s.LakeRadius <= 0f)
+            return default;
+
+        var top = (int)(s.LakeSurface - 0.5f);
+        return new LakeInfo(Vector2.Zero, s.LakeRadius + LakeShoreCells, top, (int)MathF.Floor(s.LakeSurface - s.LakeDepth - LakeBedDetail) - 1);
+    }
+
+    /// <summary>
+    /// The bodies of still water the generator makes above sea level (docs/voxel-water.md "Bodies of water"): the crater
+    /// lake, as a record the water sim holds at its level and drains by its area (the shore's, not the fill's).
+    /// </summary>
+    public static WaterBodyInfo[] Bodies(in TerrainParams p)
+    {
+        var lake = Lake(p);
+
+        if (!lake.Exists)
+            return [];
+
+        var shore = lake.Radius - LakeShoreCells;
+        return [new WaterBodyInfo(lake.Centre, lake.Radius, lake.Surface, lake.Bottom - 0.5f, MathF.PI * shore * shore)];
+    }
+
     /// <summary>
     /// Fills density, material and water (padded apron included) at the chunk's LOD: voxel i samples world origin + i·s,
     /// density is stored in voxel units. Thread-safe, deterministic, allocation-free.
@@ -65,6 +133,59 @@ public static class TerrainGenerator
     {
         GenerateSolids(chunk, p);
         FillSea(chunk, p.SeaLevel);
+        FillLake(chunk, Lake(p));
+    }
+
+    /// <summary>
+    /// Every open voxel at or under the lake's top layer and within its radius holds lake water. The basin is closed (its
+    /// rim stands above the water all round, and no overhang cave opens under it), so the water is at rest as generated.
+    /// </summary>
+    public static void FillLake(VoxelChunk chunk, in LakeInfo lake)
+    {
+        if (!lake.Exists)
+            return;
+
+        var origin = chunk.Coord.WorldOrigin;
+        var scale = chunk.Coord.VoxelScale;
+        var low = origin - new Vector3(scale);
+        var high = origin + new Vector3(ChunkConstants.Size * scale);
+
+        if (low.Y > lake.Top || high.Y < lake.Bottom)
+            return;
+
+        var nearX = Math.Clamp(lake.Centre.X, low.X, high.X) - lake.Centre.X;
+        var nearZ = Math.Clamp(lake.Centre.Y, low.Z, high.Z) - lake.Centre.Y;
+        var r2 = lake.Radius * lake.Radius;
+
+        if (nearX * nearX + nearZ * nearZ > r2)
+            return;
+
+        var water = chunk.Water;
+        var density = chunk.Density;
+
+        for (var z = -1; z <= ChunkConstants.Size; z++)
+        {
+            var dz = origin.Z + z * scale - lake.Centre.Y;
+
+            for (var x = -1; x <= ChunkConstants.Size; x++)
+            {
+                var dx = origin.X + x * scale - lake.Centre.X;
+
+                if (dx * dx + dz * dz > r2)
+                    continue;
+
+                for (var y = -1; y <= ChunkConstants.Size; y++)
+                {
+                    if (origin.Y + y * scale > lake.Top)
+                        break;
+
+                    var i = ChunkConstants.Index(x, y, z);
+
+                    if (density[i] >= 0)
+                        water[i] = byte.MaxValue;
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -161,6 +282,25 @@ public static class TerrainGenerator
                 minH = MathF.Min(minH, h[0]);
                 maxH = MathF.Max(maxH, h[0]);
                 maxAmp = MathF.Max(maxAmp, amp);
+            }
+        }
+
+        // Around the crater lake the ground carries no overhang caves (one under the rim could open below the water line).
+        if (islands.LakeRadius > 0f && maxAmp > 0f)
+        {
+            maxAmp = 0f;
+
+            for (var z = 0; z < P; z++)
+            {
+                var dz = origin.Z + (z - 1) * s;
+
+                for (var x = 0; x < P; x++)
+                {
+                    var dx = origin.X + (x - 1) * s;
+                    var c = x + z * P;
+                    colAmp[c] *= Smooth01((MathF.Sqrt(dx * dx + dz * dz) - islands.LakeRadius - LakeSolidRim) / LakeSolidRamp);
+                    maxAmp = MathF.Max(maxAmp, colAmp[c]);
+                }
             }
         }
 
@@ -375,7 +515,32 @@ public static class TerrainGenerator
                 h = e;
         }
 
+        if (s.LakeRadius > 0f)
+        {
+            var r = MathF.Sqrt(x * x + z * z);
+
+            if (r < s.LakeReach)
+                h = MathF.Min(h, LakeBed(r, detail, p, s));
+        }
+
         return h;
+    }
+
+    /// <summary>
+    /// The crater's ground at distance r from its centre: a bowl from the surface at the shore down to the full depth at the
+    /// centre, then banks rising at <see cref="TerrainParams.LakeBankSlope"/> until the island's own ground is lower. The
+    /// banks take the island's detail gradually, so they never dip under the water line; the bed a little of it.
+    /// </summary>
+    private static float LakeBed(float r, float detail, in TerrainParams p, in IslandSet s)
+    {
+        if (r < s.LakeRadius)
+        {
+            var u = r / s.LakeRadius;
+            return s.LakeSurface - s.LakeDepth * (1f - u * u) + detail * LakeBedDetail * (1f - u);
+        }
+
+        var bank = r - s.LakeRadius;
+        return s.LakeSurface + bank * s.LakeBank + detail * p.DetailHeight * Smooth01(bank / LakeBankRamp);
     }
 
     private static IslandSet CreateIslands(in TerrainParams p)
@@ -406,6 +571,20 @@ public static class TerrainGenerator
         }
 
         s.Count = small + 1;
+
+        // The lake's water stands under the lowest the main island's ground can be at its shore: the shape with the coast
+        // warp at its worst (cliffs only raise it) less the full detail, rounded down to a voxel layer with 1.5 m to spare.
+        if (p.LakeRadius > 0f)
+        {
+            var t = 1f - p.LakeRadius / p.IslandRadius * (1f + MathF.Min(p.CoastWarp, 0.9f));
+            var lowest = p.IslandHeight * Smooth01(t) - p.DetailHeight;
+            s.LakeRadius = p.LakeRadius;
+            s.LakeSurface = MathF.Floor(lowest - 2f) + 0.5f;
+            s.LakeDepth = p.LakeDepth;
+            s.LakeBank = p.LakeBankSlope;
+            s.LakeReach = p.LakeRadius + (MaxHeight(p) - s.LakeSurface) / p.LakeBankSlope;
+        }
+
         return s;
     }
 

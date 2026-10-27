@@ -7,7 +7,7 @@ Scope of v1: procedural island terrain, chunk storage, generation and meshing on
 - Voxel size 1 m, chunk = 32³ voxels (32 m). Y is up. Sea level is y = 0.
 - `ChunkCoord(X, Y, Z)` integer chunk index. World origin of a chunk = coord × 32.
 - Density is a clamped signed distance: **negative = solid, positive = air**. Stored as `sbyte`. The value is the distance in metres × `DensityScale` (= 32, so ±4 m range), clamped to [-127, 127]. The surface is the 0 crossing.
-- Vertical world range for v1 is chunk Y ∈ [−2, 2] (−64 m … +96 m).
+- Vertical world range is chunk Y ∈ [−2, 3] (−64 m … +128 m). It was [−2, 2] (+96 m) until the island grew to 660 m (2026-10-27): its ground reaches 120 m.
 
 ## Storage (`BrutalGame.Terrain`, project `src/Terrain`, no Vulkan dependency)
 
@@ -48,8 +48,11 @@ public struct TerrainParams()
 {
     public ulong Seed = 1;
     public float SeabedDepth = -30f;     // open-sea floor height
-    public float IslandRadius = 220f;
-    public float IslandHeight = 55f;
+    public float IslandRadius = 660f;   // 220 m until 2026-10-27
+    public float IslandHeight = 110f;   // 55 m until then
+    public float LakeRadius = 170f;     // the crater lake (below); 0: none
+    public float LakeDepth = 14f;
+    public float LakeBankSlope = 0.3f;
     // plus fBm octave settings, as the implementation needs
 }
 
@@ -64,6 +67,11 @@ public static class TerrainGenerator
 ```
 
 - **Shape:** one main island at the origin plus 2–3 smaller islands (positions derived from the seed) on a seabed with low-frequency undulation. Use fBm coherent noise (own deterministic implementation, e.g. 2D/3D simplex or gradient noise; no System.Random). Island radial falloff gives beaches near sea level and cliffs in places.
+- **Size (2026-10-27):** the main island is 660 m in radius and 110 m high, three times the 220 m it was and twice the height, so its slopes are about two thirds as steep. The satellites scale with it (1.1–1.7 km out, 165–300 m in radius). The coast's warp, cliff and detail noise keep their world frequencies, so the coastline has three times as many bays and headlands. With the default seed the west waterline at z = 0 moved from x −210 to −682. The start camera and the scripted scenes now stand relative to it (`Coastline.WestX`, `src/Game/Coastline.cs`). Measured at the start view, against the old island: 1606 chunks loaded against 1454, 912 LOD-0 leaves against 760, mesh memory 35.2 MB against 33.2 MB; the coastal map build (481 against 508 ms, on jobs) and the bathymetry rebuild (9.6–13.3 ms) are unchanged. `--fly-test` main-thread work: p50 0.65 ms (0.70–0.72 before), p95 1.40–1.50 (1.39–1.47), p99 2.70–2.80 (2.87–2.91).
+- **Crater lake:** the main island's summit holds a lake 340 m across (`LakeRadius` 170 m at the waterline, `LakeDepth` 14 m at the centre). Its ground is the lower of the island's and a crater's: a bowl from the shore down to the full depth (with ±1.5 m of the island's detail, none at the shore), then banks rising at `LakeBankSlope` 0.3 that take on the island's detail over 40 m, so they never dip under the water line.
+  - Its surface stands under the lowest the island's ground can be at the shore radius: the shape with the coast warp at its worst (cliffs only raise it) less the full detail, minus 2 m, rounded to a voxel layer. With the default parameters that is 70.5 m; the rim's lowest crest is 79.4 m, the bed 56.6 m at the centre.
+  - No overhang caves within 20–50 m of the shore, so none opens under the rim below the water line.
+  - Its water is voxel water (docs/voxel-water.md, "Lakes").
 - **Overhangs:** add a 3D noise term near the surface band only (|y − height| < ~12 m), to give overhangs and arches without a full 3D cost.
 - **Speed:** compute a 34×34 column height map first, then fill the volume. Columns far above or below the surface clamp to ±127 without noise. Chunks entirely above max height or below min height should exit early with `HasSurface = false`.
 - **Materials:**

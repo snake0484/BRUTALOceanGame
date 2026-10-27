@@ -16,11 +16,13 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 skyZenith;
     vec4 skyHorizon;  // w = fog density
     vec4 rain;        // x = intensity 0..1, y = its time (s, looped); as the ocean's foamParams.xy
+    vec4 wind;        // xy = 10 m wind (m/s, the way it blows toward)
 } frame;
 
 layout(location = 0) in vec3 vWorldPos;
 layout(location = 1) in vec3 vNormal;
 layout(location = 2) in float vThickness;
+layout(location = 3) in float vExposure; // the wind's reach here for the way it blows: 0 sheltered .. 1 open with fetch
 
 layout(location = 0) out vec4 outColor;
 
@@ -50,16 +52,34 @@ vec3 acesFit(vec3 x)
     return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
 }
 
-// Height-field slope (d/dx, d/dz) of three scrolling sine waves.
-vec2 rippleSlope(vec2 p, float t)
+const float GRAVITY = 9.81;
+const float TWO_PI = 6.2831853;
+
+// One wind-sea component: a deep-water wave of wavelength lambda running along the wind turned by ang, at steepness
+// steep (its slope amplitude) once the wind is over u1 m/s, none under u0. Returns its height-field slope.
+vec2 ripple(vec2 p, float t, vec2 d, vec2 n, float ang, float lambda, float steep, float U, float u0, float u1)
 {
-    const vec2 D0 = vec2(0.8, 0.6);
-    const vec2 D1 = vec2(-0.5, 0.87);
-    const vec2 D2 = vec2(0.97, -0.24);
-    vec2 s = D0 * (0.020 * 2.1) * cos(dot(D0, p) * 2.1 + t * 1.7);
-    s += D1 * (0.014 * 3.7) * cos(dot(D1, p) * 3.7 + t * 2.3);
-    s += D2 * (0.008 * 6.3) * cos(dot(D2, p) * 6.3 + t * 3.1);
-    return s;
+    vec2 k = d * cos(ang) + n * sin(ang);
+    float kk = TWO_PI / lambda;
+    float w = sqrt(GRAVITY * kk);
+    return k * (steep * smoothstep(u0, u1, U)) * cos(dot(k, p) * kk - w * t);
+}
+
+// Wind ripples (docs/voxel-water.md "Wind on voxel water"): four short waves spread about the wind, raised by its speed
+// and scaled by how far the wind reaches this water. Sheltered water (e = 0) has none and lies as glass.
+vec2 windRippleSlope(vec2 p, float t, vec2 wind, float e)
+{
+    float U = length(wind);
+    if (e <= 0.001 || U < 1.0)
+        return vec2(0.0);
+
+    vec2 d = wind / U;
+    vec2 n = vec2(-d.y, d.x);
+    vec2 s = ripple(p, t, d, n, -0.45, 0.45, 0.10, U, 1.5, 4.0);
+    s += ripple(p, t, d, n, 0.20, 0.8, 0.09, U, 2.0, 5.0);
+    s += ripple(p, t, d, n, -0.10, 1.4, 0.07, U, 3.0, 7.0);
+    s += ripple(p, t, d, n, 0.50, 2.4, 0.05, U, 4.0, 10.0);
+    return s * e;
 }
 
 void main()
@@ -71,10 +91,12 @@ void main()
     float intensity = frame.sunDir.w;
     float time = frame.cameraPos.w;
 
-    // Ripples fade with distance so they don't alias.
+    // Wind ripples where the wind reaches: the mesher's shelter at this corner (walls, shore, roofs in the block) and the
+    // cover map's exposure (roofs and caves beyond it, rain_cover.glsl). They fade with distance so they don't alias.
     vec3 N = normalize(vNormal);
     float rippleFade = 1.0 - smoothstep(30.0, 120.0, dist);
-    vec2 slope = rippleSlope(vWorldPos.xz, time) * rippleFade;
+    float exposure = vExposure * windCover(vWorldPos.xz).x;
+    vec2 slope = windRippleSlope(vWorldPos.xz, time, frame.wind.xy, exposure) * rippleFade;
     N = normalize(N + vec3(-slope.x, 0.0, -slope.y));
 
     // Rain: the ocean's rings and flashes (rain_ripples.glsl), none under cover (a cave pool). No crowns are drawn on

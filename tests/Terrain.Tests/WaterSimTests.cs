@@ -15,10 +15,31 @@ public sealed class WaterSimTests(ITestOutputHelper output)
     private sealed class Sim
     {
         public readonly Dictionary<ChunkCoord, WaterBlock> Blocks = new();
+        public readonly WaterBodies Bodies;
+        public WaterBodyInfo[] Generated = [];
+
+        public Sim(float seaLevel = 0f) => Bodies = new WaterBodies(seaLevel);
+
+        /// <summary>Registers the generator's bodies (the crater lake) so blocks read from the generator hold their water.</summary>
+        public void Register(in TerrainParams p)
+        {
+            Generated = TerrainGenerator.Bodies(p);
+
+            for (var i = 0; i < Generated.Length; i++)
+                Generated[i] = Generated[i] with { Id = Bodies.Add(Generated[i].Level, Generated[i].Area, Generated[i].Centre, Generated[i].Radius, Generated[i].Bottom) };
+        }
+
+        /// <summary>What the bodies' held cells gave or took in the last step, booked as the runtime does.</summary>
+        private void Book()
+        {
+            foreach (var block in Blocks.Values)
+                foreach (var id in block.Touched)
+                    Bodies.Exchange(id, block.BodyExchange[id]);
+        }
 
         public WaterBlock Add(ChunkCoord coord)
         {
-            var block = new WaterBlock();
+            var block = new WaterBlock { Bodies = Bodies };
             block.Reset(coord);
             Blocks.Add(coord, block);
             return block;
@@ -51,6 +72,8 @@ public sealed class WaterSimTests(ITestOutputHelper output)
 
                 foreach (var block in Blocks.Values)
                     WaterFlow.Swap(block);
+
+                Book();
             }
         }
 
@@ -256,20 +279,17 @@ public sealed class WaterSimTests(ITestOutputHelper output)
     [Fact]
     public void ReservoirFillsPitGradually()
     {
-        var sim = new Sim();
+        // The sea's top layer is this block's row 8 (world y −24): sea level −23.5.
+        var sim = new Sim(-23.5f);
         var b = sim.Add(new ChunkCoord(0, -1, 0));
-        b.ReservoirTopY = -32 + 8;
         CarveBox(b, 2, 1, 10, 25, 8, 10);
 
         for (var y = 1; y <= 8; y++)
             for (var x = 2; x <= 5; x++)
-            {
-                b.Flags[I(x, y, 10)] = (byte)WaterFlags.Reservoir;
-                b.Water[I(x, y, 10)] = b.ReservoirFill(y);
-            }
+                b.Hold(x, y, 10, WaterBodies.Sea);
 
-        Assert.Equal(1f, b.ReservoirFill(8));
-        Assert.Equal(1f + 7 * WaterFlow.Compression, b.ReservoirFill(1), 1e-6);
+        Assert.Equal(1f, b.Water[I(2, 8, 10)]);
+        Assert.Equal(1f + 7 * WaterFlow.Compression, b.Water[I(2, 1, 10)], 1e-6);
 
         sim.Step();
         Assert.True(b.Water[I(25, 1, 10)] < 1e-3, "far cell must not fill instantly");
@@ -304,7 +324,9 @@ public sealed class WaterSimTests(ITestOutputHelper output)
         FillWater(b, 2, 1, 5, 2, 22, 5);
         var start = sim.Mass();
 
-        sim.Step(15000);
+        // Pressure spreads at an eighth of each difference between full cells (stability with six neighbours), so the
+        // legs take twice the 15,000 steps they took at a quarter.
+        sim.Step(30000);
         var left = Sum(b, 2, 2, 5, 2, 28, 5);
         var right = Sum(b, 12, 2, 5, 12, 28, 5);
         output.WriteLine($"left leg {left:F3}, right leg {right:F3}");
@@ -324,7 +346,7 @@ public sealed class WaterSimTests(ITestOutputHelper output)
         VoxelEditor.Apply(chunk, [new BrushOp(centre, 2.5f, BrushMode.Dig, VoxelMaterial.Air)]);
 
         var block = new WaterBlock();
-        block.InitFrom(chunk);
+        block.InitFrom(chunk, new WaterBodies(p.SeaLevel));
         var reservoirs = 0;
 
         for (var z = 0; z < S; z++)
@@ -337,7 +359,7 @@ public sealed class WaterSimTests(ITestOutputHelper output)
                     var flags = (WaterFlags)block.Flags[i];
                     Assert.NotEqual(WaterFlags.Solid | WaterFlags.Reservoir, flags);
                     Assert.Equal(chunk.Density[i] < 0, flags.HasFlag(WaterFlags.Solid));
-                    Assert.Equal(flags.HasFlag(WaterFlags.Reservoir) ? block.ReservoirFill(y) : 0f, block.Water[i]);
+                    Assert.Equal(flags.HasFlag(WaterFlags.Reservoir) ? block.HeldFill(i) : 0f, block.Water[i]);
 
                     if (flags.HasFlag(WaterFlags.Reservoir))
                         reservoirs++;
@@ -355,7 +377,7 @@ public sealed class WaterSimTests(ITestOutputHelper output)
 
     private static (Vector3 Centre, ChunkCoord Coord) FindSeabedDig(in TerrainParams p)
     {
-        for (var cx = 4; cx < 64; cx++)
+        for (var cx = 4; cx < 256; cx++)
         {
             var x = cx * 8f + 0.5f;
             var z = 16.5f;
@@ -373,6 +395,78 @@ public sealed class WaterSimTests(ITestOutputHelper output)
         }
 
         throw new InvalidOperationException("no seabed column found");
+    }
+
+    /// <summary>
+    /// A pit dug beside the crater lake fills from the lake's held cells and is still within 20 s, so it can join the lake
+    /// (<see cref="WaterBlock.JoinBodies"/>). Water under pressure exchanges with all six neighbours; at a quarter of each
+    /// difference its cells swung in a checkerboard by 0.6–0.9 every step and never slept (<see cref="WaterFlow.PressureHorizontalRate"/>).
+    /// </summary>
+    [Fact]
+    public void PitBesideTheLakeFillsAndJoinsIt()
+    {
+        var p = new TerrainParams();
+        var sim = new Sim();
+        sim.Register(p);
+        var coord = new ChunkCoord(-6, 2, 0);
+        var chunk = new VoxelChunk { Coord = coord };
+        TerrainGenerator.Generate(chunk, p);
+        var b = sim.Add(coord);
+        b.InitFrom(chunk, sim.Bodies, sim.Generated);
+        VoxelEditor.Apply(chunk, [new BrushOp(new Vector3(-168f, 68.5f, 0f), 3f, BrushMode.Dig, VoxelMaterial.Air)]);
+        b.RefreshFrom(chunk);
+        sim.LinkFlags();
+
+        // 240 steps a second.
+        var still = 0;
+        for (var s = 1; s <= 20 * 240 && still < 240; s++)
+        {
+            sim.Step();
+            still = b.MaxDelta < 1e-4f ? still + 1 : 0;
+        }
+
+        var lake = sim.Generated[0].Id;
+        output.WriteLine($"the pit's cells change by {b.MaxDelta:E1} a step; the lake gave {sim.Bodies[lake].Given:F2} m3");
+        Assert.True(b.MaxDelta < 1e-4f, $"the pit should be still, its cells change by {b.MaxDelta} a step");
+        Assert.True(sim.Bodies[lake].Given > 5f, "the lake should have filled the pit");
+
+        b.JoinBodies();
+        var floor = I(24 - 2, 70 - 64 - 2, 0);
+        Assert.Equal((byte)WaterFlags.Reservoir, b.Flags[floor]);
+        Assert.Equal(lake, b.Body[floor]);
+        Assert.True(MathF.Abs(b.Joined[0].Paid) < 2f, $"the pit stands at the lake's level, yet joining paid {b.Joined[0].Paid} m3");
+    }
+
+    /// <summary>
+    /// The same pit across a block seam, as an edit in the game makes it: both blocks fill it and are still. (Before the
+    /// pressure rate fix its cells swapped 4 m³ across the seam every step.)
+    /// </summary>
+    [Fact]
+    public void PitAcrossABlockSeamSettles()
+    {
+        var p = new TerrainParams();
+        var sim = new Sim();
+        sim.Register(p);
+
+        foreach (var cz in new[] { -1, 0 })
+        {
+            var coord = new ChunkCoord(-6, 2, cz);
+            var chunk = new VoxelChunk { Coord = coord };
+            TerrainGenerator.Generate(chunk, p);
+            var b = sim.Add(coord);
+            b.InitFrom(chunk, sim.Bodies, sim.Generated);
+            VoxelEditor.Apply(chunk, [new BrushOp(new Vector3(-168f, 68.5f, 0f), 3f, BrushMode.Dig, VoxelMaterial.Air)]);
+            b.RefreshFrom(chunk);
+        }
+
+        sim.LinkFlags();
+        sim.Step(20 * 240);
+
+        foreach (var (c, b) in sim.Blocks)
+        {
+            output.WriteLine($"block z {c.Z}: after 20 s its cells change by {b.MaxDelta:E1} a step");
+            Assert.True(b.MaxDelta < 1e-4f, $"block z {c.Z} should be still, its cells change by {b.MaxDelta} a step");
+        }
     }
 
     [Fact]
@@ -402,6 +496,7 @@ public sealed class WaterSimTests(ITestOutputHelper output)
         for (var x = 20; x < 24; x++)
         {
             b.Flags[I(x, 1, 20)] = (byte)WaterFlags.Reservoir;
+            b.Body[I(x, 1, 20)] = WaterBodies.Sea;
             b.Water[I(x, 1, 20)] = 1f;
         }
 
@@ -432,6 +527,46 @@ public sealed class WaterSimTests(ITestOutputHelper output)
             mesher.Build(b, mesh);
 
         Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
+    }
+
+    /// <summary>
+    /// The wind's reach per corner (docs/voxel-water.md "Wind on voxel water"): water in the lee of a 4 m wall is
+    /// sheltered for the wind blowing from the wall and open for the wind blowing toward it, water in the open is open all
+    /// round, and water under a roof is sheltered from every direction.
+    /// </summary>
+    [Fact]
+    public void MesherSheltersWaterBehindAWallAndUnderARoof()
+    {
+        var b = new WaterBlock();
+        FillSolid(b, 0, 0, 0, S - 1, 0, S - 1);
+        FillWater(b, 4, 1, 4, 27, 1, 27, 0.5f);
+        FillSolid(b, 2, 1, 0, 3, 4, S - 1);
+        FillSolid(b, 20, 6, 0, 27, 6, S - 1);
+
+        var mesh = new WaterMesh();
+        new WaterSurfaceMesher().Build(b, mesh);
+
+        var lee = Corner(mesh, 4.5f, 16.5f);
+        var open = Corner(mesh, 12.5f, 16.5f);
+        var roofed = Corner(mesh, 24.5f, 16.5f);
+        output.WriteLine($"lee of the wall: toward +X {lee.Shelter(0)}, toward -X {lee.Shelter(4)}; open: {open.Shelter(0)} {open.Shelter(2)} {open.Shelter(4)}; roofed: {roofed.Shelter(0)}");
+
+        Assert.True(lee.Shelter(0) < 30, $"wind blowing from the wall should be sheltered, reach {lee.Shelter(0)}");
+        Assert.True(lee.Shelter(4) >= 250, $"wind blowing toward the wall crosses open water first, reach {lee.Shelter(4)}");
+        Assert.True(open.Shelter(2) >= 250 && open.Shelter(4) >= 250, "open water is open");
+        Assert.InRange(open.Shelter(0), 60, 200);
+
+        for (var k = 0; k < 8; k++)
+            Assert.Equal(0, roofed.Shelter(k));
+    }
+
+    private static WaterVertex Corner(WaterMesh mesh, float x, float z)
+    {
+        foreach (var v in mesh.VertexSpan)
+            if (MathF.Abs(v.Position.X - x) < 1e-4f && MathF.Abs(v.Position.Z - z) < 1e-4f)
+                return v;
+
+        throw new InvalidOperationException($"no corner at {x}, {z}");
     }
 
     [Fact]
@@ -484,10 +619,7 @@ public sealed class WaterSimTests(ITestOutputHelper output)
 
             for (var z = 0; z < S; z++)
                 for (var x = 26; x < S; x++)
-                {
-                    b.Flags[I(x, 4, z)] = (byte)WaterFlags.Reservoir;
-                    b.Water[I(x, 4, z)] = b.ReservoirFill(4);
-                }
+                    b.Hold(x, 4, z, WaterBodies.Sea);
 
             return b;
         }

@@ -6,11 +6,20 @@ namespace BrutalGame.Terrain.Water;
 [StructLayout(LayoutKind.Sequential)]
 public struct WaterVertex
 {
-    public const int SizeInBytes = 28;
+    public const int SizeInBytes = 36;
 
     public Vector3 Position;
     public Vector3 Normal;
     public float Thickness;
+
+    /// <summary>
+    /// How far the wind reaches this water, 0..255 per direction it blows toward (<see cref=WaterSurfaceMesher.Directions/>,
+    /// 45° apart from +X), as two R8G8B8A8_UNORM attributes: 0 under a roof or in the lee of a wall, 255 open with fetch.
+    /// </summary>
+    public uint Shelter0;
+    public uint Shelter1;
+
+    public readonly byte Shelter(int direction) => (byte)((direction < 4 ? Shelter0 : Shelter1) >> (8 * (direction & 3)));
 }
 
 /// <summary>Reusable surface mesh for one block, sized for the worst case so it never grows.</summary>

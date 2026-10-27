@@ -2,6 +2,7 @@ using System.Numerics;
 using Brutal.Logging;
 using BrutalGame.Engine.Rendering;
 using BrutalGame.Engine.Scene;
+using BrutalGame.Terrain;
 using BrutalGame.Terrain.Runtime;
 
 namespace BrutalGame;
@@ -32,8 +33,10 @@ public struct FrameSections
 public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryTexture map, CoastalSystem coastal, RainCover cover)
 {
     private static readonly LogCategory Log = LogCategory.Make("FlyTest");
-    private const float Radius = 270f;
+    /// <summary>The circle runs 60 m off the west beach, at least <see cref="Clearance"/> over the ground.</summary>
+    private readonly float _radius = 60f - Coastline.WestX(world.Params, 0f);
     private const float Height = 22f;
+    private const float Clearance = 15f;
     private const float Speed = 40f;
     private const double Seconds = 30.0;
     private const int MaxFrames = 1 << 16;
@@ -74,9 +77,10 @@ public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryText
             _coverBuilds = cover.Builds;
         }
 
-        var angle = (float)((time - _start) * Speed / Radius);
+        var angle = (float)((time - _start) * Speed / _radius);
         var (sin, cos) = MathF.SinCos(angle);
-        camera.Position = new Vector3(Radius * cos, Height, Radius * sin);
+        var (x, z) = (_radius * cos, _radius * sin);
+        camera.Position = new Vector3(x, MathF.Max(Height, TerrainGenerator.SurfaceHeight(x, z, world.Params) + Clearance), z);
         camera.Yaw = MathF.Atan2(cos, -sin) - 0.35f;
         camera.Pitch = -0.25f;
     }

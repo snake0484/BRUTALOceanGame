@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Numerics;
 using BrutalGame.Terrain.Water;
 using Xunit.Abstractions;
 
@@ -16,10 +17,31 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
     private sealed class Sim
     {
         public readonly Dictionary<ChunkCoord, WaterBlock> Blocks = new();
+        public readonly WaterBodies Bodies;
+        public WaterBodyInfo[] Generated = [];
+
+        public Sim(float seaLevel = 0f) => Bodies = new WaterBodies(seaLevel);
+
+        /// <summary>Registers the generator's bodies (the crater lake) so blocks read from the generator hold their water.</summary>
+        public void Register(in TerrainParams p)
+        {
+            Generated = TerrainGenerator.Bodies(p);
+
+            for (var i = 0; i < Generated.Length; i++)
+                Generated[i] = Generated[i] with { Id = Bodies.Add(Generated[i].Level, Generated[i].Area, Generated[i].Centre, Generated[i].Radius, Generated[i].Bottom) };
+        }
+
+        /// <summary>What the bodies' held cells gave or took in the last step, booked as the runtime does.</summary>
+        private void Book()
+        {
+            foreach (var block in Blocks.Values)
+                foreach (var id in block.Touched)
+                    Bodies.Exchange(id, block.BodyExchange[id]);
+        }
 
         public WaterBlock Add(ChunkCoord coord)
         {
-            var block = new WaterBlock(pipes: true);
+            var block = new WaterBlock(pipes: true) { Bodies = Bodies };
             block.Reset(coord);
             Blocks.Add(coord, block);
             return block;
@@ -74,6 +96,8 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
 
                 foreach (var block in Blocks.Values)
                     WaterFlow.Swap(block);
+
+                Book();
             }
         }
 
@@ -455,9 +479,9 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
                     chunk.Density[I(x, y, z)] = (sbyte)Math.Clamp(MathF.Round(d), -127f, 127f);
                 }
 
-        var sim = new Sim();
+        var sim = new Sim(-100f);
         var b = sim.Add(chunk.Coord);
-        b.InitFrom(chunk, seaLevel: -100f);
+        b.InitFrom(chunk, sim.Bodies);
 
         double Column(int x) => Sum(b, x, 0, 8, x, S - 1, 11) / 4;
         int[] probes = [12, 18, 24];
@@ -497,20 +521,237 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>
+    /// A block of the crater lake loaded from the generator, its shore included: its water is the lake's reservoir, held
+    /// at its hydrostatic fill under the surface (half full at the top layer, then 1 + Compression × the water above), and
+    /// at rest.
+    /// </summary>
+    [Fact]
+    public void LakeLoadsAtRest()
+    {
+        var p = new TerrainParams();
+        var lake = TerrainGenerator.Lake(p);
+        // 24 m inside the fill radius: 16 m inside the shore, where the bed is well under the top layer.
+        var coord = ChunkCoord.FromWorld(new Vector3(lake.Radius - 24f, lake.Top, 0f));
+        var chunk = new VoxelChunk { Coord = coord };
+        TerrainGenerator.Generate(chunk, p);
+
+        var sim = new Sim();
+        sim.Register(p);
+        var b = sim.Add(coord);
+        b.InitFrom(chunk, sim.Bodies, sim.Generated);
+        var top = lake.Top - coord.Y * S;
+        Assert.Equal((byte)WaterFlags.Reservoir, b.Flags[I(0, top, 16)]);
+        Assert.Equal(sim.Generated[0].Id, b.Body[I(0, top, 16)]);
+        Assert.Equal(0.5f, b.Water[I(0, top, 16)], 1e-6f);
+        Assert.Equal(1f + 0.5f * WaterFlow.Compression, b.Water[I(0, top - 1, 16)], 1e-6f);
+        Assert.Equal(0f, b.Water[I(0, top + 1, 16)]);
+
+        var mass = sim.Mass();
+        var settled = StepUntilSettled(sim, 480);
+        output.WriteLine($"lake block {coord}: {mass:F0} m3, quiet after {settled * Dt:F2} s, max delta {b.MaxDelta:E1}");
+        Assert.InRange(settled, 1, (int)(1.05f / Dt));
+        Assert.True(Math.Abs(sim.Mass() - mass) < 1e-3, "mass drifted");
+    }
+
+    /// <summary>
+    /// A pit dug into the crater lake's edge (no disc: the hole alone) fills from the lake's held cells, comes to rest, and
+    /// then joins the lake (<see cref="WaterBlock.JoinBodies"/>): its cells become the lake's at its level, the water it
+    /// took booked against the lake, and the block is at rest.
+    /// </summary>
+    [Fact]
+    public void PitDugIntoTheLakeFillsAndJoinsIt()
+    {
+        var p = new TerrainParams();
+        var lake = TerrainGenerator.Lake(p);
+
+        // The water reaches the shoreline only in its top layer or two, so the pit cuts 2 m inside it, a layer down.
+        var shore = lake.Radius - 8f;
+        var centre = new Vector3(2f - shore, lake.Top - 1f, 0f);
+        var (sim, b, coord) = LakeBlock(p, lake, centre);
+        b.RefreshFrom(Chunk(p, coord, centre, dig: true));
+
+        var local = centre - coord.WorldOrigin;
+        var top = lake.Top - coord.Y * S;
+        var floor = I((int)local.X - 2, top - 2, (int)local.Z);
+        Assert.Equal((byte)WaterFlags.None, b.Flags[floor]);
+        Assert.Equal(0f, b.Water[floor]);
+
+        var settled = StepUntilSettled(sim, (int)(40f / Dt));
+        var id = sim.Generated[0].Id;
+        output.WriteLine($"the pit filled and came to rest after {settled * Dt:F1} s; the lake gave {sim.Bodies[id].Given:F2} m3");
+        Assert.True(settled > 0, "the pit should fill from the lake and come to rest");
+        Assert.True(sim.Bodies[id].Given > 5f, "the lake should have paid for the pit");
+
+        b.JoinBodies();
+        Assert.Equal((byte)WaterFlags.Reservoir, b.Flags[floor]);
+        Assert.Equal(id, b.Body[floor]);
+        Assert.Equal(b.HeldFill(floor), b.Water[floor]);
+        Assert.Single(b.Joined);
+        Assert.True(MathF.Abs(b.Joined[0].Paid) < 2f, $"the pit stands at the lake's level, yet joining paid {b.Joined[0].Paid} m3");
+        Assert.InRange(StepUntilSettled(sim, (int)(2f / Dt)), 1, (int)(1.05f / Dt));
+    }
+
+    /// <summary>A pocket dug in the crater's bank under the lake's level, out of the water's reach, stays dry.</summary>
+    [Fact]
+    public void PocketTheLakeCannotReachStaysDry()
+    {
+        var p = new TerrainParams();
+        var lake = TerrainGenerator.Lake(p);
+        var centre = new Vector3(-lake.Radius - 12f, lake.Top - 2f, 0f);
+        var (_, b, coord) = LakeBlock(p, lake, centre);
+        b.RefreshFrom(Chunk(p, coord, centre, dig: true));
+
+        var local = centre - coord.WorldOrigin;
+        var i = I((int)local.X, (int)local.Y, (int)local.Z);
+        Assert.Equal((byte)WaterFlags.None, b.Flags[i]);
+        Assert.Equal(0f, b.Water[i]);
+        b.JoinBodies();
+        Assert.Empty(b.Joined);
+    }
+
+    /// <summary>
+    /// A disc around a dig into the lake (docs/voxel-water.md "Bodies of water"): inside it the lake's water is free, at the
+    /// fill it was held at, so it loads at rest; a pit dug in it fills by flow from the lake, paid for by the held cells
+    /// beyond the disc; and once still, with the disc ended, the pit joins the lake.
+    /// </summary>
+    [Fact]
+    public void LakeDiscPoursIntoAPitAndRejoins()
+    {
+        var p = new TerrainParams();
+        var lake = TerrainGenerator.Lake(p);
+        var shore = lake.Radius - 8f;
+        var centre = new Vector3(2f - shore, lake.Top - 1f, 0f);
+        var coord = ChunkCoord.FromWorld(centre);
+        var beyond = new ChunkCoord(coord.X + 1, coord.Y, coord.Z);
+        var sim = new Sim();
+        sim.Register(p);
+        var id = sim.Generated[0].Id;
+        var disc = new Vector4(centre.X, centre.Z, 3f + 6f, id);
+        var a = sim.Add(coord);
+        var b = sim.Add(beyond);
+        a.InitFrom(Chunk(p, coord, centre), sim.Bodies, sim.Generated, [disc]);
+        b.InitFrom(Chunk(p, beyond, centre), sim.Bodies, sim.Generated, [disc]);
+
+        var local = centre - coord.WorldOrigin;
+        var top = lake.Top - coord.Y * S;
+        // The lake reaches the shore only in its top layer: probe that layer, 6 m inside the shore and well beyond the disc.
+        var inside = I((int)local.X + 6, top, (int)local.Z);
+        var firstBeyond = (int)MathF.Floor(disc.X + disc.Z - beyond.WorldOrigin.X) + 1;
+        var outside = I(firstBeyond + 2, top, (int)local.Z);
+        Assert.Equal((byte)WaterFlags.None, a.Flags[inside]);
+        // Freed at the fill whose surface on its bed is the lake's (WaterBlock.FreeFill): its sideways head is the held cells'.
+        Assert.Equal(WaterBodies.Fill(lake.Top, lake.Surface) - 0.5f, WaterPipes.Head(a.Water[inside]) + WaterBlock.BedRise(a.Bed[inside], a.Water[inside]), 1e-3f);
+        Assert.Equal((byte)WaterFlags.Reservoir, b.Flags[outside]);
+        Assert.Equal(id, b.Body[outside]);
+
+        var mass = sim.Mass();
+        var settled = StepUntilSettled(sim, (int)(4f / Dt));
+        output.WriteLine($"disc loads at rest: quiet after {settled * Dt:F2} s, mass drift {sim.Mass() - mass:E1}");
+        Assert.InRange(settled, 1, (int)(2f / Dt));
+        Assert.True(Math.Abs(sim.Mass() - mass) < 0.05, $"mass drifted by {sim.Mass() - mass}");
+
+        a.RefreshFrom(Chunk(p, coord, centre, dig: true), [disc]);
+        var floor = I((int)local.X - 2, top - 2, (int)local.Z);
+        Assert.Equal((byte)WaterFlags.None, a.Flags[floor]);
+        Assert.Equal(0f, a.Water[floor]);
+
+        sim.Step((int)(10f / Dt));
+        var gave = sim.Bodies[id].Given;
+        output.WriteLine($"10 s after the dig: pit floor {a.Water[floor]:F3}, the lake gave {gave:F2} m3");
+        Assert.True(a.Water[floor] > 0.15f, $"the pit should fill from the lake, its floor holds {a.Water[floor]}");
+        Assert.True(gave > 3f, $"the held cells beyond the disc should pay for the pit, it gave {gave} m3");
+
+        // Once still, the disc ends: the pit's water at the lake's level joins it, paying about nothing more.
+        var rest = StepUntilSettled(sim, (int)(90f / Dt));
+        Assert.True(rest > 0, "the pour should come to rest");
+        a.MarkDiscs(default);
+        b.MarkDiscs(default);
+        a.JoinBodies();
+        b.JoinBodies();
+        sim.LinkFlags();
+        output.WriteLine($"at rest after {rest * Dt:F1} s more; rejoined: the lake paid {(a.Joined.Count > 0 ? a.Joined[0].Paid : 0f):F2} m3");
+        Assert.Equal((byte)WaterFlags.Reservoir, a.Flags[floor]);
+        Assert.Equal(id, a.Body[floor]);
+        Assert.True(a.Joined.Count > 0 && MathF.Abs(a.Joined[0].Paid) < 3f, "joining water at the level should pay about nothing");
+        Assert.InRange(StepUntilSettled(sim, (int)(2f / Dt)), 1, (int)(1.05f / Dt));
+    }
+
+    /// <summary>
+    /// Free water left standing level becomes a body (docs/voxel-water.md "Bodies of water"): a pond at rest in a box is
+    /// born a body at its level with its surface as its area, its cells held; a step of its ledger moves its level and the
+    /// refill lowers its held cells.
+    /// </summary>
+    [Fact]
+    public void StillPondIsBornABodyAndDrainsUniformly()
+    {
+        var sim = new Sim();
+        var b = sim.Add(new ChunkCoord(0, 1, 0));
+        CarveBox(b, 4, 1, 4, 19, 10, 19);
+        const float level = 32f + 3f;
+
+        for (var z = 4; z <= 19; z++)
+            for (var y = 1; y <= 3; y++)
+                for (var x = 4; x <= 19; x++)
+                    b.Water[I(x, y, z)] = WaterBodies.Fill(32 + y, level);
+
+        var settled = StepUntilSettled(sim, (int)(5f / Dt));
+        Assert.InRange(settled, 1, (int)(3f / Dt));
+
+        b.JoinBodies();
+        Assert.Empty(b.Joined);
+        b.BornBodies();
+        var (id, paid, _) = Assert.Single(b.Joined);
+        Assert.True(id > WaterBodies.Sea);
+        ref var body = ref sim.Bodies[id];
+        output.WriteLine($"born body {id}: level {body.Level:F3}, area {body.Area}, paid {paid:E1} m3");
+        Assert.Equal(level, body.Level, 0.05f);
+        Assert.Equal(256f, body.Area);
+        Assert.True(MathF.Abs(paid) < 0.5f);
+        Assert.Equal((byte)WaterFlags.Reservoir, b.Flags[I(10, 3, 10)]);
+        Assert.Equal(id, b.Body[I(10, 1, 10)]);
+        Assert.True(b.AllHeld() || !b.HasFreeWater());
+
+        // A small drain: a level step of water out of the ledger lowers the whole pond by a centimetre.
+        sim.Bodies.Exchange(id, -body.Area * WaterBodies.LevelStep);
+        sim.Bodies.SettleLevels();
+        Assert.Contains(id, sim.Bodies.Moved);
+        Assert.Equal(level - WaterBodies.LevelStep, sim.Bodies[id].Level, 1e-4f);
+        b.RefillHeld();
+        Assert.Equal(0.49f, b.Water[I(10, 3, 10)], 1e-4f);
+    }
+
+    private static VoxelChunk Chunk(in TerrainParams p, ChunkCoord coord, Vector3 centre, bool dig = false)
+    {
+        var chunk = new VoxelChunk { Coord = coord };
+        TerrainGenerator.Generate(chunk, p);
+
+        if (dig)
+            VoxelEditor.Apply(chunk, [new BrushOp(centre, 3f, BrushMode.Dig, VoxelMaterial.Air)]);
+
+        return chunk;
+    }
+
+    private static (Sim Sim, WaterBlock Block, ChunkCoord Coord) LakeBlock(in TerrainParams p, in LakeInfo lake, Vector3 at)
+    {
+        var coord = ChunkCoord.FromWorld(at);
+        var sim = new Sim();
+        sim.Register(p);
+        var b = sim.Add(coord);
+        b.InitFrom(Chunk(p, coord, at), sim.Bodies, sim.Generated);
+        return (sim, b, coord);
+    }
+
     [Fact]
     public void ReservoirFillsPit()
     {
-        var sim = new Sim();
+        var sim = new Sim(-23.5f);
         var b = sim.Add(new ChunkCoord(0, -1, 0));
-        b.ReservoirTopY = -32 + 8;
         CarveBox(b, 2, 1, 10, 25, 8, 10);
 
         for (var y = 1; y <= 8; y++)
             for (var x = 2; x <= 5; x++)
-            {
-                b.Flags[I(x, y, 10)] = (byte)WaterFlags.Reservoir;
-                b.Water[I(x, y, 10)] = b.ReservoirFill(y);
-            }
+                b.Hold(x, y, 10, WaterBodies.Sea);
 
         sim.Step();
         Assert.True(b.Water[I(25, 1, 10)] < 1e-3, "far cell must not fill instantly");

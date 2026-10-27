@@ -65,6 +65,7 @@ The queryable surface is built from three layers, composed by a single `OceanSur
 - **C, active local sim**: the voxel-water shallow-water solver, run near the player and near obstacles, with open edges driven by A + B. It handles reflection, run-up, flow around islands and breaking. Moving bodies inject displacement into it (two-way coupling). Outside C, bodies only feel buoyancy. Use it nearshore only: shallow water equations get deep-water wave speed wrong.
 - Voxel terrain and static Jolt shapes supply bathymetry and the solid mask to B and C. Terrain edits rebuild B and wake C.
 - **Voxel water** (`docs/voxel-water.md`): every voxel carries a water fill. Voxels decide *where* water is: sea fill at generation, edits, and later the flow sim. The swell and FFT decide *how* the open-sea surface moves. The ocean surface is drawn only over columns whose top sea voxel holds water. C is the voxel flow sim.
+  - **Crater lake** (`docs/voxel-water.md` "Lakes", implemented v1): the main island's summit lake is generated voxel water, loaded at rest and asleep, drawn within 352 m of the camera.
 - **Much later:** flooding enclosed vehicle volumes (e.g. a submarine hull breach). Interior water lives in the vehicle frame; inflow is driven by the outside head from `OceanSurface`; flooding changes mass, centre of mass and buoyancy.
 
 ### CPU side

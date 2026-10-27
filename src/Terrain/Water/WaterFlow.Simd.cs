@@ -85,12 +85,17 @@ public static partial class WaterFlow
         var reservoirBit = Vector256.Create((int)ReservoirBit);
         var maxDelta = zero;
         var border = false;
+        var one = Vector256.Create(1f);
+        var compression = Vector256.Create(Compression);
+        block.ClearExchange();
 
         fixed (float* w = block.Water)
         fixed (float* next = block.Next)
         fixed (float* os = block.OutScale)
         fixed (byte* fl = block.Flags)
         fixed (byte* wet = block.WetRows)
+        fixed (ushort* body = block.Body)
+        fixed (float* levels = block.Bodies.Levels)
         {
             for (var z = 0; z < S; z++)
             {
@@ -111,7 +116,7 @@ public static partial class WaterFlow
                     var seamBack = seam && z == 0 ? AllLanes() : zero;
                     var seamFront = seam && z == S - 1 ? AllLanes() : zero;
                     var borderRow = y == 0 || y == S - 1 || z == 0 || z == S - 1;
-                    var reservoirFill = Vector256.Create(block.ReservoirFill(y));
+                    var centre = Vector256.Create(block.Coord.Y * S + y + 0.5f);
 
                     for (var c = 0; c < Chunks; c++)
                     {
@@ -132,7 +137,23 @@ public static partial class WaterFlow
                         var solid = Vector256.Equals(flags & solidBit, solidBit).AsSingle();
                         var n = wc + (left + down + back - right - up - front);
                         n = Vector256.AndNot(n, Vector256.LessThan(n, eps) | solid);
-                        n = Vector256.ConditionalSelect(reservoir, reservoirFill, n);
+
+                        // Held lanes take their body's fill under its level (WaterBodies.Fill); what they would have held is booked to it.
+                        var held = Vector256.ExtractMostSignificantBits(reservoir);
+                        if (held != 0)
+                        {
+                            var ids = Avx2.ConvertToVector256Int32(body + i);
+                            var over = Avx2.GatherVector256(levels, ids, 4) - centre;
+                            var fill = Vector256.ConditionalSelect(Vector256.GreaterThanOrEqual(over, zero), one + compression * over, Vector256.MaxNative(one + over, zero));
+                            var gave = (n - fill) & reservoir;
+
+                            for (var l = 0; l < Lanes; l++)
+                                if ((held & (1u << l)) != 0)
+                                    block.AddExchange(body[i + l], gave.GetElement(l));
+
+                            n = Vector256.ConditionalSelect(reservoir, fill, n);
+                        }
+
                         n.Store(next + i);
 
                         var delta = Vector256.Abs(n - wc);
@@ -171,12 +192,16 @@ public static partial class WaterFlow
             var total = wl + wh;
             var squeezed = (Vector256.Create(1f) + total * Vector256.Create(Compression)) / Vector256.Create(1f + Compression);
             var stacked = (total + Vector256.Create(Compression)) * Vector256.Create(0.5f);
+            var unstacked = Vector256.LessThan(total, Vector256.Create(2f + Compression));
             var lower = Vector256.ConditionalSelect(Vector256.LessThanOrEqual(total, Vector256.Create(1f)), total,
-                Vector256.ConditionalSelect(Vector256.LessThan(total, Vector256.Create(2f + Compression)), squeezed, stacked));
-            return Vector256.AndNot((wl - lower) * Vector256.Create(VerticalRate), blocked);
+                Vector256.ConditionalSelect(unstacked, squeezed, stacked));
+            var rate = Vector256.ConditionalSelect(unstacked, Vector256.Create(VerticalRate), Vector256.Create(PressureVerticalRate));
+            return Vector256.AndNot((wl - lower) * rate, blocked);
         }
 
-        var t = (wl - wh) * Vector256.Create(HorizontalRate);
+        var one = Vector256.Create(1f);
+        var full = Vector256.GreaterThanOrEqual(wl, one) | Vector256.GreaterThanOrEqual(wh, one);
+        var t = (wl - wh) * Vector256.ConditionalSelect(full, Vector256.Create(PressureHorizontalRate), Vector256.Create(HorizontalRate));
         var threshold = Vector256.Create(SupportThreshold);
         var supportLo = SolidLanes(fl, lo - P) | Vector256.GreaterThanOrEqual(Vector256.Load(w + lo - P), threshold);
         var supportHi = SolidLanes(fl, hi - P) | Vector256.GreaterThanOrEqual(Vector256.Load(w + hi - P), threshold);

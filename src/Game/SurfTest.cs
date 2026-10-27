@@ -53,7 +53,8 @@ public sealed class SurfTest(TerrainWorld world, FlyCamera camera, OceanSwell sw
     private int _stage;
     private double _start;
     private bool _placed;
-    private Vector2 _target = new(-300f, 0f);
+    private readonly float _west = Coastline.WestX(world.Params, 0f);
+    private Vector2 _target = new(Coastline.WestX(world.Params, 0f) - 90f, 0f);
     private Vector2 _logged = new(float.NaN);
     private Vector3 _look;
 
@@ -151,7 +152,7 @@ public sealed class SurfTest(TerrainWorld world, FlyCamera camera, OceanSwell sw
         _crestDepth = MathF.Max(CrestShare * breakDepth, MinCrestDepth);
         var flankDepth = FlankShare * breakDepth;
         var foot = Min.X;
-        for (var x = -150f; x > -700f; x -= 2f)
+        for (var x = _west + 60f; x > _west - 490f; x -= 2f)
         {
             foot = x;
             if (-world.Bathymetry.SampleTop(x, 0f) >= flankDepth)

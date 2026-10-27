@@ -18,7 +18,8 @@ public sealed class FloodTest(TerrainWorld world, VoxelWaterSystem water, Physic
     private const float CraterRadius = 9f;
     private const float ChannelRadius = 3f;
     private const float ChannelDepth = -2f;
-    private const float SeaX = -250f;
+    /// <summary>The channel runs out to here, 40 m off the west beach.</summary>
+    private readonly float _seaX = Coastline.WestX(world.Params, 0f) - 40f;
 
     private double _start = -1.0;
     private double _nextLog;
@@ -48,13 +49,13 @@ public sealed class FloodTest(TerrainWorld world, VoxelWaterSystem water, Physic
 
         if (_stage == 2 && time - _start > 3.0)
         {
-            for (var x = _crater.X; x >= SeaX; x -= 2f)
+            for (var x = _crater.X; x >= _seaX; x -= 2f)
             {
                 world.ApplyBrush(new BrushOp(new Vector3(x, ChannelDepth, _crater.Z), ChannelRadius, BrushMode.Dig, VoxelMaterial.Air));
                 world.ApplyBrush(new BrushOp(new Vector3(x, ChannelDepth + 4f, _crater.Z), ChannelRadius, BrushMode.Dig, VoxelMaterial.Air));
             }
 
-            Log.Info($"channel cut from x={_crater.X:F0} to x={SeaX:F0}");
+            Log.Info($"channel cut from x={_crater.X:F0} to x={_seaX:F0}");
             _nextLog = time;
             _stage = 3;
         }

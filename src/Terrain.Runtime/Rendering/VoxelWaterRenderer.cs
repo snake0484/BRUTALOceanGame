@@ -15,7 +15,7 @@ namespace BrutalGame.Terrain.Runtime.Rendering;
 /// </summary>
 public sealed unsafe class VoxelWaterRenderer : IDisposable
 {
-    public const int VertexStride = 28;
+    public const int VertexStride = 36;
     public const int RegionVertexBytes = 8 << 20;
     public const int RegionIndexBytes = 8 << 20;
     public const int MaxDraws = 1024;
@@ -63,6 +63,7 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
         public Vector4 SkyZenith;
         public Vector4 SkyHorizon;
         public Vector4 Rain;
+        public Vector4 Wind;
     }
 
     public VoxelWaterRenderer(Renderer renderer, RainCover rainCover)
@@ -144,7 +145,8 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
 
     /// <summary>Inside the main pass, after opaque geometry and the ocean: frustum-culls and draws this frame's meshes.</summary>
     /// <param name="rain">Rain intensity 0..1 and its looped time (s), as the ocean gets them: rings on the water (rain_ripples.glsl).</param>
-    public void Draw(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, Vector3 cameraPos, in SceneLighting lighting, float time, Vector2 rain)
+    /// <param name="wind">10 m wind (m/s, the way it blows toward): raises ripples where the water's shelter lets it.</param>
+    public void Draw(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, Vector3 cameraPos, in SceneLighting lighting, float time, Vector2 rain, Vector2 wind)
     {
         MeshesLastFrame = 0;
         TrianglesLastFrame = 0;
@@ -159,6 +161,7 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
         uniforms->SkyZenith = new Vector4(lighting.SkyZenith, 0f);
         uniforms->SkyHorizon = new Vector4(lighting.SkyHorizon, lighting.FogDensity);
         uniforms->Rain = new Vector4(rain, 0f, 0f);
+        uniforms->Wind = new Vector4(wind, 0f, 0f);
 
         commands.BindPipeline(VkPipelineBindPoint.Graphics, _pipeline);
         commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex]], []);
@@ -336,13 +339,15 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
                     new() { Location = 0, Binding = 0, Format = VkFormat.R32G32B32SFloat, Offset = (ByteSize32)0 },
                     new() { Location = 1, Binding = 0, Format = VkFormat.R32G32B32SFloat, Offset = (ByteSize32)12 },
                     new() { Location = 2, Binding = 0, Format = VkFormat.R32SFloat, Offset = (ByteSize32)24 },
+                    new() { Location = 3, Binding = 0, Format = VkFormat.R8G8B8A8UNorm, Offset = (ByteSize32)28 },
+                    new() { Location = 4, Binding = 0, Format = VkFormat.R8G8B8A8UNorm, Offset = (ByteSize32)32 },
                 };
 
                 var vertexInput = new VkPipelineVertexInputStateCreateInfo
                 {
                     VertexBindingDescriptionCount = 1,
                     VertexBindingDescriptions = &binding,
-                    VertexAttributeDescriptionCount = 3,
+                    VertexAttributeDescriptionCount = 5,
                     VertexAttributeDescriptions = attributes,
                 };
                 var inputAssembly = new VkPipelineInputAssemblyStateCreateInfo { Topology = VkPrimitiveTopology.TriangleList };

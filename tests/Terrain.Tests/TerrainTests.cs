@@ -10,7 +10,7 @@ public sealed class TerrainTests
 
     private static readonly ChunkCoord[] SampleCoords =
     [
-        new(0, 0, 0), new(0, 1, 0), new(6, 0, 0), new(-7, -1, 2), new(3, 0, -5), new(-2, 1, 1), new(12, -1, 9), new(0, -2, 0),
+        new(0, 0, 0), new(0, 1, 0), new(20, 0, 0), new(-22, -1, 2), new(3, 0, -5), new(-2, 1, 1), new(12, -1, 9), new(0, -2, 0),
     ];
 
     private static VoxelChunk Generate(ChunkCoord coord, in TerrainParams p)
@@ -121,12 +121,12 @@ public sealed class TerrainTests
     {
         BrushOp[] ops =
         [
-            new(new Vector3(200f, 5f, 10f), 6f, BrushMode.Dig, VoxelMaterial.Air),
-            new(new Vector3(205f, 8f, 12f), 3f, BrushMode.Place, VoxelMaterial.Dirt),
-            new(new Vector3(190.3f, -2.7f, 25.1f), 4.4f, BrushMode.Place, VoxelMaterial.Sand),
+            new(new Vector3(648f, 5f, 10f), 6f, BrushMode.Dig, VoxelMaterial.Air),
+            new(new Vector3(653f, 8f, 12f), 3f, BrushMode.Place, VoxelMaterial.Dirt),
+            new(new Vector3(638.3f, -2.7f, 25.1f), 4.4f, BrushMode.Place, VoxelMaterial.Sand),
         ];
 
-        var c = Generate(new ChunkCoord(6, 0, 0), new TerrainParams());
+        var c = Generate(new ChunkCoord(20, 0, 0), new TerrainParams());
         VoxelEditor.Apply(c, ops);
         var h = Fnv(14695981039346656037UL, MemoryMarshal.AsBytes(c.Density.AsSpan()));
         h = Fnv(h, c.Material);
@@ -137,9 +137,9 @@ public sealed class TerrainTests
     public void Lod0OutputMatchesReference()
     {
         var (voxels, mesh) = Lod0Hashes();
-        Assert.Equal(15090781701742964954UL, voxels);
-        Assert.Equal(3896220001399264571UL, mesh);
-        Assert.Equal(14746362846408289604UL, Lod0EditHash());
+        Assert.Equal(2301151461472924951UL, voxels);
+        Assert.Equal(7113128240621187065UL, mesh);
+        Assert.Equal(3646996744844462313UL, Lod0EditHash());
     }
 
     [Fact]
@@ -172,8 +172,8 @@ public sealed class TerrainTests
     public void GeneratedNeighboursAgreeOnSharedApron()
     {
         var p = new TerrainParams();
-        var a = Generate(new ChunkCoord(6, 0, 0), p);
-        var b = Generate(new ChunkCoord(7, 0, 0), p);
+        var a = Generate(new ChunkCoord(20, 0, 0), p);
+        var b = Generate(new ChunkCoord(21, 0, 0), p);
         Assert.True(a.HasSurface || b.HasSurface);
 
         for (var z = -1; z <= ChunkConstants.Size; z++)
@@ -284,7 +284,7 @@ public sealed class TerrainTests
     public void MesherDoesNotAllocateAfterWarmUp()
     {
         var p = new TerrainParams();
-        var chunk = Generate(new ChunkCoord(6, 0, 0), p);
+        var chunk = Generate(new ChunkCoord(20, 0, 0), p);
         Assert.True(chunk.HasSurface);
         var mesher = new SurfaceNetsMesher();
         var mesh = new ChunkMesh();
@@ -413,7 +413,7 @@ public sealed class TerrainTests
     public void GenerationFillsSeaOnlyInAirBelowSeaLevel()
     {
         var p = new TerrainParams();
-        var chunk = Generate(new ChunkCoord(20, -1, 0), p); // open sea, well off the coast
+        var chunk = Generate(new ChunkCoord(40, -1, 0), p); // open sea, well off the coast
         var origin = chunk.Coord.WorldOrigin;
         var wet = 0;
 
@@ -428,7 +428,42 @@ public sealed class TerrainTests
         }
 
         Assert.True(wet > 0);
-        Assert.All(Generate(new ChunkCoord(0, 1, 0), p).Water, w => Assert.Equal(0, w));
+        Assert.All(Generate(new ChunkCoord(10, 1, 0), p).Water, w => Assert.Equal(0, w));
+    }
+
+    /// <summary>
+    /// The crater lake: every open voxel at or under its top layer within its radius is full, none above it, and the rim
+    /// stands over the water all round, so the basin holds it.
+    /// </summary>
+    [Fact]
+    public void CraterLakeIsGeneratedFullAndHeldByItsRim()
+    {
+        var p = new TerrainParams();
+        var lake = TerrainGenerator.Lake(p);
+        Assert.True(lake.Exists);
+
+        var top = new Vector3(0f, lake.Top, 0f);
+        var coord = ChunkCoord.FromWorld(top);
+        var chunk = Generate(coord, p);
+        var local = top - coord.WorldOrigin;
+        var at = ChunkConstants.Index((int)local.X, (int)local.Y, (int)local.Z);
+        Assert.Equal(byte.MaxValue, chunk.Water[at]);
+        Assert.Equal(0, Generate(ChunkCoord.FromWorld(top + Vector3.UnitY), p).Water[ChunkConstants.Index((int)local.X, ((int)local.Y + 1) % ChunkConstants.Size, (int)local.Z)]);
+
+        var lowest = float.MaxValue;
+        for (var a = 0; a < 360; a += 2)
+        {
+            var (sin, cos) = MathF.SinCos(a * MathF.PI / 180f);
+            var crest = float.MinValue;
+
+            for (var r = lake.Radius; r < lake.Radius + 300f; r += 2f)
+                crest = MathF.Max(crest, TerrainGenerator.SurfaceHeight(cos * r, sin * r, p));
+
+            lowest = MathF.Min(lowest, crest);
+        }
+
+        Assert.True(lowest > lake.Top + 1.5f, $"the rim's lowest crest {lowest:F1} m should stand over the water at {lake.Top + 0.5f} m");
+        Assert.True(TerrainGenerator.SurfaceHeight(0f, 0f, p) < lake.Top - 8f, "the lake should be deep at its centre");
     }
 
     [Fact]

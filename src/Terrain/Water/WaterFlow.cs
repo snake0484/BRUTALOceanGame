@@ -25,6 +25,17 @@ public static partial class WaterFlow
     public const float Compression = 0.02f;
     public const float VerticalRate = 0.5f;
     public const float HorizontalRate = 0.25f;
+
+    /// <summary>
+    /// The rates where either cell of a pair is full (water under pressure). There all six neighbours exchange, and a
+    /// quarter of each difference (the limit for a layer's four) gave the checkerboard mode a factor of −2 a step: a pit
+    /// beside the lake swung its cells by 0.6–0.9 every step and never slept. An eighth (horizontally, and vertically
+    /// between stacked full cells) keeps the six at ¾ of the limit, so the mode decays by half a step. It must apply when
+    /// only one cell is full too: a pit filling from the lake's held cells hovers about full, and with the quarter on
+    /// those mixed pairs its cells flipped between 0.3 and 3.4 every step for good (the old instant join hid it).
+    /// </summary>
+    public const float PressureHorizontalRate = 0.125f;
+    public const float PressureVerticalRate = 0.25f;
     public const float SupportThreshold = 0.99f;
     public const float SnapEpsilon = 1e-5f;
     public const float BorderEpsilon = 1e-4f;
@@ -119,6 +130,8 @@ public static partial class WaterFlow
     [SkipLocalsInit]
     private static unsafe void ApplyFlowsScalar(WaterBlock block)
     {
+        block.ClearExchange();
+        var levels = block.Bodies.Levels;
         var yCache = stackalloc float[S];
         var zCache = stackalloc float[S * S];
         var maxDelta = 0f;
@@ -146,7 +159,7 @@ public static partial class WaterFlow
                     }
 
                     var seam = y == 0;
-                    var reservoirFill = block.ReservoirFill(y);
+                    var worldY = block.Coord.Y * S + y;
                     var borderRow = y == 0 || y == S - 1 || z == 0 || z == S - 1;
                     var left = Actual(w, fl, os, row - 1, 1, seam ? HorizontalSeam : Horizontal);
 
@@ -166,7 +179,12 @@ public static partial class WaterFlow
                         var n = wc + (left + down + back - right - up - front);
 
                         if ((flags & ReservoirBit) != 0)
-                            n = reservoirFill;
+                        {
+                            var id = block.Body[i];
+                            var fill = WaterBodies.Fill(worldY, levels[id]);
+                            block.AddExchange(id, n - fill);
+                            n = fill;
+                        }
                         else if (n < SnapEpsilon || (flags & SolidBit) != 0)
                             n = 0f;
 
@@ -216,11 +234,11 @@ public static partial class WaterFlow
             var lower = total <= 1f ? total
                 : total < 2f + Compression ? (1f + total * Compression) / (1f + Compression)
                 : (total + Compression) * 0.5f;
-            return (wl - lower) * VerticalRate;
+            return (wl - lower) * (total < 2f + Compression ? VerticalRate : PressureVerticalRate);
         }
 
         // Spreads smaller than the snap would only be destroyed by it on arrival.
-        var t = (wl - wh) * HorizontalRate;
+        var t = (wl - wh) * (wl >= 1f || wh >= 1f ? PressureHorizontalRate : HorizontalRate);
 
         if (MathF.Abs(t) < SnapEpsilon)
             return 0f;

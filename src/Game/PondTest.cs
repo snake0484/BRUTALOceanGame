@@ -60,7 +60,8 @@ public sealed class PondTest(TerrainWorld world, VoxelWaterSystem water, Physics
         {
             if (!FindSite())
             {
-                Log.Info($"no hillside site found (ground at x -240 z 0: {Ground(-240f, 0f):F1} m, x -200: {Ground(-200f, 0f):F1} m, x -150: {Ground(-150f, 0f):F1} m)");
+                var west = Coastline.WestX(world.Params, 0f);
+                Log.Info($"no hillside site found (ground 30 m in from the west waterline at z 0: {Ground(west + 30f, 0f):F1} m, 60 m: {Ground(west + 60f, 0f):F1} m, 90 m: {Ground(west + 90f, 0f):F1} m)");
                 _stage = 5;
                 return;
             }
@@ -110,7 +111,7 @@ public sealed class PondTest(TerrainWorld world, VoxelWaterSystem water, Physics
 
         if (_stage >= 3 && _stage < 5 && time >= _nextLog)
         {
-            Log.Info($"t+{time - _start:F1}s voxel {(water.Pipes ? "pipes" : "automaton")}: blocks {water.Blocks}, awake {water.AwakeBlocks}, step {water.LastStepMs:F3} ms, awake mass {water.Mass:F0} m3; zone discs {water.ZoneDiscs}; activity {water.Activity}");
+            Log.Info($"t+{time - _start:F1}s voxel {(water.Pipes ? "pipes" : "automaton")}: blocks {water.Blocks}, awake {water.AwakeBlocks}, step {water.LastStepMs:F3} ms, awake mass {water.Mass:F0} m3; bodies {water.Bodies.Count - 2}, discs {water.Discs}, zone discs {water.ZoneDiscs}; activity {water.Activity}");
             _nextLog = time + 0.5;
 
             // Water depth down the run-off path: the pond's centre, then every 4 m toward the sea.
@@ -137,7 +138,7 @@ public sealed class PondTest(TerrainWorld world, VoxelWaterSystem water, Physics
     {
         foreach (var z in Lanes)
         {
-            for (var x = -300f; x < 0f; x += 1f)
+            for (var x = Coastline.WestX(world.Params, z) - 90f; x < 0f; x += 1f)
             {
                 var here = Ground(x, z);
                 if (float.IsNaN(here) || here < SiteHeight)

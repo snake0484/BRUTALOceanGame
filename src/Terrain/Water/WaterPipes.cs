@@ -50,6 +50,13 @@ public static class WaterPipes
     /// <summary>A supported cell's speed down through its floor is measured over at least this much water, so its last drops don't read as a jet.</summary>
     private const float MinFallFill = 0.05f;
 
+    /// <summary>
+    /// A reservoir cell (sea or lake, held at its fill) over a cell with room pours into it at this speed (m/s): water
+    /// falling half a cell, √(2 g · 0.5). It has no fall speed of its own, so without it a pit dug under a lake or the
+    /// seabed, or under the cells at a lake's edge, never filled from above.
+    /// </summary>
+    private const float ReservoirPour = 3.13f;
+
     /// <summary>Falling water's sideways speed is at most this (m/s); water flowing off a thin film reads its speed over at least <see cref="MinFallFill"/>.</summary>
     private const float MaxDrift = 10f;
     private const float InverseCompression = 1f / WaterFlow.Compression;
@@ -128,17 +135,17 @@ public static class WaterPipes
                         var i = row + x;
 
                         if (x == 0)
-                            fx[i - 1] = Horizontal(w, fl, bed, v, dx, fx[i - 1], i - 1, 1, seam, !top, fallsHere, pipe, damping, dt);
+                            fx[i - 1] = Horizontal(w, fl, bed, v, dx, fx[i - 1], i - 1, 1, seam, !top, fallsHere, pipe, damping, settling, dt);
 
                         if (y == 0)
                             fy[i - P] = Vertical(w, fl, v, fy[i - P], i - P, pipe, settling, dt);
 
                         if (z == 0)
-                            fz[i - A] = Horizontal(w, fl, bed, v, dz, fz[i - A], i - A, A, seam, !top, fallsBack || fallsHere, pipe, damping, dt);
+                            fz[i - A] = Horizontal(w, fl, bed, v, dz, fz[i - A], i - A, A, seam, !top, fallsBack || fallsHere, pipe, damping, settling, dt);
 
-                        fx[i] = Horizontal(w, fl, bed, v, dx, fx[i], i, 1, seam && x == S - 1, !(top && x == S - 1), fallsHere, pipe, damping, dt);
+                        fx[i] = Horizontal(w, fl, bed, v, dx, fx[i], i, 1, seam && x == S - 1, !(top && x == S - 1), fallsHere, pipe, damping, settling, dt);
                         fy[i] = Vertical(w, fl, v, fy[i], i, pipe, settling, dt);
-                        fz[i] = Horizontal(w, fl, bed, v, dz, fz[i], i, A, seam && z == S - 1, !(top && z == S - 1), fallsHere || fallsFront, pipe, damping, dt);
+                        fz[i] = Horizontal(w, fl, bed, v, dz, fz[i], i, A, seam && z == S - 1, !(top && z == S - 1), fallsHere || fallsFront, pipe, damping, settling, dt);
 
                         var sent = dt * (MathF.Max(fx[i], 0f) + MathF.Max(-fx[i - 1], 0f) + MathF.Max(fy[i], 0f)
                             + MathF.Max(-fy[i - P], 0f) + MathF.Max(fz[i], 0f) + MathF.Max(-fz[i - A], 0f));
@@ -162,6 +169,9 @@ public static class WaterPipes
         var maxFlux = 0f;
         var border = false;
         var gain = Gravity * dt;
+        var levels = block.Bodies.Levels;
+        var body = block.Body;
+        block.ClearExchange();
 
         fixed (float* w = block.Water)
         fixed (float* next = block.Next)
@@ -188,7 +198,7 @@ public static class WaterPipes
                         continue;
                     }
 
-                    var reservoirFill = block.ReservoirFill(y);
+                    var worldY = block.Coord.Y * S + y;
                     var borderRow = y == 0 || y == S - 1 || z == 0 || z == S - 1;
 
                     for (var x = 0; x < S; x++)
@@ -225,7 +235,10 @@ public static class WaterPipes
                         // it falls, so deleting it would only lose mass.
                         if ((flags & ReservoirBit) != 0)
                         {
-                            n = reservoirFill;
+                            var id = body[i];
+                            var fill = WaterBodies.Fill(worldY, levels[id]);
+                            block.AddExchange(id, n - fill);
+                            n = fill;
                         }
                         else if (n <= 0f || (flags & SolidBit) != 0)
                         {
@@ -291,7 +304,7 @@ public static class WaterPipes
     /// <paramref name="falling"/>: the rows over it hold falling water.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe float Horizontal(float* w, byte* fl, sbyte* bd, float* v, float* drift, float f, int lo, int stride, bool seam, bool over, bool falling, float pipe, float damping, float dt)
+    private static unsafe float Horizontal(float* w, byte* fl, sbyte* bd, float* v, float* drift, float f, int lo, int stride, bool seam, bool over, bool falling, float pipe, float damping, float settling, float dt)
     {
         var hi = lo + stride;
         var wl = w[lo];
@@ -300,11 +313,18 @@ public static class WaterPipes
         if (((fl[lo] | fl[hi]) & SolidBit) != 0 || (wl == 0f && wh == 0f))
             return 0f;
 
+        // A face into a reservoir settles as a pressure face does: an open lake or sea takes a wave's energy away, where a
+        // held cell reflected it, and a pit dug beside the lake rang against it for 35 s.
+        if (((fl[lo] | fl[hi]) & ReservoirBit) != 0)
+            damping = settling;
+
         var drive = SideHead(w, fl, bd, lo, seam) - SideHead(w, fl, bd, hi, seam);
         var up = drive > 0f ? lo : hi;
         var below = up - P;
         var bed = seam ? bd[up] != WaterBlock.NotBed : (fl[below] & SolidBit) != 0;
-        var face = seam || bed || w[below] >= WaterFlow.SupportThreshold ? MathF.Min(w[up], 1f) : 0f;
+
+        // A reservoir is held at its fill whatever is under it, so it pushes with its full face.
+        var face = seam || bed || (fl[up] & ReservoirBit) != 0 || w[below] >= WaterFlow.SupportThreshold ? MathF.Min(w[up], 1f) : 0f;
 
         if (bed)
         {
@@ -388,6 +408,10 @@ public static class WaterPipes
         var wi = w[i];
         var below = i - P;
 
+        // A reservoir's fill already is the lake's or the sea's level: it takes no bed rise.
+        if ((fl[i] & ReservoirBit) != 0)
+            return Head(wi);
+
         if (seam || (fl[below] & SolidBit) != 0 || w[below] >= WaterFlow.SupportThreshold)
             return Head(wi) + WaterBlock.BedRise(bd[i], wi);
 
@@ -413,6 +437,9 @@ public static class WaterPipes
 
         if (wl >= WaterFlow.SupportThreshold)
             return f * damping + pipe * (Head(wl) - 1f - Head(wh));
+
+        if ((fl[hi] & ReservoirBit) != 0)
+            return -ReservoirPour * MathF.Min(wh, 1f);
 
         var fall = v[hi] * MathF.Min(wh, 1f);
         return fall < 0f && -fall * dt < WaterFlow.SnapEpsilon ? -wh / dt : fall;

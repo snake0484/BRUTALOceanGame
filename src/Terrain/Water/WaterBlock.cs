@@ -6,6 +6,8 @@ public enum WaterFlags : byte
 {
     None = 0,
     Solid = 1,
+
+    /// <summary>Held by a body of water (<see cref="WaterBlock.Body"/>) at the hydrostatic fill under its level; never stepped.</summary>
     Reservoir = 2,
 
     /// <summary>Simulated sea next to an edit: flows like any water, but is drawn by the ocean renderer (level offset).</summary>
@@ -33,12 +35,23 @@ public sealed class WaterBlock
     private const int P = ChunkConstants.Padded;
     private const int A = ChunkConstants.PaddedArea;
     private const byte ReservoirByte = 128;
+    private const byte SolidBit = (byte)WaterFlags.Solid;
+    private const byte HeldBit = (byte)WaterFlags.Reservoir;
 
     public ChunkCoord Coord;
     public float[] Water = new float[ChunkConstants.PaddedVolume];
     public float[] Next = new float[ChunkConstants.PaddedVolume];
     public readonly float[] OutScale = new float[ChunkConstants.PaddedVolume];
     public readonly byte[] Flags = new byte[ChunkConstants.PaddedVolume];
+
+    /// <summary>
+    /// Per cell, the body of water that holds it (<see cref="WaterBodies"/>), <see cref="WaterBodies.None"/> for free
+    /// water, air and solid. Set with the <see cref="WaterFlags.Reservoir"/> bit; halo planes are copied with the flags.
+    /// </summary>
+    public readonly ushort[] Body = new ushort[ChunkConstants.PaddedVolume];
+
+    /// <summary>The bodies table the block's held cells read their levels from. Set by <see cref="InitFrom"/>; blocks built by hand (tests) share <see cref="WaterBodies.Default"/>.</summary>
+    public WaterBodies Bodies = WaterBodies.Default;
 
     /// <summary>
     /// Per open cell standing on solid: how far the terrain's smooth surface lies above the cell's voxel floor (y − 0.5),
@@ -50,6 +63,13 @@ public sealed class WaterBlock
 
     public const sbyte NotBed = sbyte.MinValue;
     public const float BedUnit = 1f / 254f;
+
+    /// <summary>
+    /// Layers over the sea's top layer that a sea zone disc claims (<see cref="Unclamp"/>): the zone sim's surface can stand
+    /// that high in a surge or run-up, and the ocean draws it. Higher cells in the disc's columns are the voxels' own, so a
+    /// tunnel coming down to the shore shows its water instead of vanishing where the disc begins.
+    /// </summary>
+    public const int ZoneRunUp = 4;
 
     /// <summary>
     /// Face fluxes of the pipe model (<see cref="WaterPipes"/>), m³/s, positive from the lower-index cell: FluxX[i] is the
@@ -80,10 +100,41 @@ public sealed class WaterBlock
     public float MaxFlux;
     public bool BorderActive;
     public int QuietSteps;
+
+    /// <summary>Steps in a row with fills changing under <see cref="VoxelWaterSystem"/>'s calm delta and no face moving more than its calm flux.</summary>
+    public int CalmSteps;
     public bool Asleep;
 
-    /// <summary>World y of the top sea voxel layer. Reservoir cells are held at their hydrostatic fill below it.</summary>
-    public int ReservoirTopY = -1;
+    /// <summary>
+    /// Per body, the water the last step put into (positive) or took out of its held cells here (m³), before they were
+    /// held at their fill again; only the ids in <see cref="Touched"/> are set. Summed over a body's blocks, it is what the
+    /// body gained or lost (<see cref="WaterBodies.Exchange"/>).
+    /// </summary>
+    public readonly float[] BodyExchange = new float[WaterBodies.MaxBodies];
+    public readonly List<ushort> Touched = new(8);
+    private readonly byte[] _touched = new byte[WaterBodies.MaxBodies];
+
+    /// <summary>The bodies with held cells in the block, for refills when their level moves.</summary>
+    public readonly List<ushort> Present = new(8);
+    private readonly byte[] _present = new byte[WaterBodies.MaxBodies];
+
+    /// <summary>What the last <see cref="JoinBodies"/> or <see cref="BornBodies"/> took in: per body, the water it paid and the surface cells added.</summary>
+    public readonly List<(ushort Id, float Paid, int Surface)> Joined = new(4);
+
+    [ThreadStatic]
+    private static int[]? _flood;
+
+    [ThreadStatic]
+    private static byte[]? _seen;
+
+    /// <summary>
+    /// Per interior column (x + z·Size): the body whose held water is free there, inside a disc around a dig into it
+    /// (docs/voxel-water.md "Bodies of water"); <see cref="JoinBodies"/> leaves such columns alone for that body.
+    /// </summary>
+    private readonly ushort[] _discBody = new ushort[S * S];
+
+    /// <summary>Per interior column: the generated body (its fill disc covers the column) that generated water above the sea belongs to.</summary>
+    private readonly ushort[] _generatedBody = new ushort[S * S];
 
     /// <summary>Per padded row (y, z): any water in the row's 34 cells. Built by pass 1, reused by pass 2.</summary>
     internal readonly byte[] WetRows = new byte[ChunkConstants.PaddedArea];
@@ -111,10 +162,16 @@ public sealed class WaterBlock
         Water.AsSpan().Clear();
         Next.AsSpan().Clear();
         OutScale.AsSpan().Fill(1f);
-        Flags.AsSpan().Fill((byte)WaterFlags.Solid);
+        Flags.AsSpan().Fill(SolidBit);
+        Body.AsSpan().Clear();
         Bed.AsSpan().Fill(NotBed);
         WetRows.AsSpan().Clear();
+        _discBody.AsSpan().Clear();
+        _generatedBody.AsSpan().Clear();
         ClearFluxes();
+        ClearExchange();
+        ClearPresent();
+        Joined.Clear();
 
         for (var z = 0; z < S; z++)
             for (var y = 0; y < S; y++)
@@ -123,8 +180,8 @@ public sealed class WaterBlock
         MaxDelta = 0f;
         BorderActive = false;
         QuietSteps = 0;
+        CalmSteps = 0;
         Asleep = false;
-        ReservoirTopY = -1;
         _openFaces = 0;
     }
 
@@ -140,51 +197,197 @@ public sealed class WaterBlock
         MaxFlux = 0f;
     }
 
-    /// <summary>Chunk generated + ops replayed at LOD 0. Solid where density &lt; 0, Reservoir where byte water ≥ 128 (open, generated sea).</summary>
-    public void InitFrom(VoxelChunk chunk, float seaLevel = 0f)
+    /// <summary>Before a step's apply pass: no body has exchanged anything yet.</summary>
+    public void ClearExchange()
+    {
+        foreach (var id in Touched)
+        {
+            BodyExchange[id] = 0f;
+            _touched[id] = 0;
+        }
+
+        Touched.Clear();
+    }
+
+    /// <summary>Books water a held cell of <paramref name="id"/> took in (positive) or gave this step.</summary>
+    public void AddExchange(ushort id, float amount)
+    {
+        if (_touched[id] == 0)
+        {
+            _touched[id] = 1;
+            Touched.Add(id);
+        }
+
+        BodyExchange[id] += amount;
+    }
+
+    private void ClearPresent()
+    {
+        foreach (var id in Present)
+            _present[id] = 0;
+
+        Present.Clear();
+    }
+
+    private void Note(ushort id)
+    {
+        if (_present[id] != 0)
+            return;
+
+        _present[id] = 1;
+        Present.Add(id);
+    }
+
+    /// <summary>Any held cell of this body in the block.</summary>
+    public bool Holds(ushort id) => _present[id] != 0;
+
+    /// <summary>
+    /// Chunk generated + ops replayed at LOD 0. Solid where density &lt; 0. Generated water (byte ≥ 128) at or under the
+    /// sea's top layer is held by the sea; above it, by the generated body (<paramref name="generated"/>) whose fill disc
+    /// covers its column, at the body's level as it now stands; generated water no body claims is free. Inside
+    /// <paramref name="discs"/> (world x, world z, radius, body id; the discs around digs into bodies) that body's water
+    /// is free instead, at the fill it would be held at.
+    /// </summary>
+    public void InitFrom(VoxelChunk chunk, WaterBodies? bodies = null, ReadOnlySpan<WaterBodyInfo> generated = default, ReadOnlySpan<Vector4> discs = default)
     {
         if (chunk.Coord.Lod != 0)
             throw new ArgumentException("Water blocks need a LOD-0 chunk.", nameof(chunk));
 
         Reset(chunk.Coord);
-        ReservoirTopY = (int)MathF.Ceiling(seaLevel) - 1;
+        Bodies = bodies ?? WaterBodies.Default;
+        MarkColumns(generated, discs);
         ReadSolids(chunk, keepWater: false);
     }
 
-    /// <summary>After an edit: recompute flags, keep water in open cells, zero solids, refill reservoirs. Keeps the InitFrom sea level.</summary>
-    public void RefreshFrom(VoxelChunk chunk)
+    /// <summary>
+    /// After an edit: recompute flags, keep water in open cells, zero solids, refill held cells at their body's level.
+    /// Held water inside <paramref name="discs"/> of its body goes free with the water it holds; nothing is joined here
+    /// (that happens as the block sleeps, <see cref="JoinBodies"/>).
+    /// </summary>
+    public void RefreshFrom(VoxelChunk chunk, ReadOnlySpan<Vector4> discs = default)
     {
         if (chunk.Coord.Lod != 0 || chunk.Coord != Coord)
             throw new ArgumentException("Refresh needs this block's LOD-0 chunk.", nameof(chunk));
 
+        MarkColumns(default, discs);
         ReadSolids(chunk, keepWater: true);
         QuietSteps = 0;
+        CalmSteps = 0;
         Asleep = false;
+    }
+
+    /// <summary>The discs now live over the block (the rest ended): their columns are left free by <see cref="JoinBodies"/>.</summary>
+    public void MarkDiscs(ReadOnlySpan<Vector4> discs) => MarkColumns(default, discs);
+
+    private void MarkColumns(ReadOnlySpan<WaterBodyInfo> generated, ReadOnlySpan<Vector4> discs)
+    {
+        _discBody.AsSpan().Clear();
+        var origin = Coord.WorldOrigin;
+
+        for (var z = 0; z < S; z++)
+        {
+            for (var x = 0; x < S; x++)
+            {
+                var wx = origin.X + x;
+                var wz = origin.Z + z;
+
+                foreach (var disc in discs)
+                {
+                    var dx = wx - disc.X;
+                    var dz = wz - disc.Y;
+
+                    if (dx * dx + dz * dz > disc.Z * disc.Z)
+                        continue;
+
+                    _discBody[x + z * S] = (ushort)disc.W;
+                    break;
+                }
+
+                if (generated.IsEmpty)
+                    continue;
+
+                _generatedBody[x + z * S] = 0;
+
+                foreach (var info in generated)
+                {
+                    if (!info.Contains(wx, wz))
+                        continue;
+
+                    _generatedBody[x + z * S] = info.Id;
+                    break;
+                }
+            }
+        }
     }
 
     private void ReadSolids(VoxelChunk chunk, bool keepWater)
     {
         var density = chunk.Density;
         var source = chunk.Water;
+        var levels = Bodies.Levels;
+        var seaTop = Bodies.SeaTop;
+        ClearPresent();
 
         for (var z = 0; z < S; z++)
         {
             for (var y = 0; y < S; y++)
             {
                 var row = ChunkConstants.Index(0, y, z);
-                var fill = ReservoirFill(y);
+                var worldY = Coord.Y * S + y;
 
                 for (var i = row; i < row + S; i++)
                 {
                     var solid = density[i] < 0;
-                    var reservoir = !solid && source[i] >= ReservoirByte;
-                    Flags[i] = (byte)(solid ? WaterFlags.Solid : reservoir ? WaterFlags.Reservoir : WaterFlags.None);
-                    Water[i] = reservoir ? fill : solid || !keepWater ? 0f : Water[i];
+                    var col = i - row + z * S;
 
                     // The surface crosses between the sample below (solid, < 0) and this one (open, >= 0); the cell's floor
                     // is halfway between them.
                     var under = density[i - P];
                     Bed[i] = solid || under >= 0 ? NotBed : (sbyte)MathF.Round(((float)under / (under - density[i]) - 0.5f) * 254f);
+
+                    if (solid)
+                    {
+                        Flags[i] = SolidBit;
+                        Body[i] = 0;
+                        Water[i] = 0f;
+                        continue;
+                    }
+
+                    ushort id;
+                    float water;
+
+                    if (keepWater)
+                    {
+                        id = Body[i];
+                        water = Water[i];
+                    }
+                    else
+                    {
+                        var generated = source[i] >= ReservoirByte;
+                        id = generated ? worldY <= seaTop ? WaterBodies.Sea : _generatedBody[col] : (ushort)0;
+                        water = generated ? 1f : 0f;
+                    }
+
+                    if (id != 0)
+                    {
+                        var fill = WaterBodies.Fill(worldY, levels[id]);
+
+                        if (_discBody[col] == id)
+                        {
+                            // Freed by a disc: the water it was held with, standing on its bed at the body's level.
+                            water = keepWater && (Flags[i] & HeldBit) == 0 ? water : FreeFill(fill, Bed[i]);
+                            id = 0;
+                        }
+                        else
+                        {
+                            water = fill;
+                            Note(id);
+                        }
+                    }
+
+                    Flags[i] = id != 0 ? HeldBit : (byte)0;
+                    Body[i] = id;
+                    Water[i] = water;
                 }
             }
         }
@@ -194,6 +397,22 @@ public sealed class WaterBlock
         for (var f = 0; f < 6; f++)
             if (ApronOpen(density, (Face)f))
                 _openFaces |= (byte)(1 << f);
+    }
+
+    /// <summary>
+    /// The fill a held cell freed by a disc starts with: its held fill, except that in the pipe model a part-full cell on a
+    /// bed stands on the bed (<see cref="BedRise"/>): the generated half-cell at the shore would stand over the body and
+    /// slump into it, or under it (a bed below its floor) and draw the body in across a seam. It takes the fill whose
+    /// surface on that bed is the body's: head + rise (1 − w) = fill − ½. What it then holds more or less than the held
+    /// fill is booked when it rejoins.
+    /// </summary>
+    private float FreeFill(float fill, sbyte bed)
+    {
+        if (FluxX is null || fill > 1f || bed == NotBed)
+            return fill;
+
+        var rise = bed * BedUnit;
+        return Math.Clamp((fill - rise) / (1f - rise), 0f, 1f);
     }
 
     private bool ApronOpen(sbyte[] density, Face face)
@@ -207,12 +426,210 @@ public sealed class WaterBlock
             {
                 var i = inner + u * su + v * sv;
 
-                if ((Flags[i] & (byte)WaterFlags.Solid) == 0 && density[i + outward] >= 0)
+                if ((Flags[i] & SolidBit) == 0 && density[i + outward] >= 0)
                     return true;
             }
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Main thread, as the block sleeps (its water still, halos fresh): free water connected to a body's held cells (here
+    /// or in the halos) that stands at the body's level joins it. A cell with a free surface joins when that surface is
+    /// within <see cref="WaterBodies.JoinTolerance"/> of the level; a cell under other water, when its top is under the
+    /// level and it is full. Dry cells never join, so a tunnel out of a lake drains it instead of the lake flooding the
+    /// hillside outside to its level, as a flood through every open cell under the surface once did. Columns inside a
+    /// live disc of the body are left alone (a dig it is pouring into; they join when the disc ends). Results in
+    /// <see cref="Joined"/>: what each body paid (fill − water, about nothing at the level) and the surface cells it gained.
+    /// </summary>
+    public void JoinBodies()
+    {
+        Joined.Clear();
+        var levels = Bodies.Levels;
+        var stack = _flood ??= new int[ChunkConstants.PaddedVolume];
+        var seen = _seen ??= new byte[ChunkConstants.PaddedVolume];
+        seen.AsSpan().Clear();
+        var count = 0;
+
+        for (var i = 0; i < ChunkConstants.PaddedVolume; i++)
+        {
+            if ((Flags[i] & HeldBit) == 0 || Body[i] <= WaterBodies.Sea)
+                continue;
+
+            stack[count++] = i;
+            seen[i] = 1;
+        }
+
+        // The walk crosses every wet free cell it reaches (a not quite full cell under the surface must not cut the rest
+        // of a pit off into a body of its own at the same level), and takes in those that stand at the level.
+        while (count > 0)
+        {
+            var i = stack[--count];
+            var id = Body[i];
+            var level = levels[id];
+
+            for (var f = 0; f < 6; f++)
+            {
+                var n = i + (f >> 1 == 0 ? 1 : f >> 1 == 1 ? P : A) * ((f & 1) == 0 ? -1 : 1);
+                var (x, y, z) = (n % P - 1, n / P % P - 1, n / A - 1);
+
+                if ((uint)x >= S || (uint)y >= S || (uint)z >= S || seen[n] != 0 || (Flags[n] & (SolidBit | HeldBit)) != 0 || _discBody[x + z * S] == id)
+                    continue;
+
+                var w = Water[n];
+
+                if (w <= WaterSurfaceMesher.WetThreshold)
+                    continue;
+
+                seen[n] = 1;
+                var worldY = Coord.Y * S + y;
+
+                if (AtLevel(n, worldY, w, level))
+                {
+                    var fill = WaterBodies.Fill(worldY, level);
+                    Take(id, fill - w, Surface(n) ? 1 : 0);
+                    Flags[n] = HeldBit;
+                    Body[n] = id;
+                    Water[n] = fill;
+                    Note(id);
+                }
+
+                stack[count++] = n;
+            }
+        }
+    }
+
+    /// <summary>Its cell above holds no water (or is solid): this cell's water has a free surface.</summary>
+    private bool Surface(int i) => (Flags[i + P] & SolidBit) != 0 || Water[i + P] <= WaterSurfaceMesher.WetThreshold;
+
+    /// <summary>The cell's water stands at the level: its surface within tolerance of it, or full and wholly under it.</summary>
+    private bool AtLevel(int i, int worldY, float w, float level)
+    {
+        if (Surface(i))
+        {
+            var surface = worldY - 0.5f + MathF.Min(w, 1f) + BedRise(Bed[i], w);
+            return MathF.Abs(surface - level) <= WaterBodies.JoinTolerance;
+        }
+
+        return w >= WaterFlow.SupportThreshold && worldY + 0.5f <= level + WaterBodies.JoinTolerance;
+    }
+
+    private void Take(ushort id, float paid, int surface)
+    {
+        for (var k = 0; k < Joined.Count; k++)
+        {
+            if (Joined[k].Id != id)
+                continue;
+
+            Joined[k] = (id, Joined[k].Paid + paid, Joined[k].Surface + surface);
+            return;
+        }
+
+        Joined.Add((id, paid, surface));
+    }
+
+    /// <summary>
+    /// Main thread, as the block sleeps, after <see cref="JoinBodies"/>: free water left that stands level becomes a body
+    /// of its own (docs/voxel-water.md "Bodies of water"): each connected set of wet free cells whose free surfaces lie
+    /// within twice the join tolerance of one another, with at least <paramref name="minSurface"/> surface cells (specks
+    /// and films are left free). Its level is their mean, its area their count here (neighbouring blocks add theirs as
+    /// they join it), its centre their mean. Cells are held at the fill under that level and what they lacked is booked.
+    /// </summary>
+    public void BornBodies(int minSurface = 4)
+    {
+        var stack = _flood ??= new int[ChunkConstants.PaddedVolume];
+        var seen = _seen ??= new byte[ChunkConstants.PaddedVolume];
+        seen.AsSpan().Clear();
+        var members = new Span<int>(stack, 0, ChunkConstants.PaddedVolume);
+
+        for (var z = 0; z < S; z++)
+        {
+            for (var y = 0; y < S; y++)
+            {
+                for (var x = 0; x < S; x++)
+                {
+                    var start = ChunkConstants.Index(x, y, z);
+
+                    if (seen[start] != 0 || (Flags[start] & (SolidBit | HeldBit)) != 0 || Water[start] <= WaterSurfaceMesher.WetThreshold)
+                        continue;
+
+                    // Gather the component (a queue in the flood array); survey its surfaces as it grows.
+                    var count = 0;
+                    var read = 0;
+                    members[count++] = start;
+                    seen[start] = 1;
+                    var surfaces = 0;
+                    var sum = 0f;
+                    var low = float.MaxValue;
+                    var high = float.MinValue;
+                    var cx = 0f;
+                    var cz = 0f;
+                    var bottom = float.MaxValue;
+                    ushort beside = 0;
+
+                    while (read < count)
+                    {
+                        var i = members[read++];
+                        var (ix, iy, iz) = (i % P - 1, i / P % P - 1, i / A - 1);
+                        var worldY = Coord.Y * S + iy;
+                        bottom = MathF.Min(bottom, worldY - 0.5f);
+
+                        if (Surface(i))
+                        {
+                            var surface = worldY - 0.5f + MathF.Min(Water[i], 1f) + BedRise(Bed[i], Water[i]);
+                            surfaces++;
+                            sum += surface;
+                            low = MathF.Min(low, surface);
+                            high = MathF.Max(high, surface);
+                            cx += ix;
+                            cz += iz;
+                        }
+
+                        for (var f = 0; f < 6; f++)
+                        {
+                            var n = i + (f >> 1 == 0 ? 1 : f >> 1 == 1 ? P : A) * ((f & 1) == 0 ? -1 : 1);
+                            var (nx, ny, nz) = (n % P - 1, n / P % P - 1, n / A - 1);
+
+                            if ((Flags[n] & HeldBit) != 0 && Body[n] > WaterBodies.Sea)
+                                beside = Body[n];
+
+                            if ((uint)nx >= S || (uint)ny >= S || (uint)nz >= S || seen[n] != 0 || (Flags[n] & (SolidBit | HeldBit)) != 0 || Water[n] <= WaterSurfaceMesher.WetThreshold)
+                                continue;
+
+                            seen[n] = 1;
+                            members[count++] = n;
+                        }
+                    }
+
+                    if (surfaces < minSurface || high - low > 2f * WaterBodies.JoinTolerance)
+                        continue;
+
+                    var level = sum / surfaces;
+                    var origin = Coord.WorldOrigin;
+
+                    // Level with a body it touches (here or in the halos): it is that body's, not a twin of it.
+                    var id = beside != 0 && MathF.Abs(Bodies.Levels[beside] - level) <= 2f * WaterBodies.JoinTolerance
+                        ? beside
+                        : Bodies.Add(level, surfaces, new Vector2(origin.X + cx / surfaces, origin.Z + cz / surfaces), 0f, bottom);
+                    level = Bodies.Levels[id];
+                    var paid = 0f;
+
+                    for (var k = 0; k < count; k++)
+                    {
+                        var i = members[k];
+                        var fill = WaterBodies.Fill(Coord.Y * S + i / P % P - 1, level);
+                        paid += fill - Water[i];
+                        Flags[i] = HeldBit;
+                        Body[i] = id;
+                        Water[i] = fill;
+                    }
+
+                    Note(id);
+                    Take(id, paid, id == beside ? surfaces : 0);
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -225,7 +642,7 @@ public sealed class WaterBlock
         for (var z = 0; z < S; z++)
             for (var y = 0; y < S; y++)
                 for (var i = ChunkConstants.Index(0, y, z); i < ChunkConstants.Index(S, y, z); i++)
-                    Bed[i] = (Flags[i] & (byte)WaterFlags.Solid) != 0 || (Flags[i - P] & (byte)WaterFlags.Solid) == 0 ? NotBed : Bed[i] == NotBed ? (sbyte)0 : Bed[i];
+                    Bed[i] = (Flags[i] & SolidBit) != 0 || (Flags[i - P] & SolidBit) == 0 ? NotBed : Bed[i] == NotBed ? (sbyte)0 : Bed[i];
     }
 
     /// <summary>
@@ -234,25 +651,91 @@ public sealed class WaterBlock
     /// </summary>
     public static float BedRise(sbyte bed, float w) => bed == NotBed ? 0f : bed * BedUnit * (1f - MathF.Min(w, 1f));
 
-    /// <summary>
-    /// Fill a reservoir cell in interior row y is held at: 1 at the top sea layer, +Compression per layer below.
-    /// That is the vertical-pair equilibrium of WaterFlow, so sim water next to the sea levels with the sea surface
-    /// instead of being pushed out by its own compression.
-    /// </summary>
-    public float ReservoirFill(int y) => 1f + WaterFlow.Compression * Math.Max(0, ReservoirTopY - (Coord.Y * S + y));
+    /// <summary>Fill a held cell is held at under its body's level (<see cref="WaterBodies.Fill"/>).</summary>
+    public float HeldFill(int i) => WaterBodies.Fill(Coord.Y * S + i / P % P - 1, Bodies.Levels[Body[i]]);
 
-    /// <summary>Interior water volume (cells), summed in double.</summary>
+    /// <summary>Tests: holds interior cell (x, y, z) for the body at its fill.</summary>
+    public void Hold(int x, int y, int z, ushort id)
+    {
+        var i = ChunkConstants.Index(x, y, z);
+        Flags[i] = HeldBit;
+        Body[i] = id;
+        Water[i] = HeldFill(i);
+        Note(id);
+    }
+
+    /// <summary>Sets every held cell to its fill again, after its body's level moved.</summary>
+    public void RefillHeld()
+    {
+        var levels = Bodies.Levels;
+
+        for (var z = 0; z < S; z++)
+        {
+            for (var y = 0; y < S; y++)
+            {
+                var row = ChunkConstants.Index(0, y, z);
+                var worldY = Coord.Y * S + y;
+
+                for (var i = row; i < row + S; i++)
+                    if ((Flags[i] & HeldBit) != 0)
+                        Water[i] = WaterBodies.Fill(worldY, levels[Body[i]]);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A held cell of the body in its top layer with open air beside it whose bed lies under the level: where a rising
+    /// body spills over its rim. The block must wake for the spill to run.
+    /// </summary>
+    public bool Spills(ushort id)
+    {
+        var level = Bodies.Levels[id];
+
+        for (var z = 0; z < S; z++)
+        {
+            for (var y = 0; y < S; y++)
+            {
+                var worldY = Coord.Y * S + y;
+
+                if (worldY + 0.5f < level - 1f || worldY - 0.5f > level)
+                    continue;
+
+                var row = ChunkConstants.Index(0, y, z);
+
+                for (var i = row; i < row + S; i++)
+                {
+                    if ((Flags[i] & HeldBit) == 0 || Body[i] != id)
+                        continue;
+
+                    for (var f = 0; f < 6; f++)
+                    {
+                        if (f >> 1 == 1)
+                            continue;
+
+                        var n = i + (f >> 1 == 0 ? 1 : A) * ((f & 1) == 0 ? -1 : 1);
+
+                        if ((Flags[n] & (SolidBit | HeldBit)) == 0 && Water[n] <= WaterSurfaceMesher.WetThreshold && (Flags[n - P] & SolidBit) != 0
+                            && worldY - 0.5f + MathF.Max(0f, BedRise(Bed[n], 0f)) < level)
+                            return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// Inside the given discs (world x, world z, radius), hands open cells below sea level to the zone shallow-water sim:
-    /// they become clamped sea for this automaton and are tagged <see cref="WaterFlags.SeaZone"/>.
+    /// they become the sea's for this automaton and are tagged <see cref="WaterFlags.SeaZone"/>.
     /// Must be re-applied after <see cref="RefreshFrom"/>, which re-derives flags from the voxel chunk.
     /// </summary>
     public void Unclamp(ReadOnlySpan<Vector3> discs)
     {
-        const byte solid = (byte)WaterFlags.Solid;
-        const byte reservoir = (byte)WaterFlags.Reservoir;
         const byte zone = (byte)WaterFlags.SeaZone;
         var origin = Coord.WorldOrigin;
+        var seaTop = Bodies.SeaTop;
+        var seaLevel = Bodies.Levels[WaterBodies.Sea];
 
         for (var z = 0; z < S; z++)
         {
@@ -273,28 +756,35 @@ public sealed class WaterBlock
                 if (!inside)
                     continue;
 
-                // Zone cells belong to the shallow-water zone sim; here they act as clamped sea (a source/sink for water
+                // Zone cells belong to the shallow-water zone sim; here they act as the sea (a source/sink for water
                 // flowing out of the zone) and are never drawn by the voxel-water mesh.
                 for (var y = 0; y < S; y++)
                 {
                     var i = ChunkConstants.Index(x, y, z);
-                    if ((Flags[i] & solid) != 0)
+                    if ((Flags[i] & SolidBit) != 0)
                         continue;
 
                     var worldY = Coord.Y * S + y;
-                    if (worldY >= ReservoirTopY + 1)
+                    if (worldY > seaTop + ZoneRunUp)
+                        continue;
+
+                    if (worldY >= seaTop + 1)
                     {
                         Flags[i] |= zone;
                         continue;
                     }
 
-                    Flags[i] = (byte)(Flags[i] | reservoir | zone);
-                    Water[i] = ReservoirFill(y);
+                    Flags[i] = (byte)(Flags[i] | HeldBit | zone);
+                    Body[i] = WaterBodies.Sea;
+                    Water[i] = WaterBodies.Fill(worldY, seaLevel);
                 }
             }
         }
+
+        Note(WaterBodies.Sea);
     }
 
+    /// <summary>Interior water volume (cells), summed in double.</summary>
     public float Mass()
     {
         var sum = 0.0;
@@ -324,6 +814,61 @@ public sealed class WaterBlock
                     return true;
 
         return false;
+    }
+
+    /// <summary>Any water in the block that is free to move: neither solid nor held by a body.</summary>
+    public bool HasFreeWater()
+    {
+        for (var z = 0; z < S; z++)
+            for (var y = 0; y < S; y++)
+                for (var i = ChunkConstants.Index(0, y, z); i < ChunkConstants.Index(S, y, z); i++)
+                    if (Water[i] > 0f && (Flags[i] & (SolidBit | HeldBit)) == 0)
+                        return true;
+
+        return false;
+    }
+
+    /// <summary>Any water on this face's border cells that is free to move: neither solid nor held by a body.</summary>
+    public bool FreeWaterOnFace(Face face)
+    {
+        Plane(face, halo: false, out var start, out var su, out var sv);
+
+        for (var v = 0; v < S; v++)
+        {
+            for (var u = 0; u < S; u++)
+            {
+                var i = start + u * su + v * sv;
+
+                if (Water[i] > 0f && (Flags[i] & (SolidBit | HeldBit)) == 0)
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Every interior cell is solid or the sea's: nothing in the block can ever change.</summary>
+    public bool AllSea()
+    {
+        for (var z = 0; z < S; z++)
+            for (var y = 0; y < S; y++)
+                for (var i = ChunkConstants.Index(0, y, z); i < ChunkConstants.Index(S, y, z); i++)
+                    if ((Flags[i] & SolidBit) == 0 && ((Flags[i] & HeldBit) == 0 || Body[i] != WaterBodies.Sea))
+                        return false;
+
+        return true;
+    }
+
+    /// <summary>Every interior cell is solid or held: at rest until a body's level moves or an edit comes.</summary>
+    public bool AllHeld()
+    {
+        for (var z = 0; z < S; z++)
+            for (var y = 0; y < S; y++)
+                for (var i = ChunkConstants.Index(0, y, z); i < ChunkConstants.Index(S, y, z); i++)
+                    if ((Flags[i] & (SolidBit | HeldBit)) == 0)
+                        return false;
+
+        return true;
     }
 
     /// <summary>The chunk's terrain lets water leave through this face (an open border cell meets open apron). Set by InitFrom/RefreshFrom.</summary>

@@ -22,7 +22,8 @@ public sealed class CaveTest(TerrainWorld world, VoxelWaterSystem water, Physics
     private const float CaveZ = 0f;
     private const float PoolZ = 70f;
     private const float CoveZ = -70f;
-    private const float SeaX = -300f;
+    /// <summary>The probes start this far out, 90 m off the west beach.</summary>
+    private readonly float _seaX = Coastline.WestX(world.Params, 0f) - 90f;
     private const float Step = 2f;
 
     private double _start = -1.0;
@@ -92,7 +93,7 @@ public sealed class CaveTest(TerrainWorld world, VoxelWaterSystem water, Physics
     /// <summary>The waterline on row z: walking east from the sea west of the island, the first ground above the top sea voxel layer.</summary>
     private Vector3 Shore(float z)
     {
-        var probe = new Vector3(SeaX, 40f, z);
+        var probe = new Vector3(_seaX, 40f, z);
 
         for (var i = 0; i < 400; i++, probe.X += 1f)
         {

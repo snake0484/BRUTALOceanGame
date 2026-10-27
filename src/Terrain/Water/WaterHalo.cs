@@ -13,10 +13,11 @@ public static class WaterHalo
 
     public static void CopyOutScale(WaterBlock dst, WaterBlock? src, Face face) => Copy(dst.OutScale, src?.OutScale, face, 1f);
 
-    /// <summary>The flags and the bed rises (<see cref="WaterBlock.Bed"/>): both static between edits.</summary>
+    /// <summary>The flags, the bodies (<see cref="WaterBlock.Body"/>) and the bed rises (<see cref="WaterBlock.Bed"/>): all static between edits and joins.</summary>
     public static void CopyFlags(WaterBlock dst, WaterBlock? src, Face face)
     {
         Copy(dst.Flags, src?.Flags, face, (byte)WaterFlags.Solid);
+        Copy(dst.Body, src?.Body, face, WaterBodies.None);
         Copy(dst.Bed, src?.Bed, face, WaterBlock.NotBed);
     }
 

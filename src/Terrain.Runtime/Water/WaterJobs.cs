@@ -15,30 +15,42 @@ internal sealed class WaterActivationJob : IJob
     private int _opCount;
     public WaterBlock? Block;
     public bool Refresh;
+
+    /// <summary>A new block straight from the generator, no edit, sea zone or body disc in it: its water is at rest (held).</summary>
+    public bool AtRest => !Refresh && _opCount == 0 && _discCount == 0 && _bodyDiscCount == 0;
     private Vector3[] _discs = new Vector3[8];
     private int _discCount;
+    private Vector4[] _bodyDiscs = new Vector4[8];
+    private int _bodyDiscCount;
+    private WaterBodyInfo[] _generated = new WaterBodyInfo[4];
+    private int _generatedCount;
     public TerrainParams Params;
+    public WaterBodies? Bodies;
 
     /// <param name="zones">Sea zone discs (world x, world z, radius); those touching the block are copied.</param>
-    public void Prepare(WaterBlock block, bool refresh, in TerrainParams p, IReadOnlyList<BrushOp> ops, List<Vector3> zones)
+    /// <param name="bodyDiscs">Discs around digs into bodies (world x, world z, radius, body id), where the body's water is free; those touching the block are copied.</param>
+    /// <param name="generated">The generator's bodies of water; those whose fill disc touches the block are copied.</param>
+    public void Prepare(WaterBlock block, bool refresh, in TerrainParams p, IReadOnlyList<BrushOp> ops, List<Vector3> zones, List<Vector4> bodyDiscs, WaterBodyInfo[] generated, WaterBodies bodies)
     {
+        Bodies = bodies;
         Block = block;
         Refresh = refresh;
         _discCount = 0;
-
+        _bodyDiscCount = 0;
+        _generatedCount = 0;
         var origin = block.Coord.WorldOrigin;
+
         foreach (var disc in zones)
-        {
-            var nx = Math.Clamp(disc.X, origin.X, origin.X + ChunkConstants.Size);
-            var nz = Math.Clamp(disc.Y, origin.Z, origin.Z + ChunkConstants.Size);
-            if ((nx - disc.X) * (nx - disc.X) + (nz - disc.Y) * (nz - disc.Y) > disc.Z * disc.Z)
-                continue;
+            if (Touches(origin, disc.X, disc.Y, disc.Z))
+                Append(ref _discs, ref _discCount, disc);
 
-            if (_discCount == _discs.Length)
-                Array.Resize(ref _discs, _discs.Length * 2);
+        foreach (var disc in bodyDiscs)
+            if (Touches(origin, disc.X, disc.Y, disc.Z))
+                Append(ref _bodyDiscs, ref _bodyDiscCount, disc);
 
-            _discs[_discCount++] = disc;
-        }
+        foreach (var info in generated)
+            if (Touches(origin, info.Centre.X, info.Centre.Y, info.Radius))
+                Append(ref _generated, ref _generatedCount, info);
 
         Params = p;
         _chunk.Coord = block.Coord;
@@ -50,22 +62,36 @@ internal sealed class WaterActivationJob : IJob
             if (!VoxelEditor.Intersects(op, block.Coord))
                 continue;
 
-            if (_opCount == _ops.Length)
-                Array.Resize(ref _ops, _ops.Length * 2);
-
-            _ops[_opCount++] = op;
+            Append(ref _ops, ref _opCount, op);
         }
+    }
+
+    /// <summary>The disc (world x, z, radius) meets the chunk's footprint.</summary>
+    private static bool Touches(Vector3 origin, float x, float z, float radius)
+    {
+        var nx = Math.Clamp(x, origin.X, origin.X + ChunkConstants.Size);
+        var nz = Math.Clamp(z, origin.Z, origin.Z + ChunkConstants.Size);
+        return (nx - x) * (nx - x) + (nz - z) * (nz - z) <= radius * radius;
+    }
+
+    private static void Append<T>(ref T[] array, ref int count, T item)
+    {
+        if (count == array.Length)
+            Array.Resize(ref array, array.Length * 2);
+
+        array[count++] = item;
     }
 
     public void Run()
     {
         TerrainGenerator.Generate(_chunk, Params);
         VoxelEditor.Apply(_chunk, _ops.AsSpan(0, _opCount));
+        var discs = _bodyDiscs.AsSpan(0, _bodyDiscCount);
 
         if (Refresh)
-            Block!.RefreshFrom(_chunk);
+            Block!.RefreshFrom(_chunk, discs);
         else
-            Block!.InitFrom(_chunk, Params.SeaLevel);
+            Block!.InitFrom(_chunk, Bodies!, _generated.AsSpan(0, _generatedCount), discs);
 
         if (_discCount > 0)
             Block.Unclamp(_discs.AsSpan(0, _discCount));

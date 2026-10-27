@@ -20,6 +20,8 @@ var waterPipes = false;
 var hideUi = false;
 var seasideTest = false;
 var pondTest = false;
+// --lake-test scene: hole (default) or tunnel; null = off.
+string? lakeTest = null;
 var coastal = true;
 var benchSeconds = 0.0;
 var breakers = false;
@@ -135,6 +137,12 @@ for (var i = 0; i < args.Length; i++)
         seasideTest = true;
     else if (args[i] == "--pond-test")
         pondTest = true;
+    else if (args[i] == "--lake-test")
+    {
+        lakeTest = "hole";
+        if (i + 1 < args.Length && !args[i + 1].StartsWith("--"))
+            lakeTest = args[++i];
+    }
     else if (args[i] == "--water-pipes")
         waterPipes = true;
     else if (args[i] == "--water-rate" && i + 1 < args.Length)
@@ -147,5 +155,5 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
-using var app = new GameApp(windSpeed, foamDebug, editTest, camera, floodTest, waterRate ?? (waterPipes ? 60 : 240), hideUi, seasideTest, coastal, benchSeconds, breakers, surfTest, faces, lips, flyTest, surfCam, surfSide, swell, foldLip, surfBack, chainLips, weather ?? true, weatherOffset, rain, benchRain, roofTest, caveTest, waterPipes, pondTest);
+using var app = new GameApp(windSpeed, foamDebug, editTest, camera, floodTest, waterRate ?? (waterPipes ? 60 : 240), hideUi, seasideTest, coastal, benchSeconds, breakers, surfTest, faces, lips, flyTest, surfCam, surfSide, swell, foldLip, surfBack, chainLips, weather ?? true, weatherOffset, rain, benchRain, roofTest, caveTest, waterPipes, pondTest, lakeTest);
 app.Run();

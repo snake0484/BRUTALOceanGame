@@ -40,7 +40,7 @@ public sealed class GameApp : IDisposable
     private readonly RainRenderer _rain;
     private readonly RainCover _rainCover;
     private readonly OceanFft _oceanFft;
-    private readonly FlyCamera _camera = new() { Position = new System.Numerics.Vector3(-265f, 28f, 0f), Pitch = -0.12f };
+    private readonly FlyCamera _camera = new() { Pitch = -0.12f };
     private readonly TerrainRenderer _terrainRenderer;
     private readonly TerrainWorld _terrain;
     private readonly BathymetryTexture _bathymetry;
@@ -53,6 +53,7 @@ public sealed class GameApp : IDisposable
     private readonly FloodTest? _floodTest;
     private readonly SeasideTest? _seasideTest;
     private readonly PondTest? _pondTest;
+    private readonly LakeTest? _lakeTest;
     private FixedClock _clock = new(TickRate);
     private readonly int _oceanScope;
     private readonly int _waterScope;
@@ -78,7 +79,7 @@ public sealed class GameApp : IDisposable
     private readonly int _uploadScope;
 
     /// <param name="camera">Optional start pose: x, y, z, yaw degrees, pitch degrees.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool floodTest = false, int waterRate = 240, bool hideUi = false, bool seasideTest = false, bool coastal = true, double benchSeconds = 0.0, bool breakers = false, bool surfTest = false, bool faces = true, bool lips = true, bool flyTest = false, bool surfCam = false, bool surfSide = false, float[]? swell = null, bool foldLip = false, bool surfBack = false, bool chainLips = false, bool weather = true, float weatherOffset = 0f, float rain = -1f, bool benchRain = false, bool roofTest = false, string? caveTest = null, bool waterPipes = false, bool pondTest = false)
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool floodTest = false, int waterRate = 240, bool hideUi = false, bool seasideTest = false, bool coastal = true, double benchSeconds = 0.0, bool breakers = false, bool surfTest = false, bool faces = true, bool lips = true, bool flyTest = false, bool surfCam = false, bool surfSide = false, float[]? swell = null, bool foldLip = false, bool surfBack = false, bool chainLips = false, bool weather = true, float weatherOffset = 0f, float rain = -1f, bool benchRain = false, bool roofTest = false, string? caveTest = null, bool waterPipes = false, bool pondTest = false, string? lakeTest = null)
     {
         if (camera is not null)
         {
@@ -117,6 +118,11 @@ public sealed class GameApp : IDisposable
         _weatherPanel = new WeatherPanel(_weather.Map) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset, OverrideRain = rain >= 0f, RainOverride = MathF.Max(rain, 0f) };
         _terrainRenderer = new TerrainRenderer(_renderer);
         _terrain = new TerrainWorld(_terrainRenderer, _physics);
+
+        // Without --cam, 55 m off the west beach, 28 m up, looking at it.
+        if (camera is null)
+            _camera.Position = new System.Numerics.Vector3(Coastline.WestX(_terrain.Params, 0f) - 55f, 28f, 0f);
+
         _brush = new TerrainBrush(_terrain, _physics, _camera);
         _editTest = editTest ? new EditTest(_terrain, _physics, _brush, _camera) : null;
         _roofTest = roofTest ? new RoofTest(_terrain, _camera) : null;
@@ -125,6 +131,7 @@ public sealed class GameApp : IDisposable
         // Waves physically enter sea zones through their open-sea boundary. The bare swell, not the surface: breakers
         // reach zones as bores (BreakerBores), and their drawn faces fade out inside zones, so the faces would count twice.
         _water.Zones.SeaSurface = (x, z) => _swell.SampleHeight(x, z);
+        _water.RainAt = (x, z) => _weatherPanel.OverrideRain ? _weatherPanel.RainOverride : _weatherPanel.DriveSky ? _weather.Map.Sample(x, z).Rain : 0f;
         _water.Zones.SeaState = (x, z) =>
         {
             var s = _swell.Sample(x, z);
@@ -135,6 +142,7 @@ public sealed class GameApp : IDisposable
         _floodTest = floodTest ? new FloodTest(_terrain, _water, _physics, _brush, _camera) : null;
         _seasideTest = seasideTest ? new SeasideTest(_terrain, _water, _physics, _camera) : null;
         _pondTest = pondTest ? new PondTest(_terrain, _water, _physics, _camera) : null;
+        _lakeTest = lakeTest is not null ? new LakeTest(_terrain, _water, _camera, lakeTest) : null;
         _caveTest = caveTest is not null ? new CaveTest(_terrain, _water, _physics, _rainCover, caveTest) : null;
         _surfTest = surfTest || surfCam ? new SurfTest(_terrain, _camera, _swell, camera is not null || surfCam) { FollowCurl = surfCam, SideView = surfSide, BackView = surfBack } : null;
         _breakerFaces.Enabled = faces;
@@ -220,6 +228,7 @@ public sealed class GameApp : IDisposable
             _floodTest?.Update(_clock.SimTime);
             _seasideTest?.Update(_clock.SimTime);
             _pondTest?.Update(_clock.SimTime);
+            _lakeTest?.Update(_clock.SimTime);
             _caveTest?.Update(_clock.SimTime);
             _surfTest?.Update(_clock.SimTime);
             _surfTest?.Follow(_breakers, _surface, (float)frameSeconds);
@@ -292,7 +301,7 @@ public sealed class GameApp : IDisposable
                 gpu.Begin(commands, _waterScope);
                 _waterRenderer.BeginFrame(_renderer.FrameIndex);
                 _water.SubmitMeshes(_waterRenderer);
-                _waterRenderer.Draw(commands, _renderer.FrameIndex, extent, viewProj, _camera.Position, SceneLightingFromOcean(), (float)(renderTime % 1000.0), _rain.Surface);
+                _waterRenderer.Draw(commands, _renderer.FrameIndex, extent, viewProj, _camera.Position, SceneLightingFromOcean(), (float)(renderTime % 1000.0), _rain.Surface, _rain.Wind);
                 gpu.End(commands, _waterScope);
 
                 _rain.Record(commands, _renderer.FrameIndex, extent);
