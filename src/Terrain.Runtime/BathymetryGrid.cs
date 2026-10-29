@@ -509,11 +509,12 @@ public sealed class BathymetryGrid
         _fades.RemoveAt(d);
         _fading.RemoveAt(d);
 
+        // A disc the grid has re-centred away from clamps to an empty (inverted) range.
         var cells = CellsInDisc(disc.X, disc.Y, disc.Z);
-        for (var gz = cells.MinZ; gz <= cells.MaxZ; gz++)
+        var count = cells.MaxX - cells.MinX + 1;
+        for (var gz = cells.MinZ; count > 0 && gz <= cells.MaxZ; gz++)
         {
             var row = cells.MinX + gz * Resolution;
-            var count = cells.MaxX - cells.MinX + 1;
             _simulated.AsSpan(row, count).Clear();
             _zoneWeight.AsSpan(row, count).Clear();
             _zoneWet.AsSpan(row, count).Clear();

@@ -110,6 +110,61 @@ public sealed class VoxelWaterSystem : IDisposable
     /// <summary>Rain intensity 0..1 at a world x, z (the weather), which bodies gain over their area at <see cref="WaterBodies.RainRate"/>.</summary>
     public Func<float, float, float>? RainAt;
 
+    /// <summary>
+    /// The open sea's height over its rest level at a world x, z (the swell), which the sea's held cells take within
+    /// <see cref="SwellRadius"/> of the camera (docs/voxel-water.md "Swell on voxel water"), pipe model only; null for a flat sea.
+    /// </summary>
+    public Func<float, float, float>? SeaSurface;
+
+    /// <summary>The sea holds the swell within this distance (m) of the camera, fading out over the last <see cref="SwellFade"/>; past it free water against the sea can sleep.</summary>
+    public float SwellRadius = 128f;
+    public float SwellFade = 32f;
+
+    /// <summary>
+    /// The swell is taken on a lattice of this spacing (m), bilinear between: a power of two, so every block interpolates
+    /// it exactly alike. A sample costs about 4.5 µs near the shore; at 4 m a block's 121 cost 0.55 ms a tick. Nearshore
+    /// swell runs 50–90 m long, so 8 m interpolates it to a few centimetres, far under a cell.
+    /// </summary>
+    private const float SwellSpacing = 8f;
+
+    /// <summary>
+    /// Each lattice point is sampled again every this many ticks (20 times a second at 60), a share of the points each tick,
+    /// and runs on between, unbroken (<see cref="RefreshSwell"/>). Measured in the pond scene: 0.16–0.20 ms a tick (0.41–0.55
+    /// sampling every tick), straying 0.5 cm on average from the fresh samples (2.6 cm at most; in a storm 2.9, peaks of 16).
+    /// Every 6 ticks cost 0.09–0.12 ms but strayed 2.3 cm (6 in a storm).
+    /// </summary>
+    private const int SwellRefreshTicks = 3;
+
+    /// <summary>A lattice point no block has read for this long (s) is forgotten.</summary>
+    private const double SwellForget = 2.0;
+
+    /// <summary>Lattice points along a block's padded columns, from one before them to one past.</summary>
+    private const int SwellPoints = ChunkConstants.Size / 8 + 3;
+
+    /// <summary>A sleeping block whose free water meets the sea wakes once the swell at its centre has moved this far (m) from where it slept.</summary>
+    private const float SwellWake = 0.02f;
+
+    /// <summary>
+    /// A lattice point: the swell it runs on from (Height at Sampled, rising at Rate m/s), the fresh sample taken then
+    /// (Fresh), and when a block last read it.
+    /// </summary>
+    private struct SwellSample
+    {
+        public long Key;
+        public float Height;
+        public float Rate;
+        public float Fresh;
+        public double Sampled;
+        public double Read;
+    }
+
+    private SwellSample[] _swellSamples = new SwellSample[1024];
+    private int _swellCount;
+    private readonly Dictionary<long, int> _swellIndex = new(1024);
+    private double _swellClock;
+    private int _swellTick;
+    private Vector3 _camera;
+
     private readonly Stack<Slot> _slotPool = new(MaxBlocks);
     private readonly Stack<WaterActivationJob> _activationPool = new(MaxActivationsPerBatch);
     private readonly List<WaterActivationJob> _activationsInFlight = new(MaxActivationsPerBatch);
@@ -172,6 +227,13 @@ public sealed class VoxelWaterSystem : IDisposable
 
         /// <summary>Touches a sea zone disc: some of its sea cells are simulated, and it feeds ocean level offsets.</summary>
         public bool Simulated;
+
+        /// <summary>Audit (<see cref="Audit"/>): its free water when its activation or refresh was queued (m³).</summary>
+        public double AuditFree;
+
+        /// <summary>Asleep with free water that meets the sea, under the swell at its centre then (<see cref="WakeOnSwell"/>).</summary>
+        public bool SeaFree;
+        public float SleptSwell;
     }
 
     /// <param name="pipes">Run the 3D pipe model with momentum (<see cref="WaterPipes"/>) instead of the cell automaton.</param>
@@ -190,6 +252,7 @@ public sealed class VoxelWaterSystem : IDisposable
         }
 
         _generatedBlocks = GeneratedBlocks(Generated);
+        _planeColumns = PlaneColumns(Generated);
         var workers = (uint)Math.Max(1, Environment.ProcessorCount - 2);
         // The tick waits on step jobs, so they outrank streaming and activation, which only add latency.
         _stepScheduler = new JobScheduler(workers, "WaterStep", ThreadPriority.AboveNormal);
@@ -242,15 +305,25 @@ public sealed class VoxelWaterSystem : IDisposable
     private int _splashCount;
 
     /// <summary>
-    /// A pour lands this fast (m/s, a fall of 0.8 m) or faster, with at least this much water a second over its metre,
-    /// into a cell at least <see cref="PourPoolFill"/> full (a pool, not a film), to splash: without the pool test every
-    /// stair of a run-off sheet counted as a pour (a falling cell fed sideways builds its fall speed past free fall) and
-    /// the whole slope stood in mist. Water runs into a wall this fast or faster.
+    /// A pour lands this fast (m/s, a fall of 0.5 m) or faster, with at least this much water a second over its metre,
+    /// into a cell at least <see cref="PourPoolFill"/> full (a pool or a stream, not a film), to splash: without the pool
+    /// test every stair of a run-off sheet (0.1-0.2 m deep) counted as a pour (a falling cell fed sideways builds its fall
+    /// speed past free fall) and the whole slope stood in mist. A stream half a metre deep stepping down a metre splashes:
+    /// small, a curtain and a low crown, mist only from big drops (ocean_spray_splash.comp). Water runs into a wall this fast or faster (ocean_spray_splash.comp WALL_THRESHOLD):
+    /// slower, it runs up the wall as a sheet (stagnation head u² / 2g, 11 cm at 1.5 m/s) and throws no droplets. At
+    /// 0.4 m/s a breach stream lapping its banks at 0.5 m/s was listed the length of its channel.
     /// </summary>
-    public float PourSplashSpeed = 4f;
-    public float PourSplashDischarge = 0.3f;
-    public float PourPoolFill = 0.9f;
-    public float WallSplashSpeed = 0.4f;
+    public float PourSplashSpeed = 3f;
+    public float PourSplashDischarge = 0.2f;
+    public float PourPoolFill = 0.5f;
+
+    /// <summary>
+    /// A pour falls freely through at least this many open cells of falling water over where it lands, and lands at the
+    /// speed of that drop, √(2 g H). At 2, every one-cell ledge fell without a splash; the run-off stairs that made it 2
+    /// land on films, which <see cref="PourPoolFill"/> keeps out.
+    /// </summary>
+    public int PourDropCells = 1;
+    public float WallSplashSpeed = 1.5f;
 
     /// <summary>
     /// Impact speeds handed to the spray are capped as the zone sim caps its own (12 m/s a fall, 8 m/s into a wall): the
@@ -309,11 +382,12 @@ public sealed class VoxelWaterSystem : IDisposable
                         var surface = origin.Y + y - 0.5f + MathF.Min(wc, 1f);
                         var fall = -v[i + P];
 
-                        if (fall >= PourSplashSpeed && wc >= PourPoolFill && w[i + P] > 0.02f && (fl[i + P] & solid) == 0 && fall * MathF.Min(w[i + P], 1f) >= PourSplashDischarge)
+                        if (fall >= PourSplashSpeed && wc >= PourPoolFill && w[i + P] > 0.02f && (fl[i + P] & solid) == 0 && fall * MathF.Min(w[i + P], 1f) >= PourSplashDischarge
+                            && Drop(w, fl, i, y) is var drop && drop >= PourDropCells)
                         {
                             var drift = new Vector2(block.DriftX![i + P], block.DriftZ![i + P]);
                             var along = drift.LengthSquared() > 1e-4f ? Vector2.Normalize(drift) : Vector2.UnitX;
-                            var impact = MathF.Min(fall, PourImpactCap);
+                            var impact = MathF.Min(MathF.Min(fall, MathF.Sqrt(2f * 9.81f * drop)), PourImpactCap);
                             Add(new Vector4(origin.X + x, surface, origin.Z + z, impact), new Vector4(along, impact * MathF.Min(w[i + P], 1f), WaterSplash.Pour));
                         }
 
@@ -326,6 +400,18 @@ public sealed class VoxelWaterSystem : IDisposable
                 }
             }
         }
+    }
+
+    /// <summary>Open cells of falling water stacked over cell i (row y), up to the block's top halo: the height (m) the pour falls.</summary>
+    private static int Drop(float[] w, byte[] fl, int i, int y)
+    {
+        const int P = ChunkConstants.Padded;
+        var drop = 0;
+
+        while (y + drop + 1 <= ChunkConstants.Size && (fl[i + (drop + 1) * P] & (byte)WaterFlags.Solid) == 0 && w[i + (drop + 1) * P] > WaterSurfaceMesher.WetThreshold)
+            drop++;
+
+        return drop;
     }
 
     private void Wall(WaterBlock block, int i, int side, int up, float footX, float footZ, Vector3 origin, int x, int z, float surface, float wc)
@@ -383,12 +469,16 @@ public sealed class VoxelWaterSystem : IDisposable
                 }
     }
 
-    /// <summary>Diagnostics: free (not held) water over loaded blocks (m³), the largest fill of any free cell, and the count of free wet cells.</summary>
-    public (float Free, float MaxFill, int Cells) FreeWater()
+    /// <summary>
+    /// Diagnostics: free (not held) water over loaded blocks (m³), the largest fill of any free cell, the count of free wet
+    /// cells, and the highest free surface (world m: a free cell with no water over it).
+    /// </summary>
+    public (float Free, float MaxFill, int Cells, float Top) FreeWater()
     {
         var free = 0.0;
         var max = 0f;
         var cells = 0;
+        var top = float.NegativeInfinity;
 
         foreach (var (_, slot) in _blocks)
         {
@@ -409,10 +499,128 @@ public sealed class VoxelWaterSystem : IDisposable
                         free += w;
                         max = MathF.Max(max, w);
                         cells++;
+
+                        if (w > WaterSurfaceMesher.WetThreshold && block.Water[i + ChunkConstants.Padded] <= WaterSurfaceMesher.WetThreshold)
+                            top = MathF.Max(top, block.Coord.WorldOrigin.Y + y - 0.5f + MathF.Min(w, 1f));
                     }
         }
 
-        return ((float)free, max, cells);
+        return ((float)free, max, cells, top);
+    }
+
+    /// <summary>
+    /// Diagnostics: the body's held cells over loaded blocks: all of them, those farther than <paramref name="radius"/>
+    /// from <paramref name="centre"/> (world xz), and those floating (the cell under them open and neither held nor full),
+    /// with the highest floating cell's world y.
+    /// </summary>
+    public (int Held, int Outside, int Floating, float FloatTop) HeldCells(ushort body, Vector2 centre, float radius)
+        => HeldCells(body, centre, radius, float.PositiveInfinity, out _);
+
+    /// <inheritdoc cref="HeldCells(ushort, Vector2, float)"/>
+    /// <param name="highY">With <paramref name="highFree"/>: free water (m³) farther than <paramref name="radius"/> whose cells lie at or over this world y.</param>
+    public (int Held, int Outside, int Floating, float FloatTop) HeldCells(ushort body, Vector2 centre, float radius, float highY, out float highFree)
+    {
+        const int P = ChunkConstants.Padded;
+        var held = 0;
+        var outside = 0;
+        var floating = 0;
+        var top = float.NegativeInfinity;
+        var r2 = radius * radius;
+        var high = 0.0;
+
+        foreach (var (_, slot) in _blocks)
+        {
+            if (slot.Pending)
+                continue;
+
+            var block = slot.Block;
+            var origin = block.Coord.WorldOrigin;
+
+            for (var z = 0; z < ChunkConstants.Size; z++)
+                for (var y = 0; y < ChunkConstants.Size; y++)
+                    for (var x = 0; x < ChunkConstants.Size; x++)
+                    {
+                        var i = ChunkConstants.Index(x, y, z);
+
+                        if ((block.Flags[i] & (byte)WaterFlags.Reservoir) == 0 && origin.Y + y >= highY
+                            && Vector2.DistanceSquared(new Vector2(origin.X + x, origin.Z + z), centre) > r2)
+                            high += block.Water[i];
+
+                        if ((block.Flags[i] & (byte)WaterFlags.Reservoir) == 0 || block.Body[i] != body)
+                            continue;
+
+                        held++;
+
+                        if (Vector2.DistanceSquared(new Vector2(origin.X + x, origin.Z + z), centre) > r2)
+                            outside++;
+
+                        var below = i - P;
+                        if ((block.Flags[below] & (byte)(WaterFlags.Solid | WaterFlags.Reservoir)) == 0 && block.Water[below] < WaterFlow.SupportThreshold)
+                        {
+                            floating++;
+                            top = MathF.Max(top, origin.Y + y);
+                        }
+                    }
+        }
+
+        highFree = (float)high;
+        return (held, outside, floating, top);
+    }
+
+    /// <summary>
+    /// Diagnostics (the terrain panel's water probe): the column of cells at world (x, z) from y − 2 up
+    /// <paramref name="up"/> metres, one line for each cell that holds water or is held, top first: world y, fill, kind
+    /// (H held by its body, Z sea zone, F free), body, fall speed (pipe model), and whether its block sleeps.
+    /// Allocates; not for the tick.
+    /// </summary>
+    public string DescribeColumn(Vector3 at, int up = 48)
+    {
+        var (cx, cz) = ((int)MathF.Round(at.X), (int)MathF.Round(at.Z));
+        var text = new System.Text.StringBuilder();
+        var bottom = (int)MathF.Floor(at.Y) - 2;
+
+        for (var y = bottom + up; y >= bottom; y--)
+        {
+            var coord = ChunkCoord.FromWorld(new Vector3(cx, y, cz));
+            if (!_blocks.TryGetValue(coord, out var slot) || slot.Pending)
+                continue;
+
+            var block = slot.Block;
+            var o = coord.WorldOrigin;
+            var i = ChunkConstants.Index(cx - (int)o.X, y - (int)o.Y, cz - (int)o.Z);
+            var flags = (WaterFlags)block.Flags[i];
+            var held = (flags & WaterFlags.Reservoir) != 0;
+
+            if ((flags & WaterFlags.Solid) != 0 || (!held && block.Water[i] <= 0.001f))
+                continue;
+
+            var kind = held ? "H" : (flags & WaterFlags.SeaZone) != 0 ? "Z" : "F";
+            var fall = block.FallSpeed is null ? 0f : -block.FallSpeed[i];
+            text.AppendLine($"y {y,4}  fill {block.Water[i],6:F3}  {kind}  body {block.Body[i]}  fall {fall,5:F1}{(block.Asleep ? "  asleep" : "")}");
+        }
+
+        return text.Length == 0 ? "(no water in this column)" : text.ToString();
+    }
+
+    /// <summary>Diagnostics (the terrain panel): every live body and every disc, one line each. Allocates; not for the tick.</summary>
+    public string DescribeBodiesAndDiscs()
+    {
+        var text = new System.Text.StringBuilder();
+
+        for (var id = WaterBodies.Sea + 1; id < Bodies.Count; id++)
+        {
+            ref var body = ref Bodies[(ushort)id];
+            if (!body.Alive)
+                continue;
+
+            var (held, outside, floating, top) = HeldCells((ushort)id, body.Centre, body.Radius);
+            text.AppendLine($"body #{id}: level {body.Level:F2} bottom {body.Bottom:F1} area {body.Area:F0} m2, centre {body.Centre} r {body.Radius:F0}, ledger {body.Ledger:F2} m3, gave {body.Given:F1} m3; loaded held cells {held}, {outside} outside r, {floating} floating (top y {top:F0})");
+        }
+
+        foreach (var disc in _discs)
+            text.AppendLine($"disc of body #{disc.Body}: centre ({disc.Shape.X:F1}, {disc.Shape.Y:F1}) r {disc.Shape.Z:F1}, flow {disc.Flow:F2} m3/s (steady {disc.Steady:F1} s), quiet {disc.Quiet:F1} s{(disc.IsOutlet ? $", outlet {disc.OutletRate:F2} m3/s at level {disc.OutletLevel:F2}" : "")}");
+
+        return text.ToString();
     }
 
     /// <summary>Diagnostics: activations and refreshes waiting to be dispatched, blocks being (re)activated, blocks being meshed.</summary>
@@ -433,6 +641,20 @@ public sealed class VoxelWaterSystem : IDisposable
     public int AwakeBlocks { get; private set; }
 
     public float LastStepMs { get; private set; }
+
+    /// <summary>Of the last tick's steps: the time spent taking the swell (sampling it, waking on it, laying it over blocks).</summary>
+    public float LastSwellMs { get; private set; }
+
+    /// <summary>Diagnostics: the largest gap (m) between a lattice point's run-on swell and its fresh sample, since last taken.</summary>
+    public float TakeSwellStray()
+    {
+        var stray = _swellStray;
+        _swellStray = 0f;
+        return stray;
+    }
+
+    private float _swellStray;
+    private long _swellTime;
 
     public float Mass { get; private set; }
 
@@ -543,9 +765,10 @@ public sealed class VoxelWaterSystem : IDisposable
     /// as steep, and a pond chattered there and never slept. The blocks it touches are created if needed; the water lands
     /// in each at the start of the first step it is ready in (never while a mesh job reads it). Not for per-frame use.
     /// </summary>
-    public void Fill(Vector3 centre, float radius, float top)
+    /// <param name="colour">The poured water's colour and fog density (<see cref="WaterColour"/>).</param>
+    public void Fill(Vector3 centre, float radius, float top, uint colour = WaterColour.Pond)
     {
-        var fill = new PendingFill(centre, radius, top);
+        var fill = new PendingFill(centre, radius, top, colour);
         var min = ChunkCoord.FromWorld(centre - new Vector3(radius));
         var max = ChunkCoord.FromWorld(centre + new Vector3(radius));
 
@@ -561,11 +784,12 @@ public sealed class VoxelWaterSystem : IDisposable
         _fills.Add(fill);
     }
 
-    private sealed class PendingFill(Vector3 centre, float radius, float top)
+    private sealed class PendingFill(Vector3 centre, float radius, float top, uint colour)
     {
         public readonly Vector3 Centre = centre;
         public readonly float Radius = radius;
         public readonly float Top = top;
+        public readonly uint Colour = colour;
         public readonly HashSet<ChunkCoord> Waiting = new();
     }
 
@@ -612,13 +836,16 @@ public sealed class VoxelWaterSystem : IDisposable
                     if (over <= -1f || Vector3.DistanceSquared(world, fill.Centre) > fill.Radius * fill.Radius || (block.Flags[i] & Held) != 0)
                         continue;
 
-                    block.Water[i] = MathF.Max(block.Water[i], over >= 0f ? 1f + WaterFlow.Compression * over : 1f + over);
+                    var had = block.Water[i];
+                    block.Water[i] = MathF.Max(had, over >= 0f ? 1f + WaterFlow.Compression * over : 1f + over);
+                    block.Colour[i] = WaterColour.Blend(block.Colour[i], had, fill.Colour, block.Water[i] - had);
                     poured = true;
                 }
 
         if (!poured)
             return;
 
+        block.Revision++;
         block.Asleep = false;
         block.QuietSteps = 0;
         slot.MeshDirty = true;
@@ -777,6 +1004,10 @@ public sealed class VoxelWaterSystem : IDisposable
 
                     slot.Block.MarkDiscs(RemainingDiscs(coord));
                     Settle(slot);
+                    NoteSleep(slot);
+
+                    // Free water still in the disc's columns that didn't join stops being the body's: it leaves it.
+                    Bodies.Exchange(disc.Body, -(float)slot.Block.FreeWaterLeft(disc.Shape));
                 });
 
                 continue;
@@ -852,7 +1083,7 @@ public sealed class VoxelWaterSystem : IDisposable
             {
                 var disc = _discs[d];
 
-                if (!block.Holds(disc.Body) || !Covers(disc.Shape, block.Coord))
+                if (block.BodyExchange[disc.Body] == 0f || !Covers(disc.Shape, block.Coord))
                     continue;
 
                 var distance = Vector2.DistanceSquared(centre, new Vector2(disc.Shape.X, disc.Shape.Y));
@@ -906,6 +1137,28 @@ public sealed class VoxelWaterSystem : IDisposable
 
         foreach (var id in Bodies.Moved)
             MoveBody(id);
+
+        foreach (var id in Bodies.Released)
+            ReleaseBody(id);
+    }
+
+    /// <summary>A released body (<see cref="WaterBodies.Released"/>): its held cells go back to free water and wake, and its discs end.</summary>
+    private void ReleaseBody(ushort id)
+    {
+        foreach (var (coord, slot) in _blocks)
+        {
+            if (slot.Pending || !slot.Block.Holds(id) || !slot.Block.ReleaseDead())
+                continue;
+
+            slot.Block.Asleep = false;
+            slot.Block.QuietSteps = 0;
+            slot.MeshDirty = true;
+            RefreshFlagHalos(coord);
+        }
+
+        for (var d = _discs.Count - 1; d >= 0; d--)
+            if (_discs[d].Body == id)
+                RemoveDisc(d);
     }
 
     /// <summary>The discs still live that touch the chunk's footprint.</summary>
@@ -927,12 +1180,21 @@ public sealed class VoxelWaterSystem : IDisposable
     private void Settle(Slot slot)
     {
         var block = slot.Block;
+        var free = Audit ? block.FreeMass() : 0.0;
         block.JoinBodies();
         var joined = block.Joined.Count;
         block.BornBodies();
+        block.Revision++;
 
         foreach (var (id, paid, surface) in block.Joined)
             Bodies.Took(id, paid, surface);
+
+        if (block.Joined.Count > 0)
+            block.RaiseTops();
+
+        // Free water that joined a body leaves the free water (the body books only what it paid to take it in at its fill).
+        if (Audit)
+            AuditEvent("settle", block, block.FreeMass() - free);
 
         if (block.Joined.Count == 0)
             return;
@@ -943,6 +1205,189 @@ public sealed class VoxelWaterSystem : IDisposable
         // A new body: the neighbours' water may stand at its level too, and will join it when they next settle.
         if (block.Joined.Count > joined)
             DirtyNeighbourMeshes(block.Coord);
+    }
+
+    /// <summary>
+    /// Before a step, a block at the sea's height takes the swell over its padded columns (<see cref="WaterBlock.Swell"/>),
+    /// bilinear from the tick's lattice. Blocks nowhere near the sea, touching none of its cells, or with no swell over them, hold a flat sea.
+    /// </summary>
+    private void PrepareSwell(WaterBlock block)
+    {
+        const int p = ChunkConstants.Padded;
+        var seaTop = Bodies.SeaTop;
+        var bottom = block.Coord.Y * ChunkConstants.Size - 1;
+        var top = bottom + ChunkConstants.Size + 1;
+        var any = false;
+        var origin = block.Coord.WorldOrigin;
+        var lx = (int)MathF.Floor((origin.X - 1f) / SwellSpacing);
+        var lz = (int)MathF.Floor((origin.Z - 1f) / SwellSpacing);
+        Span<float> points = stackalloc float[SwellPoints * SwellPoints];
+
+        // A block sharing no cell with the sea (inland, a lake's) takes no swell, or samples it for nothing.
+        if (SeaSurface is not null && top >= seaTop - WaterBodies.SwellDepth && bottom <= seaTop + WaterBlock.ZoneRunUp && block.TouchesSea())
+        {
+            for (var j = 0; j < SwellPoints; j++)
+            {
+                for (var i = 0; i < SwellPoints; i++)
+                {
+                    var h = SwellPoint(lx + i, lz + j);
+                    points[i + j * SwellPoints] = h;
+                    any |= h != 0f;
+                }
+            }
+        }
+
+        if (!any)
+        {
+            if (block.Swelling)
+            {
+                block.Swell.AsSpan().Clear();
+                block.Swelling = false;
+            }
+
+            return;
+        }
+
+        for (var z = 0; z < p; z++)
+        {
+            var fz = (origin.Z + z - 1f) / SwellSpacing - lz;
+            var iz = (int)fz;
+            var tz = fz - iz;
+
+            for (var x = 0; x < p; x++)
+            {
+                var fx = (origin.X + x - 1f) / SwellSpacing - lx;
+                var ix = (int)fx;
+                var k = ix + iz * SwellPoints;
+                var near = float.Lerp(points[k], points[k + 1], fx - ix);
+                var far = float.Lerp(points[k + SwellPoints], points[k + SwellPoints + 1], fx - ix);
+                block.Swell[x + z * p] = float.Lerp(near, far, tz);
+            }
+        }
+
+        block.Swelling = true;
+    }
+
+    /// <summary>
+    /// The swell at a lattice point this tick, faded out past <see cref="SwellRadius"/>: run on from its last sample
+    /// (<see cref="RefreshSwell"/>), the same for every block. A point first read is sampled now.
+    /// </summary>
+    private float SwellPoint(int ix, int iz)
+    {
+        var x = ix * SwellSpacing;
+        var z = iz * SwellSpacing;
+        var dx = x - _camera.X;
+        var dz = z - _camera.Z;
+        var fade = Math.Clamp((SwellRadius - MathF.Sqrt(dx * dx + dz * dz)) / SwellFade, 0f, 1f);
+
+        if (fade <= 0f)
+            return 0f;
+
+        var key = (long)ix << 32 | (uint)iz;
+
+        if (!_swellIndex.TryGetValue(key, out var k))
+        {
+            if (_swellCount == _swellSamples.Length)
+                Array.Resize(ref _swellSamples, _swellCount * 2);
+
+            k = _swellCount++;
+            var h = SeaSurface!(x, z);
+            _swellSamples[k] = new SwellSample { Key = key, Height = h, Fresh = h, Sampled = _swellClock };
+            _swellIndex.Add(key, k);
+        }
+
+        ref var point = ref _swellSamples[k];
+        point.Read = _swellClock;
+        return fade * (point.Height + point.Rate * (float)(_swellClock - point.Sampled));
+    }
+
+    /// <summary>
+    /// Once a tick: samples a share of the lattice again (every point once in <see cref="SwellRefreshTicks"/>). A point runs
+    /// on from where it stands now toward where its last two samples put the swell one refresh on, so it never jumps:
+    /// jumping to each fresh sample stepped the sea's held cells by 1–3 cm at every refresh (16 cm in a storm). Once a
+    /// second it forgets the points no block has read for <see cref="SwellForget"/>.
+    /// </summary>
+    private void RefreshSwell(double dt)
+    {
+        var interval = SwellRefreshTicks * dt;
+
+        for (var k = _swellTick % SwellRefreshTicks; k < _swellCount; k += SwellRefreshTicks)
+        {
+            ref var point = ref _swellSamples[k];
+            var h = SeaSurface!((int)(point.Key >> 32) * SwellSpacing, (int)point.Key * SwellSpacing);
+            var since = _swellClock - point.Sampled;
+            var now = point.Height + point.Rate * (float)since;
+            var ahead = since > 0.0 ? h + (float)((h - point.Fresh) / since * interval) : h;
+            _swellStray = MathF.Max(_swellStray, MathF.Abs(h - now));
+            point.Height = now;
+            point.Rate = (float)((ahead - now) / interval);
+            point.Fresh = h;
+            point.Sampled = _swellClock;
+        }
+
+        if (_swellTick % (SwellRefreshTicks * 10) != 0)
+            return;
+
+        var kept = 0;
+
+        for (var k = 0; k < _swellCount; k++)
+        {
+            var point = _swellSamples[k];
+
+            if (_swellClock - point.Read > SwellForget)
+            {
+                _swellIndex.Remove(point.Key);
+                continue;
+            }
+
+            _swellSamples[kept] = point;
+            _swellIndex[point.Key] = kept++;
+        }
+
+        _swellCount = kept;
+    }
+
+    /// <summary>The swell at a block's centre this tick, bilinear from the lattice.</summary>
+    private float SwellAtCentre(ChunkCoord coord)
+    {
+        var origin = coord.WorldOrigin;
+        var fx = (origin.X + ChunkConstants.Size * 0.5f) / SwellSpacing;
+        var fz = (origin.Z + ChunkConstants.Size * 0.5f) / SwellSpacing;
+        var ix = (int)MathF.Floor(fx);
+        var iz = (int)MathF.Floor(fz);
+        var near = float.Lerp(SwellPoint(ix, iz), SwellPoint(ix + 1, iz), fx - ix);
+        var far = float.Lerp(SwellPoint(ix, iz + 1), SwellPoint(ix + 1, iz + 1), fx - ix);
+        return float.Lerp(near, far, fz - iz);
+    }
+
+    /// <summary>A block asleep: whether its free water meets the sea, and the swell it slept under.</summary>
+    private void NoteSleep(Slot slot)
+    {
+        var block = slot.Block;
+        slot.SeaFree = Pipes && SeaSurface is not null && block.Asleep && block.TouchesSea() && block.HasFreeWater();
+
+        if (slot.SeaFree)
+            slot.SleptSwell = SwellAtCentre(block.Coord);
+    }
+
+    /// <summary>
+    /// Once a tick: a sleeping block whose free water meets the sea wakes when the swell over it has moved, so water
+    /// against the sea rises and falls with it near the camera. Past <see cref="SwellRadius"/> the swell is flat and it sleeps on.
+    /// </summary>
+    private void WakeOnSwell()
+    {
+        foreach (var (_, slot) in _blocks)
+        {
+            var block = slot.Block;
+
+            if (!slot.SeaFree || !block.Asleep || slot.Pending || MathF.Abs(SwellAtCentre(block.Coord) - slot.SleptSwell) <= SwellWake)
+                continue;
+
+            slot.SeaFree = false;
+            block.Asleep = false;
+            block.QuietSteps = 0;
+            block.CalmSteps = 0;
+        }
     }
 
     /// <summary>Creates (or, for an existing block and refresh = true, re-reads solids for) a block.</summary>
@@ -971,6 +1416,7 @@ public sealed class VoxelWaterSystem : IDisposable
         created.MeshDirty = false;
         created.RefreshQueued = false;
         created.Simulated = false;
+        created.SeaFree = false;
         created.Mesh.Clear();
         created.Building.Clear();
         created.Meshing = false;
@@ -981,6 +1427,8 @@ public sealed class VoxelWaterSystem : IDisposable
     /// <summary>Main thread, once per frame: finish activations, start new ones, evict far blocks.</summary>
     public void Update(Vector3 cameraPos)
     {
+        _camera = cameraPos;
+
         if (_activationScheduler.IsExecuting)
             return;
 
@@ -993,10 +1441,18 @@ public sealed class VoxelWaterSystem : IDisposable
                 slot.MeshDirty = true;
 
                 // A body's level may have moved while it was activating.
+                // A body released while it was activating leaves its cells free.
+                slot.Block.ReleaseDead();
                 slot.Block.RefillHeld();
+                slot.Block.RaiseTops();
+                slot.Block.BookOpened();
+
+                if (Audit)
+                    AuditEvent(job.Refresh ? "refresh" : "activation", slot.Block, slot.Block.FreeMass() - slot.AuditFree);
                 slot.Block.Asleep = slot.Block.AllHeld() || job.AtRest;
                 slot.Block.QuietSteps = 0;
                 RefreshFlagHalos(job.Block.Coord);
+                NoteSleep(slot);
                 DirtyNeighbourMeshes(job.Block.Coord);
             }
 
@@ -1021,6 +1477,7 @@ public sealed class VoxelWaterSystem : IDisposable
 
             // A refresh writes into the block, so it must not be stepped meanwhile.
             slot.Pending = true;
+            slot.AuditFree = refresh ? slot.Block.FreeMass() : 0.0;
             var job = _activationPool.Pop();
             job.Prepare(slot.Block, refresh, _terrain.Params, _terrain.Ops, _zones, _discShapes, Generated, Bodies);
             _activationScheduler.Queue(job, 1);
@@ -1067,11 +1524,7 @@ public sealed class VoxelWaterSystem : IDisposable
             {
                 for (var x = low.X; x <= high.X; x++)
                 {
-                    var origin = new ChunkCoord(x, 0, z).WorldOrigin;
-                    var nx = Math.Clamp(info.Centre.X, origin.X, origin.X + ChunkConstants.Size) - info.Centre.X;
-                    var nz = Math.Clamp(info.Centre.Y, origin.Z, origin.Z + ChunkConstants.Size) - info.Centre.Y;
-
-                    if (nx * nx + nz * nz > info.Radius * info.Radius)
+                    if (!DiscReaches(info, x, z))
                         continue;
 
                     for (var y = low.Y; y <= high.Y; y++)
@@ -1081,6 +1534,15 @@ public sealed class VoxelWaterSystem : IDisposable
         }
 
         return [.. coords];
+    }
+
+    /// <summary>The body's disc reaches into chunk column (x, z).</summary>
+    private static bool DiscReaches(in WaterBodyInfo info, int x, int z)
+    {
+        var origin = new ChunkCoord(x, 0, z).WorldOrigin;
+        var nx = Math.Clamp(info.Centre.X, origin.X, origin.X + ChunkConstants.Size) - info.Centre.X;
+        var nz = Math.Clamp(info.Centre.Y, origin.Z, origin.Z + ChunkConstants.Size) - info.Centre.Y;
+        return nx * nx + nz * nz <= info.Radius * info.Radius;
     }
 
     private void RefreshFlagHalos(ChunkCoord coord)
@@ -1109,6 +1571,18 @@ public sealed class VoxelWaterSystem : IDisposable
         // Budgeted: after an edit wakes many blocks a step can take tens of ms; stop once the budget is spent and drop
         // the backlog, so water slows down for a moment instead of the frame rate collapsing (and the clock spiralling).
         var budget = (long)(StepBudgetMs * Stopwatch.Frequency / 1000.0);
+        _swellTime = 0;
+
+        if (Pipes && SeaSurface is not null)
+        {
+            var swell = Stopwatch.GetTimestamp();
+            _swellClock += dt;
+            _swellTick++;
+            RefreshSwell(dt);
+            WakeOnSwell();
+            _swellTime += Stopwatch.GetTimestamp() - swell;
+        }
+
         while (_meshing.Count == 0 && _accumulator >= stepTime && steps < MaxStepsPerTick && Stopwatch.GetTimestamp() - start < budget)
         {
             _accumulator -= stepTime;
@@ -1121,7 +1595,10 @@ public sealed class VoxelWaterSystem : IDisposable
 
         // The voxel steps alone: the zone sim below has its own timing (LastZoneMs).
         if (steps > 0)
+        {
             LastStepMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds / steps;
+            LastSwellMs = (float)(_swellTime * 1000.0 / Stopwatch.Frequency);
+        }
 
         StartMeshing();
         StepZones(dt);
@@ -1133,6 +1610,27 @@ public sealed class VoxelWaterSystem : IDisposable
 
         SettleBodies();
     }
+
+    /// <summary>
+    /// Diagnostics: audit every step's water. The free water no body counts as its own (WaterBlock.FreeMass) in the awake
+    /// blocks after the step, less before, plus what the bodies took in (the sea's too), is water the step made (positive)
+    /// or lost: 0 for a step that conserves. Costs a pass over each awake block's cells twice a step, so it is off unless asked for.
+    /// </summary>
+    public bool Audit;
+
+    /// <summary>Water the audited steps made, summed (m³), and the steps audited.</summary>
+    public double AuditMade { get; private set; }
+    public long AuditSteps { get; private set; }
+
+    /// <summary>The worst audited step: water it made (m³), its block that changed most against its bodies' exchange, and that block's largest fill.</summary>
+    public (float Made, ChunkCoord Block, float BlockMade, float MaxFill, long Step) AuditWorst { get; private set; }
+
+    /// <summary>A step making or losing more than this (m³) is logged, its three worst blocks with it, at most AuditLogLimit times.</summary>
+    public float AuditLogThreshold = 0.5f;
+    public int AuditLogLimit = 200;
+    private int _auditLogged;
+    private readonly double[] _auditBefore = new double[MaxBlocks];
+    private readonly double[] _auditMade = new double[MaxBlocks];
 
     private void Step()
     {
@@ -1167,8 +1665,25 @@ public sealed class VoxelWaterSystem : IDisposable
 
                 if (Pipes && f != (int)Face.NegY)
                     WaterHalo.CopyFalling(slot.Block, neighbour, (Face)f);
+
+                if (Pipes)
+                {
+                    WaterHalo.CopyColour(slot.Block, neighbour, (Face)f);
+                    WaterHalo.CopyFroth(slot.Block, neighbour, (Face)f);
+                }
+            }
+
+            if (Pipes)
+            {
+                var swell = Stopwatch.GetTimestamp();
+                PrepareSwell(slot.Block);
+                _swellTime += Stopwatch.GetTimestamp() - swell;
             }
         }
+        if (Audit)
+            for (var k = 0; k < _awake.Count; k++)
+                _auditBefore[k] = _awake[k].Block.FreeMass();
+
         RunPass(Pipes ? WaterStepJob.Kind.PipeFluxes : WaterStepJob.Kind.OutflowScale);
 
         foreach (var slot in _awake)
@@ -1178,11 +1693,26 @@ public sealed class VoxelWaterSystem : IDisposable
 
         var mass = 0f;
         var stepTime = 1f / StepsPerSecond;
-        foreach (var slot in _awake)
+        var made = 0.0;
+        for (var k = 0; k < _awake.Count; k++)
         {
+            var slot = _awake[k];
             var block = slot.Block;
             WaterFlow.Swap(block);
-            mass += block.Mass();
+            var blockMass = block.Mass();
+            mass += blockMass;
+
+            if (Audit)
+            {
+                // Held cells are refilled and the bodies' own free water (disc columns) is booked to them: what the
+                // bodies took is what the rest of the water lost.
+                var taken = 0.0;
+                foreach (var id in block.Touched)
+                    taken += block.BodyExchange[id];
+
+                _auditMade[k] = block.FreeMass() - _auditBefore[k] + taken;
+                made += _auditMade[k];
+            }
 
             if (float.IsNaN(mass) && !_nanReported)
                 ReportNaN(block);
@@ -1201,12 +1731,24 @@ public sealed class VoxelWaterSystem : IDisposable
             if (noisy)
                 slot.MeshDirty = true;
 
-            if (block.QuietSteps >= QuietStepsToSleep || block.CalmSteps >= CalmSeconds * StepsPerSecond)
+            var resting = block.QuietSteps >= QuietStepsToSleep || block.CalmSteps >= CalmSeconds * StepsPerSecond;
+
+            // Free water against a swelling sea moves with it: asleep, it would freeze, or settle into a body of its own
+            // that no longer follows the sea. Checked again after another quiet spell.
+            if (resting && block.Swelling && block.TouchesSea() && block.HasFreeWater())
+            {
+                resting = false;
+                block.QuietSteps = 0;
+                block.CalmSteps = 0;
+            }
+
+            if (resting)
             {
                 block.Asleep = true;
                 block.ClearFluxes();
                 block.MarkDiscs(RemainingDiscs(block.Coord));
                 Settle(slot);
+                NoteSleep(slot);
             }
 
             if (block.BorderActive)
@@ -1215,10 +1757,91 @@ public sealed class VoxelWaterSystem : IDisposable
 
         Mass = mass;
 
+        if (Audit)
+            AuditStep(made);
+
         if (_discs.Count > 0)
             MeasureDiscs(stepTime);
 
         MarkStepped();
+    }
+
+    /// <summary>Water outside the steps (m³) by event, as audited: activations, refreshes, evictions, settles.</summary>
+    public double AuditActivations { get; private set; }
+    public double AuditRefreshes { get; private set; }
+    public double AuditEvictions { get; private set; }
+    public double AuditSettles { get; private set; }
+
+    /// <summary>
+    /// Audit (<see cref="Audit"/>): free water an event outside the steps added to a block (negative: took away), summed by
+    /// kind, and logged when it is over <see cref="AuditLogThreshold"/>, with the discs over the block.
+    /// </summary>
+    private void AuditEvent(string kind, WaterBlock block, double free)
+    {
+        switch (kind)
+        {
+            case "activation": AuditActivations += free; break;
+            case "refresh": AuditRefreshes += free; break;
+            case "eviction": AuditEvictions += free; break;
+            default: AuditSettles += free; break;
+        }
+
+        if (Math.Abs(free) <= AuditLogThreshold || _auditLogged >= AuditLogLimit)
+            return;
+
+        _auditLogged++;
+        var discs = 0;
+        foreach (var disc in _discs)
+            discs += Covers(disc.Shape, block.Coord) ? 1 : 0;
+
+        Console.WriteLine($"water audit: {kind} of block {block.Coord} changed its free water by {free:F1} m3 (max fill {block.MaxFill():F2}, {discs} discs over it); totals: activations {AuditActivations:F0}, refreshes {AuditRefreshes:F0}, evictions {AuditEvictions:F0}, settles {AuditSettles:F0}, steps {AuditMade:F1}");
+    }
+
+    /// <summary>
+    /// Books an audited step (<see cref="Audit"/>): the total, the worst step, and a log line with the three blocks whose
+    /// water changed most against their bodies' exchange when the step made or lost more than <see cref="AuditLogThreshold"/>.
+    /// A block's own figure includes what crossed its faces to other awake blocks, so only the step's total is water made.
+    /// </summary>
+    private void AuditStep(double made)
+    {
+        AuditSteps++;
+        AuditMade += made;
+
+        if (Math.Abs(made) <= Math.Abs(AuditWorst.Made) && (Math.Abs(made) <= AuditLogThreshold || _auditLogged >= AuditLogLimit))
+            return;
+
+        Span<int> worst = stackalloc int[3];
+        worst.Fill(-1);
+
+        for (var k = 0; k < _awake.Count; k++)
+        {
+            for (var w = 0; w < 3; w++)
+            {
+                if (worst[w] >= 0 && Math.Abs(_auditMade[k]) <= Math.Abs(_auditMade[worst[w]]))
+                    continue;
+
+                for (var m = 2; m > w; m--)
+                    worst[m] = worst[m - 1];
+
+                worst[w] = k;
+                break;
+            }
+        }
+
+        if (Math.Abs(made) > Math.Abs(AuditWorst.Made) && worst[0] >= 0)
+            AuditWorst = ((float)made, _awake[worst[0]].Block.Coord, (float)_auditMade[worst[0]], _awake[worst[0]].Block.MaxFill(), AuditSteps);
+
+        if (Math.Abs(made) <= AuditLogThreshold || _auditLogged >= AuditLogLimit)
+            return;
+
+        _auditLogged++;
+        var line = $"water audit: step {AuditSteps} made {made:F3} m3 (total {AuditMade:F1}), awake {_awake.Count}, bodies {Bodies.Count - 2}, discs {_discs.Count};";
+
+        foreach (var k in worst)
+            if (k >= 0)
+                line += $" block {_awake[k].Block.Coord} {_auditMade[k]:F3} m3 max fill {_awake[k].Block.MaxFill():F2};";
+
+        Console.WriteLine(line);
     }
 
     /// <summary>
@@ -1474,6 +2097,10 @@ public sealed class VoxelWaterSystem : IDisposable
         foreach (var coord in _scratch)
         {
             _blocks.Remove(coord, out var slot);
+
+            if (Audit)
+                AuditEvent("eviction", slot!.Block, -slot.Block.FreeMass());
+
             _slotPool.Push(slot!);
 
             for (var f = 0; f < 6; f++)
@@ -1501,12 +2128,418 @@ public sealed class VoxelWaterSystem : IDisposable
         }
     }
 
-    /// <summary>Per frame: hand every non-empty surface mesh to the renderer.</summary>
+    /// <summary>Per frame: hand every non-empty surface mesh to the renderer, then the generated bodies' far planes.</summary>
     public void SubmitMeshes(VoxelWaterRenderer renderer)
     {
         foreach (var (coord, slot) in _blocks)
             if (!slot.Pending && slot.Mesh.IndexCount > 0)
                 renderer.Add(coord, slot.Mesh);
+
+        SubmitPlanes(renderer);
+    }
+
+    /// <summary>A far plane's quads are this many metres a side: the wind's reach is read per vertex.</summary>
+    private const int PlaneCell = 8;
+    private const int PlaneSide = ChunkConstants.Size / PlaneCell + 1;
+
+    /// <summary>Per generated body, the chunk columns its disc reaches (y unused).</summary>
+    private readonly ChunkCoord[][] _planeColumns;
+    private readonly WaterMesh _plane = new();
+
+    /// <summary>
+    /// A generated body's water exists in the sim only where a block holds it, so past the loaded blocks it is drawn as a
+    /// flat plane at its level over every chunk column of its disc no drawn block covers. The basin is closed, so the
+    /// terrain, drawn first, hides it wherever the ground stands over the water, and the disc clips it in the shader.
+    /// </summary>
+    private void SubmitPlanes(VoxelWaterRenderer renderer)
+    {
+        for (var b = 0; b < Generated.Length; b++)
+        {
+            var info = Generated[b];
+            ref var body = ref Bodies[info.Id];
+
+            if (!body.Alive)
+                continue;
+
+            var y = ChunkCoord.FromWorld(new Vector3(info.Centre.X, body.Level - 0.5f, info.Centre.Y)).Y;
+            var clip = new Vector4(info.Centre, info.Radius, 0f);
+            var built = false;
+
+            foreach (var column in _planeColumns[b])
+            {
+                var coord = new ChunkCoord(column.X, y, column.Z);
+
+                // A loaded block draws its own surface once meshed, even an empty one (water drained by a dig).
+                if (_blocks.TryGetValue(coord, out var slot) && !slot.Pending && !(slot.Mesh.IsEmpty && (slot.MeshDirty || slot.Meshing)))
+                    continue;
+
+                if (!built)
+                {
+                    BuildPlane(body.Level - coord.WorldOrigin.Y, body.Level - body.Bottom);
+                    built = true;
+                }
+
+                if (!renderer.Add(coord, _plane, clip))
+                    return;
+            }
+        }
+    }
+
+    /// <summary>A chunk-sized grid at <paramref name="height"/> over its origin, facing up, still.</summary>
+    private void BuildPlane(float height, float thickness)
+    {
+        _plane.Clear();
+
+        for (var z = 0; z < PlaneSide; z++)
+            for (var x = 0; x < PlaneSide; x++)
+                _plane.Vertices[_plane.VertexCount++] = new WaterVertex { Position = new Vector3(x * PlaneCell, height, z * PlaneCell), Normal = Vector3.UnitY, Thickness = thickness };
+
+        for (var z = 0; z < PlaneSide - 1; z++)
+        {
+            for (var x = 0; x < PlaneSide - 1; x++)
+            {
+                var i = (uint)(x + z * PlaneSide);
+                var indices = _plane.Indices.AsSpan(_plane.IndexCount, 6);
+                indices[0] = i;
+                indices[1] = i + PlaneSide;
+                indices[2] = i + 1;
+                indices[3] = i + 1;
+                indices[4] = i + PlaneSide;
+                indices[5] = i + PlaneSide + 1;
+                _plane.IndexCount += 6;
+            }
+        }
+    }
+
+    private static ChunkCoord[][] PlaneColumns(WaterBodyInfo[] generated)
+    {
+        var columns = new ChunkCoord[generated.Length][];
+        var list = new List<ChunkCoord>();
+
+        for (var b = 0; b < generated.Length; b++)
+        {
+            var info = generated[b];
+            var low = ChunkCoord.FromWorld(new Vector3(info.Centre.X - info.Radius, 0f, info.Centre.Y - info.Radius));
+            var high = ChunkCoord.FromWorld(new Vector3(info.Centre.X + info.Radius, 0f, info.Centre.Y + info.Radius));
+            list.Clear();
+
+            for (var z = low.Z; z <= high.Z; z++)
+                for (var x = low.X; x <= high.X; x++)
+                    if (DiscReaches(info, x, z))
+                        list.Add(new ChunkCoord(x, 0, z));
+
+            columns[b] = [.. list];
+        }
+
+        return columns;
+    }
+
+    /// <summary>Where the fog fill left off round the window, so every stale block gets its turn under the per-frame budget.</summary>
+    private int _fogCursor;
+
+    /// <summary>
+    /// Per frame, after <see cref="Update"/> and before the volume is recorded: the fog volume's stale blocks in its window,
+    /// up to its budget, from the loaded blocks' cells (docs/water-fog.md) and, where no block is loaded, from the
+    /// bathymetry: sea water from the bed up to sea level, solid under the ground, air above.
+    /// </summary>
+    public void FillFog(WaterFogVolume fog)
+    {
+        var start = Stopwatch.GetTimestamp();
+        var (x0, y0, z0) = fog.WindowMin;
+        var budget = (long)(FogFillBudgetMs * Stopwatch.Frequency / 1000.0);
+
+        // The bathymetry blocks' keys: a hash of the grid cells under each (with the sea mask's reach), so a block is filled
+        // again only when its own ground changed, not on every rebuild of the kilometre grid. Hashed once per rebuild.
+        if (_fogKeyVersion != _bathymetry.Version || _fogKeyWindow != fog.WindowMin)
+        {
+            for (var index = 0; index < WaterFogVolume.Slots; index++)
+                _fogKeys[index] = BathymetryKey(FogBlock(fog.WindowMin, index));
+
+            _fogKeyVersion = _bathymetry.Version;
+            _fogKeyWindow = fog.WindowMin;
+            fog.KeysPeakMs = MathF.Max(fog.KeysPeakMs, (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+        }
+
+        for (var k = 0; k < WaterFogVolume.Slots; k++)
+        {
+            var index = (_fogCursor + k) % WaterFogVolume.Slots;
+            var coord = FogBlock(fog.WindowMin, index);
+            var loaded = _blocks.TryGetValue(coord, out var slot) && !slot.Pending;
+            var revision = loaded ? slot!.Block.Revision : _fogKeys[index];
+
+            if (!fog.Stale(coord.X, coord.Y, coord.Z, revision))
+                continue;
+
+            if (!fog.CanUpload || Stopwatch.GetTimestamp() - start > budget)
+            {
+                _fogCursor = index;
+                break;
+            }
+
+            // Written to a managed scratch and copied once: the volume's staging is write-combined memory.
+            var blockStart = Stopwatch.GetTimestamp();
+            var cells = fog.Reserve(coord.X, coord.Y, coord.Z, revision);
+            var scratch = _fogScratch ??= new uint[WaterFogVolume.BlockCells];
+
+            if (loaded)
+                FogFromBlock(slot!.Block, scratch);
+            else
+                FogFromBathymetry(coord, scratch);
+
+            scratch.AsSpan().CopyTo(cells);
+            fog.BlockPeakMs = MathF.Max(fog.BlockPeakMs, (float)Stopwatch.GetElapsedTime(blockStart).TotalMilliseconds);
+        }
+
+        var ms = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+        fog.Fills += fog.UploadsLastFrame;
+
+        // Frames that filled something, once the code is warm (the first calls are the JIT's).
+        if (fog.UploadsLastFrame > 0 && fog.Fills > 24)
+        {
+            fog.FillMs.Record(ms);
+
+            if (ms > fog.FillPeakMs)
+                (fog.FillPeakMs, fog.FillPeakUploads) = (ms, fog.UploadsLastFrame);
+        }
+    }
+
+    /// <summary>A block's cells as fog: solid stops the march (alpha 255), water carries its own colour at a density scaled by its fill, air is nothing.</summary>
+    private static void FogFromBlock(WaterBlock block, Span<uint> cells)
+    {
+        const byte solidBit = (byte)WaterFlags.Solid;
+        var water = block.Water;
+        var flags = block.Flags;
+        var colour = block.Colour;
+        var o = 0;
+
+        for (var z = 0; z < ChunkConstants.Size; z++)
+            for (var y = 0; y < ChunkConstants.Size; y++)
+            {
+                var row = ChunkConstants.Index(0, y, z);
+
+                for (var i = row; i < row + ChunkConstants.Size; i++)
+                {
+                    var w = water[i];
+
+                    if ((flags[i] & solidBit) != 0)
+                        cells[o++] = 0xFF000000u;
+                    else if (w < WaterSurfaceMesher.WetThreshold)
+                        cells[o++] = WaterColour.None;
+                    else
+                    {
+                        var c = colour[i] == WaterColour.None ? WaterColour.Sea : colour[i];
+                        var a = (byte)MathF.Min(WaterColour.A(c) * MathF.Min(w, 1f), 254f);
+                        cells[o++] = (c & 0x00FFFFFFu) | (uint)a << 24;
+                    }
+                }
+            }
+    }
+
+    /// <summary>The window's block at a slot index: x fastest, then y, then z.</summary>
+    private static ChunkCoord FogBlock((int X, int Y, int Z) min, int index) =>
+        new(min.X + index % WaterFogVolume.BlocksX, min.Y + index / WaterFogVolume.BlocksX % WaterFogVolume.BlocksY, min.Z + index / (WaterFogVolume.BlocksX * WaterFogVolume.BlocksY));
+
+    /// <summary>The grid cells a fog block reads: its columns' bilinear cells and the sea mask's reach around them, FogCells a side from (x, z).</summary>
+    private (int X, int Z) FogFootprint(ChunkCoord coord)
+    {
+        var origin = coord.WorldOrigin;
+        return ((int)MathF.Floor((origin.X - _bathymetry.Origin.X) / BathymetryGrid.CellSize - 0.5f) - SeaReach + 1,
+            (int)MathF.Floor((origin.Z - _bathymetry.Origin.Y) / BathymetryGrid.CellSize - 0.5f) - SeaReach + 1);
+    }
+
+    /// <summary>A hash of the ground and sea state of the grid cells under a fog block, with the sign bit set so it never reads as a sim block's revision.</summary>
+    private int BathymetryKey(ChunkCoord coord)
+    {
+        var grid = _bathymetry;
+        var (bx, bz) = FogFootprint(coord);
+        var tops = grid.Tops;
+        var beds = grid.Beds;
+        var sea = grid.Sea;
+        var h = 2166136261u;
+
+        for (var j = 0; j < FogCells; j++)
+        {
+            var gz = Math.Clamp(bz + j, 0, BathymetryGrid.Resolution - 1) * BathymetryGrid.Resolution;
+
+            for (var i = 0; i < FogCells; i++)
+            {
+                // The ground the fill reads (the bed under the sea, the top on the beach: a beach refined by streaming moves
+                // its waterline) and the sea state.
+                var g = Math.Clamp(bx + i, 0, BathymetryGrid.Resolution - 1) + gz;
+                h = (h ^ (uint)BitConverter.SingleToInt32Bits(BathymetryGrid.Ground(tops[g], beds[g], sea[g]))) * 16777619u;
+                h = (h ^ (byte)sea[g]) * 16777619u;
+            }
+        }
+
+        return (int)(h | 0x80000000u);
+    }
+
+    /// <summary>
+    /// A block no sim block covers, from the bathymetry: per voxel column the ground (bilinear over the 2 m cells, so a
+    /// beach slopes instead of stepping), solid under it, sea water from there up to the sea-level layer where the column
+    /// is sea (an unknown bed is deep sea), the cell the ground crosses holding its wet part; air elsewhere. A roof over a
+    /// beach counts as ground down to the sand; the sim's blocks, which know the voxels, cover anywhere a march matters.
+    /// </summary>
+    private void FogFromBathymetry(ChunkCoord coord, Span<uint> cells)
+    {
+        var grid = _bathymetry;
+        var origin = coord.WorldOrigin;
+        var sea = grid.Sea;
+        var seaTop = Bodies.SeaTop;
+        var seaAlpha = WaterColour.A(WaterColour.Sea);
+        var raw = _fogSeaRaw ??= new bool[FogCells * FogCells];
+        var dilated = _fogSeaDilated ??= new bool[FogCells * FogCells];
+        var (bx, bz) = FogFootprint(coord);
+
+        // A column is sea when any cell within SeaReach of it is: the mask marks a cell sea only where its y = -1 voxel holds
+        // water, so the last half metre of the beach's slope under sea level, and the run-up over it, several metres on a
+        // gentle beach, read as dry and stepped along the cells. The ground still decides where the water is. Dilated in
+        // two passes over the block's footprint of cells.
+        for (var j = 0; j < FogCells; j++)
+        {
+            var gz = Math.Clamp(bz + j, 0, BathymetryGrid.Resolution - 1) * BathymetryGrid.Resolution;
+
+            for (var i = 0; i < FogCells; i++)
+                raw[i + j * FogCells] = sea[Math.Clamp(bx + i, 0, BathymetryGrid.Resolution - 1) + gz] == BathymetryGrid.SeaState.Sea;
+        }
+
+        for (var j = 0; j < FogCells; j++)
+            for (var i = 0; i < FogCells; i++)
+            {
+                var any = false;
+                for (var k = Math.Max(i - SeaReach + 1, 0); k <= Math.Min(i + SeaReach, FogCells - 1) && !any; k++)
+                    any = raw[k + j * FogCells];
+
+                dilated[i + j * FogCells] = any;
+            }
+
+        for (var i = 0; i < FogCells; i++)
+            for (var j = 0; j < FogCells; j++)
+            {
+                var any = false;
+                for (var k = Math.Max(j - SeaReach + 1, 0); k <= Math.Min(j + SeaReach, FogCells - 1) && !any; k++)
+                    any = dilated[i + k * FogCells];
+
+                raw[i + j * FogCells] = any;
+            }
+
+        // The ground at the footprint's cell centres once (SampleGround at a centre is that cell's ground), then bilinear
+        // per column by hand: 289 grid reads for a block instead of 4 per column.
+        var corners = _fogGround ??= new float[FogGroundSide * FogGroundSide];
+        var cx0 = bx + SeaReach - 1;
+        var cz0 = bz + SeaReach - 1;
+
+        for (var j = 0; j < FogGroundSide; j++)
+            for (var i = 0; i < FogGroundSide; i++)
+                corners[i + j * FogGroundSide] = grid.SampleGround(grid.Origin.X + (cx0 + i + 0.5f) * BathymetryGrid.CellSize, grid.Origin.Y + (cz0 + j + 0.5f) * BathymetryGrid.CellSize);
+
+        // Per column: the last solid cell (its centre at or under the ground), the part-wet cell over it (none over the
+        // sea-level layer or off the sea), and the top water cell; the cells are then three integer compares each.
+        var solidTop = _fogSolidTop ??= new int[ChunkConstants.Size * ChunkConstants.Size];
+        var partial = _fogPartial ??= new uint[ChunkConstants.Size * ChunkConstants.Size];
+        var waterTop = _fogWaterTop ??= new int[ChunkConstants.Size * ChunkConstants.Size];
+        var seaTopCell = seaTop + 1;
+
+        for (var z = 0; z < ChunkConstants.Size; z++)
+        {
+            var fz = (origin.Z + z - grid.Origin.Y) / BathymetryGrid.CellSize - 0.5f - cz0;
+            var iz = (int)MathF.Floor(fz);
+            var tz = fz - iz;
+            var rowSea = (int)MathF.Floor((origin.Z + z - grid.Origin.Y) / BathymetryGrid.CellSize - 0.5f) - bz;
+
+            for (var x = 0; x < ChunkConstants.Size; x++)
+            {
+                var fx = (origin.X + x - grid.Origin.X) / BathymetryGrid.CellSize - 0.5f - cx0;
+                var ix = (int)MathF.Floor(fx);
+                var tx = fx - ix;
+                var g = ix + iz * FogGroundSide;
+                var ground = float.Lerp(float.Lerp(corners[g], corners[g + 1], tx), float.Lerp(corners[g + FogGroundSide], corners[g + FogGroundSide + 1], tx), tz);
+                var isSea = raw[(int)MathF.Floor((origin.X + x - grid.Origin.X) / BathymetryGrid.CellSize - 0.5f) - bx + rowSea * FogCells];
+                var c = x + z * ChunkConstants.Size;
+                var solid = (int)MathF.Floor(ground - 0.5f);
+                var wet = solid + 1.5f - ground;
+                solidTop[c] = solid;
+                partial[c] = isSea && solid + 1 <= seaTopCell ? (WaterColour.Sea & 0x00FFFFFFu) | (uint)(byte)(seaAlpha * wet) << 24 : WaterColour.None;
+                waterTop[c] = isSea ? seaTopCell : int.MinValue;
+            }
+        }
+
+        var o = 0;
+        for (var z = 0; z < ChunkConstants.Size; z++)
+        {
+            var row = z * ChunkConstants.Size;
+
+            for (var y = 0; y < ChunkConstants.Size; y++)
+            {
+                var worldY = (int)origin.Y + y;
+
+                for (var x = 0; x < ChunkConstants.Size; x++)
+                {
+                    var c = row + x;
+                    var solid = solidTop[c];
+                    cells[o++] = worldY <= solid ? 0xFF000000u : worldY == solid + 1 ? partial[c] : worldY <= waterTop[c] ? WaterColour.Sea : WaterColour.None;
+                }
+            }
+        }
+    }
+
+    private float[]? _fogGround;
+    private int[]? _fogSolidTop;
+    private uint[]? _fogPartial;
+    private int[]? _fogWaterTop;
+    private uint[]? _fogScratch;
+
+    /// <summary>Ground samples a side per block: its 16 cells and one more for the bilinear.</summary>
+    private const int FogGroundSide = ChunkConstants.Size / 2 + 2;
+    private bool[]? _fogSeaRaw;
+    private bool[]? _fogSeaDilated;
+    private readonly int[] _fogKeys = new int[WaterFogVolume.Slots];
+    private int _fogKeyVersion = -1;
+    private (int X, int Y, int Z) _fogKeyWindow;
+
+    /// <summary>Bathymetry cells (2 m) around a fog column within which a sea cell makes it sea.</summary>
+    private const int SeaReach = 3;
+
+    /// <summary>Grid cells a side a fog block's footprint covers: its 16 (plus one for the bilinear) and the reach on both sides.</summary>
+    private const int FogCells = ChunkConstants.Size / 2 + 1 + 2 * SeaReach;
+
+    /// <summary>Main-thread time (ms) a frame's fog fill may spend before the rest waits for the next frame: a hitch is worse than a block of fog a few frames late.</summary>
+    private const float FogFillBudgetMs = 0.5f;
+
+    /// <summary>
+    /// The voxel water at world point p, for the camera: true inside a loaded block's water, with the surface over it (the
+    /// top of the wet column). The open sea is not voxel water here; the caller tests the swell.
+    /// </summary>
+    public bool WaterAt(Vector3 p, out float surface)
+    {
+        surface = float.NaN;
+        var cell = new Vector3(MathF.Round(p.X), MathF.Round(p.Y), MathF.Round(p.Z));
+        var coord = ChunkCoord.FromWorld(cell);
+
+        if (!_blocks.TryGetValue(coord, out var slot) || slot.Pending)
+            return false;
+
+        var block = slot.Block;
+        var o = coord.WorldOrigin;
+        var (x, y, z) = ((int)(cell.X - o.X), (int)(cell.Y - o.Y), (int)(cell.Z - o.Z));
+        var i = ChunkConstants.Index(x, y, z);
+        var w = block.Water[i];
+
+        if (w < WaterSurfaceMesher.WetThreshold || p.Y > cell.Y - 0.5f + MathF.Min(w, 1f))
+            return false;
+
+        surface = cell.Y - 0.5f + MathF.Min(w, 1f);
+
+        for (var k = y + 1; k < ChunkConstants.Size; k++)
+        {
+            var above = block.Water[ChunkConstants.Index(x, k, z)];
+            if (above < WaterSurfaceMesher.WetThreshold)
+                break;
+
+            surface = o.Y + k - 0.5f + MathF.Min(above, 1f);
+        }
+
+        return true;
     }
 
     private WaterBlock? Neighbour(ChunkCoord coord, int face)

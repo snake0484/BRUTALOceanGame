@@ -8,7 +8,7 @@ namespace BrutalGame.Debug;
 /// <summary>
 /// CPU frame breakdown. Strings go through the ImString arena, so no GC allocation per frame.
 /// </summary>
-public sealed class ProfilerPanel(FrameStats stats, Renderer renderer, RainCover cover)
+public sealed class ProfilerPanel(FrameStats stats, Renderer renderer, RainCover cover, WaterFogVolume fog)
 {
     private static readonly float2 GraphSize = new(0f, 48f);
 
@@ -48,6 +48,7 @@ public sealed class ProfilerPanel(FrameStats stats, Renderer renderer, RainCover
             Row("Record"u8, stats.Record);
             Row("Submit + present"u8, stats.Present);
             Row("Cover rebuild"u8, cover.BuildMs);
+            Row("Fog fill"u8, fog.FillMs);
 
             var gpu = renderer.GpuTimer;
             ImGui.SeparatorText("GPU (avg ms)"u8);

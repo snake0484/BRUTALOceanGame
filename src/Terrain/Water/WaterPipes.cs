@@ -46,6 +46,15 @@ public static class WaterPipes
     public const float MaxFallSpeed = 30f;
 
     /// <summary>
+    /// Water falling through air is white (<see cref="WaterBlock.Froth"/> 1) from this fall speed (m/s, a drop of 1.8 m),
+    /// in proportion below it; a one-cell stair (4.4 m/s) froths to 0.7.
+    /// </summary>
+    public const float AerateSpeed = 6f;
+
+    /// <summary>Froth fades at this rate (1/s, 1/e in 4 s) as its bubbles rise and burst: a stream at 1 m/s trails a pour's foam a few metres.</summary>
+    public const float FrothDecay = 0.25f;
+
+    /// <summary>
     /// A vertical face is a pressure face when the cell under it is full (<see cref="WaterFlow.SupportThreshold"/>), or
     /// when the cell over it is full and the one under it holds at least this: a trough inside a column, where the cell is
     /// a pressure cell with a deficit, not space (the head is continuous across a full cell). Otherwise the water above is
@@ -95,6 +104,7 @@ public static class WaterPipes
     private const int A = ChunkConstants.PaddedArea;
     private const byte SolidBit = (byte)WaterFlags.Solid;
     private const byte ReservoirBit = (byte)WaterFlags.Reservoir;
+    private const byte ZoneBit = (byte)WaterFlags.SeaZone;
 
     /// <summary>
     /// A cell's head relative to its centre (m): its free surface while it has room, and over full the pressure its
@@ -107,10 +117,14 @@ public static class WaterPipes
     /// <summary>
     /// Pass 1: every face touching the interior once, then each interior cell's outflow limit. Needs fresh Water halos and
     /// fall speeds above. A face reads only its own last flux and the cells' state, so the sweep's order doesn't matter.
+    /// The sea's held cells first take the swell (<see cref="WaterBlock.HoldSwell"/>).
     /// </summary>
     public static unsafe void UpdateFluxes(WaterBlock block, float dt)
     {
+        block.HoldSwell();
         WaterFlow.BuildWetRows(block);
+        var swelling = block.Swelling;
+        var aboveSea = block.Bodies.SeaTop - block.Coord.Y * S;
         var pipe = dt * Gravity;
         var damping = MathF.Exp(-DampingRate * dt);
         var settling = MathF.Exp(-PressureDampingRate * dt);
@@ -120,6 +134,7 @@ public static class WaterPipes
         fixed (float* os = block.OutScale)
         fixed (byte* fl = block.Flags)
         fixed (sbyte* bed = block.Bed)
+        fixed (ushort* body = block.Body)
         fixed (byte* wet = block.WetRows)
         fixed (float* fx = block.FluxX)
         fixed (float* fy = block.FluxY)
@@ -153,6 +168,10 @@ public static class WaterPipes
 
                     var seam = y == 0;
 
+                    // Rows over the sea's top layer, where a crest of the swell stays in the sea's run-up cells (Spills).
+                    var shut = swelling && y > aboveSea;
+                    var shutUp = swelling && y + 1 > aboveSea;
+
                     // Landing water is looked for only under rows that hold falling water (the X faces' cells and the Z
                     // faces' cells on either side). A face across an X or Z block face in the top row has edge halo cells
                     // over it, which no block carries: none there.
@@ -166,17 +185,17 @@ public static class WaterPipes
                         var i = row + x;
 
                         if (x == 0)
-                            fx[i - 1] = Horizontal(w, fl, bed, v, dx, fx[i - 1], i - 1, 1, seam, !top, fallsHere, pipe, damping, settling, deepSettling, dt);
+                            fx[i - 1] = Horizontal(w, fl, bed, body, v, dx, fx[i - 1], i - 1, 1, seam, !top, fallsHere, shut, pipe, damping, settling, deepSettling, dt);
 
                         if (y == 0)
-                            fy[i - P] = Vertical(w, fl, v, fy[i - P], i - P, pipe, settling, deepSettling, dt);
+                            fy[i - P] = Vertical(w, fl, body, v, fy[i - P], i - P, shut, pipe, settling, deepSettling, dt);
 
                         if (z == 0)
-                            fz[i - A] = Horizontal(w, fl, bed, v, dz, fz[i - A], i - A, A, seam, !top, fallsBack || fallsHere, pipe, damping, settling, deepSettling, dt);
+                            fz[i - A] = Horizontal(w, fl, bed, body, v, dz, fz[i - A], i - A, A, seam, !top, fallsBack || fallsHere, shut, pipe, damping, settling, deepSettling, dt);
 
-                        fx[i] = Horizontal(w, fl, bed, v, dx, fx[i], i, 1, seam && x == S - 1, !(top && x == S - 1), fallsHere, pipe, damping, settling, deepSettling, dt);
-                        fy[i] = Vertical(w, fl, v, fy[i], i, pipe, settling, deepSettling, dt);
-                        fz[i] = Horizontal(w, fl, bed, v, dz, fz[i], i, A, seam && z == S - 1, !(top && z == S - 1), fallsHere || fallsFront, pipe, damping, settling, deepSettling, dt);
+                        fx[i] = Horizontal(w, fl, bed, body, v, dx, fx[i], i, 1, seam && x == S - 1, !(top && x == S - 1), fallsHere, shut, pipe, damping, settling, deepSettling, dt);
+                        fy[i] = Vertical(w, fl, body, v, fy[i], i, shutUp, pipe, settling, deepSettling, dt);
+                        fz[i] = Horizontal(w, fl, bed, body, v, dz, fz[i], i, A, seam && z == S - 1, !(top && z == S - 1), fallsHere || fallsFront, shut, pipe, damping, settling, deepSettling, dt);
 
                         var sent = dt * (MathF.Max(fx[i], 0f) + MathF.Max(-fx[i - 1], 0f) + MathF.Max(fy[i], 0f)
                             + MathF.Max(-fy[i - P], 0f) + MathF.Max(fz[i], 0f) + MathF.Max(-fz[i - A], 0f));
@@ -202,6 +221,12 @@ public static class WaterPipes
         var gain = Gravity * dt;
         var levels = block.Bodies.Levels;
         var body = block.Body;
+        var discs = block.DiscBodies;
+        var swell = block.Swelling ? block.Swell : null;
+        var seaTop = block.Bodies.SeaTop;
+        var scratch = _colourScratch ??= new uint[ChunkConstants.PaddedVolume];
+        var frothScratch = _frothScratch ??= new float[ChunkConstants.PaddedVolume];
+        var fade = MathF.Max(1f - FrothDecay * dt, 0f);
         block.ClearExchange();
 
         fixed (float* w = block.Water)
@@ -215,6 +240,10 @@ public static class WaterPipes
         fixed (float* v = block.FallSpeed)
         fixed (float* dx = block.DriftX)
         fixed (float* dz = block.DriftZ)
+        fixed (uint* colour = block.Colour)
+        fixed (uint* carried = scratch)
+        fixed (float* froth = block.Froth)
+        fixed (float* frothed = frothScratch)
         {
             for (var z = 0; z < S; z++)
             {
@@ -226,6 +255,8 @@ public static class WaterPipes
                     {
                         new Span<float>(next + row, S).Clear();
                         new Span<float>(v + row, S).Clear();
+                        new Span<uint>(carried + row, S).Clear();
+                        new Span<float>(frothed + row, S).Clear();
                         continue;
                     }
 
@@ -261,13 +292,23 @@ public static class WaterPipes
                         var speed = 0f;
                         var driftX = 0f;
                         var driftZ = 0f;
+                        var falling = false;
+                        var swelled = false;
 
                         // No snap: a speck left behind can't spread (its transfers are under the minimum) and drops whole when
                         // it falls, so deleting it would only lose mass.
                         if ((flags & ReservoirBit) != 0)
                         {
                             var id = body[i];
-                            var fill = WaterBodies.Fill(worldY, levels[id]);
+                            var level = levels[id];
+
+                            if (swell is not null && id == WaterBodies.Sea && (flags & ZoneBit) == 0)
+                            {
+                                level = WaterBodies.SwellLevel(level, swell[x + 1 + (z + 1) * P], worldY, seaTop);
+                                swelled = true;
+                            }
+
+                            var fill = WaterBodies.Fill(worldY, level);
                             block.AddExchange(id, n - fill);
                             n = fill;
                         }
@@ -285,16 +326,17 @@ public static class WaterPipes
                             }
                             else
                             {
+                                falling = true;
                                 var kept = MathF.Max(wc + dt * MathF.Min(floor, 0f), 0f);
                                 var fell = -dt * MathF.Min(top, 0f);
-                                var falling = kept + fell;
-                                speed = falling > 0f ? (kept * v[i] + fell * v[i + P]) / falling - gain : 0f;
+                                var moving = kept + fell;
+                                speed = moving > 0f ? (kept * v[i] + fell * v[i + P]) / moving - gain : 0f;
 
                                 var inLeft = dt * MathF.Max(left, 0f);
                                 var inRight = -dt * MathF.Min(right, 0f);
                                 var inBack = dt * MathF.Max(back, 0f);
                                 var inFront = -dt * MathF.Min(front, 0f);
-                                var mixed = falling + inLeft + inRight + inBack + inFront;
+                                var mixed = moving + inLeft + inRight + inBack + inFront;
 
                                 if (mixed > 0f)
                                 {
@@ -306,10 +348,37 @@ public static class WaterPipes
                             speed = MathF.Max(speed, -MaxFallSpeed);
                         }
 
+                        // Free water in a column a disc frees is still its body's: the disc freed it at the fill it was held
+                        // at, and the body's level still counts it. What it gains or loses is booked as a held cell's is, so
+                        // moves inside the disc's columns cancel and only water leaving them comes out of the body. Booked
+                        // only at the held cells, the water a disc freed was the body's twice over: drained away, the held
+                        // cells refilled the disc from the body again, and every disc grown frees another ring.
+                        var disc = discs[x + z * S];
+                        if (disc != 0 && (flags & (ReservoirBit | SolidBit)) == 0)
+                            block.AddExchange(disc, n - wc);
+
                         next[i] = n;
                         v[i] = speed;
                         dx[i] = driftX;
                         dz[i] = driftZ;
+
+                        if (n <= 0f)
+                        {
+                            carried[i] = WaterColour.None;
+                            frothed[i] = 0f;
+                        }
+                        else
+                        {
+                            var c = Carried(colour, froth, i, wc, left, right, floor, top, back, front, dt, out var f);
+                            carried[i] = (flags & ReservoirBit) != 0 ? colour[i] : c;
+                            frothed[i] = fade * (falling ? MathF.Max(f, MathF.Min(-speed / AerateSpeed, 1f)) : f);
+                        }
+
+                        // The sea's cells under the swell change every step and move nothing of the block's own: counted, a
+                        // block holding the sea never slept, remeshed every tick and woke its neighbours.
+                        if (swelled)
+                            continue;
+
                         var delta = MathF.Abs(n - wc);
                         maxDelta = MathF.Max(maxDelta, delta);
                         maxFlux = MathF.Max(maxFlux, MathF.Max(MathF.Max(MathF.Abs(right), MathF.Abs(top)), MathF.Abs(front)));
@@ -321,9 +390,67 @@ public static class WaterPipes
             }
         }
 
+        // The colours and froth were read from every neighbour while the new ones were written aside; now they land. Quiet
+        // rows keep theirs.
+        fixed (byte* wet = block.WetRows)
+        {
+            for (var z = 0; z < S; z++)
+            {
+                for (var y = 0; y < S; y++)
+                {
+                    if (WaterFlow.RowQuiet(wet, y, z))
+                        continue;
+
+                    var row = ChunkConstants.Index(0, y, z);
+                    scratch.AsSpan(row, S).CopyTo(block.Colour.AsSpan(row, S));
+                    frothScratch.AsSpan(row, S).CopyTo(block.Froth!.AsSpan(row, S));
+                }
+            }
+        }
+
         block.MaxDelta = maxDelta;
         block.MaxFlux = maxFlux;
         block.BorderActive = border;
+    }
+
+    [ThreadStatic]
+    private static uint[]? _colourScratch;
+
+    [ThreadStatic]
+    private static float[]? _frothScratch;
+
+    /// <summary>
+    /// The colour of cell i after the step: what stayed of its own water and what each face brought in, blended by mass
+    /// (<see cref="WaterColour.Blend"/>), so silt pours with the water that carries it and a dry cell takes the colour of
+    /// what fills it. Unchanged where nothing flowed in. Its froth (<paramref name="carriedFroth"/>) is mixed the same way.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe uint Carried(uint* colour, float* froth, int i, float own, float left, float right, float floor, float top, float back, float front, float dt, out float carriedFroth)
+    {
+        var inLeft = dt * MathF.Max(left, 0f);
+        var inRight = -dt * MathF.Min(right, 0f);
+        var inFloor = dt * MathF.Max(floor, 0f);
+        var inTop = -dt * MathF.Min(top, 0f);
+        var inBack = dt * MathF.Max(back, 0f);
+        var inFront = -dt * MathF.Min(front, 0f);
+        var inflow = inLeft + inRight + inFloor + inTop + inBack + inFront;
+
+        if (inflow <= 0f)
+        {
+            carriedFroth = froth[i];
+            return colour[i];
+        }
+
+        var outflow = dt * (MathF.Max(-left, 0f) + MathF.Max(right, 0f) + MathF.Max(-floor, 0f) + MathF.Max(top, 0f) + MathF.Max(-back, 0f) + MathF.Max(front, 0f));
+        var kept = MathF.Max(own - outflow, 0f);
+        carriedFroth = (kept * froth[i] + inLeft * froth[i - 1] + inRight * froth[i + 1] + inFloor * froth[i - P] + inTop * froth[i + P] + inBack * froth[i - A] + inFront * froth[i + A]) / (kept + inflow);
+        var c = colour[i];
+        c = WaterColour.Blend(c, kept, colour[i - 1], inLeft);
+        c = WaterColour.Blend(c, kept + inLeft, colour[i + 1], inRight);
+        c = WaterColour.Blend(c, kept + inLeft + inRight, colour[i - P], inFloor);
+        c = WaterColour.Blend(c, kept + inLeft + inRight + inFloor, colour[i + P], inTop);
+        c = WaterColour.Blend(c, kept + inLeft + inRight + inFloor + inTop, colour[i - A], inBack);
+        return WaterColour.Blend(c, kept + inflow - inFront, colour[i + A], inFront);
     }
 
     /// <summary>
@@ -332,16 +459,20 @@ public static class WaterPipes
     /// where it stands on solid. A seam face (bottom layer, across an X or Z block face) has an edge halo cell no block
     /// carries for its "below": it counts as supported, and as standing on a bed by the cells' <see cref="WaterBlock.Bed"/>.
     /// <paramref name="over"/>: the cells over the face are carried (false across an X or Z block face in the top row);
-    /// <paramref name="falling"/>: the rows over it hold falling water.
+    /// <paramref name="falling"/>: the rows over it hold falling water; <paramref name="shut"/>: its row is over the sea's
+    /// top layer under the swell (<see cref="Spills"/>).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe float Horizontal(float* w, byte* fl, sbyte* bd, float* v, float* drift, float f, int lo, int stride, bool seam, bool over, bool falling, float pipe, float damping, float settling, float deepSettling, float dt)
+    private static unsafe float Horizontal(float* w, byte* fl, sbyte* bd, ushort* body, float* v, float* drift, float f, int lo, int stride, bool seam, bool over, bool falling, bool shut, float pipe, float damping, float settling, float deepSettling, float dt)
     {
         var hi = lo + stride;
         var wl = w[lo];
         var wh = w[hi];
 
         if (((fl[lo] | fl[hi]) & SolidBit) != 0 || (wl == 0f && wh == 0f))
+            return 0f;
+
+        if (shut && (wl == 0f || wh == 0f) && Spills(fl, body, wl == 0f ? hi : lo, wl == 0f ? lo : hi))
             return 0f;
 
         // A face into a reservoir settles as a pressure face does: an open lake or sea takes a wave's energy away, where a
@@ -465,13 +596,16 @@ public static class WaterPipes
     /// a falling speck too small to move at that speed drops whole, or it would hang in the air.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe float Vertical(float* w, byte* fl, float* v, float f, int lo, float pipe, float damping, float deepDamping, float dt)
+    private static unsafe float Vertical(float* w, byte* fl, ushort* body, float* v, float f, int lo, bool shut, float pipe, float damping, float deepDamping, float dt)
     {
         var hi = lo + P;
         var wl = w[lo];
         var wh = w[hi];
 
         if (((fl[lo] | fl[hi]) & SolidBit) != 0 || (wl == 0f && wh == 0f))
+            return 0f;
+
+        if (shut && (wl == 0f || wh == 0f) && Spills(fl, body, wl == 0f ? hi : lo, wl == 0f ? lo : hi))
             return 0f;
 
         if (Pressure(wl, wh))
@@ -487,6 +621,16 @@ public static class WaterPipes
         var fall = v[hi] * MathF.Min(wh, 1f);
         return fall < 0f && -fall * dt < WaterFlow.SnapEpsilon ? -wh / dt : fall;
     }
+
+    /// <summary>
+    /// A face over the sea's top layer from the sea's held cell to a free cell with no water: shut. A crest of the swell
+    /// stands in the sea's run-up cells and moves free water already against it (a channel, a stream's foot), but never
+    /// spills onto dry ground: the ocean draws its swash there, and crests run up every dry beach kept the whole coast near
+    /// the camera awake (21 blocks at 8 ms a step in the pond scene).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe bool Spills(byte* fl, ushort* body, int held, int dry) =>
+        (fl[held] & ReservoirBit) != 0 && body[held] == WaterBodies.Sea && (fl[dry] & ReservoirBit) == 0;
 
     /// <summary>A face's flux scaled by its source's limit: the momentum carried on, whether or not it moves water this step (<see cref="Moved"/>).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

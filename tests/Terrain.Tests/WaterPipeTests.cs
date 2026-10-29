@@ -81,6 +81,8 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
                     for (var f = 0; f < 6; f++)
                     {
                         WaterHalo.CopyWater(block, Neighbour(block, f), (Face)f);
+                        WaterHalo.CopyColour(block, Neighbour(block, f), (Face)f);
+                        WaterHalo.CopyFroth(block, Neighbour(block, f), (Face)f);
 
                         if (f != (int)Face.NegY)
                             WaterHalo.CopyFalling(block, Neighbour(block, f), (Face)f);
@@ -615,8 +617,8 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
 
     /// <summary>
     /// A disc around a dig into the lake (docs/voxel-water.md "Bodies of water"): inside it the lake's water is free, at the
-    /// fill it was held at, so it loads at rest; a pit dug in it fills by flow from the lake, paid for by the held cells
-    /// beyond the disc; and once still, with the disc ended, the pit joins the lake.
+    /// fill it was held at, so it loads at rest; a pit dug in it fills by flow from the lake, the lake paying for the room
+    /// the dig opened under its level (WaterBlock.Opened); and once still, with the disc ended, the pit joins the lake.
     /// </summary>
     [Fact]
     public void LakeDiscPoursIntoAPitAndRejoins()
@@ -655,6 +657,7 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
         Assert.True(Math.Abs(sim.Mass() - mass) < 0.05, $"mass drifted by {sim.Mass() - mass}");
 
         a.RefreshFrom(Chunk(p, coord, centre, dig: true), [disc]);
+        a.BookOpened();
         var floor = I((int)local.X - 2, top - 2, (int)local.Z);
         Assert.Equal((byte)WaterFlags.None, a.Flags[floor]);
         Assert.Equal(0f, a.Water[floor]);
@@ -663,7 +666,7 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
         var gave = sim.Bodies[id].Given;
         output.WriteLine($"10 s after the dig: pit floor {a.Water[floor]:F3}, the lake gave {gave:F2} m3");
         Assert.True(a.Water[floor] > 0.15f, $"the pit should fill from the lake, its floor holds {a.Water[floor]}");
-        Assert.True(gave > 3f, $"the held cells beyond the disc should pay for the pit, it gave {gave} m3");
+        Assert.True(gave > 3f, $"the lake should pay for the pit, it gave {gave} m3");
 
         // Once still, the disc ends: the pit's water at the lake's level joins it, paying about nothing more.
         var rest = StepUntilSettled(sim, (int)(90f / Dt));
@@ -678,6 +681,113 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
         Assert.Equal(id, a.Body[floor]);
         Assert.True(a.Joined.Count > 0 && MathF.Abs(a.Joined[0].Paid) < 3f, "joining water at the level should pay about nothing");
         Assert.InRange(StepUntilSettled(sim, (int)(2f / Dt)), 1, (int)(1.05f / Dt));
+    }
+
+    /// <summary>
+    /// Water a disc freed is still its body's (WaterPipes books free water in disc columns as held water): a pool freed by a
+    /// disc drains through a gap in a wall into a channel beyond the disc, and the body pays exactly what crossed. Booked
+    /// only at held cells (there are none here) it paid nothing, and the water the disc freed was the body's twice over.
+    /// </summary>
+    [Fact]
+    public void DiscWaterDrainingAwayIsPaidForByItsBody()
+    {
+        var sim = new Sim();
+        var b = sim.Add(new ChunkCoord(0, 1, 0));
+        CarveBox(b, 2, 1, 12, 29, 10, 20);
+        FillSolid(b, 13, 1, 12, 13, 10, 20);
+
+        for (var z = 14; z <= 17; z++)
+            for (var y = 1; y <= 2; y++)
+                b.Flags[I(13, y, z)] = 0;
+
+        const float level = 32f + 4f;
+        var id = sim.Bodies.Add(level, 100f, new Vector2(6.5f, 16f), 10f, 32.5f);
+        // The pool and the gap lie inside the disc; the channel (x 14 and on) beyond it.
+        b.MarkDiscs([new Vector4(6.5f, 16f, 7f, id)]);
+
+        for (var z = 12; z <= 20; z++)
+            for (var y = 1; y <= 4; y++)
+                for (var x = 2; x <= 11; x++)
+                    b.Water[I(x, y, z)] = WaterBodies.Fill(32 + y, level);
+
+        sim.Step((int)(10f / Dt));
+        var crossed = Sum(b, 14, 1, 12, 29, 10, 20);
+        var gave = sim.Bodies[id].Given;
+        output.WriteLine($"{crossed:F1} m3 crossed out of the disc, the body gave {gave:F1} m3");
+        Assert.True(crossed > 50.0, $"the pool should drain into the channel, {crossed} m3 did");
+        Assert.Equal(crossed, gave, 0.01 * crossed);
+    }
+
+    /// <summary>
+    /// A body's level stops at its highest held cell's top (WaterBodies.Body.Top): over it its cells have no room, and the
+    /// level stood only for pressure. What more it took waits in its ledger and is given back first.
+    /// </summary>
+    [Fact]
+    public void BodyLevelStopsAtItsTopCell()
+    {
+        var bodies = new WaterBodies(0f);
+        var id = bodies.Add(35.2f, 100f, Vector2.Zero, 10f, 30f);
+        Assert.Equal(35.5f, bodies[id].Top);
+
+        bodies.Exchange(id, 100f);
+        bodies.SettleLevels();
+        Assert.Equal(35.5f, bodies[id].Level, 1e-4f);
+        Assert.Equal(70f, bodies[id].Ledger, 1e-2f);
+
+        bodies.Exchange(id, -90f);
+        bodies.SettleLevels();
+        Assert.Equal(35.3f, bodies[id].Level, 1e-4f);
+        Assert.Equal(0f, bodies[id].Ledger);
+    }
+
+    /// <summary>
+    /// A born body fed past its top is no still pool (WaterBodies.SettleLevels): held at a fixed level in a stream it
+    /// swallowed water on one side and poured it out on the other without end. It is released, its cells free again at the
+    /// fill they were held at. A pool under WaterBlock.MinBornSurface is never born.
+    /// </summary>
+    [Fact]
+    public void BornBodyFedPastItsTopIsReleased()
+    {
+        var sim = new Sim();
+        var b = sim.Add(new ChunkCoord(0, 1, 0));
+        CarveBox(b, 4, 1, 4, 19, 10, 19);
+        const float level = 32f + 3f;
+
+        for (var z = 4; z <= 19; z++)
+            for (var y = 1; y <= 3; y++)
+                for (var x = 4; x <= 19; x++)
+                    b.Water[I(x, y, z)] = WaterBodies.Fill(32 + y, level);
+
+        StepUntilSettled(sim, (int)(5f / Dt));
+        b.BornBodies();
+        var (id, _, _) = Assert.Single(b.Joined);
+        var held = b.Water[I(10, 3, 10)];
+        var mass = sim.Mass();
+
+        sim.Bodies.Exchange(id, sim.Bodies[id].Area * 1f);
+        sim.Bodies.SettleLevels();
+        Assert.Contains(id, sim.Bodies.Released);
+        Assert.False(sim.Bodies[id].Alive);
+
+        Assert.True(b.ReleaseDead());
+        Assert.False(b.Holds(id));
+        Assert.Equal((byte)0, b.Flags[I(10, 3, 10)]);
+        Assert.Equal(held, b.Water[I(10, 3, 10)]);
+        Assert.Equal(mass, sim.Mass(), 1e-3);
+
+        // Too small to be born: a 6 by 6 pool stays free.
+        var small = new Sim();
+        var c = small.Add(new ChunkCoord(0, 1, 0));
+        CarveBox(c, 4, 1, 4, 9, 10, 9);
+
+        for (var z = 4; z <= 9; z++)
+            for (var y = 1; y <= 3; y++)
+                for (var x = 4; x <= 9; x++)
+                    c.Water[I(x, y, z)] = WaterBodies.Fill(32 + y, level);
+
+        StepUntilSettled(small, (int)(5f / Dt));
+        c.BornBodies();
+        Assert.Empty(c.Joined);
     }
 
     /// <summary>
@@ -835,6 +945,90 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void ChannelRisesAndFallsWithTheSwell()
+    {
+        // The sea's top layer is y 8 (level −23.5), its run-up layers 9..12 held empty over it. A channel 4 m deep and 8 m
+        // long opens off it: a quarter wave in it takes 5 s, so a 16 s swell should carry it up and down nearly whole.
+        const float amplitude = 0.5f;
+        const float period = 16f;
+        var sim = new Sim(-23.5f) { StepLength = 1f / 60f };
+        var b = sim.Add(new ChunkCoord(0, -1, 0));
+        CarveBox(b, 2, 5, 10, 17, 12, 12);
+
+        for (var z = 10; z <= 12; z++)
+            for (var y = 5; y <= 12; y++)
+                for (var x = 2; x <= 9; x++)
+                    b.Hold(x, y, z, WaterBodies.Sea);
+
+        FillWater(b, 10, 5, 10, 17, 8, 12);
+        Assert.True(StepUntilSettled(sim, 6000) > 0, "the channel settles against a flat sea");
+        var rest = Sum(b, 10, 5, 10, 17, 12, 12);
+        var low = float.MaxValue;
+        var high = float.MinValue;
+        var steps = (int)(2f * period / sim.StepLength);
+
+        for (var s = 1; s <= steps; s++)
+        {
+            b.Swell.AsSpan().Fill(amplitude * MathF.Sin(2f * MathF.PI * s * sim.StepLength / period));
+            b.Swelling = true;
+            sim.Step();
+
+            if (s * 2 < steps)
+                continue;
+
+            var surface = -27.5f;
+            for (var y = 5; y <= 12; y++)
+                surface += MathF.Min(b.Water[I(17, y, 11)], 1f);
+
+            low = MathF.Min(low, surface);
+            high = MathF.Max(high, surface);
+        }
+
+        output.WriteLine($"far end of the channel {low:F3} to {high:F3} m against the sea's -24.000 to -23.000");
+        Assert.InRange((high - low) * 0.5f, 0.7f * amplitude, 1.4f * amplitude);
+        Assert.InRange((high + low) * 0.5f, -23.5f - 0.1f, -23.5f + 0.1f);
+
+        b.Swell.AsSpan().Clear();
+        b.Swelling = false;
+        Assert.True(StepUntilSettled(sim, 12000) > 0, "the channel settles again once the sea is flat");
+        var after = Sum(b, 10, 5, 10, 17, 12, 12);
+        output.WriteLine($"channel water {rest:F3} before the swell, {after:F3} after");
+        Assert.InRange(after, rest - 0.01 * rest, rest + 0.01 * rest);
+    }
+
+    [Fact]
+    public void CrestNeverSpillsOntoDryBeach()
+    {
+        // The sea's top layer is y 8 (level −23.5), its run-up layers 9..12 held over it; a dry beach shelf at y 9..12
+        // beside it. A ±0.5 m swell stands half a cell up the run-up layer at its crests, but the beach stays dry.
+        const float amplitude = 0.5f;
+        const float period = 8f;
+        var sim = new Sim(-23.5f) { StepLength = 1f / 60f };
+        var b = sim.Add(new ChunkCoord(0, -1, 0));
+        CarveBox(b, 2, 5, 10, 9, 12, 12);
+        CarveBox(b, 10, 9, 10, 17, 12, 12);
+
+        for (var z = 10; z <= 12; z++)
+            for (var y = 5; y <= 12; y++)
+                for (var x = 2; x <= 9; x++)
+                    b.Hold(x, y, z, WaterBodies.Sea);
+
+        var wettest = 0.0;
+        var steps = (int)(2f * period / sim.StepLength);
+
+        for (var s = 1; s <= steps; s++)
+        {
+            b.Swell.AsSpan().Fill(amplitude * MathF.Sin(2f * MathF.PI * s * sim.StepLength / period));
+            b.Swelling = true;
+            sim.Step();
+            wettest = Math.Max(wettest, Sum(b, 10, 9, 10, 17, 12, 12));
+        }
+
+        output.WriteLine($"most water on the beach {wettest:F4} m3");
+        Assert.Equal(0.0, wettest);
+    }
+
+    [Fact]
     public void ResumingBlockTakesItsNeighboursSharedFluxes()
     {
         var a = new WaterBlock(pipes: true);
@@ -889,6 +1083,93 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
         var b = new WaterBlock(pipes: true);
         FillWater(b, 0, 0, 0, 15, S - 1, S - 1);
         return b;
+    }
+
+    /// <summary>A dam break of pond-coloured water: every cell the water reaches carries its colour (docs/water-fog.md), and no wet cell is left unset.</summary>
+    [Fact]
+    public void ColourTravelsWithTheWater()
+    {
+        var sim = new Sim();
+        var b = sim.Add(new ChunkCoord(0, 0, 0));
+        FillWater(b, 0, 0, 0, 15, S - 1, S - 1);
+
+        for (var z = 0; z < S; z++)
+            for (var y = 0; y < S; y++)
+                for (var x = 0; x <= 15; x++)
+                    b.Colour[I(x, y, z)] = WaterColour.Pond;
+
+        sim.Step(300);
+        var reached = 0;
+
+        for (var z = 0; z < S; z++)
+            for (var y = 0; y < S; y++)
+                for (var x = 0; x < S; x++)
+                {
+                    var i = I(x, y, z);
+                    if (b.Water[i] < WaterSurfaceMesher.WetThreshold)
+                        continue;
+
+                    Assert.Equal(WaterColour.Pond, b.Colour[i]);
+                    if (x > 15)
+                        reached++;
+                }
+
+        Assert.True(reached > 100, $"the water should have spread right, {reached} cells did");
+    }
+
+    /// <summary>
+    /// A column falling 20 m lands white (<see cref="WaterBlock.Froth"/>): the falling water aerates and carries its froth
+    /// into the pool, which spreads it and lets it fade (1/e in 4 s) once the pour has stopped.
+    /// </summary>
+    [Fact]
+    public void PourFrothsWhereItLandsAndFades()
+    {
+        var sim = new Sim();
+        var b = sim.Add(new ChunkCoord(0, 0, 0));
+        CarveBox(b, 8, 1, 8, 23, 30, 23);
+        FillWater(b, 15, 22, 15, 16, 29, 16);
+        var start = sim.Mass();
+        var peak = 0f;
+
+        for (var s = 0; s < 3 * 240; s++)
+        {
+            sim.Step();
+            peak = MathF.Max(peak, MaxFroth(b, 1));
+        }
+
+        sim.Step(20 * 240);
+        var after = MaxFroth(b, 1);
+        output.WriteLine($"floor froth peaked at {peak:F2}, {after:F3} 20 s later");
+        Assert.True(peak > 0.4f, $"the landing should froth, peaked at {peak:F2}");
+        Assert.True(after < 0.05f, $"the froth should fade, {after:F3} left");
+        Assert.Equal(start, sim.Mass(), 1e-3);
+    }
+
+    private static float MaxFroth(WaterBlock b, int y)
+    {
+        var max = 0f;
+
+        for (var z = 0; z < S; z++)
+            for (var x = 0; x < S; x++)
+                if (b.Water[I(x, y, z)] > WaterSurfaceMesher.WetThreshold)
+                    max = MathF.Max(max, b.Froth![I(x, y, z)]);
+
+        return max;
+    }
+
+    [Fact]
+    public void ColourBlendsByMass()
+    {
+        var a = WaterColour.Pack(200, 100, 0, 255);
+        var c = WaterColour.Pack(0, 100, 200, 51);
+        var mixed = WaterColour.Blend(a, 3f, c, 1f);
+
+        Assert.Equal(150, WaterColour.R(mixed));
+        Assert.Equal(100, WaterColour.G(mixed));
+        Assert.Equal(50, WaterColour.B(mixed));
+        Assert.Equal(204, WaterColour.A(mixed));
+        Assert.Equal(a, WaterColour.Blend(a, 2f, WaterColour.None, 5f));
+        Assert.Equal(c, WaterColour.Blend(WaterColour.None, 2f, c, 5f));
     }
 
     [Fact]

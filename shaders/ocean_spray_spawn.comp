@@ -72,6 +72,7 @@ void main()
 
         SprayParticle particle;
         particle.motion = SPRAY_MOTION;
+        particle.shape = PUFF_SHAPE;
         if (reach < 1.0 || random(state) < FEATHER_SHARE)
         {
             // Off the thin edge of the tongue as it throws: fine, short-lived, carried on with the lip and a little up.

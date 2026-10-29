@@ -1,11 +1,14 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// Splash spray: one invocation per splash (ZoneFlowSim.Agitate), where sea-zone water slammed into something this tick.
-// Slots come from the breaker spray's atomic ring head.
+// Splash spray: one invocation per splash (ZoneFlowSim.Agitate, VoxelWaterSystem.FindSplashes), where water slammed into
+// something this tick. Slots come from the breaker spray's atomic ring head.
 // - Wall: water running into a wall it can only climb. Droplets leave along the metre of wall just off its face, thrown
 //   up it and back over the water, at a rate and speed set by how fast the water arrives.
-// - Pour: water landing from a fall, a waterfall's foot. A crown of droplets thrown up and out around where it lands,
-//   and a cloud of mist that hangs over the plunge pool, both as many as the pour is heavy and fast.
+// - Pour: water landing from a fall, a waterfall's foot, as many particles as the pour is heavy and fast:
+//   - curtain: droplets shed by the falling water, streaking down beside it at its speed for the height they are at;
+//   - crown: droplets thrown up and out around where it lands, the higher the faster it lands;
+//   - mist: from drops of a metre and a half or more, a cloud hanging over the plunge pool, more the harder it lands.
+// Droplets die as they fall back through the water they left.
 
 #define SPRAY_WRITABLE
 #include "ocean_common.glsl"
@@ -16,13 +19,36 @@ layout(push_constant) uniform Push {
     vec4 params; // x = frame seconds, y = random seed, z = splash count
 } pc;
 
-const float WALL_RATE = 30.0;     // particles per second per metre of wall per m/s into it past WALL_THRESHOLD
-const float WALL_THRESHOLD = 0.4; // m/s: slower water only laps at the wall
-const float WALL_LIFT = 3.0;      // upward launch speed per m/s into the wall: the jet runs up far faster than the flow
-const float WALL_BACK = 0.6;      // ... and back off the wall over the water
-const float POUR_RATE = 10.0;     // particles per second per metre of lip, per m²/s of discharge, per m/s of fall
-const float POUR_MIST = 0.25;     // share of a pour's particles that are mist
-const int MAX_PER_SPLASH = 4;     // per frame
+const float WALL_RATE = 60.0;     // particles per second per metre of wall per m/s into it past WALL_THRESHOLD
+// m/s: slower water runs up the wall as a sheet (its stagnation head u^2 / 2g, 11 cm here) and falls back without
+// throwing droplets; at 0.4 a stream lapping its banks at 0.5 m/s sprayed the length of its channel.
+const float WALL_THRESHOLD = 1.5;
+// Upward launch speed per m/s into the wall: the run-up jet leaves at about the flow's speed, up to twice it where a bore
+// slams flat into the wall. It was 3, which threw a 3 m/s slap 4 m up.
+const float WALL_LIFT = 1.2;
+const float WALL_BACK = 0.4;      // ... and back off the wall over the water
+const float POUR_RATE = 40.0;     // particles per second per metre of lip, per m²/s of discharge, per m/s of fall
+// A crown's droplets leave at a fraction of the impact speed: up at 0.15-0.4 of it, out at 0.1-0.3 (they were 0.3-0.8 and
+// 0.2-0.6, a 12 m/s landing threw spray 5 m up).
+const vec2 POUR_LIFT = vec2(0.15, 0.25);
+const vec2 POUR_OUT = vec2(0.1, 0.2);
+const float CURTAIN_SHARE = 0.4;  // of a pour's particles, shed by the falling water
+const float MIST_SPEED = 5.5;     // m/s: landings slower than this (drops under 1.5 m) raise no mist ...
+const float MIST_SHARE = 0.3;     // ... and from twice it, this share of the rest is mist
+const int MAX_PER_SPLASH = 8;     // per frame: the ring holds 16,384 shared with the breakers
+const float DROPLET_STREAK = 0.035; // s of motion a droplet is drawn over
+const float DROPLET_PHASE = 0.5;
+const float MIST_PHASE = 0.7;
+
+SprayParticle droplet(vec3 p, vec3 v, float life, float size, float floorY)
+{
+    SprayParticle particle;
+    particle.positionLife = vec4(p, life);
+    particle.velocitySize = vec4(v, size);
+    particle.motion = DROPLET_MOTION;
+    particle.shape = vec4(floorY, DROPLET_STREAK, DROPLET_PHASE, 0.0);
+    return particle;
+}
 
 void wall(WaterSplash w, inout uint state, uint slot)
 {
@@ -32,43 +58,55 @@ void wall(WaterSplash w, inout uint state, uint slot)
     float body = min(w.direction.z, 1.0);
 
     vec3 p = w.positionSpeed.xyz + along * (random(state) - 0.5) - into * (0.1 + 0.2 * random(state));
-    vec3 v = vec3(0.0, WALL_LIFT * speed * (0.5 + 0.7 * random(state)), 0.0)
+    vec3 v = vec3(0.0, WALL_LIFT * speed * (0.6 + 0.9 * random(state)), 0.0)
            - into * (WALL_BACK * speed * random(state))
            + along * ((random(state) - 0.5) * speed);
 
-    SprayParticle particle;
-    particle.positionLife = vec4(p, 0.5 + 0.8 * random(state));
-    particle.velocitySize = vec4(v, (0.06 + 0.14 * random(state)) * (0.5 + 0.5 * body));
-    particle.motion = SPRAY_MOTION;
-    spray.particles[slot % SPRAY_MAX] = particle;
+    spray.particles[slot % SPRAY_MAX] = droplet(p, v, 3.0, (0.025 + 0.04 * random(state)) * (0.5 + 0.5 * body), w.positionSpeed.y - 0.05);
 }
 
 void pour(WaterSplash w, inout uint state, uint slot)
 {
     float speed = w.positionSpeed.w;
+    float height = speed * speed / (2.0 * 9.81); // the drop it landed from
     vec3 flow = vec3(w.direction.x, 0.0, w.direction.y);
     float angle = TWO_PI * random(state);
     vec3 outward = vec3(cos(angle), 0.0, sin(angle));
-    vec3 p = w.positionSpeed.xyz + outward * (0.6 * random(state)) + flow * (0.5 * random(state));
+    vec3 landing = w.positionSpeed.xyz;
+    float pick = random(state);
+    float mist = MIST_SHARE * clamp((speed - MIST_SPEED) / MIST_SPEED, 0.0, 1.0);
 
-    SprayParticle particle;
-    if (random(state) < POUR_MIST)
+    if (pick < CURTAIN_SHARE)
     {
-        p.y += 0.2 + 0.6 * random(state);
-        vec3 v = vec3(0.0, 0.5 + 1.0 * random(state), 0.0) + outward * (0.3 + 0.7 * random(state)) + flow * 0.5;
+        // Shed off the falling sheet: at a random height of the drop, falling as fast as the water has by then, carried
+        // on with its drift and flung a little clear of it.
+        float drop = height * random(state);
+        vec3 p = landing + vec3(0.0, height - drop, 0.0) + outward * (0.35 + 0.25 * random(state)) - flow * 0.3;
+        vec3 v = vec3(0.0, -sqrt(2.0 * 9.81 * drop) * (0.85 + 0.15 * random(state)), 0.0)
+               + outward * (0.3 + 0.6 * random(state)) + flow * (0.3 * random(state));
+        spray.particles[slot % SPRAY_MAX] = droplet(p, v, 2.0, 0.015 + 0.03 * random(state), landing.y);
+    }
+    else if (pick < CURTAIN_SHARE + mist)
+    {
+        vec3 p = landing + outward * (0.8 * random(state)) + flow * (0.5 * random(state));
+        p.y += 0.1 + 0.5 * random(state);
+        vec3 v = vec3(0.0, 0.4 + 0.8 * random(state), 0.0) + outward * (0.3 + 0.7 * random(state)) + flow * 0.5;
+
+        SprayParticle particle;
         particle.positionLife = vec4(p, 1.5 + 2.0 * random(state));
-        particle.velocitySize = vec4(v, 0.15 + 0.15 * random(state));
+        particle.velocitySize = vec4(v, 0.2 + 0.2 * random(state));
         particle.motion = MIST_MOTION;
+        particle.shape = vec4(-1e9, 0.0, MIST_PHASE, 0.0);
+        spray.particles[slot % SPRAY_MAX] = particle;
     }
     else
     {
-        vec3 v = vec3(0.0, speed * (0.3 + 0.5 * random(state)), 0.0) + outward * (speed * (0.2 + 0.4 * random(state))) + flow * (0.3 * speed);
-        particle.positionLife = vec4(p, 0.5 + 0.7 * random(state));
-        particle.velocitySize = vec4(v, 0.06 + 0.12 * random(state));
-        particle.motion = SPRAY_MOTION;
+        // The crown: from a ring round the plunge, up and out.
+        vec3 p = landing + outward * (0.2 + 0.4 * random(state)) + flow * (0.4 * random(state));
+        vec3 v = vec3(0.0, speed * (POUR_LIFT.x + POUR_LIFT.y * random(state)), 0.0)
+               + outward * (speed * (POUR_OUT.x + POUR_OUT.y * random(state))) + flow * (0.15 * speed);
+        spray.particles[slot % SPRAY_MAX] = droplet(p, v, 2.5, 0.02 + 0.035 * random(state), landing.y - 0.05);
     }
-
-    spray.particles[slot % SPRAY_MAX] = particle;
 }
 
 void main()

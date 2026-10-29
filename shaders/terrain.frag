@@ -1,5 +1,7 @@
 #version 450
-// Terrain fragment shader: material palette, Lambert sun + hemispheric sky, underwater absorption, ocean-matched tonemap/fog.
+#extension GL_GOOGLE_include_directive : require
+// Terrain fragment shader: material palette, Lambert sun + hemispheric sky, underwater absorption, the water fog between
+// an underwater camera and the ground (water_fog.glsl), ocean-matched tonemap/fog.
 
 layout(set = 0, binding = 0, std140) uniform Frame {
     mat4 viewProj;
@@ -8,6 +10,10 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 skyZenith;
     vec4 skyHorizon;  // w = fog density
 } frame;
+
+#define WATER_FOG_SET 0
+#define WATER_FOG_BINDING 1
+#include "water_fog.glsl"
 
 layout(location = 0) in vec3 vWorldPos;
 layout(location = 1) in vec3 vNormal;
@@ -51,11 +57,22 @@ void main()
     float depth = max(SEA_LEVEL - vWorldPos.y, 0.0);
     colour *= exp(-ABSORPTION * depth);
 
+    // Under water: the fog between the camera and the ground, marched through the volume and stopped by the hard limit
+    // where it is thick, so far ground is fog and costs nothing past it. Water seen from the air is fogged by its surface.
+    vec3 toFrag = vWorldPos - frame.cameraPos.xyz;
+    float dist = length(toFrag);
+    if (fogEnabled() && fog.camera.x > 0.5)
+    {
+        vec3 inscatter = vec3(0.0);
+        float t = 1.0;
+        waterFogMarch(frame.cameraPos.xyz, toFrag / max(dist, 1e-4), dist, fog.camera.y, fog.camera.y - vWorldPos.y, fogJitter(gl_FragCoord.xy), inscatter, t);
+        colour = colour * t + inscatter;
+    }
+
     // Tonemap + gamma (same as ocean).
     colour = pow(acesFit(colour), vec3(1.0 / 2.2));
 
     // Fog in display space so the far terrain equals the clear colour, like the ocean.
-    float dist = length(frame.cameraPos.xyz - vWorldPos);
     float f = 1.0 - exp(-dist * frame.skyHorizon.w);
     colour = mix(colour, frame.skyHorizon.rgb, f);
 

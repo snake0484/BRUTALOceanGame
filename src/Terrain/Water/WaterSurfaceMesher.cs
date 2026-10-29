@@ -5,11 +5,22 @@ namespace BrutalGame.Terrain.Water;
 /// <summary>
 /// Heightfield surface for one block (docs/voxel-water.md "Water surface rendering v1"): one quad per wet,
 /// non-reservoir interior column, corners averaged over the wet columns around them (face-halo columns included,
-/// so neighbouring blocks agree at seams). Positions are chunk-local metres. One instance per thread; no allocation.
+/// so neighbouring blocks agree at seams), and a skirt over the dry columns beside them whose ground stands at or over
+/// the water (<see cref="Skirt"/>). Positions are chunk-local metres. One instance per thread; no allocation.
 /// </summary>
 public sealed class WaterSurfaceMesher
 {
     public const float WetThreshold = 0.02f;
+
+    /// <summary>
+    /// A dry column beside the water is skirted when its ground stands no more than this (m) under the water's surface.
+    /// The voxels say only which cells are solid, and the terrain's smooth surface dips under the water inside a solid
+    /// column at the shore: a surface that stopped at the last wet column's edge left a strip of dry-looking ground
+    /// between the water and the bank. The skirt carries the surface flat over the bank's column and the terrain, drawn
+    /// first, hides it wherever the ground is higher, so the waterline is where the surface meets the terrain. Where the
+    /// ground falls away (a lip, a film's downhill side) there is no skirt, which would hang over it.
+    /// </summary>
+    public const float SkirtTolerance = 0.05f;
 
     private const int S = ChunkConstants.Size;
     private const int P = ChunkConstants.Padded;
@@ -22,6 +33,8 @@ public sealed class WaterSurfaceMesher
     private readonly Vector2[] _columnFlow = new Vector2[P * P];
     private readonly float[] _columnFoam = new float[P * P];
     private readonly bool[] _columnWet = new bool[P * P];
+    private readonly bool[] _columnSkirt = new bool[P * P];
+    private readonly int[] _columnTop = new int[P * P];
     private readonly float[] _cornerHeight = new float[K * K];
     private readonly float[] _cornerThickness = new float[K * K];
     private readonly Vector2[] _cornerFlow = new Vector2[K * K];
@@ -45,7 +58,8 @@ public sealed class WaterSurfaceMesher
         {
             for (var x = 0; x < S; x++)
             {
-                if (!_columnWet[Column(x, z)])
+                var column = Column(x, z);
+                if (!_columnWet[column] && !_columnSkirt[column])
                     continue;
 
                 var v00 = Vertex(x, z, vertices, ref vertexCount);
@@ -85,7 +99,84 @@ public sealed class WaterSurfaceMesher
                 BuildColumn(block, x, z);
             }
         }
+
+        _columnSkirt.AsSpan().Clear();
+
+        for (var z = -1; z <= S; z++)
+        {
+            for (var x = -1; x <= S; x++)
+            {
+                if ((x < 0 || x == S) && (z < 0 || z == S))
+                    continue;
+
+                Skirt(block, x, z);
+            }
+        }
     }
+
+    /// <summary>
+    /// A dry column beside wet ones (sides and corners) whose ground stands at or over their surface (<see cref="SkirtTolerance"/>) takes
+    /// their mean surface height and no thickness, flow or foam. Halo columns are judged from the neighbours this block
+    /// holds, so a skirt's corner on a seam can differ from the next block's by a neighbour two columns out.
+    /// </summary>
+    private void Skirt(WaterBlock block, int x, int z)
+    {
+        var c = Column(x, z);
+        if (_columnWet[c])
+            return;
+
+        var height = 0f;
+        var count = 0;
+
+        // Diagonal neighbours too, or a convex bend in the shore keeps a notch at its corner column.
+        for (var dz = -1; dz <= 1; dz++)
+        {
+            for (var dx = -1; dx <= 1; dx++)
+            {
+                var nx = x + dx;
+                var nz = z + dz;
+                if ((dx == 0 && dz == 0) || nx < -1 || nz < -1 || nx > S || nz > S)
+                    continue;
+
+                var n = Column(nx, nz);
+                if (!_columnWet[n] || block.Water[ChunkConstants.Index(x, _columnTop[n], z)] > WetThreshold || Ground(block, x, z, _columnTop[n]) < _columnHeight[n] - SkirtTolerance)
+                    continue;
+
+                height += _columnHeight[n];
+                count++;
+            }
+        }
+
+        if (count == 0)
+            return;
+
+        _columnSkirt[c] = true;
+        _columnHeight[c] = height / count;
+        _columnThickness[c] = 0f;
+        _columnFlow[c] = Vector2.Zero;
+        _columnFoam[c] = 0f;
+    }
+
+    /// <summary>
+    /// The ground's height (chunk-local m) in column (x, z) about the level of cell y: the smooth surface (the bed) of the
+    /// open cell standing on solid at y or y + 1; infinite where solid stands over y (a bank or a wall), minus infinity
+    /// where the ground lies under y − 1 (a drop).
+    /// </summary>
+    private static float Ground(WaterBlock block, int x, int z, int y)
+    {
+        var flags = block.Flags;
+        var i = ChunkConstants.Index(x, y, z);
+
+        if ((flags[i + P] & SolidBit) != 0)
+            return float.PositiveInfinity;
+
+        if ((flags[i] & SolidBit) != 0)
+            return y + 0.5f + BedHeight(block.Bed[i + P]);
+
+        return (flags[i - P] & SolidBit) != 0 ? y - 0.5f + BedHeight(block.Bed[i]) : float.NegativeInfinity;
+    }
+
+    private static float BedHeight(sbyte bed) => bed == WaterBlock.NotBed ? 0f : bed * WaterBlock.BedUnit;
 
     private void BuildColumn(WaterBlock block, int x, int z)
     {
@@ -135,6 +226,7 @@ public sealed class WaterSurfaceMesher
 
         var c = Column(x, z);
         _columnWet[c] = true;
+        _columnTop[c] = top;
         _columnHeight[c] = surface;
         (_columnFlow[c], _columnFoam[c]) = FlowAndFoam(block, x, z, topIndex, water[topIndex]);
         var bed = block.Bed[ChunkConstants.Index(x, bottom, z)];
@@ -143,8 +235,8 @@ public sealed class WaterSurfaceMesher
 
     /// <summary>
     /// The pipe model's surface flow at a column's top cell (its four side faces' fluxes over the water they move, m/s)
-    /// and how churned the water is there: water landing on it from above (the cell over it falling), and fast flow over
-    /// shallow water (its Froude number past 0.8). The automaton has neither.
+    /// and how churned the water is there: its froth (<see cref="WaterBlock.Froth"/>: aerated by falling, carried on from
+    /// where a pour lands), and fast flow over shallow water (its Froude number past 1.2). The automaton has neither.
     /// </summary>
     private static (Vector2 Flow, float Foam) FlowAndFoam(WaterBlock block, int x, int z, int i, float w)
     {
@@ -159,10 +251,9 @@ public sealed class WaterSurfaceMesher
         var body = MathF.Max(MathF.Min(w, 1f), 0.1f);
         var flow = new Vector2(u, v) / body;
         var speed = flow.Length();
-        var fall = -block.FallSpeed![i + P] * MathF.Min(block.Water[i + P], 1f);
-        // Pours froth where they land; fast shallow flow froths past Froude 1.2, a thin sheet at its critical speed only a little.
+        // Fast shallow flow froths past Froude 1.2, a thin sheet at its critical speed only a little.
         var froude = speed / MathF.Sqrt(9.81f * MathF.Max(MathF.Min(w, 1f), 0.05f));
-        var foam = MathF.Max(MathF.Min(fall / 6f, 1f), MathF.Min(MathF.Max(froude - 1.2f, 0f) * 0.5f, 0.6f));
+        var foam = MathF.Max(block.Froth![i], MathF.Min(MathF.Max(froude - 1.2f, 0f) * 0.5f, 0.6f));
         return (flow, foam);
     }
 
@@ -192,6 +283,24 @@ public sealed class WaterSurfaceMesher
                         flow += _columnFlow[c];
                         foam += _columnFoam[c];
                         count++;
+                    }
+                }
+
+                // A corner no wet column touches is a skirt's outer corner: the skirts' height, no water under it.
+                if (count == 0)
+                {
+                    for (var dz = -1; dz <= 0; dz++)
+                    {
+                        for (var dx = -1; dx <= 0; dx++)
+                        {
+                            var c = Column(cx + dx, cz + dz);
+
+                            if (!_columnSkirt[c])
+                                continue;
+
+                            height += _columnHeight[c];
+                            count++;
+                        }
                     }
                 }
 

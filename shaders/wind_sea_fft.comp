@@ -1,0 +1,103 @@
+#version 450
+
+// One line of the 2D inverse FFT of the wind sea bands (wind_sea_h0.comp, WindSeaBands), as ocean_fft.comp. Each layer
+// packs two bands' slope spectra, C = hx + i hz, one per complex half of a vec4. Rows (pass.direction 0): the cached
+// spectrum is evolved to the frame's time straight into shared memory, transformed along x and written to specMap.
+// Columns (direction 1): transformed along y, the centred-spectrum shift undone with (-1)^(x+y), and written to slopeMap
+// as (hx, hz) of the even band, (hx, hz) of the odd. Radix-2 Stockham, natural-order output, no 1/N scale.
+// Workgroup x = line index, z = layer.
+
+#define N 128
+#define LOG2N 7
+#define HALF_N 64
+
+layout(local_size_x = HALF_N, local_size_y = 1, local_size_z = 1) in;
+
+layout(std140, set = 0, binding = 0) uniform Bands {
+    vec4 wind;   // x = direction rad (waves travel toward), y = spread exponent s, z = spread norm Ns, w = looped time t
+    vec4 params; // x = loop period T
+} bands;
+layout(set = 0, binding = 1, rgba32f) readonly uniform image2DArray h0Map;      // per band
+layout(set = 0, binding = 2, r32f) readonly uniform image2DArray omegaMap;      // per band
+layout(set = 0, binding = 3, rgba32f) uniform image2DArray specMap;             // per layer: (Ceven, Codd)
+layout(set = 0, binding = 4, rgba16f) writeonly uniform image2DArray slopeMap;  // per layer: (hx, hz) even, (hx, hz) odd
+layout(push_constant) uniform Pass { int direction; } pass;
+
+const float TAU = 6.28318530717959;
+const float LAYER_PATCH = 128.0; // wind_sea_h0.comp
+
+shared vec4 s[2 * N];
+
+vec2 cmul(vec2 a, vec2 b) { return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x); }
+vec2 mulI(vec2 a) { return vec2(-a.y, a.x); }
+
+// The slope spectrum C = i kx h + i (i kz h) of a band at texel (x, y), at time t.
+vec2 evolve(int x, int y, int band)
+{
+    ivec3 coord = ivec3(x, y, band);
+    vec4 h0 = imageLoad(h0Map, coord);
+    if (all(equal(h0, vec4(0.0))))
+        return vec2(0.0);
+
+    vec2 k = (vec2(x, y) - 0.5 * float(N)) * (TAU * float(1 << (2 * (band >> 1))) / LAYER_PATCH);
+    float phase = imageLoad(omegaMap, coord).r * bands.wind.w;
+    vec2 e = vec2(cos(phase), sin(phase));
+    vec2 h = cmul(h0.xy, vec2(e.x, -e.y)) + cmul(vec2(h0.z, -h0.w), e);
+    vec2 ih = mulI(h);
+    return ih * k.x + mulI(ih * k.y);
+}
+
+void main()
+{
+    int j = int(gl_LocalInvocationID.x);
+    int line = int(gl_WorkGroupID.x);
+    int layer = int(gl_WorkGroupID.z);
+    bool rows = pass.direction == 0;
+
+    if (rows)
+    {
+        s[j] = vec4(evolve(j, line, 2 * layer), evolve(j, line, 2 * layer + 1));
+        s[j + HALF_N] = vec4(evolve(j + HALF_N, line, 2 * layer), evolve(j + HALF_N, line, 2 * layer + 1));
+    }
+    else
+    {
+        s[j] = imageLoad(specMap, ivec3(line, j, layer));
+        s[j + HALF_N] = imageLoad(specMap, ivec3(line, j + HALF_N, layer));
+    }
+
+    barrier();
+
+    int src = 0;
+    for (int stage = 0; stage < LOG2N; stage++)
+    {
+        int Ns = 1 << stage;
+        int dst = src ^ 1;
+        int kk = j & (Ns - 1);
+        float angle = TAU * float(kk) / float(2 * Ns);
+        vec2 w = vec2(cos(angle), sin(angle));
+
+        int si = src * N;
+        vec4 a0 = s[si + j];
+        vec4 a1 = s[si + j + HALF_N];
+        a1 = vec4(cmul(a1.xy, w), cmul(a1.zw, w));
+
+        int di = dst * N + (j - kk) * 2 + kk;
+        s[di] = a0 + a1;
+        s[di + Ns] = a0 - a1;
+
+        src = dst;
+        barrier();
+    }
+
+    int si = src * N;
+    if (rows)
+    {
+        imageStore(specMap, ivec3(j, line, layer), s[si + j]);
+        imageStore(specMap, ivec3(j + HALF_N, line, layer), s[si + j + HALF_N]);
+        return;
+    }
+
+    float sgn = ((line + j) & 1) == 0 ? 1.0 : -1.0;
+    imageStore(slopeMap, ivec3(line, j, layer), sgn * s[si + j]);
+    imageStore(slopeMap, ivec3(line, j + HALF_N, layer), sgn * s[si + j + HALF_N]);
+}

@@ -156,7 +156,7 @@ public sealed unsafe class OceanRenderer : IDisposable
     // queue order and barriers order each frame's compute after the previous frame's draw.
     private const int SprayBinding = 3 + SampledMaps;
     private const int SprayMax = 16384;
-    private const int SprayBytes = 16 + SprayMax * 48;
+    private const int SprayBytes = 16 + SprayMax * 64;
     private readonly GpuBuffer _spray;
     private readonly VkPipeline _sprayUpdate;
     private readonly VkPipeline _spraySpawn;
@@ -204,10 +204,18 @@ public sealed unsafe class OceanRenderer : IDisposable
     // host-visible buffer per frame in flight. The surface's foam and ripples stream with it and roughen by it. A sim
     // bigger than MaxFlowCells goes up empty (the zone's cap is 12,000 cells, but edit discs alone can pass it).
     private const int ZoneFlowBinding = 9 + SampledMaps;
+
+    /// <summary>The water fog the body is marched through (water_fog.glsl): its uniforms and its volume.</summary>
+    private const int FogUniformBinding = 10 + SampledMaps;
+    private const int FogVolumeBinding = 11 + SampledMaps;
+    private readonly WaterFogVolume _fog;
+
+    /// <summary>The opaque scene copied for the surface's and lips' reflections (water_ssr.glsl, set 1).</summary>
+    private readonly ScreenReflections _reflections;
     private const int MaxFlowCells = 32768;
     private const int ZoneFlowBytes = 32 + MaxFlowCells * 8;
     private readonly GpuBuffer[] _zoneFlow = new GpuBuffer[Renderer.FramesInFlight];
-    private const int Bindings = 10 + SampledMaps;
+    private const int Bindings = 12 + SampledMaps;
     private readonly RainCover _rainCover;
     private readonly VmaAllocator _allocator;
     private readonly VkImage _carrierAtlas;
@@ -237,9 +245,11 @@ public sealed unsafe class OceanRenderer : IDisposable
     private readonly VkSampler _depthSampler;
 
     /// <param name="depthView">Depth and sea-zone map, two array layers (latest tick, tick before), in SHADER_READ_ONLY_OPTIMAL.</param>
-    public OceanRenderer(Renderer renderer, OceanFft fft, VkImageView depthView, VkSampler depthSampler, RainCover rainCover)
+    public OceanRenderer(Renderer renderer, OceanFft fft, VkImageView depthView, VkSampler depthSampler, RainCover rainCover, WaterFogVolume fog, ScreenReflections reflections)
     {
         _rainCover = rainCover;
+        _fog = fog;
+        _reflections = reflections;
         _fft = fft;
         _depthView = depthView;
         _depthSampler = depthSampler;
@@ -290,7 +300,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         [
             new VkPushConstantRange { StageFlags = PushStages, Size = (ByteSize32)PushConstantSize },
         ];
-        _layout = _device.CreatePipelineLayout([_setLayout], push, null);
+        _layout = _device.CreatePipelineLayout([_setLayout, reflections.SetLayout], push, null);
         _pipeline = CreatePipeline(renderer.RenderPass, "ocean.vert", "ocean.frag");
         _lipPipeline = CreatePipeline(renderer.RenderPass, "ocean_lip.vert", "ocean_lip.frag");
         _patchPipeline = CreatePipeline(renderer.RenderPass, "ocean_patch.vert", "ocean.frag");
@@ -601,6 +611,22 @@ public sealed unsafe class OceanRenderer : IDisposable
             StageFlags = buffers,
         };
 
+        bindings[FogUniformBinding] = new VkDescriptorSetLayoutBinding
+        {
+            Binding = FogUniformBinding,
+            DescriptorType = VkDescriptorType.UniformBuffer,
+            DescriptorCount = 1,
+            StageFlags = VkShaderStageFlags.FragmentBit,
+        };
+
+        bindings[FogVolumeBinding] = new VkDescriptorSetLayoutBinding
+        {
+            Binding = FogVolumeBinding,
+            DescriptorType = VkDescriptorType.CombinedImageSampler,
+            DescriptorCount = 1,
+            StageFlags = VkShaderStageFlags.FragmentBit,
+        };
+
         return _device.CreateDescriptorSetLayout(
             new VkDescriptorSetLayoutCreateInfo { BindingCount = Bindings, Bindings = bindings },
             null
@@ -611,8 +637,8 @@ public sealed unsafe class OceanRenderer : IDisposable
     {
         var sizes = stackalloc VkDescriptorPoolSize[]
         {
-            new() { Type = VkDescriptorType.UniformBuffer, DescriptorCount = Renderer.FramesInFlight },
-            new() { Type = VkDescriptorType.CombinedImageSampler, DescriptorCount = Renderer.FramesInFlight * SampledMaps },
+            new() { Type = VkDescriptorType.UniformBuffer, DescriptorCount = 2 * Renderer.FramesInFlight },
+            new() { Type = VkDescriptorType.CombinedImageSampler, DescriptorCount = Renderer.FramesInFlight * (SampledMaps + 1) },
             new() { Type = VkDescriptorType.StorageBuffer, DescriptorCount = Renderer.FramesInFlight * (CoastalSlots + 7) },
             new() { Type = VkDescriptorType.StorageImage, DescriptorCount = Renderer.FramesInFlight },
         };
@@ -770,6 +796,31 @@ public sealed unsafe class OceanRenderer : IDisposable
                 DescriptorCount = 1,
                 DescriptorType = VkDescriptorType.StorageBuffer,
                 BufferInfo = &zoneFlow,
+            };
+
+            var fogInfo = new VkDescriptorBufferInfo
+            {
+                Buffer = _fog.UniformBuffer,
+                Offset = (ByteSize64)_fog.UniformOffset(i),
+                Range = (ByteSize64)WaterFogVolume.UniformBytes,
+            };
+            writes[FogUniformBinding] = new VkWriteDescriptorSet
+            {
+                DstSet = _sets[i],
+                DstBinding = FogUniformBinding,
+                DescriptorCount = 1,
+                DescriptorType = VkDescriptorType.UniformBuffer,
+                BufferInfo = &fogInfo,
+            };
+
+            var fogVolume = new VkDescriptorImageInfo { Sampler = _fog.Sampler, ImageView = _fog.View, ImageLayout = VkImageLayout.ShaderReadOnlyOptimal };
+            writes[FogVolumeBinding] = new VkWriteDescriptorSet
+            {
+                DstSet = _sets[i],
+                DstBinding = FogVolumeBinding,
+                DescriptorCount = 1,
+                DescriptorType = VkDescriptorType.CombinedImageSampler,
+                ImageInfo = &fogVolume,
             };
 
             _device.UpdateDescriptorSets(writes, []);
@@ -1019,11 +1070,11 @@ public sealed unsafe class OceanRenderer : IDisposable
     private static void Barrier(CommandBuffer commands, VkPipelineStageFlags srcStage, VkAccessFlags srcAccess, VkPipelineStageFlags dstStage, VkAccessFlags dstAccess) =>
         commands.PipelineBarrier(srcStage, dstStage, VkDependencyFlags.None, [new VkMemoryBarrier { SrcAccessMask = srcAccess, DstAccessMask = dstAccess }], [], []);
 
-    /// <summary>Records the surface (one draw per clipmap level), breaker lips and spray. Inside the main pass.</summary>
+    /// <summary>Records the surface (one draw per clipmap level), breaker lips and spray. Inside the water pass.</summary>
     public void Record(CommandBuffer commands, int frameIndex, VkExtent2D extent, Vector3 cameraPos, int segments)
     {
         commands.BindPipeline(VkPipelineBindPoint.Graphics, _pipeline);
-        commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex]], []);
+        commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex], _reflections.Set(frameIndex)], []);
         commands.BindIndexBuffer(_buffer.Handle, (ByteSize64)0, VkIndexType.UInt16);
         commands.SetViewport(0, [new VkViewport { Width = extent.Width, Height = extent.Height, MaxDepth = 1f }]);
         commands.SetScissor(0, [new VkRect2D { Extent = extent }]);

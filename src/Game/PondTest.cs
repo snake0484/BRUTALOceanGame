@@ -15,7 +15,7 @@ namespace BrutalGame;
 /// downhill rim below the water line so the pond pours out and runs down the slope toward the sea. Frames the camera on
 /// it and logs the voxel sim each half second.
 /// </summary>
-public sealed class PondTest(TerrainWorld world, VoxelWaterSystem water, PhysicsWorld physics, FlyCamera camera)
+public sealed class PondTest(TerrainWorld world, VoxelWaterSystem water, PhysicsWorld physics, FlyCamera camera, bool keepCamera = false)
 {
     private static readonly LogCategory Log = LogCategory.Make("PondTest");
 
@@ -67,13 +67,19 @@ public sealed class PondTest(TerrainWorld world, VoxelWaterSystem water, Physics
             }
 
             world.ApplyBrush(new BrushOp(_site + new Vector3(0f, BowlLift, 0f), BowlRadius, BrushMode.Dig, VoxelMaterial.Air));
-            // From high over the slope, off to one side, looking back up the run-off path at the breach and into the pond.
-            var side = new Vector3(_downhill.Z, 0f, -_downhill.X);
-            var target = new Vector3(_site.X, _level - 3f, _site.Z) + _downhill * 12f;
-            camera.Position = target + _downhill * 14f + side * 8f + new Vector3(0f, 24f, 0f);
-            var look = target - camera.Position;
-            camera.Yaw = MathF.Atan2(look.Z, look.X);
-            camera.Pitch = MathF.Atan2(look.Y, new Vector2(look.X, look.Z).Length());
+
+            // From high over the slope, off to one side, looking back up the run-off path at the breach and into the pond
+            // (unless --cam placed it).
+            if (!keepCamera)
+            {
+                var side = new Vector3(_downhill.Z, 0f, -_downhill.X);
+                var target = new Vector3(_site.X, _level - 3f, _site.Z) + _downhill * 12f;
+                camera.Position = target + _downhill * 14f + side * 8f + new Vector3(0f, 24f, 0f);
+                var look = target - camera.Position;
+                camera.Yaw = MathF.Atan2(look.Z, look.X);
+                camera.Pitch = MathF.Atan2(look.Y, new Vector2(look.X, look.Z).Length());
+            }
+
             Log.Info($"pond at {_site}, water to y {_level:F2}, downhill {_downhill}, model {(water.Pipes ? "pipes" : "automaton")}");
             _stage = 2;
         }
@@ -111,7 +117,7 @@ public sealed class PondTest(TerrainWorld world, VoxelWaterSystem water, Physics
 
         if (_stage >= 3 && _stage < 5 && time >= _nextLog)
         {
-            Log.Info($"t+{time - _start:F1}s voxel {(water.Pipes ? "pipes" : "automaton")}: blocks {water.Blocks}, awake {water.AwakeBlocks}, step {water.LastStepMs:F3} ms, awake mass {water.Mass:F0} m3; bodies {water.Bodies.Count - 2}, discs {water.Discs}, zone discs {water.ZoneDiscs}; activity {water.Activity}");
+            Log.Info($"t+{time - _start:F1}s voxel {(water.Pipes ? "pipes" : "automaton")}: blocks {water.Blocks}, awake {water.AwakeBlocks}, step {water.LastStepMs:F3} ms (swell {water.LastSwellMs:F3}, strays {water.TakeSwellStray() * 100f:F1} cm), awake mass {water.Mass:F0} m3; bodies {water.Bodies.Count - 2}, discs {water.Discs}, zone discs {water.ZoneDiscs}; activity {water.Activity}");
             _nextLog = time + 0.5;
 
             // Water depth down the run-off path: the pond's centre, then every 4 m toward the sea.

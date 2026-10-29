@@ -210,6 +210,7 @@ public static partial class WaterFlow
     {
         WaterHalo.CopyHaloPlanes(block.Water, block.Next);
         (block.Water, block.Next) = (block.Next, block.Water);
+        block.Revision++;
     }
 
     /// <summary>

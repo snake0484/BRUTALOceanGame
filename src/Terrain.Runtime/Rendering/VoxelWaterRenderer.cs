@@ -11,7 +11,7 @@ namespace BrutalGame.Terrain.Runtime.Rendering;
 
 /// <summary>
 /// Draws voxel water surface meshes, re-streamed every frame into a host-visible per-frame ring.
-/// Main thread only. Per frame: Renderer.BeginFrame, BeginFrame, Add (per mesh), Draw (in the main pass, after opaque + ocean).
+/// Main thread only. Per frame: Renderer.BeginFrame, BeginFrame, Add (per mesh), Draw (in the water pass, after the ocean).
 /// </summary>
 public sealed unsafe class VoxelWaterRenderer : IDisposable
 {
@@ -23,7 +23,7 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
     private const int RegionVertices = RegionVertexBytes / VertexStride;
     private const int RegionIndices = RegionIndexBytes / sizeof(uint);
     private const int UniformAlignment = 256;
-    private const int PushConstantSize = 16;
+    private const int PushConstantSize = 32;
     private const float CullMargin = 1f;
 
     private readonly Device _device;
@@ -33,8 +33,18 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
     private readonly VkDescriptorSetLayout _setLayout;
     private readonly VkDescriptorPool _pool;
 
-    /// <summary>Where rain can't reach (rain_cover.glsl, binding 1): no rings on water under cover.</summary>
+    /// <summary>Where rain and wind can't reach (rain_cover.glsl, binding 1): no rings on water under cover, and the wind's shelter and fetch per vertex.</summary>
     private readonly RainCover _rainCover;
+
+    /// <summary>The water fog the body is marched through (water_fog.glsl, bindings 2 and 3).</summary>
+    private readonly WaterFogVolume _fog;
+
+    /// <summary>The opaque scene copied for the water's reflections (water_ssr.glsl, set 1).</summary>
+    private readonly ScreenReflections _reflections;
+
+    /// <summary>The wind sea bands (WindSeaBands, binding 4), weighted per vertex by the wind and fetch the water feels.</summary>
+    private readonly VkImageView _waveSlopes;
+    private readonly VkSampler _waveSampler;
     private readonly VkDescriptorSet[] _sets = new VkDescriptorSet[Renderer.FramesInFlight];
     private readonly VkPipelineLayout _layout;
     private readonly VkPipeline _pipeline;
@@ -56,6 +66,7 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
         public int FirstIndex;
         public int VertexOffset;
         public int IndexCount;
+        public Vector4 Clip;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -72,9 +83,13 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
         public Vector4 WaterScatter;
     }
 
-    public VoxelWaterRenderer(Renderer renderer, RainCover rainCover)
+    public VoxelWaterRenderer(Renderer renderer, RainCover rainCover, WaterFogVolume fog, ScreenReflections reflections, VkImageView waveSlopes, VkSampler waveSampler)
     {
         _rainCover = rainCover;
+        _fog = fog;
+        _reflections = reflections;
+        _waveSlopes = waveSlopes;
+        _waveSampler = waveSampler;
 
         if (sizeof(WaterVertex) != VertexStride)
             throw new InvalidOperationException($"WaterVertex is {sizeof(WaterVertex)} bytes, expected {VertexStride}.");
@@ -92,9 +107,9 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
 
         Span<VkPushConstantRange> push =
         [
-            new VkPushConstantRange { StageFlags = VkShaderStageFlags.VertexBit, Size = (ByteSize32)PushConstantSize },
+            new VkPushConstantRange { StageFlags = VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit, Size = (ByteSize32)PushConstantSize },
         ];
-        _layout = _device.CreatePipelineLayout([_setLayout], push, null);
+        _layout = _device.CreatePipelineLayout([_setLayout, reflections.SetLayout], push, null);
         _pipeline = CreatePipeline(renderer.RenderPass);
     }
 
@@ -114,7 +129,8 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
     }
 
     /// <summary>Copies the mesh into this frame's ring. Returns false if the ring or draw list is full.</summary>
-    public bool Add(ChunkCoord coord, WaterMesh mesh)
+    /// <param name="clip">A body's far plane: its centre (world x, z) and radius, outside which nothing is drawn; zero for a block's mesh.</param>
+    public bool Add(ChunkCoord coord, WaterMesh mesh, Vector4 clip = default)
     {
         var vertexCount = mesh.VertexCount;
         var indexCount = mesh.IndexCount;
@@ -143,15 +159,16 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
             FirstIndex = indexBase,
             VertexOffset = vertexBase,
             IndexCount = indexCount,
+            Clip = clip,
         };
         _vertexCursor += vertexCount;
         _indexCursor += indexCount;
         return true;
     }
 
-    /// <summary>Inside the main pass, after opaque geometry and the ocean: frustum-culls and draws this frame's meshes.</summary>
+    /// <summary>Inside the water pass, after the ocean: frustum-culls and draws this frame's meshes.</summary>
     /// <param name="rain">Rain intensity 0..1 and its looped time (s), as the ocean gets them: rings on the water (rain_ripples.glsl).</param>
-    /// <param name="wind">10 m wind (m/s, the way it blows toward): raises ripples where the water's shelter lets it.</param>
+    /// <param name="wind">10 m wind (m/s, the way it blows toward): raises the wind sea where the water's shelter and fetch let it.</param>
     public void Draw(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, Vector3 cameraPos, in SceneLighting lighting, float time, Vector2 rain, Vector2 wind)
     {
         MeshesLastFrame = 0;
@@ -172,7 +189,7 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
         uniforms->WaterScatter = new Vector4(lighting.WaterScatter, 0f);
 
         commands.BindPipeline(VkPipelineBindPoint.Graphics, _pipeline);
-        commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex]], []);
+        commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex], _reflections.Set(frameIndex)], []);
         commands.BindVertexBuffers(0, [_vertices.Handle], [(ByteSize64)0]);
         commands.BindIndexBuffer(_indices.Handle, (ByteSize64)0, VkIndexType.UInt32);
         commands.SetViewport(0, [new VkViewport { Width = extent.Width, Height = extent.Height, MaxDepth = 1f }]);
@@ -182,7 +199,7 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
         ExtractPlanes(viewProj, planes);
         var meshes = 0;
         var indices = 0;
-        var push = Vector4.Zero;
+        var push = stackalloc Vector4[2];
         var visible = 0;
 
         for (var i = 0; i < _drawCount; i++)
@@ -202,8 +219,9 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
         for (var k = 0; k < visible; k++)
         {
             ref var draw = ref _draws[_order[k]];
-            push = new Vector4(draw.Origin, 0f);
-            commands.PushConstants(_layout, VkShaderStageFlags.VertexBit, 0, new ReadOnlySpan<byte>(&push, PushConstantSize));
+            push[0] = new Vector4(draw.Origin, 0f);
+            push[1] = draw.Clip;
+            commands.PushConstants(_layout, VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit, 0, new ReadOnlySpan<byte>(push, PushConstantSize));
             commands.DrawIndexed(draw.IndexCount, 1, draw.FirstIndex, draw.VertexOffset, 0);
             meshes++;
             indices += draw.IndexCount;
@@ -259,22 +277,26 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
                 DescriptorCount = 1,
                 StageFlags = VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit,
             },
-            new() { Binding = 1, DescriptorType = VkDescriptorType.StorageBuffer, DescriptorCount = 1, StageFlags = VkShaderStageFlags.FragmentBit },
+            new() { Binding = 1, DescriptorType = VkDescriptorType.StorageBuffer, DescriptorCount = 1, StageFlags = VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit },
+            new() { Binding = 2, DescriptorType = VkDescriptorType.UniformBuffer, DescriptorCount = 1, StageFlags = VkShaderStageFlags.FragmentBit },
+            new() { Binding = 3, DescriptorType = VkDescriptorType.CombinedImageSampler, DescriptorCount = 1, StageFlags = VkShaderStageFlags.FragmentBit },
+            new() { Binding = 4, DescriptorType = VkDescriptorType.CombinedImageSampler, DescriptorCount = 1, StageFlags = VkShaderStageFlags.FragmentBit },
         };
 
-        return _device.CreateDescriptorSetLayout(new VkDescriptorSetLayoutCreateInfo { BindingCount = 2, Bindings = bindings }, null);
+        return _device.CreateDescriptorSetLayout(new VkDescriptorSetLayoutCreateInfo { BindingCount = 5, Bindings = bindings }, null);
     }
 
     private VkDescriptorPool CreatePool()
     {
         var sizes = stackalloc VkDescriptorPoolSize[]
         {
-            new() { Type = VkDescriptorType.UniformBuffer, DescriptorCount = Renderer.FramesInFlight },
+            new() { Type = VkDescriptorType.UniformBuffer, DescriptorCount = 2 * Renderer.FramesInFlight },
             new() { Type = VkDescriptorType.StorageBuffer, DescriptorCount = Renderer.FramesInFlight },
+            new() { Type = VkDescriptorType.CombinedImageSampler, DescriptorCount = 2 * Renderer.FramesInFlight },
         };
 
         return _device.CreateDescriptorPool(
-            new VkDescriptorPoolCreateInfo { MaxSets = Renderer.FramesInFlight, PoolSizeCount = 2, PoolSizes = sizes },
+            new VkDescriptorPoolCreateInfo { MaxSets = Renderer.FramesInFlight, PoolSizeCount = 3, PoolSizes = sizes },
             null
         );
     }
@@ -305,6 +327,14 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
                 Range = (ByteSize64)sizeof(FrameUniforms),
             };
             var cover = new VkDescriptorBufferInfo { Buffer = _rainCover.Buffer(i), Range = (ByteSize64)RainCover.Bytes };
+            var fogInfo = new VkDescriptorBufferInfo
+            {
+                Buffer = _fog.UniformBuffer,
+                Offset = (ByteSize64)_fog.UniformOffset(i),
+                Range = (ByteSize64)WaterFogVolume.UniformBytes,
+            };
+            var fogVolume = new VkDescriptorImageInfo { Sampler = _fog.Sampler, ImageView = _fog.View, ImageLayout = VkImageLayout.ShaderReadOnlyOptimal };
+            var slopes = new VkDescriptorImageInfo { Sampler = _waveSampler, ImageView = _waveSlopes, ImageLayout = VkImageLayout.General };
 
             _device.UpdateDescriptorSets(
                 [
@@ -323,6 +353,30 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
                         DescriptorCount = 1,
                         DescriptorType = VkDescriptorType.StorageBuffer,
                         BufferInfo = &cover,
+                    },
+                    new VkWriteDescriptorSet
+                    {
+                        DstSet = _sets[i],
+                        DstBinding = 2,
+                        DescriptorCount = 1,
+                        DescriptorType = VkDescriptorType.UniformBuffer,
+                        BufferInfo = &fogInfo,
+                    },
+                    new VkWriteDescriptorSet
+                    {
+                        DstSet = _sets[i],
+                        DstBinding = 3,
+                        DescriptorCount = 1,
+                        DescriptorType = VkDescriptorType.CombinedImageSampler,
+                        ImageInfo = &fogVolume,
+                    },
+                    new VkWriteDescriptorSet
+                    {
+                        DstSet = _sets[i],
+                        DstBinding = 4,
+                        DescriptorCount = 1,
+                        DescriptorType = VkDescriptorType.CombinedImageSampler,
+                        ImageInfo = &slopes,
                     },
                 ],
                 []

@@ -5,6 +5,9 @@
 // own normal, so it shades as the crest it grows from; its underside and the tube ceiling are in the tube's shadow; a
 // thin sheet lets a little more sun through, and the thrown edge turns to foam as the lip throws and breaks.
 
+#define WATER_FOG_SET 0
+#define WATER_FOG_BINDING 14
+#define WATER_SSR_SET 1
 #include "ocean_common.glsl"
 #include "ocean_shading.glsl"
 
@@ -91,7 +94,8 @@ void main()
     float streaks = smoothstep(1.0 - 0.9 * coverage, 1.15 - 0.9 * coverage, streak) * (0.5 + 0.5 * coverage);
     float foam = max(streaks, flowingLace(lipUV, vHook, speed, max(vCollapse, spill), 1.0));
 
-    vec3 colour = shadeWater(vWorldPos, N, depth, thickness, map.b, foam);
+    float bedThrough; // a lip is a sheet in the air with its own alpha below: the bed never shows through it
+    vec3 colour = shadeWater(vWorldPos, N, depth, thickness, map.b, foam, bedThrough);
 
     // The tube's shadow: the underside of the tongue and its ceiling face down into the tube and get little sky.
     float under = clamp(-N.y, 0.0, 1.0) * (1.0 - 0.5 * foam);

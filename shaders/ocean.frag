@@ -2,6 +2,9 @@
 #extension GL_GOOGLE_include_directive : require
 // Ocean surface fragment shader: normal and foam from the CPU band plus FFT detail, shaded by ocean_shading.glsl.
 
+#define WATER_FOG_SET 0
+#define WATER_FOG_BINDING 14
+#define WATER_SSR_SET 1
 #include "ocean_common.glsl"
 #include "ocean_shading.glsl"
 #include "rain_ripples.glsl"
@@ -145,7 +148,8 @@ void main()
         return;
     }
 
-    vec3 colour = shadeWater(vWorldPos, N, max(waterDepth(vRestXZ), 0.0), thickness, zone, foam);
+    float through;
+    vec3 colour = shadeWater(vWorldPos, N, max(waterDepth(vRestXZ), 0.0), thickness, zone, foam, through);
 
     // A folded tongue is a sheet of water lit through. Between its lace the outer skin is the lip's body (LIP_*): a thin
     // sheet lit from behind, bright turquoise, brighter where it is thin (vTongue.y) and toward the sun, mixed over the
@@ -170,19 +174,28 @@ void main()
         alpha *= 1.0 - FOLD_TIP_FADE * smoothstep(0.85, 1.0, vTongue.x) * (1.0 - foam) * vFold.x;
     }
 
-    // Thin open water is see-through (SHEET_OPAQUE): the share of the pixel that is neither the sky's reflection, foam nor
-    // the water body (which builds up over the first SHEET_OPAQUE of thickness) shows the terrain behind, darkened to
-    // WET_SAND as wet sand is; the blend is straight alpha, so that share is left out of the colour and taken off the
-    // alpha. Opaque at distance, where the fog has the pixel anyway. Zones keep their own fade.
+    // The terrain shows through the water: near the camera by the fog march's transmittance to the bed (through, already
+    // less the reflection's and foam's shares; the colour holds the far field's estimate of the sand), and where the march hands over to the far
+    // field (or with the fog off) thin open water is see-through (SHEET_OPAQUE): the share of the pixel that is neither
+    // the sky's reflection, foam nor the water body (which builds up over the first SHEET_OPAQUE of thickness). Either
+    // way the terrain is darkened to WET_SAND as wet sand is; the blend is straight alpha, so that share is taken off
+    // the alpha. Opaque at distance, where the fog has the pixel anyway. Zones keep their fade, less what shows through.
+    vec3 toEye = frame.cameraPos.xyz - vWorldPos;
+    float eyeDist = length(toEye);
+    float aerial = exp(-eyeDist * frame.skyHorizon.w);
+    float thin = 0.0;
     if (thickness < SHEET_OPAQUE)
     {
-        vec3 toEye = frame.cameraPos.xyz - vWorldPos;
-        float eyeDist = length(toEye);
         float Fv = fresnelSchlick(max(dot(N, toEye / max(eyeDist, 1e-4)), 0.0));
-        float through = (1.0 - Fv) * (1.0 - smoothstep(0.0, SHEET_OPAQUE, thickness)) * (1.0 - foam) * exp(-eyeDist * frame.skyHorizon.w) * (1.0 - zone) * (1.0 - vFold.x);
-        float alphaOpen = 1.0 - through * WET_SAND;
-        colour *= (1.0 - through) / alphaOpen;
-        alpha = mix(alphaOpen * waterline, alpha, zone);
+        thin = (1.0 - Fv) * (1.0 - smoothstep(0.0, SHEET_OPAQUE, thickness)) * (1.0 - foam) * aerial * (1.0 - zone) * (1.0 - vFold.x) * (1.0 - gFogNear);
+    }
+
+    float see = max(through * aerial * (1.0 - vFold.x), thin);
+    if (see > 0.0)
+    {
+        float alphaOpen = 1.0 - see * WET_SAND;
+        colour *= (1.0 - see) / alphaOpen;
+        alpha = mix(alphaOpen * waterline, alpha * alphaOpen, zone);
     }
 
     // Foam keeps thin sheets visible, but fades out with them so films clinging to walls don't read as white shards.

@@ -139,7 +139,7 @@ public sealed unsafe class RainRenderer : IDisposable
         Barrier(commands, VkPipelineStageFlags.ComputeShaderBit, VkAccessFlags.ShaderWriteBit, VkPipelineStageFlags.VertexShaderBit, VkAccessFlags.ShaderReadBit);
     }
 
-    /// <summary>Crowns, then the falling drops over them. Inside the main pass, after the water.</summary>
+    /// <summary>Crowns, then the falling drops over them. Inside the water pass, after the water.</summary>
     public void Record(CommandBuffer commands, int frameIndex, VkExtent2D extent)
     {
         if (!_active)

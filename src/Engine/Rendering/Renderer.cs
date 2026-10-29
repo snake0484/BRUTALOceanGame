@@ -8,7 +8,9 @@ using BrutalGame.Engine.Time;
 namespace BrutalGame.Engine.Rendering;
 
 /// <summary>
-/// Frame loop: wait, acquire, record into a clear pass, submit, present.
+/// Frame loop: wait, acquire, record an opaque pass (cleared) and a water pass over it, submit, present. Between the two
+/// the frame's colour and depth are left readable by transfer (ScreenReflections copies both for the water to sample).
+/// The passes are compatible: pipelines are made against <see cref="RenderPass"/> and drawn in either.
 /// </summary>
 public sealed unsafe class Renderer : IDisposable
 {
@@ -18,6 +20,7 @@ public sealed unsafe class Renderer : IDisposable
     public readonly VulkanContext Context;
     public readonly Swapchain Swapchain;
     public readonly VkRenderPass RenderPass;
+    private readonly VkRenderPass _opaquePass;
     public readonly GpuTimer GpuTimer;
     public float4 ClearColor = new(0.02f, 0.05f, 0.09f, 1f);
 
@@ -47,7 +50,8 @@ public sealed unsafe class Renderer : IDisposable
         Context = new VulkanContext(window, enableValidation);
 
         var format = Swapchain.ChooseFormat(Context);
-        RenderPass = CreateRenderPass(format.Format);
+        RenderPass = CreateRenderPass(format.Format, opaque: false);
+        _opaquePass = CreateRenderPass(format.Format, opaque: true);
         Swapchain = new Swapchain(Context, format, Swapchain.ChoosePresentMode(Context, vsync), RenderPass, window.FramebufferSize);
 
         for (var i = 0; i < FramesInFlight; i++)
@@ -77,31 +81,42 @@ public sealed unsafe class Renderer : IDisposable
 
     public VkExtent2D Extent => Swapchain.Extent;
 
-    private VkRenderPass CreateRenderPass(VkFormat format)
+    /// <summary>This frame's swapchain image: in TRANSFER_SRC between <see cref="EndOpaquePass"/> and <see cref="BeginWaterPass"/>.</summary>
+    public VkImage ColourImage => Swapchain.Image(_imageIndex);
+
+    /// <summary>The depth image: in TRANSFER_SRC between <see cref="EndOpaquePass"/> and <see cref="BeginWaterPass"/>.</summary>
+    public VkImage DepthImage => Swapchain.DepthImage;
+
+    /// <summary>
+    /// The opaque pass clears both attachments and leaves both in TRANSFER_SRC; the
+    /// water pass loads them from there and presents. Same formats and samples, so the two are compatible.
+    /// </summary>
+    private VkRenderPass CreateRenderPass(VkFormat format, bool opaque)
     {
+        var load = opaque ? VkAttachmentLoadOp.Clear : VkAttachmentLoadOp.Load;
         var attachments = stackalloc VkAttachmentDescription[]
         {
             new VkAttachmentDescription
             {
                 Format = format,
                 Samples = VkSampleCountFlags._1Bit,
-                LoadOp = VkAttachmentLoadOp.Clear,
+                LoadOp = load,
                 StoreOp = VkAttachmentStoreOp.Store,
                 StencilLoadOp = VkAttachmentLoadOp.DontCare,
                 StencilStoreOp = VkAttachmentStoreOp.DontCare,
-                InitialLayout = VkImageLayout.Undefined,
-                FinalLayout = VkImageLayout.PresentSrcKHR,
+                InitialLayout = opaque ? VkImageLayout.Undefined : VkImageLayout.TransferSrcOptimal,
+                FinalLayout = opaque ? VkImageLayout.TransferSrcOptimal : VkImageLayout.PresentSrcKHR,
             },
             new VkAttachmentDescription
             {
                 Format = Swapchain.DepthFormat,
                 Samples = VkSampleCountFlags._1Bit,
-                LoadOp = VkAttachmentLoadOp.Clear,
-                StoreOp = VkAttachmentStoreOp.DontCare,
+                LoadOp = load,
+                StoreOp = opaque ? VkAttachmentStoreOp.Store : VkAttachmentStoreOp.DontCare,
                 StencilLoadOp = VkAttachmentLoadOp.DontCare,
                 StencilStoreOp = VkAttachmentStoreOp.DontCare,
-                InitialLayout = VkImageLayout.Undefined,
-                FinalLayout = VkImageLayout.DepthStencilAttachmentOptimal,
+                InitialLayout = opaque ? VkImageLayout.Undefined : VkImageLayout.TransferSrcOptimal,
+                FinalLayout = opaque ? VkImageLayout.TransferSrcOptimal : VkImageLayout.DepthStencilAttachmentOptimal,
             },
         };
 
@@ -121,16 +136,47 @@ public sealed unsafe class Renderer : IDisposable
             | VkPipelineStageFlags.EarlyFragmentTestsBit
             | VkPipelineStageFlags.LateFragmentTestsBit;
 
-        // Shared depth image: previous frame's depth writes must finish before this frame clears it.
-        var dependency = new VkSubpassDependency
+        const VkAccessFlags writes = VkAccessFlags.ColorAttachmentWriteBit | VkAccessFlags.DepthStencilAttachmentWriteBit;
+        const VkAccessFlags reads = VkAccessFlags.ColorAttachmentReadBit | VkAccessFlags.DepthStencilAttachmentReadBit;
+        var dependencies = stackalloc VkSubpassDependency[2];
+
+        if (opaque)
         {
-            SrcSubpass = VK.SUBPASS_EXTERNAL,
-            DstSubpass = 0,
-            SrcStageMask = stages,
-            DstStageMask = stages,
-            SrcAccessMask = VkAccessFlags.DepthStencilAttachmentWriteBit,
-            DstAccessMask = VkAccessFlags.ColorAttachmentWriteBit | VkAccessFlags.DepthStencilAttachmentWriteBit,
-        };
+            // Shared depth image: previous frame's depth writes must finish before this frame clears it.
+            dependencies[0] = new VkSubpassDependency
+            {
+                SrcSubpass = VK.SUBPASS_EXTERNAL,
+                DstSubpass = 0,
+                SrcStageMask = stages,
+                DstStageMask = stages,
+                SrcAccessMask = VkAccessFlags.DepthStencilAttachmentWriteBit,
+                DstAccessMask = writes,
+            };
+
+            // The colour and depth are copied after the pass.
+            dependencies[1] = new VkSubpassDependency
+            {
+                SrcSubpass = 0,
+                DstSubpass = VK.SUBPASS_EXTERNAL,
+                SrcStageMask = stages,
+                DstStageMask = VkPipelineStageFlags.TransferBit,
+                SrcAccessMask = writes,
+                DstAccessMask = VkAccessFlags.TransferReadBit,
+            };
+        }
+        else
+        {
+            // After the opaque pass and the copies out of it (skipped while reflections are off).
+            dependencies[0] = new VkSubpassDependency
+            {
+                SrcSubpass = VK.SUBPASS_EXTERNAL,
+                DstSubpass = 0,
+                SrcStageMask = stages | VkPipelineStageFlags.TransferBit,
+                DstStageMask = stages,
+                SrcAccessMask = writes,
+                DstAccessMask = reads | writes,
+            };
+        }
 
         return Context.Device.CreateRenderPass(
             new VkRenderPassCreateInfo
@@ -139,8 +185,8 @@ public sealed unsafe class Renderer : IDisposable
                 Attachments = attachments,
                 SubpassCount = 1,
                 Subpasses = &subpass,
-                DependencyCount = 1,
-                Dependencies = &dependency,
+                DependencyCount = opaque ? 2 : 1,
+                Dependencies = dependencies,
             },
             null
         );
@@ -170,7 +216,7 @@ public sealed unsafe class Renderer : IDisposable
     }
 
     /// <summary>
-    /// Starts a frame and begins its command buffer. Record compute work, then call <see cref="BeginMainPass"/>.
+    /// Starts a frame and begins its command buffer. Record compute work, then call <see cref="BeginOpaquePass"/>.
     /// Returns false when nothing should be drawn.
     /// </summary>
     public bool BeginFrame(out CommandBuffer commands)
@@ -225,8 +271,8 @@ public sealed unsafe class Renderer : IDisposable
         return true;
     }
 
-    /// <summary>Opens the swapchain colour + depth pass.</summary>
-    public void BeginMainPass(CommandBuffer commands)
+    /// <summary>Opens the opaque pass: the swapchain colour + depth, cleared.</summary>
+    public void BeginOpaquePass(CommandBuffer commands)
     {
         var clear = stackalloc VkClearValue[]
         {
@@ -236,11 +282,28 @@ public sealed unsafe class Renderer : IDisposable
         commands.BeginRenderPass(
             new VkRenderPassBeginInfo
             {
-                RenderPass = RenderPass,
+                RenderPass = _opaquePass,
                 Framebuffer = Swapchain.Framebuffer(_imageIndex),
                 RenderArea = new VkRect2D { Extent = Swapchain.Extent },
                 ClearValueCount = 2,
                 ClearValues = clear,
+            },
+            VkSubpassContents.Inline
+        );
+    }
+
+    /// <summary>Closes the opaque pass: <see cref="ColourImage"/> is left in TRANSFER_SRC, the depth in SHADER_READ_ONLY.</summary>
+    public void EndOpaquePass(CommandBuffer commands) => commands.EndRenderPass();
+
+    /// <summary>Opens the water pass over the opaque one (water, rain, UI); <see cref="EndFrame"/> closes it.</summary>
+    public void BeginWaterPass(CommandBuffer commands)
+    {
+        commands.BeginRenderPass(
+            new VkRenderPassBeginInfo
+            {
+                RenderPass = RenderPass,
+                Framebuffer = Swapchain.Framebuffer(_imageIndex),
+                RenderArea = new VkRect2D { Extent = Swapchain.Extent },
             },
             VkSubpassContents.Inline
         );
@@ -315,6 +378,7 @@ public sealed unsafe class Renderer : IDisposable
         GpuTimer.Dispose();
         Swapchain.Dispose();
         device.DestroyRenderPass(RenderPass, null);
+        device.DestroyRenderPass(_opaquePass, null);
         Context.Dispose();
     }
 }

@@ -43,6 +43,10 @@ public sealed unsafe class Swapchain : IDisposable
 
     public VkFramebuffer Framebuffer(int imageIndex) => _framebuffers[imageIndex];
 
+    public VkImage Image(int imageIndex) => _images[imageIndex];
+
+    public VkImage DepthImage => _depthImage;
+
     public VkSemaphore RenderFinished(int imageIndex) => _renderFinished[imageIndex];
 
     public static VkSurfaceFormatKHR ChooseFormat(VulkanContext context)
@@ -116,7 +120,7 @@ public sealed unsafe class Swapchain : IDisposable
                 ImageColorSpace = Format.ColorSpace,
                 ImageExtent = Extent,
                 ImageArrayLayers = 1,
-                ImageUsage = VkImageUsageFlags.ColorAttachmentBit,
+                ImageUsage = VkImageUsageFlags.ColorAttachmentBit | VkImageUsageFlags.TransferSrcBit,
                 ImageSharingMode = VkSharingMode.Exclusive,
                 PreTransform = caps.CurrentTransform,
                 CompositeAlpha = VkCompositeAlphaFlagsKHR.OpaqueBitKHR,
@@ -198,7 +202,7 @@ public sealed unsafe class Swapchain : IDisposable
                 ArrayLayers = 1,
                 Samples = VkSampleCountFlags._1Bit,
                 Tiling = VkImageTiling.Optimal,
-                Usage = VkImageUsageFlags.DepthStencilAttachmentBit,
+                Usage = VkImageUsageFlags.DepthStencilAttachmentBit | VkImageUsageFlags.TransferSrcBit,
                 SharingMode = VkSharingMode.Exclusive,
                 InitialLayout = VkImageLayout.Undefined,
             },

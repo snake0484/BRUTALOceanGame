@@ -950,10 +950,14 @@ struct SprayParticle
     vec4 velocitySize; // xyz m/s, w = radius (m)
     vec4 motion;       // x = air drag (1/s), y = share of gravity: spray falls, mist hangs in the air;
                        // z = growth of its radius (m/s) as it disperses; w = opacity
+    vec4 shape;        // x = floor (world y): it dies falling through it, back into the water; y = streak (s of its
+                       // motion drawn behind it, 0 = a round puff); z = forward scattering of sunlight (phase g); w unused
 };
 
-const vec4 SPRAY_MOTION = vec4(1.2, 1.0, 0.6, 1.0);  // droplets: slowed quickly in air, falling, misting out
+const vec4 SPRAY_MOTION = vec4(1.2, 1.0, 0.6, 1.0);  // breaker spray: slowed quickly in air, falling, misting out
+const vec4 DROPLET_MOTION = vec4(0.3, 1.0, 0.0, 0.9); // splash droplets: near ballistic, falling, staying droplets
 const vec4 MIST_MOTION = vec4(3.0, 0.1, 0.25, 0.35); // mist: fine droplets, drifting and settling slowly, thin
+const vec4 PUFF_SHAPE = vec4(-1e9, 0.0, 0.0, 0.0);   // no floor, round, lit evenly
 
 // Read-only except in the spray compute shaders (they define SPRAY_WRITABLE): vertex stages may not see writable buffers.
 #ifdef SPRAY_WRITABLE

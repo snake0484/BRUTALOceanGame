@@ -13,6 +13,16 @@ public static class WaterHalo
 
     public static void CopyOutScale(WaterBlock dst, WaterBlock? src, Face face) => Copy(dst.OutScale, src?.OutScale, face, 1f);
 
+    /// <summary>The neighbour's water colours (<see cref="WaterBlock.Colour"/>), so water flowing in across the face brings its colour.</summary>
+    public static void CopyColour(WaterBlock dst, WaterBlock? src, Face face) => Copy(dst.Colour, src?.Colour, face, WaterColour.None);
+
+    /// <summary>The neighbour's froth (<see cref="WaterBlock.Froth"/>), so foam flows on across the face.</summary>
+    public static void CopyFroth(WaterBlock dst, WaterBlock? src, Face face)
+    {
+        if (dst.Froth is not null)
+            Copy(dst.Froth, src?.Froth, face, 0f);
+    }
+
     /// <summary>The flags, the bodies (<see cref="WaterBlock.Body"/>) and the bed rises (<see cref="WaterBlock.Bed"/>): all static between edits and joins.</summary>
     public static void CopyFlags(WaterBlock dst, WaterBlock? src, Face face)
     {

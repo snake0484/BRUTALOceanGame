@@ -66,6 +66,28 @@ public sealed class BathymetryGridTests
     }
 
     /// <summary>
+    /// A zone disc that fades out after the grid has re-centred away from it (camera flown off) lies wholly outside
+    /// the grid; removing it must not touch any cells. It used to clear a negative-length span and crash.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(-1)]
+    public void FadeOut_DiscOffTheGrid_IsRemoved(int side)
+    {
+        var grid = new BathymetryGrid();
+        grid.Recenter(Vector3.Zero, out _, out _);
+        var disc = new Vector3(0f, 0f, 30f);
+        grid.AddSimulatedDisc(disc.X, disc.Y, disc.Z);
+        grid.FadeOutDisc(disc);
+
+        Assert.True(grid.Recenter(new Vector3(side * grid.WorldSize * 2f, 0f, 0f), out _, out _));
+
+        var gone = new List<Vector3>();
+        grid.AdvanceZoneFades(grid.ZoneFadeSeconds * 2f, gone);
+        Assert.Equal(disc, Assert.Single(gone));
+    }
+
+    /// <summary>
     /// A seabed 8 m down under a rock roof at +6 m: the sea sees the seabed (the water under the roof is drawn and
     /// simulated), rain still sees the roof. Land rising through sea level keeps its own top.
     /// </summary>
