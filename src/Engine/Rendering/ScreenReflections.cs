@@ -24,10 +24,10 @@ public sealed unsafe class ScreenReflections : IDisposable
     public float MaxDistance = 1000f;
 
     /// <summary>Most march steps along a ray, rounded up to a multiple of four (fetched and tested together).</summary>
-    public int Steps = 24;
+    public int Steps = 12;
 
     /// <summary>Pixels between steps where the whole reflection shows; sparser as less of it does, up to <see cref="Steps"/>.</summary>
-    public float Stride = 4f;
+    public float Stride = 8f;
 
     private readonly Device _device;
     private readonly VmaAllocator _allocator;

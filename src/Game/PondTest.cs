@@ -117,7 +117,7 @@ public sealed class PondTest(TerrainWorld world, VoxelWaterSystem water, Physics
 
         if (_stage >= 3 && _stage < 5 && time >= _nextLog)
         {
-            Log.Info($"t+{time - _start:F1}s voxel {(water.Pipes ? "pipes" : "automaton")}: blocks {water.Blocks}, awake {water.AwakeBlocks}, step {water.LastStepMs:F3} ms (swell {water.LastSwellMs:F3}, strays {water.TakeSwellStray() * 100f:F1} cm), awake mass {water.Mass:F0} m3; bodies {water.Bodies.Count - 2}, discs {water.Discs}, zone discs {water.ZoneDiscs}; activity {water.Activity}");
+            Log.Info($"t+{time - _start:F1}s voxel {(water.Pipes ? "pipes" : "automaton")}: blocks {water.Blocks}, awake {water.AwakeBlocks}, step {water.LastStepMs:F3} ms (peak tick {water.TakePeakStepMs():F2}, swell {water.LastSwellMs:F3}, strays {water.TakeSwellStray() * 100f:F1} cm), awake mass {water.Mass:F0} m3; bodies {water.Bodies.Count - 2}, discs {water.Discs}, zone discs {water.ZoneDiscs}; activity {water.Activity}");
             _nextLog = time + 0.5;
 
             // Water depth down the run-off path: the pond's centre, then every 4 m toward the sea.

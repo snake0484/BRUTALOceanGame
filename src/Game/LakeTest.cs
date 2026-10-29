@@ -138,7 +138,7 @@ public sealed class LakeTest(TerrainWorld world, VoxelWaterSystem water, FlyCame
         if (_stage >= 1 && _stage < 3 && time >= _nextLog)
         {
             var since = _dug < 0.0 ? "before the dig" : $"+{time - _dug:F1}s after the dig";
-            Log.Info($"t+{time - _start:F1}s ({since}) voxel {(water.Pipes ? "pipes" : "automaton")}: blocks {water.Blocks}, awake {water.AwakeBlocks}, step {water.LastStepMs:F3} ms, awake mass {water.Mass:F0} m3, lake surface {Level:F3} m, discs {water.Discs} ({water.Outlets} outlets), bodies {water.Bodies.Count - 2}, lake gave {Given:F1} m3 ({(Given - _givenAtLog) / 0.5:F2} m3/s); activity {water.Activity}");
+            Log.Info($"t+{time - _start:F1}s ({since}) voxel {(water.Pipes ? "pipes" : "automaton")}: blocks {water.Blocks}, awake {water.AwakeBlocks}, step {water.LastStepMs:F3} ms (peak tick {water.TakePeakStepMs():F2}), awake mass {water.Mass:F0} m3, lake surface {Level:F3} m, discs {water.Discs} ({water.Outlets} outlets), bodies {water.Bodies.Count - 2}, lake gave {Given:F1} m3 ({(Given - _givenAtLog) / 0.5:F2} m3/s); activity {water.Activity}");
             _givenAtLog = Given;
 
             if (Tunnel && _dug >= 0.0)

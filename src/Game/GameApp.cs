@@ -21,6 +21,7 @@ public sealed class GameApp : IDisposable
     private const int TickRate = 60;
     private const int TimingSamples = 256;
     private const string Title = "BRUTALGame";
+    private const int VoxelSwellIterations = 2;
 #if DEBUG
     private const bool Validation = true;
 #else
@@ -153,9 +154,10 @@ public sealed class GameApp : IDisposable
         // reach zones as bores (BreakerBores), and their drawn faces fade out inside zones, so the faces would count twice.
         _water.Zones.SeaSurface = (x, z) => _swell.SampleHeight(x, z);
 
-        // The same swell holds the sea's voxel cells, so free voxel water against the sea rises and falls with it.
+        // The same swell holds the sea's voxel cells, so free voxel water against the sea rises and falls with it. Its 8 m
+        // lattice takes the cheaper two-step inversion.
         if (voxelSwell)
-            _water.SeaSurface = _water.Zones.SeaSurface;
+            _water.SeaSurface = (x, z) => _swell.SampleHeight(x, z, VoxelSwellIterations);
 
         _water.RainAt = (x, z) => _weatherPanel.OverrideRain ? _weatherPanel.RainOverride : _weatherPanel.DriveSky ? _weather.Map.Sample(x, z).Rain : 0f;
         _water.Zones.SeaState = (x, z) =>

@@ -649,22 +649,28 @@ public sealed class OceanSwell
     }
 
     /// <summary>Water surface height at world (x, z).</summary>
-    public float SampleHeight(float x, float z)
+    public float SampleHeight(float x, float z) => SampleHeight(x, z, InversionIterations);
+
+    /// <summary>
+    /// Water surface height at world (x, z), finding the rest point in <paramref name="iterations"/> steps: fewer is cheaper
+    /// and lands centimetres off on steep chop, enough for coarse consumers (the voxel water's 8 m swell lattice).
+    /// </summary>
+    public float SampleHeight(float x, float z, int iterations)
     {
         var current = new CoastalSample();
         var previous = new CoastalSample();
         var fields = SampleFields(x, z, ref current, ref previous);
         if (fields == 0)
-            return HeightOf(DeepWaves(), x, z);
+            return HeightOf(DeepWaves(), x, z, iterations);
 
         Span<float> scratch = stackalloc float[ScratchArrays * CoastalPadded];
-        var height = HeightOf(CoastalWaves(Coastal!.Direction, x, z, current, scratch), x, z);
-        return fields == 2 ? float.Lerp(HeightOf(CoastalWaves(PreviousDirection, x, z, previous, scratch), x, z), height, CoastalFade) : height;
+        var height = HeightOf(CoastalWaves(Coastal!.Direction, x, z, current, scratch), x, z, iterations);
+        return fields == 2 ? float.Lerp(HeightOf(CoastalWaves(PreviousDirection, x, z, previous, scratch), x, z, iterations), height, CoastalFade) : height;
     }
 
-    private float HeightOf(in Waves waves, float x, float z)
+    private float HeightOf(in Waves waves, float x, float z, int iterations)
     {
-        Invert(waves, x, z, out var x0, out var z0);
+        Invert(waves, x, z, iterations, out var x0, out var z0);
         return SumHeight(waves, x0, z0);
     }
 
@@ -709,7 +715,7 @@ public sealed class OceanSwell
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private WaveSample SampleOf(in Waves w, float x, float z)
     {
-        Invert(w, x, z, out var x0, out var z0);
+        Invert(w, x, z, InversionIterations, out var x0, out var z0);
 
         var vx = Vector256.Create(x0);
         var vz = Vector256.Create(z0);
@@ -1222,7 +1228,7 @@ public sealed class OceanSwell
         return (cap, steepness > MaxRmsSteepness ? MaxRmsSteepness / steepness : 1f);
     }
 
-    private void Invert(in Waves waves, float x, float z, out float x0, out float z0)
+    private void Invert(in Waves waves, float x, float z, int iterations, out float x0, out float z0)
     {
         x0 = x;
         z0 = z;
@@ -1230,7 +1236,7 @@ public sealed class OceanSwell
         if (Choppiness <= 0f)
             return;
 
-        for (var i = 0; i < InversionIterations; i++)
+        for (var i = 0; i < iterations; i++)
         {
             SumDisplacement(waves, x0, z0, out var dx, out var dz);
             x0 = x - dx;

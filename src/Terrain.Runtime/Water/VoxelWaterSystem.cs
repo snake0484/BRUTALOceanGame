@@ -130,10 +130,11 @@ public sealed class VoxelWaterSystem : IDisposable
     /// <summary>
     /// Each lattice point is sampled again every this many ticks (20 times a second at 60), a share of the points each tick,
     /// and runs on between, unbroken (<see cref="RefreshSwell"/>). Measured in the pond scene: 0.16–0.20 ms a tick (0.41–0.55
-    /// sampling every tick), straying 0.5 cm on average from the fresh samples (2.6 cm at most; in a storm 2.9, peaks of 16).
-    /// Every 6 ticks cost 0.09–0.12 ms but strayed 2.3 cm (6 in a storm).
+    /// sampling every tick) every 3 ticks, straying 0.5 cm on average from the fresh samples (2.6 cm at most; in a storm 2.9,
+    /// peaks of 16). Every 6 ticks cost 0.09–0.12 ms but strayed 2.3 cm (6 in a storm): taken for the frame budget, a
+    /// stray under a tenth of a cell and the heights never jump (a point re-aims its rate, it is not snapped).
     /// </summary>
-    private const int SwellRefreshTicks = 3;
+    private const int SwellRefreshTicks = 6;
 
     /// <summary>A lattice point no block has read for this long (s) is forgotten.</summary>
     private const double SwellForget = 2.0;
@@ -270,6 +271,62 @@ public sealed class VoxelWaterSystem : IDisposable
             _activationPool.Push(new WaterActivationJob());
 
         terrain.EditApplied += OnEdit;
+
+        if (pipes)
+            new Thread(WarmUp) { IsBackground = true, Priority = ThreadPriority.BelowNormal, Name = "WaterWarmUp" }.Start();
+    }
+
+    private const int WarmUpSteps = 400;
+
+    /// <summary>
+    /// Steps a scratch block (a column of water falling into a walled box) while the game loads, so the step's code reaches
+    /// its final tier before a dig wakes water: at tier 0 the pipe passes inline none of their helpers, and a dig's first
+    /// step took 9 ms for four blocks, with another 10 ms tick a second later as they tiered up.
+    /// </summary>
+    private static void WarmUp()
+    {
+        var block = new WaterBlock(pipes: true) { Bodies = new WaterBodies(0f) };
+        block.Reset(default);
+
+        for (var z = 4; z < 28; z++)
+            for (var y = 1; y < 28; y++)
+                for (var x = 4; x < 28; x++)
+                    block.Flags[ChunkConstants.Index(x, y, z)] = 0;
+
+        for (var f = 0; f < 6; f++)
+            WaterHalo.CopyFlags(block, null, (Face)f);
+
+        block.DeriveBeds();
+        var dt = 1f / 60f;
+
+        for (var step = 0; step < WarmUpSteps; step++)
+        {
+            if (step % 100 == 0)
+                for (var z = 8; z < 16; z++)
+                    for (var y = 12; y < 24; y++)
+                        for (var x = 8; x < 16; x++)
+                            block.Water[ChunkConstants.Index(x, y, z)] = 1f;
+
+            for (var f = 0; f < 6; f++)
+            {
+                WaterHalo.CopyFlags(block, null, (Face)f);
+                WaterHalo.CopyWater(block, null, (Face)f);
+                WaterHalo.CopyColour(block, null, (Face)f);
+                WaterHalo.CopyFroth(block, null, (Face)f);
+
+                if (f != (int)Face.NegY)
+                    WaterHalo.CopyFalling(block, null, (Face)f);
+            }
+
+            WaterPipes.UpdateFluxes(block, dt);
+
+            for (var f = 0; f < 6; f++)
+                WaterHalo.CopyOutScale(block, null, (Face)f);
+
+            WaterPipes.ApplyFluxes(block, dt);
+            WaterFlow.Swap(block);
+            Thread.Sleep(1);
+        }
     }
 
     public bool Pipes { get; }
@@ -641,6 +698,16 @@ public sealed class VoxelWaterSystem : IDisposable
     public int AwakeBlocks { get; private set; }
 
     public float LastStepMs { get; private set; }
+
+    /// <summary>The slowest tick's voxel steps, swell included, since the last call: job waits show here, not in <see cref="LastStepMs"/>'s samples.</summary>
+    public float TakePeakStepMs()
+    {
+        var peak = _peakStepMs;
+        _peakStepMs = 0f;
+        return peak;
+    }
+
+    private float _peakStepMs;
 
     /// <summary>Of the last tick's steps: the time spent taking the swell (sampling it, waking on it, laying it over blocks).</summary>
     public float LastSwellMs { get; private set; }
@@ -1596,7 +1663,9 @@ public sealed class VoxelWaterSystem : IDisposable
         // The voxel steps alone: the zone sim below has its own timing (LastZoneMs).
         if (steps > 0)
         {
-            LastStepMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds / steps;
+            var ms = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+            _peakStepMs = MathF.Max(_peakStepMs, ms);
+            LastStepMs = ms / steps;
             LastSwellMs = (float)(_swellTime * 1000.0 / Stopwatch.Frequency);
         }
 
