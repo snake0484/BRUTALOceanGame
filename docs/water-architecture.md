@@ -38,7 +38,13 @@ Sample(x, z) = C (if an active local sim covers x,z, blended at its edge)
 - **Amplitude:** per reference, energy is carried along the rays: u·∇F = −∇·u with F = ln(E c_g), upwind sweeps, F = 0 on the boundary.
   - S = √(e^F c_g0 / c_g) is shoaling and refraction together. It is clamped to 3.
 - **Land cells** take their phase lag and amplitude from neighbouring water (a fill sweep), so bilinear samples at the shoreline stay smooth.
-- **Edge fade:** the outer 16 cells fade to lag 0, amplitude 1 and deep, so there is no seam where the map ends.
+- **Edge fade:** the outer 16 cells fade to the far field's lag, amplitude and depth (below), or for the far field itself to lag 0, amplitude 1 and deep, so there is no seam where the map ends.
+- **Far field** (2026-10-30, `CoastalField.Far`, `CoastalField.FarCellSize`): the near field is 1 km across and the main island 1.3 km, so it never held the island and its lee at once. Downwind of the island its edge faded the sheltered sea back to the full open swell in a band that travelled with the camera, and with the island outside it the near field lost the lee altogether (waves entered its upwind edge as open sea).
+  - A far field, the same solver at 16 m (4 km a side), is centred on the near field's centre snapped to 512 m, so it re-centres once the camera has gone 256–768 m. It builds first; the next near field is solved inside it and the pair swaps and crossfades as one (`CoastalSystem`).
+  - A near field's upwind edges take the far field's phase lag and energy (`CoastalRefJob.Fix`, `FarF`), its outer cells blend into the far field's lag, amplitude and depth, and the swell surface reads the far field past the near field's edge (`CoastalField.SampleWithFar`; ocean_common.glsl `coastalSample`, a second rect and buffer slot per tap). The surf carrier, its atlas and the breakers read the near field alone, as before.
+  - `NearField_InTheLee_AgreesWithItsFarField`: 400 m downwind of a 300 m island the far field's amplitude is 0.080 and the near field's 0.085 (0.947 solved without the far field); across the near field's downwind edge both sides read the same.
+  - Cost: one more background build when the far field re-centres or the wind turns (the far one first, then the near one inside it); 6 storage buffers instead of 3 (+22 MB host-visible). GPU (`--bench 12`, A B A B against the last commit, RTX 4090): the surf scene's frame unchanged within the spread (0.382 / 0.405 against 0.402 / 0.390 ms); in the lee view (`--cam 760 20 0 0 -6`), where far water used to skip the coastal terms, *Ocean surface* 0.157 / 0.156 → 0.172 / 0.167 ms (the off side also read +0.007). `--fly-test` main thread p50 0.46, p95 1.40, p99 2.58 ms, no coastal time in the slowest frames.
+  - Past the far field (2 km and more from the camera) the swell is the open sea's again, faded over its outer 256 m.
 - **Per sample:**
   - Bilinear lag (with its analytic gradient), amplitude and depth, read from the map.
   - Breaking cap: all amplitudes × min(1, γ h / H_s,local), with γ = 0.55. H_s,local = 4√(Σ_j E_j S_j²), where E_j is each reference's share of the swell variance, per tick.
@@ -46,11 +52,11 @@ Sample(x, z) = C (if an active local sim covers x,z, blended at its edge)
     - History: both clamps bounded the worst case Σ|a·k| by 0.9. Over 128 random phases that sum is 14× the rms, so from 8 m/s up the clamp overrode the asked choppiness (0.8) with 0.68 at 10 m/s, 0.52 at 20 and 0.44 at 30, pinning chop × rms slope at 0.065: the sea got higher but its crests peaked no harder, and read as smooth in heavy weather.
 - **CPU ↔ GPU:**
   - The same 28-float texels: depth, active flag, and (lag, amplitude) × 12.
-  - The GPU reads them from storage buffers with the same manual bilinear the CPU uses, and evaluates at the rest position x₀. There are two slots per frame in flight (current and fading-out field); a field keeps its slot, so a crossfade copies only the new one (7.3 MB).
+  - The GPU reads them from storage buffers with the same manual bilinear the CPU uses, and evaluates at the rest position x₀. Six buffers are shared by the frames in flight (the current near field and its far field, the fading-out pair, and room to copy a new pair); a field keeps its buffer, so a crossfade copies only what is new (7.3 MB a field), and a pair is drawn once both its fields are up.
   - The CPU prepares the coastal terms once at the query point and linearises the lag over the Gerstner inversion. Its result matches the GPU to second order in horizontal displacement.
 - **Build:**
   - Depth jobs (8 row bands), then 12 jobs (one per reference), then one finish job (land fill, edge fade, flags), on the Brutal job system. Triple-buffered: fading out, fading in, being built.
-  - Rebuilt only when the map re-centres (every 128 m of camera travel), the terrain is edited, or the wind direction moves by more than 5°. Never for LOD streaming.
+  - Rebuilt only when the map re-centres (every 128 m of camera travel), the terrain is edited, the wind direction moves by more than 5°, or a new far field is ready. Never for LOD streaming.
   - **Crossfade:** a new field blends in over 1.5 s (`CoastalSystem.FadeSeconds`). Lag, gradient, amplitude and depth are lerped between the two fields, identically on CPU (`SampleCoastal`) and GPU. The first build fades in from the open ocean. No build starts until the fade ends.
   - Before this, rebuilds swapped instantly about once a second while flying, and the swell near shore jumped every few seconds. Measured on a 15 m/s scripted fly-by at a fixed nearshore point:
     - Before: a jump on every rebuild, and fades changed the surface by up to 3.6 m per unit of fade.

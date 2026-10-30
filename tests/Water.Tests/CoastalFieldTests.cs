@@ -14,15 +14,17 @@ public sealed class CoastalFieldTests(ITestOutputHelper output)
     /// <summary>Plane beach: depth falls linearly along +x from 40 m to the shoreline near x = 1000 m.</summary>
     private static float BeachDepth(float x) => 40f - 0.04f * x;
 
-    private static CoastalField Build(Func<float, float, float> depth, float direction)
+    private static CoastalField Build(Func<float, float, float> depth, float direction) => Build(depth, direction, Vector2.Zero, Cell, null);
+
+    private static CoastalField Build(Func<float, float, float> depth, float direction, Vector2 origin, float cell, CoastalField? far)
     {
         var depths = new float[N * N];
         for (var z = 0; z < N; z++)
             for (var x = 0; x < N; x++)
-                depths[x + z * N] = depth((x + 0.5f) * Cell, (z + 0.5f) * Cell);
+                depths[x + z * N] = depth(origin.X + (x + 0.5f) * cell, origin.Y + (z + 0.5f) * cell);
 
-        using var builder = new CoastalBuilder();
-        Assert.True(builder.TryStart(depths, Vector2.Zero, direction));
+        using var builder = new CoastalBuilder(cell);
+        Assert.True(builder.TryStart(depths, origin, direction, far));
 
         var timer = Stopwatch.StartNew();
         while (!builder.Poll())
@@ -130,5 +132,48 @@ public sealed class CoastalFieldTests(ITestOutputHelper output)
 
         output.WriteLine($"depth {depth:F2} m, max |eta| {max:F2} m, deep Hs {swell.SignificantWaveHeight:F2} m");
         Assert.True(max < depth, $"crest {max:F2} m in {depth:F2} m of water");
+    }
+
+    /// <summary>
+    /// A near field downwind of an island it doesn't contain (the camera in the lee): solved inside a far field that does,
+    /// it keeps the island's shadow, and across its edge the surface carries on into the far field without a step.
+    /// </summary>
+    [Fact]
+    public void NearField_InTheLee_AgreesWithItsFarField()
+    {
+        const int reference = 5;
+        var island = new Vector2(1200f, 2048f);
+        float Depth(float x, float z) => Vector2.Distance(new Vector2(x, z), island) < 300f ? -5f : 50f;
+
+        var far = Build(Depth, 0f, Vector2.Zero, CoastalField.FarCellSize, null);
+        var nearOrigin = new Vector2(1600f, 1536f);
+        var near = Build(Depth, 0f, nearOrigin, Cell, far);
+        var open = Build(Depth, 0f, nearOrigin, Cell, null);
+        var a = new CoastalSample();
+        var b = new CoastalSample();
+
+        // In the shadow, inside the near field: the far field's shelter, which the near field solved alone would lose.
+        var lee = new Vector2(1800f, 2048f);
+        Assert.True(far.Sample(lee.X, lee.Y, ref a));
+        Assert.True(near.SampleWithFar(lee.X, lee.Y, ref b));
+        var alone = new CoastalSample();
+        var aloneHas = open.Sample(lee.X, lee.Y, ref alone);
+        output.WriteLine($"lee {lee}: far amp {a.Amp[reference]:F3}, near {b.Amp[reference]:F3}, near without far {(aloneHas ? alone.Amp[reference] : 1f):F3}");
+        Assert.True(a.Amp[reference] < 0.8f, $"far field has no shadow ({a.Amp[reference]:F3})");
+        Assert.True(MathF.Abs(a.Amp[reference] - b.Amp[reference]) < 0.1f, $"near {b.Amp[reference]:F3} against far {a.Amp[reference]:F3}");
+
+        // Across the near field's downwind edge: just inside it and just past it.
+        var worst = 0f;
+        for (var z = 1700f; z <= 2400f; z += 100f)
+        {
+            var edge = nearOrigin.X + N * Cell;
+            Assert.True(near.SampleWithFar(edge - 3f, z, ref a));
+            Assert.True(near.SampleWithFar(edge + 3f, z, ref b));
+            var step = MathF.Abs(a.Amp[reference] - b.Amp[reference]);
+            worst = MathF.Max(worst, step);
+            output.WriteLine($"edge z {z}: inside {a.Amp[reference]:F3}, past {b.Amp[reference]:F3}");
+        }
+
+        Assert.True(worst < 0.05f, $"amplitude steps {worst:F3} across the edge");
     }
 }

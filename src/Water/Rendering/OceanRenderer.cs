@@ -127,6 +127,8 @@ public sealed unsafe class OceanRenderer : IDisposable
         public Vector4 Carrier;
         public Vector4 CarrierChop;
         public Vector4 WindSea;
+        public Vector4 CoastFarRect;
+        public Vector4 CoastFarPrevRect;
         public int WaveCount;
         public int RefMin;
         public int RefMax;
@@ -136,7 +138,8 @@ public sealed unsafe class OceanRenderer : IDisposable
     private readonly OceanFft _fft;
     // Layer B maps: buffers shared by all frames. A new field is copied into one no frame in flight still reads, a
     // sixteenth per frame, and drawn once complete; until then the GPU keeps drawing the field it replaces.
-    private const int CoastalSlots = 3;
+    /// <summary>Near and far fields: the current pair, the pair fading out, and a field being copied.</summary>
+    private const int CoastalSlots = 6;
     private const int CoastalCopyChunks = 16;
     private readonly GpuBuffer[] _coastal = new GpuBuffer[CoastalSlots];
     private readonly int[] _coastalVersion = new int[CoastalSlots];
@@ -1204,6 +1207,9 @@ public sealed unsafe class OceanRenderer : IDisposable
         _tapVersion[0] = -1;
         _tapVersion[1] = -1;
 
+        header->CoastFarRect = Vector4.Zero;
+        header->CoastFarPrevRect = Vector4.Zero;
+
         if (field is null)
         {
             header->CoastRect = Vector4.Zero;
@@ -1212,8 +1218,9 @@ public sealed unsafe class OceanRenderer : IDisposable
         }
 
         var previous = swell.CoastalPrevious;
-        var slot = Slot(field);
-        var prevSlot = previous is null ? -1 : Slot(previous);
+        var slot = PairSlots(field, out var farSlot);
+        var prevFarSlot = -1;
+        var prevSlot = previous is null ? -1 : PairSlots(previous, out prevFarSlot);
         var fade = swell.CoastalFade;
 
         if (slot < 0)
@@ -1225,18 +1232,49 @@ public sealed unsafe class OceanRenderer : IDisposable
                 return;
             }
 
-            (field, slot, previous, prevSlot, fade) = (previous!, prevSlot, null, -1, 1f);
+            (field, slot, farSlot, previous, prevSlot, fade) = (previous!, prevSlot, prevFarSlot, null, -1, 1f);
         }
 
         Use(slot);
-        Use(prevSlot);
-        header->CoastRect = new Vector4(field.Origin.X, field.Origin.Y, CoastalField.CellSize, CoastalField.Resolution);
-        header->CoastPrevRect = prevSlot < 0 ? Vector4.Zero : new Vector4(previous!.Origin.X, previous.Origin.Y, CoastalField.CellSize, CoastalField.Resolution);
+        Use(farSlot);
+        header->CoastRect = Rect(field);
+        header->CoastFarRect = farSlot < 0 ? Vector4.Zero : Rect(field.Far!);
+        var bits = slot | Math.Max(farSlot, 0) << 6;
+
+        if (prevSlot >= 0)
+        {
+            Use(prevSlot);
+            Use(prevFarSlot);
+            header->CoastPrevRect = Rect(previous!);
+            header->CoastFarPrevRect = prevFarSlot < 0 ? Vector4.Zero : Rect(previous!.Far!);
+            bits |= prevSlot << 3 | Math.Max(prevFarSlot, 0) << 9;
+        }
+        else
+            header->CoastPrevRect = Vector4.Zero;
+
         var (dirZ, dirX) = MathF.SinCos(field.Direction);
         header->CoastDir = new Vector4(dirX, dirZ, prevSlot < 0 && previous is not null ? 1f : fade, prevSlot < 0 ? field.Direction : previous!.Direction);
-        header->CoastSlots = slot | Math.Max(prevSlot, 0) << 2;
+        header->CoastSlots = bits;
         _tapVersion[0] = field.Version;
         _tapVersion[1] = prevSlot < 0 ? -1 : previous!.Version;
+    }
+
+    private static Vector4 Rect(CoastalField field) => new(field.Origin.X, field.Origin.Y, field.Cell, CoastalField.Resolution);
+
+    /// <summary>
+    /// A near field's buffer slot, or -1 until it and its far field are both copied; <paramref name="farSlot"/> = the far
+    /// field's, -1 without one.
+    /// </summary>
+    private int PairSlots(CoastalField field, out int farSlot)
+    {
+        farSlot = -1;
+        var slot = Slot(field);
+
+        if (field.Far is null)
+            return slot;
+
+        farSlot = Slot(field.Far);
+        return farSlot < 0 ? -1 : slot;
     }
 
     private void Use(int slot)
@@ -1326,8 +1364,10 @@ public sealed unsafe class OceanRenderer : IDisposable
             _coastalCopied[slot] = 0;
         }
 
+        // A field still going up holds its buffer, or the other field of its pair could take it and both restart.
         if (_coastalCopied[slot] < total)
         {
+            _coastalUsed[slot] = _frameNumber;
             var chunk = Math.Min((total + CoastalCopyChunks - 1) / CoastalCopyChunks, total - _coastalCopied[slot]);
             field.Texels.AsSpan(_coastalCopied[slot], chunk).CopyTo(_coastal[slot].AsSpan<float>().Slice(_coastalCopied[slot]));
             _coastalCopied[slot] += chunk;

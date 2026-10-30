@@ -7,12 +7,10 @@ namespace BrutalGame;
 /// <summary>
 /// Layer B seabed from the analytic terrain surface plus a snapshot of the brush edits (as spheres cut into or added
 /// onto the column top). Unlike the streamed bathymetry it is the same at every LOD, so flying around never changes the
-/// coastal maps. Each 4 m cell averages 2×2 samples.
+/// coastal maps. Each cell averages 2×2 samples.
 /// </summary>
 public sealed class TerrainCoastalDepth : ICoastalDepth
 {
-    private const float Cell = CoastalField.CellSize;
-
     private BrushOp[] _ops = new BrushOp[64];
     private int _opCount;
     private TerrainParams _params;
@@ -32,7 +30,7 @@ public sealed class TerrainCoastalDepth : ICoastalDepth
             _ops[i] = ops[i];
     }
 
-    public void Fill(Span<float> depth, Vector2 origin, int z0, int z1)
+    public void Fill(Span<float> depth, Vector2 origin, float cell, int z0, int z1)
     {
         const int n = CoastalField.Resolution;
 
@@ -40,11 +38,11 @@ public sealed class TerrainCoastalDepth : ICoastalDepth
         {
             for (var x = 0; x < n; x++)
             {
-                var corner = origin + new Vector2(x * Cell, z * Cell);
+                var corner = origin + new Vector2(x * cell, z * cell);
                 var sum = 0f;
 
                 for (var k = 0; k < 4; k++)
-                    sum += Top(corner.X + ((k & 1) + 0.5f) * Cell * 0.5f, corner.Y + ((k >> 1) + 0.5f) * Cell * 0.5f);
+                    sum += Top(corner.X + ((k & 1) + 0.5f) * cell * 0.5f, corner.Y + ((k >> 1) + 0.5f) * cell * 0.5f);
 
                 depth[x + z * n] = _params.SeaLevel - 0.25f * sum;
             }

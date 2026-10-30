@@ -7,8 +7,8 @@ namespace BrutalGame.Water.Ocean;
 /// <summary>Seabed for layer B, sampled off the main thread. Must not depend on what terrain happens to be streamed in.</summary>
 public interface ICoastalDepth
 {
-    /// <summary>Fills rows [z0, z1) of a Resolution² grid of water depths (m, sea level − ground) at CellSize, cell (0, 0)'s corner at origin. Called from jobs.</summary>
-    void Fill(Span<float> depth, Vector2 origin, int z0, int z1);
+    /// <summary>Fills rows [z0, z1) of a Resolution² grid of water depths (m, sea level − ground) at cell (m), cell (0, 0)'s corner at origin. Called from jobs.</summary>
+    void Fill(Span<float> depth, Vector2 origin, float cell, int z0, int z1);
 }
 
 /// <summary>
@@ -34,13 +34,20 @@ public sealed class CoastalBuilder : IDisposable
     private readonly CoastalRefJob[] _refJobs = new CoastalRefJob[CoastalField.RefCount];
     private readonly CoastalFinishJob _finish = new();
     private readonly float[] _depth = new float[N * N];
-    private CoastalField _back = new();
+    /// <summary>Versions are unique across builders: the renderer keys its buffer slots by them.</summary>
+    private static int _versions;
+
+    private readonly float _cell;
+    private CoastalField _back;
     private Stage _stage;
-    private int _version;
     private long _start;
 
-    public CoastalBuilder()
+    /// <param name="cell">The fields' cell size (m): <see cref="CoastalField.CellSize"/> near, <see cref="CoastalField.FarCellSize"/> far.</param>
+    public CoastalBuilder(float cell = CoastalField.CellSize)
     {
+        _cell = cell;
+        _back = new CoastalField(cell);
+
         // Background work nothing waits on: few workers, below normal priority, so it never starves per-tick jobs.
         _scheduler = new JobScheduler((uint)Math.Max(1, Environment.ProcessorCount / 4), "Coastal", ThreadPriority.BelowNormal);
 
@@ -60,31 +67,32 @@ public sealed class CoastalBuilder : IDisposable
 
     public float LastBuildMs { get; private set; }
 
-    /// <param name="depth">Resolution² water depths (m) at 4 m, sea level − ground (≤ 0 on land), row-major z.</param>
+    /// <param name="depth">Resolution² water depths (m) at the builder's cell, sea level − ground (≤ 0 on land), row-major z.</param>
     /// <param name="direction">Direction (radians) the incident waves travel toward.</param>
-    public bool TryStart(ReadOnlySpan<float> depth, Vector2 origin, float direction)
+    /// <param name="far">The far field to solve inside: waves enter through the upwind edges as it has them, and the edges blend into it. Null = open ocean.</param>
+    public bool TryStart(ReadOnlySpan<float> depth, Vector2 origin, float direction, CoastalField? far = null)
     {
         if (Busy)
             return false;
 
         depth.CopyTo(_depth);
-        Begin(origin, direction);
+        Begin(origin, direction, far);
         QueueReferences();
         return true;
     }
 
     /// <summary>As above, with the depths sampled from <paramref name="source"/> on the job system first.</summary>
-    public bool TryStart(ICoastalDepth source, Vector2 origin, float direction)
+    public bool TryStart(ICoastalDepth source, Vector2 origin, float direction, CoastalField? far = null)
     {
         if (Busy)
             return false;
 
-        Begin(origin, direction);
+        Begin(origin, direction, far);
         const int rows = N / DepthJobs;
 
         for (var i = 0; i < DepthJobs; i++)
         {
-            _depthJobs[i].Prepare(source, _depth, origin, i * rows, (i + 1) * rows);
+            _depthJobs[i].Prepare(source, _depth, origin, _cell, i * rows, (i + 1) * rows);
             _scheduler.Queue(_depthJobs[i], 1);
         }
 
@@ -93,10 +101,11 @@ public sealed class CoastalBuilder : IDisposable
         return true;
     }
 
-    private void Begin(Vector2 origin, float direction)
+    private void Begin(Vector2 origin, float direction, CoastalField? far)
     {
         _back.Origin = origin;
         _back.Direction = direction;
+        _back.Far = far;
         _start = Stopwatch.GetTimestamp();
     }
 
@@ -135,11 +144,11 @@ public sealed class CoastalBuilder : IDisposable
 
         // Three fields: the one fading out, the one fading in, and the next build's target (the owner must not start a
         // build until the fade has finished, so the retired field is free).
-        _back.Version = ++_version;
+        _back.Version = ++_versions;
         var retired = Previous;
         Previous = Current;
         Current = _back;
-        _back = retired ?? new CoastalField();
+        _back = retired ?? new CoastalField(_cell);
         _stage = Stage.Idle;
         LastBuildMs = (float)Stopwatch.GetElapsedTime(_start).TotalMilliseconds;
         return true;
@@ -156,26 +165,27 @@ internal sealed class CoastalDepthJob : IJob
     private ICoastalDepth? _source;
     private float[] _depth = [];
     private Vector2 _origin;
+    private float _cell;
     private int _z0;
     private int _z1;
 
-    public void Prepare(ICoastalDepth source, float[] depth, Vector2 origin, int z0, int z1)
+    public void Prepare(ICoastalDepth source, float[] depth, Vector2 origin, float cell, int z0, int z1)
     {
         _source = source;
         _depth = depth;
         _origin = origin;
+        _cell = cell;
         _z0 = z0;
         _z1 = z1;
     }
 
-    public void Run() => _source!.Fill(_depth, _origin, _z0, _z1);
+    public void Run() => _source!.Fill(_depth, _origin, _cell, _z0, _z1);
 }
 
 /// <summary>Eikonal phase lag and energy-transport amplitude for one reference frequency.</summary>
 internal sealed class CoastalRefJob(int reference) : IJob
 {
     private const int N = CoastalField.Resolution;
-    private const float Cell = CoastalField.CellSize;
     private const float Gravity = 9.81f;
     private const float LandDepth = 0.2f;
     private const float LandSlowness = 8f;
@@ -200,12 +210,17 @@ internal sealed class CoastalRefJob(int reference) : IJob
     private readonly byte[] _wet = new byte[N * N];
     private float[] _depth = [];
     private CoastalField? _field;
+    private CoastalField? _far;
+    private float _cell;
+    private float _cg0;
     private Vector2 _dir;
 
     public void Prepare(float[] depth, CoastalField field, float direction)
     {
         _depth = depth;
         _field = field;
+        _far = field.Far;
+        _cell = field.Cell;
         _dir = new Vector2(MathF.Cos(direction), MathF.Sin(direction));
     }
 
@@ -213,24 +228,39 @@ internal sealed class CoastalRefJob(int reference) : IJob
     {
         var omega = CoastalField.RefOmega(reference);
         var k0 = omega * omega / Gravity;
+        _cg0 = 0.5f * Gravity / omega;
 
         Wavenumbers(omega);
         SolvePhase(k0);
         RayDirections();
         SolveTransport();
 
-        var cg0 = 0.5f * Gravity / omega;
         for (var c = 0; c < N * N; c++)
         {
             _lag[c] = _psi[c] - k0 * Vector2.Dot(_dir, CellCentre(c));
-            _amp[c] = Math.Clamp(MathF.Sqrt(MathF.Exp(_f[c]) * cg0 / _cg[c]), 0f, MaxAmplitude);
+            _amp[c] = Math.Clamp(MathF.Sqrt(MathF.Exp(_f[c]) * _cg0 / _cg[c]), 0f, MaxAmplitude);
         }
 
         FillLand();
         Write();
     }
 
-    private static Vector2 CellCentre(int c) => new(((c % N) + 0.5f) * Cell, ((c / N) + 0.5f) * Cell);
+    private Vector2 CellCentre(int c) => new(((c % N) + 0.5f) * _cell, ((c / N) + 0.5f) * _cell);
+
+    /// <summary>The far field's lag and amplitude for this reference at local cell (x, z), which may lie past the edge; open ocean where it has nothing.</summary>
+    private (float Lag, float Amp) FarAt(int x, int z)
+    {
+        var s = new CoastalSample();
+        var p = _field!.Origin + new Vector2((x + 0.5f) * _cell, (z + 0.5f) * _cell);
+        return _far is not null && _far.Sample(p.X, p.Y, ref s) ? (s.Lag[reference], s.Amp[reference]) : (0f, 1f);
+    }
+
+    /// <summary>F = ln(E c_g) of the far field's amplitude at local cell (x, z), against cell c's group speed.</summary>
+    private float FarF(int x, int z, int c)
+    {
+        var amp = FarAt(x, z).Amp;
+        return Math.Clamp(MathF.Log(MathF.Max(amp * amp * _cg[c] / _cg0, 1e-6f)), -8f, 2.2f);
+    }
 
     private void Wavenumbers(float omega)
     {
@@ -256,7 +286,7 @@ internal sealed class CoastalRefJob(int reference) : IJob
         }
     }
 
-    /// <summary>Fast sweeping, first-order Godunov, plane-wave boundary on the upwind edges.</summary>
+    /// <summary>Fast sweeping, first-order Godunov, plane-wave boundary on the upwind edges, lagged as the far field has it there.</summary>
     private void SolvePhase(float k0)
     {
         Array.Fill(_psi, float.PositiveInfinity);
@@ -281,7 +311,7 @@ internal sealed class CoastalRefJob(int reference) : IJob
             return;
 
         var c = x + z * N;
-        _psi[c] = k0 * Vector2.Dot(_dir, CellCentre(c));
+        _psi[c] = k0 * Vector2.Dot(_dir, CellCentre(c)) + (_far is null ? 0f : FarAt(x, z).Lag);
         _fixed[c] = 1;
     }
 
@@ -305,7 +335,7 @@ internal sealed class CoastalRefJob(int reference) : IJob
 
         var a = MathF.Min(x > 0 ? _psi[c - 1] : float.PositiveInfinity, x < N - 1 ? _psi[c + 1] : float.PositiveInfinity);
         var b = MathF.Min(z > 0 ? _psi[c - N] : float.PositiveInfinity, z < N - 1 ? _psi[c + N] : float.PositiveInfinity);
-        var f = _k[c] * Cell;
+        var f = _k[c] * _cell;
 
         if (float.IsPositiveInfinity(a) && float.IsPositiveInfinity(b))
             return;
@@ -341,10 +371,15 @@ internal sealed class CoastalRefJob(int reference) : IJob
         }
     }
 
-    /// <summary>u·∇F = −∇·u with F = ln(E c_g), relative to the boundary (F = 0).</summary>
+    /// <summary>u·∇F = −∇·u with F = ln(E c_g), relative to the open sea (F = 0); the upwind edges take the far field's.</summary>
     private void SolveTransport()
     {
         Array.Clear(_f);
+
+        if (_far is not null)
+            for (var c = 0; c < N * N; c++)
+                if (_fixed[c] != 0)
+                    _f[c] = FarF(c % N, c / N, c);
 
         for (var it = 0; it < TransportIterations; it++)
             for (var order = 0; order < 4; order++)
@@ -359,15 +394,15 @@ internal sealed class CoastalRefJob(int reference) : IJob
 
         var ux = _ux[c];
         var uz = _uz[c];
-        var div = (Neighbour(_ux, c, x + 1, z) - Neighbour(_ux, c, x - 1, z) + Neighbour(_uz, c, x, z + 1) - Neighbour(_uz, c, x, z - 1)) / (2f * Cell);
+        var div = (Neighbour(_ux, c, x + 1, z) - Neighbour(_ux, c, x - 1, z) + Neighbour(_uz, c, x, z + 1) - Neighbour(_uz, c, x, z - 1)) / (2f * _cell);
         div = Math.Clamp(div, -MaxDivergence, MaxDivergence);
 
         var ax = x - MathF.Sign(ux);
         var az = z - MathF.Sign(uz);
         var fx = Upwind(c, (int)ax, z);
         var fz = Upwind(c, x, (int)az);
-        var wx = MathF.Abs(ux) / Cell;
-        var wz = MathF.Abs(uz) / Cell;
+        var wx = MathF.Abs(ux) / _cell;
+        var wz = MathF.Abs(uz) / _cell;
 
         _f[c] = Math.Clamp((wx * fx + wz * fz - div) / (wx + wz), -8f, 2.2f);
     }
@@ -384,7 +419,7 @@ internal sealed class CoastalRefJob(int reference) : IJob
     private float Upwind(int c, int x, int z)
     {
         if ((uint)x >= N || (uint)z >= N)
-            return 0f;
+            return _far is null ? 0f : FarF(x, z, c);
 
         var n = x + z * N;
         return _wet[n] != 0 ? _f[n] : _f[c];
@@ -446,10 +481,14 @@ internal sealed class CoastalRefJob(int reference) : IJob
 
         for (var c = 0; c < N * N; c++)
         {
-            // Solver rounding (~1e-3 rad over 1 km of phase) must not mark deep water as coastal.
+            // The edges blend into the far field (the open ocean for a far field itself). Solver rounding (~1e-3 rad
+            // over 1 km of phase) must not mark deep water as coastal.
             var w = EdgeWeight(c % N, c / N);
-            var lag = MathF.Abs(_lag[c]) < LagEpsilon ? 0f : _lag[c] * w;
-            var amp = MathF.Abs(_amp[c] - 1f) < AmpEpsilon ? 1f : float.Lerp(1f, _amp[c], w);
+            var (farLag, farAmp) = w < 1f ? FarAt(c % N, c / N) : (0f, 1f);
+            var lag = float.Lerp(farLag, _lag[c], w);
+            var amp = float.Lerp(farAmp, _amp[c], w);
+            lag = MathF.Abs(lag) < LagEpsilon ? 0f : lag;
+            amp = MathF.Abs(amp - 1f) < AmpEpsilon ? 1f : amp;
             texels[c * CoastalField.TexelFloats + o] = lag;
             texels[c * CoastalField.TexelFloats + o + 1] = amp;
         }
@@ -463,7 +502,7 @@ internal sealed class CoastalRefJob(int reference) : IJob
     }
 }
 
-/// <summary>Depth channel (faded to deep at the edges) and per-texel active flags.</summary>
+/// <summary>Depth channel (faded at the edges to the far field's, or to deep) and per-texel active flags.</summary>
 internal sealed class CoastalFinishJob : IJob
 {
     private const int N = CoastalField.Resolution;
@@ -486,7 +525,8 @@ internal sealed class CoastalFinishJob : IJob
         for (var c = 0; c < N * N; c++)
         {
             var t = c * CoastalField.TexelFloats;
-            var depth = float.Lerp(CoastalField.DeepDepth, _depth[c], CoastalRefJob.EdgeWeight(c % N, c / N));
+            var w = CoastalRefJob.EdgeWeight(c % N, c / N);
+            var depth = w < 1f ? float.Lerp(FarDepth(c), _depth[c], w) : _depth[c];
             var active = depth < ActiveDepth;
 
             for (var j = 0; j < CoastalField.RefCount && !active; j++)
@@ -497,5 +537,13 @@ internal sealed class CoastalFinishJob : IJob
             texels[t + 2] = 0f;
             texels[t + 3] = 0f;
         }
+    }
+
+    /// <summary>The far field's depth under texel c; deep without one, or where it has nothing.</summary>
+    private float FarDepth(int c)
+    {
+        var field = _field!;
+        var p = field.Origin + new Vector2((c % N + 0.5f) * field.Cell, (c / N + 0.5f) * field.Cell);
+        return field.Far is not null && field.Far.Depth(p.X, p.Y, out var depth) ? depth : CoastalField.DeepDepth;
     }
 }

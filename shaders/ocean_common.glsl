@@ -16,7 +16,7 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 cascadeKLo;   // xyz = band low |k| per cascade, w = persistent foam strength
     vec4 foamParams;   // x = rain 0..1, y = rain time (s, looped), z = debug view (1 = Jacobian/foam), w = sim tick alpha
     vec4 depthRect;    // xy = depth map world origin, z = world size, w = depth outside the map
-    vec4 coastRect;    // layer B maps: xy = world origin, z = cell size, w = resolution (0 = none)
+    vec4 coastRect;    // layer B near field: xy = world origin, z = cell size, w = resolution (0 = none)
     vec4 refEnergy[3]; // swell variance per coastal reference frequency
     vec4 refChop[3];   // variance of the Gerstner trace, sum 1/2 (|c| k)^2, per reference
     vec4 refK0[3];     // deep-water k per reference
@@ -26,7 +26,9 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 carrier;      // surf coherence (OceanSwell.GpuCarrier): k0, reference coord, phase, peak-band energy sum a^2
     vec4 carrierChop;  // x = choppiness, y = omega, z = set group phase, w = group ratio (a set every 1 / this waves)
     vec4 windSea;      // x = wind speed the cascades' spectrum is raised by (m/s), yzw unused
-    ivec4 counts;      // x = wave count, y..z = coastal reference range in use, w = buffer slots (bits 0-1 current, 2-3 previous)
+    vec4 coastFar;     // the current near field's far field (CoastalField.Far): xy = world origin, z = cell size, w = resolution (0 = none)
+    vec4 coastFarPrev; // the fading-out near field's far field, the same
+    ivec4 counts;      // x = wave count, y..z = coastal reference range in use, w = buffer slots, 3 bits each: current, previous, current's far, previous's far
     Wave waves[512];
 } frame;
 
@@ -35,10 +37,10 @@ layout(set = 0, binding = 2) uniform sampler2DArray derivMap; // (hx, hz, λDxx,
 layout(set = 0, binding = 3) uniform sampler2DArray foamMap;  // r = persistent foam
 layout(set = 0, binding = 4) uniform sampler2DArray depthMap; // see depthMapAt
 
-// Layer B coastal maps (CoastalField): 7 vec4 per 4 m texel = (depth, active, 0, 0), then (lag, amp, lag, amp) x 6.
-// Three buffers shared by all frames (OceanRenderer.Slot); counts.w says which holds the current field and which, while
-// a rebuild crossfades in, the one it replaces.
-layout(std430, set = 0, binding = 5) readonly buffer Coastal { vec4 texels[]; } coastal[3];
+// Layer B coastal maps (CoastalField): 7 vec4 per texel = (depth, active, 0, 0), then (lag, amp, lag, amp) x 6. Six
+// buffers shared by all frames (OceanRenderer.Slot); counts.w says which hold the current near field and, while a rebuild
+// crossfades in, the one it replaces, and each one's far field.
+layout(std430, set = 0, binding = 5) readonly buffer Coastal { vec4 texels[]; } coastal[6];
 
 // Carrier atlas (ocean_carrier_atlas.comp): per tap (0 = current field, 1 = fading out), layer 2 tap = (the surf carrier's
 // lag, water depth, shoal amplitude, active flag) per coastal texel and layer 2 tap + 1 = (d lag / dx, d lag / dz, by
@@ -139,8 +141,10 @@ float gFoldTaper = 1.0; // the tongue's reach scaled toward a segment end that h
 vec2 gFoldPour = vec2(0.0); // on the strip, the rest offset that puts this vertex's lace at the surface's density along the skin (ocean.frag)
 vec3 gFoldBody = vec3(0.0); // on the strip: x = how far along the tongue's path (0 root .. 1 tip, on either skin), y = the body's thickness there (m), z = how deep in the tube's shadow (ocean.frag)
 
-// Per tap (0 = current field, 1 = fading-out field): buffer slot, first vec4 of the four bilinear texels, weights.
+// Per tap (0 = current field, 1 = fading-out field): buffer slot and cell size of the field it read (the near field, or
+// past it the far one), first vec4 of the four bilinear texels, weights.
 int cSlot[2];
+float cCell[2];
 ivec4 cTexel[2];
 vec2 cT[2];
 bool cHas[2];
@@ -148,13 +152,16 @@ float cDepth[2];
 vec2 cDir[2];
 float cFade;
 
-// Same bilinear as CoastalField.Sample on the CPU. False = this field has nothing active here.
-bool coastalTapAt(int tap, vec4 rect, vec2 xz, out float depth)
+// Same bilinear as CoastalField.Sample on the CPU, of the field in buffer slot. False = it has nothing active here.
+bool coastalTapAt(int tap, vec4 rect, int slot, vec2 xz, out float depth)
 {
     depth = DEEP_DEPTH;
     int res = int(rect.w);
     if (res <= 0)
         return false;
+
+    cSlot[tap] = slot;
+    cCell[tap] = rect.z;
 
     vec2 f = (xz - rect.xy) / rect.z - 0.5;
     if (!(f.x >= 0.0 && f.y >= 0.0 && f.x < float(res - 1) && f.y < float(res - 1)))
@@ -181,16 +188,18 @@ bool coastalTapAt(int tap, vec4 rect, vec2 xz, out float depth)
     return true;
 }
 
-// Current field, crossfaded from the previous one while a rebuild fades in (OceanSwell.SampleCoastal). False = open ocean.
+// Current field, crossfaded from the previous one while a rebuild fades in (OceanSwell.SampleCoastal); each past its
+// edge, or where it has nothing, its far field (CoastalField.SampleWithFar). False = open ocean.
 bool coastalSample(vec2 xz)
 {
-    cSlot[0] = frame.counts.w & 3;
-    cSlot[1] = (frame.counts.w >> 2) & 3;
+    int slots = frame.counts.w;
     cFade = frame.coastDir.z; // no previous field (coastPrev.w = 0) fades in from the open ocean
 
     cDepth[1] = DEEP_DEPTH;
-    cHas[0] = coastalTapAt(0, frame.coastRect, xz, cDepth[0]);
-    cHas[1] = cFade < 1.0 && coastalTapAt(1, frame.coastPrev, xz, cDepth[1]);
+    cHas[0] = coastalTapAt(0, frame.coastRect, slots & 7, xz, cDepth[0])
+        || coastalTapAt(0, frame.coastFar, (slots >> 6) & 7, xz, cDepth[0]);
+    cHas[1] = cFade < 1.0 && (coastalTapAt(1, frame.coastPrev, (slots >> 3) & 7, xz, cDepth[1])
+        || coastalTapAt(1, frame.coastFarPrev, (slots >> 9) & 7, xz, cDepth[1]));
     cDir[0] = frame.coastDir.xy;
     cDir[1] = vec2(cos(frame.coastDir.w), sin(frame.coastDir.w));
     return cHas[0] || cHas[1];
@@ -231,7 +240,7 @@ vec4 coastalTapRef(int tap, int j, float cell)
 // mixed term by term: blending two lags sweeps the phase by their difference and the waves run backwards.
 vec4 coastalRef(int tap, int j)
 {
-    return coastalTapRef(tap, j, tap == 0 ? frame.coastRect.z : frame.coastPrev.z);
+    return coastalTapRef(tap, j, cCell[tap]);
 }
 
 // Over the references in use: breaking cap min(1, gamma h / Hs) and the choppiness scale that keeps the rms of the
@@ -262,7 +271,7 @@ vec2 coastalLimits(int tap)
 void carrierField(int tap, out vec4 rect, out int slot, out vec2 dir)
 {
     rect = tap == 0 ? frame.coastRect : frame.coastPrev;
-    slot = tap == 0 ? frame.counts.w & 3 : (frame.counts.w >> 2) & 3;
+    slot = tap == 0 ? frame.counts.w & 7 : (frame.counts.w >> 3) & 7;
     dir = tap == 0 ? frame.coastDir.xy : vec2(cos(frame.coastDir.w), sin(frame.coastDir.w));
 }
 

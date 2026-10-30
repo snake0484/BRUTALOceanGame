@@ -4,14 +4,21 @@ using System.Runtime.CompilerServices;
 namespace BrutalGame.Water.Ocean;
 
 /// <summary>
-/// Layer B coastal maps (docs/water-architecture.md): per 4 m cell, depth and, for 12 reference frequencies, the phase lag
-/// against deep water (refraction + depth dispersion) and the amplitude factor (shoaling + refraction).
+/// Layer B coastal maps (docs/water-architecture.md): per cell, depth and, for 12 reference frequencies, the phase lag
+/// against deep water (refraction + depth dispersion) and the amplitude factor (shoaling + refraction). Near fields are
+/// 4 m cells round the camera; each is solved inside a coarse far field (<see cref="FarCellSize"/>) that carries the
+/// islands' shadows past it, and blends into that field at its edges.
 /// Texel layout matches the GPU storage buffer: 28 floats = (depth, active, 0, 0), then (lag, amp) per reference.
 /// </summary>
 public sealed class CoastalField
 {
     public const int Resolution = 256;
+
+    /// <summary>A near field's cell (m): the breakers, the surf carrier and its atlas are on this grid.</summary>
     public const float CellSize = 4f;
+
+    /// <summary>A far field's cell (m): 4 km a side.</summary>
+    public const float FarCellSize = 16f;
     public const int RefCount = 12;
     public const int TexelFloats = 28;
     public const float MinOmega = 0.15f;
@@ -26,6 +33,14 @@ public sealed class CoastalField
 
     public readonly float[] Texels = new float[Resolution * Resolution * TexelFloats];
 
+    /// <summary>This field's cell size (m).</summary>
+    public readonly float Cell;
+
+    /// <summary>The far field a near field was solved inside and blends into at its edges; null for a far field.</summary>
+    public CoastalField? Far;
+
+    public CoastalField(float cell = CellSize) => Cell = cell;
+
     /// <summary>World xz of cell (0, 0)'s corner.</summary>
     public Vector2 Origin;
 
@@ -34,7 +49,7 @@ public sealed class CoastalField
 
     public int Version;
 
-    public float WorldSize => Resolution * CellSize;
+    public float WorldSize => Resolution * Cell;
 
     public static float RefOmega(int j) => MinOmega * MathF.Exp(LogRange * j / (RefCount - 1));
 
@@ -55,8 +70,8 @@ public sealed class CoastalField
     /// </summary>
     public bool Sample(float x, float z, ref CoastalSample s)
     {
-        var fx = (x - Origin.X) / CellSize - 0.5f;
-        var fz = (z - Origin.Y) / CellSize - 0.5f;
+        var fx = (x - Origin.X) / Cell - 0.5f;
+        var fz = (z - Origin.Y) / Cell - 0.5f;
 
         if (!(fx >= 0f && fz >= 0f && fx < Resolution - 1 && fz < Resolution - 1))
             return false;
@@ -84,20 +99,26 @@ public sealed class CoastalField
             var c = t[t01 + o];
             var d = t[t11 + o];
             s.Lag[j] = Lerp2(a, b, c, d, tx, tz);
-            s.LagX[j] = float.Lerp(b - a, d - c, tz) / CellSize;
-            s.LagZ[j] = float.Lerp(c - a, d - b, tx) / CellSize;
+            s.LagX[j] = float.Lerp(b - a, d - c, tz) / Cell;
+            s.LagZ[j] = float.Lerp(c - a, d - b, tx) / Cell;
             s.Amp[j] = Lerp2(t[t00 + o + 1], t[t10 + o + 1], t[t01 + o + 1], t[t11 + o + 1], tx, tz);
         }
 
         return true;
     }
 
+    /// <summary>
+    /// <see cref="Sample"/>, or past this field's edge (or where it has nothing) its far field's: the swell surface reads
+    /// this, so the islands' shadows carry on past the near field. The surf carrier and breakers read the near field alone.
+    /// </summary>
+    public bool SampleWithFar(float x, float z, ref CoastalSample s) => Sample(x, z, ref s) || (Far?.Sample(x, z, ref s) ?? false);
+
     /// <summary>Bilinear water depth alone at world (x, z), the same read as <see cref="Sample"/>'s; false outside the map or where no texel is active.</summary>
     public bool Depth(float x, float z, out float depth)
     {
         depth = DeepDepth;
-        var fx = (x - Origin.X) / CellSize - 0.5f;
-        var fz = (z - Origin.Y) / CellSize - 0.5f;
+        var fx = (x - Origin.X) / Cell - 0.5f;
+        var fz = (z - Origin.Y) / Cell - 0.5f;
 
         if (!(fx >= 0f && fz >= 0f && fx < Resolution - 1 && fz < Resolution - 1))
             return false;

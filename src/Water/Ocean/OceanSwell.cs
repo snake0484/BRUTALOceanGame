@@ -252,8 +252,8 @@ public sealed class OceanSwell
     public float GroupRatio { get; private set; } = 2f * (float)WaveSet.WindSeaBandwidth;
 
     /// <summary>
-    /// Coastal terms of each field at (x, z): the current one and, while a rebuild fades in, the one it replaces (open
-    /// ocean where a field has nothing). Returns 0 for open ocean, 1 for the current field only, 2 when the surface must
+    /// Coastal terms of each field at (x, z): the current one and, while a rebuild fades in, the one it replaces (past a
+    /// near field its far field, and open ocean where neither has anything). Returns 0 for open ocean, 1 for the current field only, 2 when the surface must
     /// be evaluated with both and blended by <see cref="CoastalFade"/>. Blending the fields' phase lags instead sweeps the
     /// phase by their difference (tens of radians after a big seabed change) over the fade, and the waves run backwards.
     /// </summary>
@@ -262,11 +262,11 @@ public sealed class OceanSwell
         if (Coastal is null)
             return 0;
 
-        var hasCurrent = Coastal.Sample(x, z, ref current);
+        var hasCurrent = Coastal.SampleWithFar(x, z, ref current);
         if (CoastalFade >= 1f)
             return hasCurrent ? 1 : 0;
 
-        var hasPrevious = CoastalPrevious?.Sample(x, z, ref previous) ?? false;
+        var hasPrevious = CoastalPrevious?.SampleWithFar(x, z, ref previous) ?? false;
         if (!hasCurrent && !hasPrevious)
             return 0;
 
@@ -289,14 +289,14 @@ public sealed class OceanSwell
         if (current is null)
             return false;
 
-        var hasCurrent = current.Sample(x, z, ref s);
+        var hasCurrent = current.SampleWithFar(x, z, ref s);
 
         if (CoastalFade >= 1f)
             return hasCurrent;
 
         // No previous field (the first build) fades in from the open ocean.
         var old = new CoastalSample();
-        var hasOld = CoastalPrevious?.Sample(x, z, ref old) ?? false;
+        var hasOld = CoastalPrevious?.SampleWithFar(x, z, ref old) ?? false;
 
         if (!hasCurrent && !hasOld)
             return false;
