@@ -13,6 +13,9 @@ public readonly record struct WaterBodyInfo(Vector2 Centre, float Radius, float 
     /// <summary>Set by the sim when it registers the body.</summary>
     public ushort Id { get; init; }
 
+    /// <summary>Water a spring or its catchment feeds it for good (m³/s): what the river out of it carries away.</summary>
+    public float Inflow { get; init; }
+
     public bool Contains(float x, float z)
     {
         var dx = x - Centre.X;

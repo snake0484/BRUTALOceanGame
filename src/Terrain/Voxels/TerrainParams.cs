@@ -1,6 +1,6 @@
 namespace BrutalGame.Terrain;
 
-public struct TerrainParams()
+public record struct TerrainParams()
 {
     public ulong Seed = 1;
     public float SeaLevel = 0f;
@@ -17,6 +17,15 @@ public struct TerrainParams()
     public float LakeRadius = 170f;
     public float LakeDepth = 14f;
     public float LakeBankSlope = 0.3f;
+
+    /// <summary>
+    /// A permanent river from the crater lake to the sea (docs/voxel-water.md "Flows"): its heading out of the lake
+    /// (radians in x-z, 0 = +x), its bed width and the discharge it is carved for (m³/s), which a spring feeds the lake
+    /// with. A width of 0 means no river.
+    /// </summary>
+    public float RiverAngle = 1.1f;
+    public float RiverWidth = 8f;
+    public float RiverDischarge = 4f;
 
     public float SeabedUndulation = 6f;
     public float SeabedFrequency = 1f / 320f;

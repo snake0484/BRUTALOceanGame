@@ -19,14 +19,17 @@ public struct WaterVertex
     public float Foam;
 }
 
-/// <summary>Reusable surface mesh for one block, sized for the worst case so it never grows.</summary>
+/// <summary>
+/// Reusable surface mesh for one block, sized for a quad per column. A waterline clipped through its columns can need
+/// more (<see cref="WaterSurfaceMesher.FullDepth"/>); it then grows once and keeps the size.
+/// </summary>
 public sealed class WaterMesh
 {
     public const int MaxVertices = (ChunkConstants.Size + 1) * (ChunkConstants.Size + 1);
     public const int MaxIndices = ChunkConstants.Size * ChunkConstants.Size * 6;
 
-    public readonly WaterVertex[] Vertices = new WaterVertex[MaxVertices];
-    public readonly uint[] Indices = new uint[MaxIndices];
+    public WaterVertex[] Vertices = new WaterVertex[MaxVertices];
+    public uint[] Indices = new uint[MaxIndices];
     public int VertexCount;
     public int IndexCount;
 
@@ -38,5 +41,14 @@ public sealed class WaterMesh
     {
         VertexCount = 0;
         IndexCount = 0;
+    }
+
+    public void EnsureCapacity(int vertices, int indices)
+    {
+        if (vertices > Vertices.Length)
+            Array.Resize(ref Vertices, Math.Max(vertices, Vertices.Length * 2));
+
+        if (indices > Indices.Length)
+            Array.Resize(ref Indices, Math.Max(indices, Indices.Length * 2));
     }
 }

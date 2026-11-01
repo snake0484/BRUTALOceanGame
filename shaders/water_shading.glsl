@@ -217,7 +217,7 @@ vec3 waterBodyDepth(vec3 worldPos, vec3 N, vec3 V, float depth, float thickness,
 // The water body seen into from the surface at worldPos along -V, by the fog: marched through the volume near the
 // camera, the open sea's closed form over the column (then the sand under it) far away, blended between (fog.camera.zw).
 // through = the share of what was drawn behind the water (the bed) that reaches the eye, 0 where the body is opaque.
-// Two texels of the same water (the same tint; the fill may differ, as a part-wet cell's does).
+// Two texels of the same water (the same tint; the density may differ, as where a pour's silt has blended in).
 bool fogSameWater(vec4 a, vec4 b)
 {
     return a.a < FOG_SOLID && b.a < FOG_SOLID && all(lessThan(abs(a.rgb - b.rgb), vec3(2.0 / 255.0)));

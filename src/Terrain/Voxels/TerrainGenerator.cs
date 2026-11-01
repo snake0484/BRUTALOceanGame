@@ -54,12 +54,43 @@ public static class TerrainGenerator
     private const float LakeSolidRim = 20f;
     private const float LakeSolidRamp = 30f;
 
+    /// <summary>No overhang caves within this distance of the river's bed, fading in over the ramp, so none opens under its water.</summary>
+    private const float RiverSolidRim = 6f;
+    private const float RiverSolidRamp = 12f;
+
     private const uint SeabedSalt = 0x1B873593u;
     private const uint CoastSalt = 0xCC9E2D51u;
     private const uint CliffSalt = 0xE6546B64u;
     private const uint DetailSalt = 0x85EBCA6Bu;
     private const uint OverhangSalt = 0xC2B2AE35u;
     private const uint IslandSalt = 0xA511E9B3u;
+    private const uint RiverSalt = 0x27D4EB2Fu;
+
+    /// <summary>The river starts this far inside the lake's shore, so its channel opens onto the water.</summary>
+    private const float RiverInset = 6f;
+
+    /// <summary>The sill runs level this far past the shore: the lake's level over it, not the channel below, sets the flow.</summary>
+    private const float RiverSillRun = 6f;
+
+    /// <summary>
+    /// Past the sill the bed lies at least this deep (m) under the ground and falls at least the slope down which the
+    /// discharge runs as deep as the sill's head (<see cref="RiverPath.ControlSlope"/>: 6 % for 4 m³/s in 8 m at the pipe
+    /// model's roughness), so no stretch of channel holds the river back. At 0.4 % a metre the bed crossed the crater's rim
+    /// as a 100 m canal that needed 1.3 m of head to pass the discharge: the 3D sim ran a quarter of it.
+    /// </summary>
+    private const float RiverIncision = 2f;
+
+    /// <summary>The heading wanders this far (radians) either side of the river's angle, over about this wavelength (m).</summary>
+    private const float RiverMeander = 0.35f;
+    private const float RiverMeanderFrequency = 1f / 160f;
+
+    /// <summary>The bed's slope for the water's depth is taken over this many stations either side.</summary>
+    private const int RiverSlopeRun = 8;
+
+    /// <summary>The path ends once the ground has been this deep under the sea (m) for this many stations.</summary>
+    private const float RiverMouthDepth = 3f;
+    private const int RiverMouthRun = 30;
+    private const int MaxRiverStations = 4000;
 
     private struct Island
     {
@@ -87,7 +118,19 @@ public static class TerrainGenerator
         public float LakeDepth;
         public float LakeBank;
         public float LakeReach;
+
+        /// <summary>The river out of the lake (<see cref="RiverPath"/>); null while it is being traced, or for none.</summary>
+        public RiverPath? River;
     }
+
+    private sealed class RiverCache(TerrainParams p, RiverPath? path)
+    {
+        public readonly TerrainParams Params = p;
+        public readonly RiverPath? Path = path;
+    }
+
+    /// <summary>The river traced for the last params asked for: tracing samples the ground a few thousand times.</summary>
+    private static volatile RiverCache? _river;
 
     public static float MaxHeight(in TerrainParams p) => p.IslandHeight + p.DetailHeight + 1f;
 
@@ -112,7 +155,8 @@ public static class TerrainGenerator
 
     /// <summary>
     /// The bodies of still water the generator makes above sea level (docs/voxel-water.md "Bodies of water"): the crater
-    /// lake, as a record the water sim holds at its level and drains by its area (the shore's, not the fill's).
+    /// lake, as a record the water sim holds at its level and drains by its area (the shore's, not the fill's). A spring
+    /// feeds it the river's discharge, so the river out of it runs for good.
     /// </summary>
     public static WaterBodyInfo[] Bodies(in TerrainParams p)
     {
@@ -122,8 +166,18 @@ public static class TerrainGenerator
             return [];
 
         var shore = lake.Radius - LakeShoreCells;
-        return [new WaterBodyInfo(lake.Centre, lake.Radius, lake.Surface, lake.Bottom - 0.5f, MathF.PI * shore * shore)];
+        var inflow = River(p)?.Discharge ?? 0f;
+        return [new WaterBodyInfo(lake.Centre, lake.Radius, lake.Surface, lake.Bottom - 0.5f, MathF.PI * shore * shore) { Inflow = inflow }];
     }
+
+    /// <summary>The river from the crater lake to the sea, or null for none.</summary>
+    public static RiverPath? River(in TerrainParams p) => CreateIslands(p).River;
+
+    /// <summary>
+    /// The flows of running water the generator makes (docs/voxel-water.md "Flows"): the river, out of the first of
+    /// <see cref="Bodies"/> into the sea.
+    /// </summary>
+    public static WaterFlowInfo[] Flows(in TerrainParams p) => River(p) is { } river ? [new WaterFlowInfo(river, 0)] : [];
 
     /// <summary>
     /// Fills density, material and water (padded apron included) at the chunk's LOD: voxel i samples world origin + i·s,
@@ -134,6 +188,73 @@ public static class TerrainGenerator
         GenerateSolids(chunk, p);
         FillSea(chunk, p.SeaLevel);
         FillLake(chunk, Lake(p));
+        FillRiver(chunk, River(p), p.SeaLevel);
+    }
+
+    /// <summary>
+    /// The river's water above sea level: every open voxel within its bed and the banks' foot, up to the generated surface
+    /// at the nearest station, its fill the part of it under that surface (the top layer part full, unlike the sea's and
+    /// the lake's). Under sea level the water is the sea's; inside the lake's fill the lake's full cells win.
+    /// </summary>
+    public static void FillRiver(VoxelChunk chunk, RiverPath? river, float seaLevel)
+    {
+        if (river is null)
+            return;
+
+        var origin = chunk.Coord.WorldOrigin;
+        var scale = chunk.Coord.VoxelScale;
+        var size = ChunkConstants.Size * scale;
+
+        if (origin.Y - scale > river.Highest || origin.Y + size < MathF.Max(river.Lowest, seaLevel) - scale)
+            return;
+
+        if (!river.Touches(origin.X - scale, origin.Z - scale, origin.X + size, origin.Z + size))
+            return;
+
+        var water = chunk.Water;
+        var density = chunk.Density;
+        var within = river.HalfWidth + RiverPath.WaterMargin;
+
+        for (var z = -1; z <= ChunkConstants.Size; z++)
+        {
+            for (var x = -1; x <= ChunkConstants.Size; x++)
+            {
+                if (!river.Nearest(origin.X + x * scale, origin.Z + z * scale, within, out var station, out _))
+                    continue;
+
+                var surface = river.Surfaces[station];
+
+                for (var y = -1; y <= ChunkConstants.Size; y++)
+                {
+                    var wy = origin.Y + y * scale;
+                    var lower = wy - 0.5f * scale;
+
+                    if (lower - 0.5f * scale >= surface)
+                        break;
+
+                    var i = ChunkConstants.Index(x, y, z);
+
+                    if (wy < seaLevel || density[i] < 0)
+                        continue;
+
+                    // On a bed the water stands on the terrain's surface between the samples, as the sim reads it
+                    // (WaterBlock.BedRise): the fill whose surface over that bed is the river's.
+                    var rise = 0f;
+
+                    if (y > -1 && density[i - P] < 0)
+                        rise = scale * ((float)density[i - P] / (density[i - P] - density[i]) - 0.5f);
+
+                    if (lower + rise >= surface)
+                        continue;
+
+                    var w = MathF.Min((surface - lower - rise) / (scale - rise), 1f);
+                    var fill = (byte)MathF.Round(w * byte.MaxValue);
+
+                    if (fill > water[i])
+                        water[i] = fill;
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -285,10 +406,11 @@ public static class TerrainGenerator
             }
         }
 
-        // Around the crater lake the ground carries no overhang caves (one under the rim could open below the water line).
-        if (islands.LakeRadius > 0f && maxAmp > 0f)
+        // Around the crater lake and along the river the ground carries no overhang caves (one could open under the water).
+        if ((islands.LakeRadius > 0f || islands.River is not null) && maxAmp > 0f)
         {
             maxAmp = 0f;
+            var river = islands.River;
 
             for (var z = 0; z < P; z++)
             {
@@ -298,7 +420,13 @@ public static class TerrainGenerator
                 {
                     var dx = origin.X + (x - 1) * s;
                     var c = x + z * P;
-                    colAmp[c] *= Smooth01((MathF.Sqrt(dx * dx + dz * dz) - islands.LakeRadius - LakeSolidRim) / LakeSolidRamp);
+
+                    if (islands.LakeRadius > 0f)
+                        colAmp[c] *= Smooth01((MathF.Sqrt(dx * dx + dz * dz) - islands.LakeRadius - LakeSolidRim) / LakeSolidRamp);
+
+                    if (river is not null && river.Nearest(dx, dz, river.HalfWidth + RiverSolidRim + RiverSolidRamp, out _, out var distance))
+                        colAmp[c] *= Smooth01((distance - river.HalfWidth - RiverSolidRim) / RiverSolidRamp);
+
                     maxAmp = MathF.Max(maxAmp, colAmp[c]);
                 }
             }
@@ -523,7 +651,81 @@ public static class TerrainGenerator
                 h = MathF.Min(h, LakeBed(r, detail, p, s));
         }
 
+        if (s.River is { } river && river.Nearest(x, z, river.Reach, out var station, out var distance))
+            h = MathF.Min(h, river.Carve(station, distance));
+
         return h;
+    }
+
+    private static RiverPath? River(in TerrainParams p, in IslandSet s)
+    {
+        var cached = _river;
+
+        if (cached is not null && cached.Params.Equals(p))
+            return cached.Path;
+
+        var path = TraceRiver(p, s);
+        _river = new RiverCache(p, path);
+        return path;
+    }
+
+    /// <summary>
+    /// Walks the river out of the lake a metre at a time, its heading wandering about <see cref="TerrainParams.RiverAngle"/>,
+    /// until the ground has stood under the sea for a while. The bed is the sill (the lake's level less the weir head
+    /// that passes the discharge) through the shore, then falls with the ground, kept <see cref="RiverIncision"/> under it
+    /// and never rising, so a hump in the way is cut through as a gorge. The water stands at the uniform flow depth for
+    /// the bed's slope there, level with the lake over the sill, and never rises downstream.
+    /// </summary>
+    private static RiverPath? TraceRiver(in TerrainParams p, in IslandSet s)
+    {
+        if (p.RiverWidth <= 0f || p.RiverDischarge <= 0f)
+            return null;
+
+        var level = s.LakeSurface - 0.5f;
+        var sill = level - RiverPath.WeirHead(p.RiverDischarge, p.RiverWidth);
+        var fall = RiverPath.ControlSlope(p.RiverDischarge, p.RiverWidth);
+        var seed = s.Seed + RiverSalt;
+        var points = new List<Vector2>(1024);
+        var beds = new List<float>(1024);
+        var pos = new Vector2(MathF.Cos(p.RiverAngle), MathF.Sin(p.RiverAngle)) * (s.LakeRadius - RiverInset);
+        var bed = sill;
+        var cut = 0f;
+        var under = 0;
+
+        for (var k = 0; k < MaxRiverStations && under < RiverMouthRun; k++)
+        {
+            var ground = Height(pos.X, pos.Y, p, s);
+
+            if (pos.Length() > s.LakeRadius + RiverSillRun)
+                bed = MathF.Min(bed - fall, ground - RiverIncision);
+
+            points.Add(pos);
+            beds.Add(bed);
+            cut = MathF.Max(cut, ground - bed);
+            under = ground < p.SeaLevel - RiverMouthDepth ? under + 1 : 0;
+            var heading = p.RiverAngle + RiverMeander * Noise.Fbm2(k * RiverMeanderFrequency, 0.5f, 2, seed);
+            pos += new Vector2(MathF.Cos(heading), MathF.Sin(heading));
+        }
+
+        var n = points.Count;
+        var surfaces = new float[n];
+
+        for (var k = 0; k < n; k++)
+        {
+            if (beds[k] == sill)
+            {
+                surfaces[k] = level;
+                continue;
+            }
+
+            var a = Math.Max(0, k - RiverSlopeRun);
+            var b = Math.Min(n - 1, k + RiverSlopeRun);
+            var slope = MathF.Max(fall, (beds[a] - beds[b]) / (b - a));
+            surfaces[k] = MathF.Min(beds[k] + RiverPath.NormalDepth(p.RiverDischarge, p.RiverWidth, slope), surfaces[k - 1]);
+        }
+
+        var reach = 0.5f * p.RiverWidth + cut / RiverPath.BankSlope + 2f;
+        return new RiverPath([.. points], [.. beds], surfaces, p.RiverWidth, p.RiverDischarge, reach);
     }
 
     /// <summary>
@@ -583,6 +785,7 @@ public static class TerrainGenerator
             s.LakeDepth = p.LakeDepth;
             s.LakeBank = p.LakeBankSlope;
             s.LakeReach = p.LakeRadius + (MaxHeight(p) - s.LakeSurface) / p.LakeBankSlope;
+            s.River = River(p, s);
         }
 
         return s;

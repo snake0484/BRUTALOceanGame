@@ -26,13 +26,16 @@ internal sealed class WaterActivationJob : IJob
     private int _generatedCount;
     public TerrainParams Params;
     public WaterBodies? Bodies;
+    private WaterFlowInfo[] _flows = [];
 
     /// <param name="zones">Sea zone discs (world x, world z, radius); those touching the block are copied.</param>
     /// <param name="bodyDiscs">Discs around digs into bodies (world x, world z, radius, body id), where the body's water is free; those touching the block are copied.</param>
     /// <param name="generated">The generator's bodies of water; those whose fill disc touches the block are copied.</param>
-    public void Prepare(WaterBlock block, bool refresh, in TerrainParams p, IReadOnlyList<BrushOp> ops, List<Vector3> zones, List<Vector4> bodyDiscs, WaterBodyInfo[] generated, WaterBodies bodies)
+    /// <param name="flows">The generator's flows (rivers), with their ids: a new block marks the columns their water runs through.</param>
+    public void Prepare(WaterBlock block, bool refresh, in TerrainParams p, IReadOnlyList<BrushOp> ops, List<Vector3> zones, List<Vector4> bodyDiscs, WaterBodyInfo[] generated, WaterBodies bodies, WaterFlowInfo[] flows)
     {
         Bodies = bodies;
+        _flows = flows;
         Block = block;
         Refresh = refresh;
         _discCount = 0;
@@ -91,7 +94,7 @@ internal sealed class WaterActivationJob : IJob
         if (Refresh)
             Block!.RefreshFrom(_chunk, discs);
         else
-            Block!.InitFrom(_chunk, Bodies!, _generated.AsSpan(0, _generatedCount), discs);
+            Block!.InitFrom(_chunk, Bodies!, _generated.AsSpan(0, _generatedCount), discs, _flows);
 
         if (_discCount > 0)
             Block.Unclamp(_discs.AsSpan(0, _discCount));

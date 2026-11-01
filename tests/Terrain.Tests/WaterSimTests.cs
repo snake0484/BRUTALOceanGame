@@ -505,15 +505,28 @@ public sealed class WaterSimTests(ITestOutputHelper output)
         mesher.Build(b, mesh);
         mesher.Build(b, mesh);
 
-        Assert.Equal(64 * 6, mesh.IndexCount);
-        Assert.Equal(81, mesh.VertexCount);
+        // Spreading onto the open ground around it, the pool faces out and fills its columns, so its edge is its own: 60
+        // quads, a triangle in each corner column (its outer corner cut), the waterline vertices sunk on its boundary.
+        Assert.Equal(60 * 6 + 4 * 3, mesh.IndexCount);
+        Assert.Equal(49 + 28, mesh.VertexCount);
 
         foreach (var v in mesh.VertexSpan)
         {
-            Assert.Equal(1f, v.Position.Y, 1e-5);
-            Assert.Equal(0.5f, v.Thickness, 1e-5);
-            Assert.Equal(Vector3.UnitY, v.Normal);
-            Assert.InRange(v.Position.X, 3.5f, 11.5f);
+            var p = v.Position;
+            Assert.InRange(p.X, 3.5f, 11.5f);
+            Assert.InRange(p.Z, 3.5f, 11.5f);
+
+            if (p.X is >= 4.5f and <= 10.5f && p.Z is >= 4.5f and <= 10.5f)
+            {
+                Assert.Equal(1f, p.Y, 1e-5);
+                Assert.Equal(0.5f, v.Thickness, 1e-5);
+            }
+            else
+            {
+                // The waterline: lowered toward the open ground, sunk, no thickness.
+                Assert.True(p.Y < 1f);
+                Assert.Equal(0f, v.Thickness);
+            }
         }
 
         var t = mesh.IndexSpan;

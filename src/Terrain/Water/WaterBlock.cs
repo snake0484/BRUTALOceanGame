@@ -181,6 +181,31 @@ public sealed class WaterBlock
     /// <summary>Per interior column: the generated body (its fill disc covers the column) that generated water above the sea belongs to.</summary>
     private readonly ushort[] _generatedBody = new ushort[S * S];
 
+    /// <summary>
+    /// Per padded column (x + 1 + (z + 1)·Padded): the flow whose water it holds (<see cref="WaterFlows"/>, docs/voxel-water.md
+    /// "Flows"), <see cref="WaterFlows.None"/> for none, and the river's nearest station there. Set by <see cref="InitFrom"/>.
+    /// </summary>
+    private readonly ushort[] _flowColumn = new ushort[A];
+    private readonly int[] _flowStation = new int[A];
+
+    /// <summary>Any column, halo included, holds a flow's water.</summary>
+    public bool HasFlow { get; private set; }
+
+    /// <summary>
+    /// Held asleep as the picture of a routed reach of a flow (<see cref="WaterFlows"/>): neighbours never wake it, and
+    /// an awake neighbour's water crossing into it is booked to that reach. Its fluxes are kept, so it draws the flow it froze with.
+    /// </summary>
+    public bool Frozen;
+
+    /// <summary>
+    /// The chunk's apron beyond the four side faces (NegX, PosX, NegZ, PosZ; a plane each, column along the face, then y),
+    /// read with the solids, in flow columns only (solid elsewhere): flags, generated water and bed. An awake block whose
+    /// neighbour there is not loaded opens its halo to these (<see cref="OpenFlowEdge"/>), so the river runs on across it.
+    /// </summary>
+    private readonly byte[] _edgeFlags = new byte[4 * S * S];
+    private readonly float[] _edgeWater = new float[4 * S * S];
+    private readonly sbyte[] _edgeBed = new sbyte[4 * S * S];
+
     /// <summary>Per padded row (y, z): any water in the row's 34 cells. Built by pass 1, reused by pass 2.</summary>
     public readonly byte[] WetRows = new byte[ChunkConstants.PaddedArea];
     private byte _openFaces;
@@ -218,6 +243,10 @@ public sealed class WaterBlock
         _swellHeld = false;
         _discBody.AsSpan().Clear();
         _generatedBody.AsSpan().Clear();
+        _flowColumn.AsSpan().Clear();
+        _edgeFlags.AsSpan().Fill(SolidBit);
+        HasFlow = false;
+        Frozen = false;
         ClearFluxes();
         ClearExchange();
         ClearPresent();
@@ -296,11 +325,13 @@ public sealed class WaterBlock
     /// <summary>
     /// Chunk generated + ops replayed at LOD 0. Solid where density &lt; 0. Generated water (byte ≥ 128) at or under the
     /// sea's top layer is held by the sea; above it, by the generated body (<paramref name="generated"/>) whose fill disc
-    /// covers its column, at the body's level as it now stands; generated water no body claims is free. Inside
-    /// <paramref name="discs"/> (world x, world z, radius, body id; the discs around digs into bodies) that body's water
-    /// is free instead, at the fill it would be held at.
+    /// covers its column, at the body's level as it now stands; generated water no body claims is free, at the fill the
+    /// generator gave it. Inside <paramref name="discs"/> (world x, world z, radius, body id; the discs around digs into
+    /// bodies) that body's water is free instead, at the fill it would be held at. Columns the water of one of
+    /// <paramref name="flows"/> runs through are marked with it, and in the pipe model its surface cells start moving
+    /// downstream at the river's speed, so a block that never steps still draws it flowing.
     /// </summary>
-    public void InitFrom(VoxelChunk chunk, WaterBodies? bodies = null, ReadOnlySpan<WaterBodyInfo> generated = default, ReadOnlySpan<Vector4> discs = default)
+    public void InitFrom(VoxelChunk chunk, WaterBodies? bodies = null, ReadOnlySpan<WaterBodyInfo> generated = default, ReadOnlySpan<Vector4> discs = default, ReadOnlySpan<WaterFlowInfo> flows = default)
     {
         if (chunk.Coord.Lod != 0)
             throw new ArgumentException("Water blocks need a LOD-0 chunk.", nameof(chunk));
@@ -308,8 +339,251 @@ public sealed class WaterBlock
         Reset(chunk.Coord);
         Bodies = bodies ?? WaterBodies.Default;
         MarkColumns(generated, discs);
+        MarkFlows(flows);
         ReadSolids(chunk, keepWater: false);
+        SeedFlow(flows);
         Revision++;
+    }
+
+    /// <summary>Marks every padded column within a flow's water (its bed and the banks' foot) with the flow and its nearest station.</summary>
+    private void MarkFlows(ReadOnlySpan<WaterFlowInfo> flows)
+    {
+        var origin = Coord.WorldOrigin;
+
+        foreach (var flow in flows)
+        {
+            var path = flow.Path;
+            var within = path.HalfWidth + RiverPath.WaterMargin;
+
+            if (!path.Touches(origin.X - 1f, origin.Z - 1f, origin.X + S, origin.Z + S))
+                continue;
+
+            for (var z = -1; z <= S; z++)
+            {
+                for (var x = -1; x <= S; x++)
+                {
+                    var c = x + 1 + (z + 1) * P;
+
+                    if (_flowColumn[c] != WaterFlows.None || !path.Nearest(origin.X + x, origin.Z + z, within, out var station, out _))
+                        continue;
+
+                    _flowColumn[c] = flow.Id;
+                    _flowStation[c] = station;
+                    HasFlow = true;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Pipe model: the top wet free cell of each interior flow column moves downstream at the river's generated speed at
+    /// its station (its side faces carry speed × its water, as the mesher reads them back), and the column's water carries
+    /// the froth the river runs with there (<see cref="RiverPath.Froth"/>), so a frozen reach is drawn running and white
+    /// where the sim would churn it. A block that wakes keeps both; the faces it shares with blocks that did not step are
+    /// zeroed then. Without the froth, the foam of the sim's reaches ended in a line where the frozen ones began.
+    /// </summary>
+    private void SeedFlow(ReadOnlySpan<WaterFlowInfo> flows)
+    {
+        if (FluxX is null || !HasFlow)
+            return;
+
+        for (var z = 0; z < S; z++)
+        {
+            for (var x = 0; x < S; x++)
+            {
+                var c = x + 1 + (z + 1) * P;
+                var id = _flowColumn[c];
+
+                if (id == WaterFlows.None)
+                    continue;
+
+                var path = PathOf(flows, id);
+
+                if (path is null)
+                    continue;
+
+                var station = _flowStation[c];
+                var froth = path.Froth(station);
+                var top = true;
+
+                for (var y = S - 1; y >= 0; y--)
+                {
+                    var i = ChunkConstants.Index(x, y, z);
+                    var w = Water[i];
+
+                    if (w <= WaterSurfaceMesher.WetThreshold || (Flags[i] & (SolidBit | HeldBit)) != 0)
+                        continue;
+
+                    Froth![i] = froth;
+
+                    if (!top)
+                        continue;
+
+                    var flow = path.Directions[station] * (path.Speed(station) * MathF.Min(w, 1f));
+                    FluxX[i - 1] = FluxX[i] = flow.X;
+                    FluxZ![i - A] = FluxZ[i] = flow.Y;
+                    top = false;
+                }
+            }
+        }
+    }
+
+    private static RiverPath? PathOf(ReadOnlySpan<WaterFlowInfo> flows, ushort id)
+    {
+        foreach (var flow in flows)
+            if (flow.Id == id)
+                return flow.Path;
+
+        return null;
+    }
+
+    /// <summary>The flow whose water interior column (x, z) holds, <see cref="WaterFlows.None"/> for none.</summary>
+    public ushort FlowAt(int x, int z) => _flowColumn[x + 1 + (z + 1) * P];
+
+    /// <summary>The free water (m³) in the interior flow columns: the flow's water this block holds.</summary>
+    public float FlowWater()
+    {
+        if (!HasFlow)
+            return 0f;
+
+        var sum = 0.0;
+
+        for (var z = 0; z < S; z++)
+        {
+            for (var x = 0; x < S; x++)
+            {
+                if (_flowColumn[x + 1 + (z + 1) * P] == WaterFlows.None)
+                    continue;
+
+                for (var y = 0; y < S; y++)
+                {
+                    var i = ChunkConstants.Index(x, y, z);
+
+                    if ((Flags[i] & (SolidBit | HeldBit)) == 0)
+                        sum += Water[i];
+                }
+            }
+        }
+
+        return (float)sum;
+    }
+
+    /// <summary>The padded column a side face's halo plane holds at <paramref name="k"/> along it (NegX, PosX, NegZ, PosZ only).</summary>
+    private static (int X, int Z) EdgeColumn(Face face, int k) => face switch
+    {
+        Face.NegX => (-1, k),
+        Face.PosX => (S, k),
+        Face.NegZ => (k, -1),
+        _ => (k, S),
+    };
+
+    private static int EdgeSlot(Face face) => face switch
+    {
+        Face.NegX => 0,
+        Face.PosX => 1,
+        Face.NegZ => 2,
+        _ => 3,
+    };
+
+    /// <summary>
+    /// Before a step, with no neighbour loaded on this side face: the halo's flow columns take the chunk's apron there (its
+    /// solids, its generated water and beds), so the river runs on across the face rather than against a wall. Other
+    /// columns stay solid.
+    /// </summary>
+    public void OpenFlowEdge(Face face)
+    {
+        var slot = EdgeSlot(face) * S * S;
+
+        for (var k = 0; k < S; k++)
+        {
+            var (x, z) = EdgeColumn(face, k);
+
+            if (_flowColumn[x + 1 + (z + 1) * P] == WaterFlows.None)
+                continue;
+
+            for (var y = 0; y < S; y++)
+            {
+                var i = ChunkConstants.Index(x, y, z);
+                var e = slot + k + y * S;
+                Flags[i] = _edgeFlags[e];
+                Body[i] = WaterBodies.None;
+                Bed[i] = _edgeBed[e];
+                Water[i] = _edgeWater[e];
+                Colour[i] = _edgeWater[e] > 0f ? WaterColour.Lake : WaterColour.None;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Before a step: the water in the halo's flow columns on this side face is scaled to <paramref name="stage"/> (the
+    /// routed reach's storage over its design), refilled from the bed up, so the head the block feels there is the reach's.
+    /// </summary>
+    public void ScaleFlowEdge(Face face, float stage)
+    {
+        if (face is Face.NegY or Face.PosY || stage == 1f)
+            return;
+
+        for (var k = 0; k < S; k++)
+        {
+            var (x, z) = EdgeColumn(face, k);
+
+            if (_flowColumn[x + 1 + (z + 1) * P] == WaterFlows.None)
+                continue;
+
+            var total = 0f;
+
+            for (var y = 0; y < S; y++)
+            {
+                var i = ChunkConstants.Index(x, y, z);
+
+                if ((Flags[i] & (SolidBit | HeldBit)) == 0)
+                    total += MathF.Min(Water[i], 1f);
+            }
+
+            var left = total * stage;
+
+            for (var y = 0; y < S; y++)
+            {
+                var i = ChunkConstants.Index(x, y, z);
+
+                if ((Flags[i] & (SolidBit | HeldBit)) != 0)
+                    continue;
+
+                Water[i] = MathF.Min(left, 1f);
+                left -= Water[i];
+            }
+        }
+    }
+
+    /// <summary>
+    /// Pipe model, after a step's apply pass: the water (m³) the step moved out across a face (negative: in), as the
+    /// apply pass moved it (each face's limited flux, none under <see cref="WaterFlow.SnapEpsilon"/>). A −side face is held
+    /// in the halo's slots, a +side face in the border cells'.
+    /// </summary>
+    public float EdgeOutflow(Face face, float dt)
+    {
+        var axis = (int)face >> 1;
+        var flux = axis == 0 ? FluxX : axis == 1 ? FluxY : FluxZ;
+
+        if (flux is null)
+            return 0f;
+
+        var negative = ((int)face & 1) == 0;
+        Plane(face, halo: negative, out var start, out var su, out var sv);
+        var sum = 0f;
+
+        for (var v = 0; v < S; v++)
+        {
+            for (var u = 0; u < S; u++)
+            {
+                var moved = flux[start + u * su + v * sv] * dt;
+
+                if (MathF.Abs(moved) >= WaterFlow.SnapEpsilon)
+                    sum += moved;
+            }
+        }
+
+        return negative ? -sum : sum;
     }
 
     /// <summary>
@@ -426,8 +700,9 @@ public sealed class WaterBlock
                     {
                         var generated = source[i] >= ReservoirByte;
                         id = generated ? worldY <= seaTop ? WaterBodies.Sea : _generatedBody[col] : (ushort)0;
-                        water = generated ? 1f : 0f;
-                        Colour[i] = id != 0 ? Bodies[id].Colour : generated ? WaterColour.Sea : WaterColour.None;
+                        water = source[i] * (1f / byte.MaxValue);
+                        var flow = _flowColumn[col % S + 1 + (col / S + 1) * P] != WaterFlows.None;
+                        Colour[i] = id != 0 ? Bodies[id].Colour : water <= 0f ? WaterColour.None : flow ? WaterColour.Lake : WaterColour.Sea;
                     }
 
                     if (id == 0 && worldY > seaTop && worldY <= seaTop + ZoneRunUp && OverSea(i, y, worldY, density, source))
@@ -478,6 +753,35 @@ public sealed class WaterBlock
         for (var f = 0; f < 6; f++)
             if (ApronOpen(density, (Face)f))
                 _openFaces |= (byte)(1 << f);
+
+        if (HasFlow)
+            ReadEdges(density, source);
+    }
+
+    /// <summary>The apron beyond the side faces in flow columns (<see cref="OpenFlowEdge"/>): solid or open, its bed, and the generated water.</summary>
+    private void ReadEdges(sbyte[] density, byte[] source)
+    {
+        for (var f = 0; f < 4; f++)
+        {
+            var face = f switch { 0 => Face.NegX, 1 => Face.PosX, 2 => Face.NegZ, _ => Face.PosZ };
+
+            for (var k = 0; k < S; k++)
+            {
+                var (x, z) = EdgeColumn(face, k);
+                var flow = _flowColumn[x + 1 + (z + 1) * P] != WaterFlows.None;
+
+                for (var y = 0; y < S; y++)
+                {
+                    var i = ChunkConstants.Index(x, y, z);
+                    var e = f * S * S + k + y * S;
+                    var solid = density[i] < 0;
+                    var under = density[i - P];
+                    _edgeFlags[e] = !flow || solid ? SolidBit : (byte)0;
+                    _edgeBed[e] = !flow || solid || under >= 0 ? NotBed : (sbyte)MathF.Round(((float)under / (under - density[i]) - 0.5f) * 254f);
+                    _edgeWater[e] = !flow || solid ? 0f : source[i] * (1f / byte.MaxValue);
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -570,7 +874,7 @@ public sealed class WaterBlock
                 var n = i + (f >> 1 == 0 ? 1 : f >> 1 == 1 ? P : A) * ((f & 1) == 0 ? -1 : 1);
                 var (x, y, z) = (n % P - 1, n / P % P - 1, n / A - 1);
 
-                if ((uint)x >= S || (uint)y >= S || (uint)z >= S || seen[n] != 0 || (Flags[n] & (SolidBit | HeldBit)) != 0 || _discBody[x + z * S] == id)
+                if ((uint)x >= S || (uint)y >= S || (uint)z >= S || seen[n] != 0 || (Flags[n] & (SolidBit | HeldBit)) != 0 || _discBody[x + z * S] == id || FlowAt(x, z) != WaterFlows.None)
                     continue;
 
                 var w = Water[n];
@@ -626,20 +930,47 @@ public sealed class WaterBlock
     }
 
     /// <summary>
+    /// A connected set of wet free cells (<see cref="BornBodies"/>): a cell of it, its surface cells with the sum, lowest
+    /// and highest of their surfaces (world y) and the sums of their world x and z, its lowest floor, and the faces (a bit
+    /// per <see cref="Face"/>) where it meets wet free water in the halo, so goes on into the neighbour.
+    /// </summary>
+    public readonly record struct Pool(int Seed, int Surfaces, double Sum, float Low, float High, double X, double Z, float Bottom, byte Faces)
+    {
+        public float Level => (float)(Sum / Surfaces);
+
+        public bool Flat => High - Low <= 2f * WaterBodies.JoinTolerance;
+
+        public Vector2 Centre => new((float)(X / Surfaces), (float)(Z / Surfaces));
+    }
+
+    /// <summary>Pools the last <see cref="BornBodies"/> left free as too small here that go on into a neighbour (<see cref="BornAcross"/>).</summary>
+    public readonly List<Pool> EdgePools = new(2);
+
+    /// <summary>A pool and the pools it meets are counted over at most this many blocks (<see cref="BornAcross"/>).</summary>
+    public const int MaxPoolBlocks = 16;
+
+    [ThreadStatic]
+    private static List<Pool>? _pools;
+
+    [ThreadStatic]
+    private static List<(ChunkCoord At, byte Faces)>? _poolBlocks;
+
+    /// <summary>
     /// Main thread, as the block sleeps, after <see cref="JoinBodies"/>: free water left that stands level becomes a body
     /// of its own (docs/voxel-water.md "Bodies of water"): each connected set of wet free cells whose free surfaces lie
     /// within twice the join tolerance of one another, with at least <paramref name="minSurface"/> surface cells (specks
     /// and films are left free). Its level is their mean, its area their count here (neighbouring blocks add theirs as
     /// they join it), its centre their mean. Cells are held at the fill under that level and what they lacked is booked.
     /// Pools under <see cref="MinBornSurface"/> stay free: a body of a few m² moved metres for each m³ it booked, and those
-    /// born in a tunnel's outflow ran to 16 m over their floors; free water at rest sleeps and costs nothing anyway.
+    /// born in a tunnel's outflow ran to 16 m over their floors; free water at rest sleeps and costs nothing anyway. Those
+    /// that go on into a neighbour are left in <see cref="EdgePools"/>, to be counted with it (<see cref="BornAcross"/>).
     /// </summary>
     public void BornBodies(int minSurface = MinBornSurface)
     {
-        var stack = _flood ??= new int[ChunkConstants.PaddedVolume];
+        EdgePools.Clear();
+        var members = _flood ??= new int[ChunkConstants.PaddedVolume];
         var seen = _seen ??= new byte[ChunkConstants.PaddedVolume];
         seen.AsSpan().Clear();
-        var members = new Span<int>(stack, 0, ChunkConstants.PaddedVolume);
 
         for (var z = 0; z < S; z++)
         {
@@ -649,85 +980,221 @@ public sealed class WaterBlock
                 {
                     var start = ChunkConstants.Index(x, y, z);
 
-                    if (seen[start] != 0 || (Flags[start] & (SolidBit | HeldBit)) != 0 || Water[start] <= WaterSurfaceMesher.WetThreshold)
+                    if (seen[start] != 0 || (Flags[start] & (SolidBit | HeldBit)) != 0 || Water[start] <= WaterSurfaceMesher.WetThreshold || FlowAt(x, z) != WaterFlows.None)
                         continue;
 
-                    // Gather the component (a queue in the flood array); survey its surfaces as it grows.
-                    var count = 0;
-                    var read = 0;
-                    members[count++] = start;
-                    seen[start] = 1;
-                    var surfaces = 0;
-                    var sum = 0f;
-                    var low = float.MaxValue;
-                    var high = float.MinValue;
-                    var cx = 0f;
-                    var cz = 0f;
-                    var bottom = float.MaxValue;
-                    ushort beside = 0;
+                    var pool = Gather(start, members, seen, out var count, out var beside);
 
-                    while (read < count)
+                    if (pool.Surfaces == 0 || !pool.Flat)
+                        continue;
+
+                    if (pool.Surfaces < minSurface)
                     {
-                        var i = members[read++];
-                        var (ix, iy, iz) = (i % P - 1, i / P % P - 1, i / A - 1);
-                        var worldY = Coord.Y * S + iy;
-                        bottom = MathF.Min(bottom, worldY - 0.5f);
+                        if (pool.Faces != 0)
+                            EdgePools.Add(pool);
 
-                        if (Surface(i))
-                        {
-                            var surface = worldY - 0.5f + MathF.Min(Water[i], 1f) + BedRise(Bed[i], Water[i]);
-                            surfaces++;
-                            sum += surface;
-                            low = MathF.Min(low, surface);
-                            high = MathF.Max(high, surface);
-                            cx += ix;
-                            cz += iz;
-                        }
-
-                        for (var f = 0; f < 6; f++)
-                        {
-                            var n = i + (f >> 1 == 0 ? 1 : f >> 1 == 1 ? P : A) * ((f & 1) == 0 ? -1 : 1);
-                            var (nx, ny, nz) = (n % P - 1, n / P % P - 1, n / A - 1);
-
-                            if ((Flags[n] & HeldBit) != 0 && Body[n] > WaterBodies.Sea)
-                                beside = Body[n];
-
-                            if ((uint)nx >= S || (uint)ny >= S || (uint)nz >= S || seen[n] != 0 || (Flags[n] & (SolidBit | HeldBit)) != 0 || Water[n] <= WaterSurfaceMesher.WetThreshold)
-                                continue;
-
-                            seen[n] = 1;
-                            members[count++] = n;
-                        }
-                    }
-
-                    if (surfaces < minSurface || high - low > 2f * WaterBodies.JoinTolerance)
                         continue;
-
-                    var level = sum / surfaces;
-                    var origin = Coord.WorldOrigin;
+                    }
 
                     // Level with a body it touches (here or in the halos): it is that body's, not a twin of it.
-                    var id = beside != 0 && MathF.Abs(Bodies.Levels[beside] - level) <= 2f * WaterBodies.JoinTolerance
-                        ? beside
-                        : Bodies.Add(level, surfaces, new Vector2(origin.X + cx / surfaces, origin.Z + cz / surfaces), 0f, bottom, Colour[members[0]] == WaterColour.None ? WaterColour.Lake : Colour[members[0]], born: true);
-                    level = Bodies.Levels[id];
-                    var paid = 0f;
-
-                    for (var k = 0; k < count; k++)
-                    {
-                        var i = members[k];
-                        var fill = WaterBodies.Fill(Coord.Y * S + i / P % P - 1, level);
-                        paid += fill - Water[i];
-                        Flags[i] = HeldBit;
-                        Body[i] = id;
-                        Water[i] = fill;
-                    }
-
-                    Note(id);
-                    Take(id, paid, id == beside ? surfaces : 0);
+                    if (beside != 0 && MathF.Abs(Bodies.Levels[beside] - pool.Level) <= 2f * WaterBodies.JoinTolerance)
+                        Hold(members, count, beside, pool.Surfaces);
+                    else
+                        Hold(members, count, Born(pool, pool.Level, pool.Centre), 0);
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Main thread, after <see cref="BornBodies"/>: an edge pool too small here is born a body if, with the pools at its
+    /// level it meets in sleeping neighbours (<paramref name="asleep"/>: the block at a coord if loaded and asleep), it has
+    /// <paramref name="minSurface"/> surface cells. Each block counted only its own part, so a pond across a block edge
+    /// was never born. Its level and centre are the whole pool's, its area its part here: the neighbours' parts join it
+    /// as they settle. A neighbour it goes on into that is awake or not loaded leaves it free, to be tried again as that
+    /// one sleeps. Returns the body, or <see cref="WaterBodies.None"/>.
+    /// </summary>
+    public ushort BornAcross(in Pool pool, Func<ChunkCoord, WaterBlock?> asleep, int minSurface = MinBornSurface)
+    {
+        var pools = _pools ??= new List<Pool>(4);
+        var blocks = _poolBlocks ??= new List<(ChunkCoord, byte)>(MaxPoolBlocks);
+        blocks.Clear();
+        blocks.Add((Coord, pool.Faces));
+        var (surfaces, sum, low, high, x, z) = (pool.Surfaces, pool.Sum, pool.Low, pool.High, pool.X, pool.Z);
+
+        for (var b = 0; b < blocks.Count && surfaces < minSurface; b++)
+        {
+            for (var f = 0; f < 6; f++)
+            {
+                if ((blocks[b].Faces & 1 << f) == 0)
+                    continue;
+
+                var at = Across(blocks[b].At, f);
+
+                if (Visited(blocks, at))
+                    continue;
+
+                if (blocks.Count == MaxPoolBlocks || asleep(at) is not { } neighbour)
+                    return WaterBodies.None;
+
+                var back = (byte)(1 << (f ^ 1));
+                var faces = (byte)0;
+                neighbour.Survey(pools);
+
+                foreach (var p in pools)
+                {
+                    if ((p.Faces & back) == 0 || !p.Flat)
+                        continue;
+
+                    if (p.Surfaces > 0 && MathF.Max(high, p.High) - MathF.Min(low, p.Low) > 2f * WaterBodies.JoinTolerance)
+                        continue;
+
+                    (surfaces, sum, x, z) = (surfaces + p.Surfaces, sum + p.Sum, x + p.X, z + p.Z);
+                    (low, high) = p.Surfaces > 0 ? (MathF.Min(low, p.Low), MathF.Max(high, p.High)) : (low, high);
+                    faces |= (byte)(p.Faces & ~back);
+                }
+
+                blocks.Add((at, faces));
+            }
+        }
+
+        if (surfaces < minSurface)
+            return WaterBodies.None;
+
+        var members = _flood ??= new int[ChunkConstants.PaddedVolume];
+        var seen = _seen ??= new byte[ChunkConstants.PaddedVolume];
+        seen.AsSpan().Clear();
+        Gather(pool.Seed, members, seen, out var count, out _);
+        var id = Born(pool, (float)(sum / surfaces), new Vector2((float)(x / surfaces), (float)(z / surfaces)));
+        Hold(members, count, id, 0);
+        return id;
+    }
+
+    /// <summary>Every connected set of wet free cells in the block (<see cref="Pool"/>).</summary>
+    public void Survey(List<Pool> into)
+    {
+        into.Clear();
+        var members = _flood ??= new int[ChunkConstants.PaddedVolume];
+        var seen = _seen ??= new byte[ChunkConstants.PaddedVolume];
+        seen.AsSpan().Clear();
+
+        for (var z = 0; z < S; z++)
+            for (var y = 0; y < S; y++)
+                for (var x = 0; x < S; x++)
+                {
+                    var i = ChunkConstants.Index(x, y, z);
+
+                    if (seen[i] == 0 && (Flags[i] & (SolidBit | HeldBit)) == 0 && Water[i] > WaterSurfaceMesher.WetThreshold)
+                        into.Add(Gather(i, members, seen, out _, out _));
+                }
+    }
+
+    /// <summary>Floods the wet free cells connected to <paramref name="start"/> into <paramref name="members"/> and surveys them; <paramref name="beside"/> is a body held next to them.</summary>
+    private Pool Gather(int start, int[] members, byte[] seen, out int count, out ushort beside)
+    {
+        var origin = Coord.WorldOrigin;
+        count = 0;
+        var read = 0;
+        members[count++] = start;
+        seen[start] = 1;
+        var surfaces = 0;
+        var sum = 0.0;
+        var low = float.MaxValue;
+        var high = float.MinValue;
+        var x = 0.0;
+        var z = 0.0;
+        var bottom = float.MaxValue;
+        var faces = (byte)0;
+        beside = 0;
+
+        while (read < count)
+        {
+            var i = members[read++];
+            var (ix, iy, iz) = (i % P - 1, i / P % P - 1, i / A - 1);
+            var worldY = Coord.Y * S + iy;
+            bottom = MathF.Min(bottom, worldY - 0.5f);
+
+            if (Surface(i))
+            {
+                var surface = worldY - 0.5f + MathF.Min(Water[i], 1f) + BedRise(Bed[i], Water[i]);
+                surfaces++;
+                sum += surface;
+                low = MathF.Min(low, surface);
+                high = MathF.Max(high, surface);
+                x += origin.X + ix;
+                z += origin.Z + iz;
+            }
+
+            for (var f = 0; f < 6; f++)
+            {
+                var n = i + (f >> 1 == 0 ? 1 : f >> 1 == 1 ? P : A) * ((f & 1) == 0 ? -1 : 1);
+                var (nx, ny, nz) = (n % P - 1, n / P % P - 1, n / A - 1);
+                var open = (Flags[n] & (SolidBit | HeldBit)) == 0 && Water[n] > WaterSurfaceMesher.WetThreshold && _flowColumn[nx + 1 + (nz + 1) * P] == WaterFlows.None;
+
+                if ((Flags[n] & HeldBit) != 0 && Body[n] > WaterBodies.Sea)
+                    beside = Body[n];
+
+                if ((uint)nx >= S || (uint)ny >= S || (uint)nz >= S)
+                {
+                    faces |= open ? (byte)(1 << f) : (byte)0;
+                    continue;
+                }
+
+                if (seen[n] != 0 || !open)
+                    continue;
+
+                seen[n] = 1;
+                members[count++] = n;
+            }
+        }
+
+        return new Pool(start, surfaces, sum, low, high, x, z, bottom, faces);
+    }
+
+    /// <summary>A body born of the pool, its area the pool's surface here.</summary>
+    private ushort Born(in Pool pool, float level, Vector2 centre)
+    {
+        var colour = Colour[pool.Seed] == WaterColour.None ? WaterColour.Lake : Colour[pool.Seed];
+        return Bodies.Add(level, pool.Surfaces, centre, 0f, pool.Bottom, colour, born: true);
+    }
+
+    /// <summary>Holds the flooded cells at the fill under the body's level and books what they lacked, with the surface they add.</summary>
+    private void Hold(int[] members, int count, ushort id, int surface)
+    {
+        var level = Bodies.Levels[id];
+        var paid = 0f;
+
+        for (var k = 0; k < count; k++)
+        {
+            var i = members[k];
+            var fill = WaterBodies.Fill(Coord.Y * S + i / P % P - 1, level);
+            paid += fill - Water[i];
+            Flags[i] = HeldBit;
+            Body[i] = id;
+            Water[i] = fill;
+        }
+
+        Note(id);
+        Take(id, paid, surface);
+    }
+
+    private static ChunkCoord Across(ChunkCoord at, int face) => (Face)face switch
+    {
+        Face.NegX => new ChunkCoord(at.X - 1, at.Y, at.Z),
+        Face.PosX => new ChunkCoord(at.X + 1, at.Y, at.Z),
+        Face.NegY => new ChunkCoord(at.X, at.Y - 1, at.Z),
+        Face.PosY => new ChunkCoord(at.X, at.Y + 1, at.Z),
+        Face.NegZ => new ChunkCoord(at.X, at.Y, at.Z - 1),
+        _ => new ChunkCoord(at.X, at.Y, at.Z + 1),
+    };
+
+    private static bool Visited(List<(ChunkCoord At, byte Faces)> blocks, ChunkCoord at)
+    {
+        foreach (var (c, _) in blocks)
+            if (c.Equals(at))
+                return true;
+
+        return false;
     }
 
     /// <summary>

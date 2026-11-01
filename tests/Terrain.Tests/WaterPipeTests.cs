@@ -791,6 +791,66 @@ public sealed class WaterPipeTests(ITestOutputHelper output)
     }
 
     /// <summary>
+    /// A pond across a block edge, 48 m² on each side: each block alone holds less than WaterBlock.MinBornSurface, so it was
+    /// never born. Counted with its neighbour's part (WaterBlock.BornAcross) it is born at the whole pool's level, and the
+    /// neighbour's part joins it. Under the minimum in all, 24 + 24 m², it stays free.
+    /// </summary>
+    [Fact]
+    public void PondAcrossABlockEdgeIsBornABody()
+    {
+        const float level = 32f + 3f;
+
+        (Sim, WaterBlock, WaterBlock) Pond(int z1)
+        {
+            var sim = new Sim();
+            var a = sim.Add(new ChunkCoord(0, 1, 0));
+            var b = sim.Add(new ChunkCoord(1, 1, 0));
+            CarveBox(a, 26, 1, 4, 31, 10, z1);
+            CarveBox(b, 0, 1, 4, 5, 10, z1);
+
+            for (var z = 4; z <= z1; z++)
+                for (var y = 1; y <= 3; y++)
+                    for (var x = 0; x < 6; x++)
+                    {
+                        a.Water[I(26 + x, y, z)] = WaterBodies.Fill(32 + y, level);
+                        b.Water[I(x, y, z)] = WaterBodies.Fill(32 + y, level);
+                    }
+
+            StepUntilSettled(sim, (int)(5f / Dt));
+            return (sim, a, b);
+        }
+
+        var (sim, a, b) = Pond(11);
+        a.JoinBodies();
+        a.BornBodies();
+        Assert.Empty(a.Joined);
+        var pool = Assert.Single(a.EdgePools);
+        Assert.Equal(48, pool.Surfaces);
+        Assert.Equal((byte)(1 << (int)Face.PosX), pool.Faces);
+
+        var id = a.BornAcross(pool, at => sim.Blocks.GetValueOrDefault(at));
+        Assert.True(id > WaterBodies.Sea);
+        Assert.True(sim.Bodies[id].Born);
+        Assert.Equal(level, sim.Bodies[id].Level, 0.05f);
+        Assert.Equal(31.5f, sim.Bodies[id].Centre.X, 0.01f);
+        Assert.Equal(id, a.Body[I(28, 2, 6)]);
+
+        WaterHalo.CopyFlags(b, a, Face.NegX);
+        b.JoinBodies();
+        var (joined, _, surface) = Assert.Single(b.Joined);
+        Assert.Equal(id, joined);
+        sim.Bodies.Took(joined, 0f, surface);
+        Assert.Equal(96f, sim.Bodies[id].Area);
+        Assert.Equal(id, b.Body[I(2, 1, 6)]);
+        Assert.False(b.HasFreeWater());
+
+        var (small, c, _) = Pond(7);
+        c.BornBodies();
+        Assert.Equal(WaterBodies.None, c.BornAcross(Assert.Single(c.EdgePools), at => small.Blocks.GetValueOrDefault(at)));
+        Assert.Empty(c.Joined);
+    }
+
+    /// <summary>
     /// Free water left standing level becomes a body (docs/voxel-water.md "Bodies of water"): a pond at rest in a box is
     /// born a body at its level with its surface as its area, its cells held; a step of its ledger moves its level and the
     /// refill lowers its held cells.
