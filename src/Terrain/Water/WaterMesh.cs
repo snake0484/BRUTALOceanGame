@@ -33,6 +33,9 @@ public sealed class WaterMesh
     public int VertexCount;
     public int IndexCount;
 
+    /// <summary>Bumped by every <see cref="Clear"/>, which starts every rebuild: an unchanged version is unchanged content.</summary>
+    public int Version;
+
     public ReadOnlySpan<WaterVertex> VertexSpan => Vertices.AsSpan(0, VertexCount);
     public ReadOnlySpan<uint> IndexSpan => Indices.AsSpan(0, IndexCount);
     public bool IsEmpty => IndexCount == 0;
@@ -41,6 +44,7 @@ public sealed class WaterMesh
     {
         VertexCount = 0;
         IndexCount = 0;
+        Version++;
     }
 
     public void EnsureCapacity(int vertices, int indices)

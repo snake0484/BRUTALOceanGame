@@ -10,25 +10,34 @@ using BrutalGame.Terrain.Water;
 namespace BrutalGame.Terrain.Runtime.Rendering;
 
 /// <summary>
-/// Draws voxel water surface meshes, re-streamed every frame into a host-visible per-frame ring.
-/// Main thread only. Per frame: Renderer.BeginFrame, BeginFrame, Add (per mesh), Draw (in the water pass, after the ocean).
+/// Draws voxel water surface meshes. Each mesh is cached in device-local vertex and index arenas and copied up again
+/// only when its <see cref="WaterMesh.Version"/> changes; a mesh not added in a frame is freed. Main thread only. Per
+/// frame, outside a render pass: Renderer.BeginFrame, BeginFrame, Add (per mesh), RecordUploads; then Draw (in the
+/// water pass, after the ocean).
 /// </summary>
 public sealed unsafe class VoxelWaterRenderer : IDisposable
 {
     public const int VertexStride = 40;
-    public const int RegionVertexBytes = 8 << 20;
-    public const int RegionIndexBytes = 8 << 20;
+    public const long VertexArenaBytes = 32L << 20;
+    public const long IndexArenaBytes = 16L << 20;
+    public const int StagingRegionBytes = 8 << 20;
     public const int MaxDraws = 1024;
 
-    private const int RegionVertices = RegionVertexBytes / VertexStride;
-    private const int RegionIndices = RegionIndexBytes / sizeof(uint);
+    /// <summary>Cached meshes: every one drawn this frame, and those dropped at the next <see cref="BeginFrame"/>.</summary>
+    private const int MaxEntries = 2 * MaxDraws;
+
+    // Live + pending-free ranges are capped so the arenas' free-block tables can never overflow.
+    private const int MaxRanges = 2 * MaxEntries;
     private const int UniformAlignment = 256;
     private const int PushConstantSize = 32;
     private const float CullMargin = 1f;
 
     private readonly Device _device;
-    private readonly GpuBuffer _vertices;
-    private readonly GpuBuffer _indices;
+    private readonly GpuBuffer _vertexArena;
+    private readonly GpuBuffer _indexArena;
+    private readonly GpuBuffer _staging;
+    private readonly RangeAllocator _vertexRanges;
+    private readonly RangeAllocator _indexRanges;
     private readonly GpuBuffer _uniforms;
     private readonly VkDescriptorSetLayout _setLayout;
     private readonly VkDescriptorPool _pool;
@@ -54,10 +63,44 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
     private readonly int[] _order = new int[MaxDraws];
     private readonly float[] _distance = new float[MaxDraws];
 
+    private readonly Dictionary<WaterMesh, int> _cache = new(MaxEntries);
+    private readonly Entry[] _entries = new Entry[MaxEntries];
+    private readonly int[] _freeEntries = new int[MaxEntries];
+    private readonly int[] _live = new int[MaxEntries];
+    private readonly PendingFree[] _pendingFrees = new PendingFree[MaxRanges];
+    private readonly VkBufferCopy[] _vertexCopies = new VkBufferCopy[MaxDraws];
+    private readonly VkBufferCopy[] _indexCopies = new VkBufferCopy[MaxDraws];
+
     private int _frameIndex = -1;
     private int _drawCount;
-    private int _vertexCursor;
-    private int _indexCursor;
+    private int _freeEntryCount;
+    private int _liveCount;
+    private int _pendingHead;
+    private int _pendingCount;
+    private int _copyCount;
+    private int _stagingCursor;
+    private long _submission;
+
+    private struct Entry
+    {
+        public WaterMesh? Mesh;
+        public int Version;
+        public int VertexOffset;
+        public int VertexCount;
+        public int IndexOffset;
+        public int IndexCount;
+        public long UsedAt;
+        public int LiveIndex;
+    }
+
+    private struct PendingFree
+    {
+        public int VertexOffset;
+        public int VertexCount;
+        public int IndexOffset;
+        public int IndexCount;
+        public long Stamp;
+    }
 
     private struct DrawEntry
     {
@@ -97,9 +140,19 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
         var context = renderer.Context;
         _device = context.Device;
 
-        _vertices = new GpuBuffer(context, RegionVertices * VertexStride * Renderer.FramesInFlight, VkBufferUsageFlags.VertexBufferBit, true);
-        _indices = new GpuBuffer(context, RegionIndices * sizeof(uint) * Renderer.FramesInFlight, VkBufferUsageFlags.IndexBufferBit, true);
+        var vertexCapacity = (int)(VertexArenaBytes / VertexStride);
+        var indexCapacity = (int)(IndexArenaBytes / sizeof(uint));
+        _vertexRanges = new RangeAllocator(vertexCapacity, MaxRanges + 1);
+        _indexRanges = new RangeAllocator(indexCapacity, MaxRanges + 1);
+        _vertexArena = new GpuBuffer(context, vertexCapacity * VertexStride, VkBufferUsageFlags.VertexBufferBit | VkBufferUsageFlags.TransferDstBit, false);
+        _indexArena = new GpuBuffer(context, indexCapacity * sizeof(uint), VkBufferUsageFlags.IndexBufferBit | VkBufferUsageFlags.TransferDstBit, false);
+        _staging = new GpuBuffer(context, StagingRegionBytes * Renderer.FramesInFlight, VkBufferUsageFlags.TransferSrcBit, true);
         _uniforms = new GpuBuffer(context, UniformStride * Renderer.FramesInFlight, VkBufferUsageFlags.UniformBufferBit, true);
+
+        for (var i = 0; i < MaxEntries; i++)
+            _freeEntries[i] = MaxEntries - 1 - i;
+
+        _freeEntryCount = MaxEntries;
 
         _setLayout = CreateSetLayout();
         _pool = CreatePool();
@@ -119,51 +172,215 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
 
     private static int UniformStride => (sizeof(FrameUniforms) + UniformAlignment - 1) / UniformAlignment * UniformAlignment;
 
-    /// <summary>Resets this frame's ring. Call after Renderer.BeginFrame so the frame's fence has been waited on.</summary>
+    public int CachedMeshes => _liveCount;
+
+    public long VertexBytesUsed => (long)_vertexRanges.Used * VertexStride;
+
+    public long IndexBytesUsed => (long)_indexRanges.Used * sizeof(uint);
+
+    /// <summary>Bytes copied up by the last <see cref="RecordUploads"/>.</summary>
+    public int UploadBytesLastFrame { get; private set; }
+
+    /// <summary>
+    /// Starts this frame's draw list and drops the meshes the last frame didn't add. Call after Renderer.BeginFrame so the
+    /// frame's fence (and with it its staging region) has been waited on.
+    /// </summary>
     public void BeginFrame(int frameIndex)
     {
         _frameIndex = frameIndex;
         _drawCount = 0;
-        _vertexCursor = 0;
-        _indexCursor = 0;
+        ReleaseDeferred();
+
+        for (var i = _liveCount - 1; i >= 0; i--)
+        {
+            var e = _live[i];
+
+            if (_entries[e].UsedAt < _submission - 1)
+                Drop(e);
+        }
     }
 
-    /// <summary>Copies the mesh into this frame's ring. Returns false if the ring or draw list is full.</summary>
+    /// <summary>
+    /// Draws the mesh this frame, copying it up first if it is new or changed. A mesh that can't be copied this frame (staging
+    /// or arena full) keeps its last version, or is left out until it can. Returns false once the draw list is full.
+    /// </summary>
     /// <param name="clip">A body's far plane: its centre (world x, z) and radius, outside which nothing is drawn; zero for a block's mesh.</param>
     public bool Add(ChunkCoord coord, WaterMesh mesh, Vector4 clip = default)
     {
-        var vertexCount = mesh.VertexCount;
-        var indexCount = mesh.IndexCount;
-
-        if (_frameIndex < 0)
+        if (_frameIndex < 0 || _drawCount == MaxDraws)
             return false;
 
-        if (vertexCount == 0 || indexCount == 0)
+        if (mesh.VertexCount == 0 || mesh.IndexCount == 0)
             return true;
 
-        if (_drawCount == MaxDraws || _vertexCursor + vertexCount > RegionVertices || _indexCursor + indexCount > RegionIndices)
-            return false;
+        var e = Cached(mesh);
 
-        var vertexBase = _frameIndex * RegionVertices + _vertexCursor;
-        var indexBase = _frameIndex * RegionIndices + _indexCursor;
+        if (e < 0)
+            return true;
 
-        var vertexDst = new Span<byte>((byte*)_vertices.Mapped + (long)vertexBase * VertexStride, vertexCount * VertexStride);
-        var indexDst = new Span<uint>((uint*)_indices.Mapped + indexBase, indexCount);
-        MemoryMarshal.AsBytes(mesh.Vertices.AsSpan(0, vertexCount)).CopyTo(vertexDst);
-        mesh.Indices.AsSpan(0, indexCount).CopyTo(indexDst);
-
+        ref var entry = ref _entries[e];
         _draws[_drawCount++] = new DrawEntry
         {
             Origin = coord.WorldOrigin,
             Size = coord.SizeMetres,
-            FirstIndex = indexBase,
-            VertexOffset = vertexBase,
-            IndexCount = indexCount,
+            FirstIndex = entry.IndexOffset,
+            VertexOffset = entry.VertexOffset,
+            IndexCount = entry.IndexCount,
             Clip = clip,
         };
-        _vertexCursor += vertexCount;
-        _indexCursor += indexCount;
         return true;
+    }
+
+    /// <summary>The mesh's entry, staged again if its version changed; -1 if it has none and can't be staged now.</summary>
+    private int Cached(WaterMesh mesh)
+    {
+        if (_cache.TryGetValue(mesh, out var e))
+        {
+            ref var entry = ref _entries[e];
+            entry.UsedAt = _submission;
+
+            if (entry.Version != mesh.Version && Stage(mesh, out var vertexOffset, out var indexOffset))
+            {
+                FreeRanges(entry);
+                entry.Version = mesh.Version;
+                entry.VertexOffset = vertexOffset;
+                entry.VertexCount = mesh.VertexCount;
+                entry.IndexOffset = indexOffset;
+                entry.IndexCount = mesh.IndexCount;
+            }
+
+            return e;
+        }
+
+        if (_freeEntryCount == 0 || !Stage(mesh, out var vertex, out var index))
+            return -1;
+
+        e = _freeEntries[--_freeEntryCount];
+        _entries[e] = new Entry
+        {
+            Mesh = mesh,
+            Version = mesh.Version,
+            VertexOffset = vertex,
+            VertexCount = mesh.VertexCount,
+            IndexOffset = index,
+            IndexCount = mesh.IndexCount,
+            UsedAt = _submission,
+            LiveIndex = _liveCount,
+        };
+        _live[_liveCount++] = e;
+        _cache.Add(mesh, e);
+        return e;
+    }
+
+    private bool Stage(WaterMesh mesh, out int vertexOffset, out int indexOffset)
+    {
+        vertexOffset = 0;
+        indexOffset = 0;
+        var vertexBytes = mesh.VertexCount * VertexStride;
+        var indexBytes = mesh.IndexCount * sizeof(uint);
+
+        if (_copyCount == MaxDraws || _liveCount + _pendingCount >= MaxRanges || _stagingCursor + vertexBytes + indexBytes > StagingRegionBytes)
+            return false;
+
+        vertexOffset = _vertexRanges.Allocate(mesh.VertexCount);
+
+        if (vertexOffset < 0)
+            return false;
+
+        indexOffset = _indexRanges.Allocate(mesh.IndexCount);
+
+        if (indexOffset < 0)
+        {
+            _vertexRanges.Release(vertexOffset, mesh.VertexCount);
+            return false;
+        }
+
+        var src = (long)_frameIndex * StagingRegionBytes + _stagingCursor;
+        var dst = (byte*)_staging.Mapped + src;
+        MemoryMarshal.AsBytes(mesh.Vertices.AsSpan(0, mesh.VertexCount)).CopyTo(new Span<byte>(dst, vertexBytes));
+        MemoryMarshal.AsBytes(mesh.Indices.AsSpan(0, mesh.IndexCount)).CopyTo(new Span<byte>(dst + vertexBytes, indexBytes));
+
+        _vertexCopies[_copyCount] = new VkBufferCopy
+        {
+            SrcOffset = (ByteSize64)src,
+            DstOffset = (ByteSize64)((long)vertexOffset * VertexStride),
+            Size = (ByteSize64)(long)vertexBytes,
+        };
+        _indexCopies[_copyCount] = new VkBufferCopy
+        {
+            SrcOffset = (ByteSize64)(src + vertexBytes),
+            DstOffset = (ByteSize64)((long)indexOffset * sizeof(uint)),
+            Size = (ByteSize64)(long)indexBytes,
+        };
+        _copyCount++;
+        _stagingCursor += vertexBytes + indexBytes;
+        return true;
+    }
+
+    private void Drop(int e)
+    {
+        ref var entry = ref _entries[e];
+        _cache.Remove(entry.Mesh!);
+        FreeRanges(entry);
+        entry.Mesh = null;
+
+        var last = _live[--_liveCount];
+        _live[entry.LiveIndex] = last;
+        _entries[last].LiveIndex = entry.LiveIndex;
+        _freeEntries[_freeEntryCount++] = e;
+    }
+
+    /// <summary>The entry's arena ranges are reused only once in-flight frames can no longer read them.</summary>
+    private void FreeRanges(in Entry entry)
+    {
+        ref var pending = ref _pendingFrees[(_pendingHead + _pendingCount) % MaxRanges];
+        pending.VertexOffset = entry.VertexOffset;
+        pending.VertexCount = entry.VertexCount;
+        pending.IndexOffset = entry.IndexOffset;
+        pending.IndexCount = entry.IndexCount;
+        pending.Stamp = _submission;
+        _pendingCount++;
+    }
+
+    // A range freed at stamp S was last read by submission S at the latest; it is idle once submission S + FramesInFlight has begun.
+    private void ReleaseDeferred()
+    {
+        while (_pendingCount > 0)
+        {
+            ref var pending = ref _pendingFrees[_pendingHead];
+
+            if (_submission < pending.Stamp + Renderer.FramesInFlight)
+                break;
+
+            _vertexRanges.Release(pending.VertexOffset, pending.VertexCount);
+            _indexRanges.Release(pending.IndexOffset, pending.IndexCount);
+            _pendingHead = (_pendingHead + 1) % MaxRanges;
+            _pendingCount--;
+        }
+    }
+
+    /// <summary>Once per frame after the Adds, outside a render pass: copies the staged meshes into the arenas.</summary>
+    public void RecordUploads(CommandBuffer commands)
+    {
+        UploadBytesLastFrame = _stagingCursor;
+
+        if (_copyCount > 0)
+        {
+            commands.CopyBuffer(_staging.Handle, _vertexArena.Handle, new ReadOnlySpan<VkBufferCopy>(_vertexCopies, 0, _copyCount));
+            commands.CopyBuffer(_staging.Handle, _indexArena.Handle, new ReadOnlySpan<VkBufferCopy>(_indexCopies, 0, _copyCount));
+            commands.PipelineBarrier(
+                VkPipelineStageFlags.TransferBit,
+                VkPipelineStageFlags.VertexInputBit,
+                VkDependencyFlags.None,
+                [new VkMemoryBarrier { SrcAccessMask = VkAccessFlags.TransferWriteBit, DstAccessMask = VkAccessFlags.VertexAttributeReadBit | VkAccessFlags.IndexReadBit }],
+                [],
+                []
+            );
+        }
+
+        _copyCount = 0;
+        _stagingCursor = 0;
+        _submission++;
     }
 
     /// <summary>Inside the water pass, after the ocean: frustum-culls and draws this frame's meshes.</summary>
@@ -190,8 +407,8 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
 
         commands.BindPipeline(VkPipelineBindPoint.Graphics, _pipeline);
         commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex], _reflections.Set(frameIndex)], []);
-        commands.BindVertexBuffers(0, [_vertices.Handle], [(ByteSize64)0]);
-        commands.BindIndexBuffer(_indices.Handle, (ByteSize64)0, VkIndexType.UInt32);
+        commands.BindVertexBuffers(0, [_vertexArena.Handle], [(ByteSize64)0]);
+        commands.BindIndexBuffer(_indexArena.Handle, (ByteSize64)0, VkIndexType.UInt32);
         commands.SetViewport(0, [new VkViewport { Width = extent.Width, Height = extent.Height, MaxDepth = 1f }]);
         commands.SetScissor(0, [new VkRect2D { Extent = extent }]);
 
@@ -493,7 +710,8 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
         _device.DestroyDescriptorSetLayout(_setLayout, null);
 
         _uniforms.Dispose();
-        _indices.Dispose();
-        _vertices.Dispose();
+        _staging.Dispose();
+        _indexArena.Dispose();
+        _vertexArena.Dispose();
     }
 }

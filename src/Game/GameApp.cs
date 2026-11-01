@@ -309,6 +309,9 @@ public sealed class GameApp : IDisposable
                 mark = Stopwatch.GetTimestamp();
                 gpu.Begin(commands, _uploadScope);
                 _terrainRenderer.RecordUploads(commands, _renderer.FrameIndex);
+                _waterRenderer.BeginFrame(_renderer.FrameIndex);
+                _water.SubmitMeshes(_waterRenderer);
+                _waterRenderer.RecordUploads(commands);
                 _bathymetry.Record(commands, _renderer.FrameIndex, _terrain.Bathymetry, _clock.TickIndex);
                 (_terrainPanel.MapUploadMs, _terrainPanel.MapUploadCells) = (_bathymetry.LastUploadMs, _bathymetry.LastUploadCells);
                 gpu.End(commands, _uploadScope);
@@ -367,8 +370,6 @@ public sealed class GameApp : IDisposable
                 gpu.End(commands, _oceanScope);
 
                 gpu.Begin(commands, _waterScope);
-                _waterRenderer.BeginFrame(_renderer.FrameIndex);
-                _water.SubmitMeshes(_waterRenderer);
                 _waterRenderer.Draw(commands, _renderer.FrameIndex, extent, viewProj, _camera.Position, SceneLightingFromOcean(), (float)(renderTime % 1000.0), _rain.Surface, _rain.Wind);
                 gpu.End(commands, _waterScope);
 
