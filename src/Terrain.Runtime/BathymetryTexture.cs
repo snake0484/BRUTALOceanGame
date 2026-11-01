@@ -193,6 +193,7 @@ public sealed unsafe class BathymetryTexture : IDisposable
 
         // Terrain regions show the same on both layers; the zone region (cells that moved this tick, and those that
         // stop blending) gets its own layer 1. It is filled and copied last, so its layer 1 wins where they overlap.
+        // The strips a shift brings in are cleared on the GPU (RecordShift); regions the grid rebuilt there are uploaded over them.
         var count = 0;
         if (full)
             _uploads[count++] = Region.All;
@@ -200,8 +201,6 @@ public sealed unsafe class BathymetryTexture : IDisposable
         {
             foreach (var region in grid.ChangedRegions)
                 _uploads[count++] = region;
-
-            count += BathymetryGrid.Exposed(shift.X, shift.Z, _uploads.AsSpan(count, 2));
         }
 
         var zone = full ? default : Join(levels, stale);
@@ -293,6 +292,14 @@ public sealed unsafe class BathymetryTexture : IDisposable
         ]);
 
         Transition(commands, _image, VkImageLayout.TransferSrcOptimal, VkImageLayout.TransferDstOptimal, VkPipelineStageFlags.TransferBit, VkAccessFlags.TransferWriteBit, range);
+
+        // The strips that came in hold what the grid's do: unknown ground, no zone. Clearing it all and copying the kept
+        // part back over it fills them on the GPU instead of the CPU writing and uploading every exposed cell.
+        var unknown = new VkClearColorValue { Float32 = new Brutal.Numerics.float4(BathymetryGrid.UnknownDepth, 0f, 0f, 0f) };
+        commands.ClearColorImage(_image, VkImageLayout.TransferDstOptimal, &unknown, [range]);
+        commands.PipelineBarrier(VkPipelineStageFlags.TransferBit, VkPipelineStageFlags.TransferBit, VkDependencyFlags.None,
+            [new VkMemoryBarrier { SrcAccessMask = VkAccessFlags.TransferWriteBit, DstAccessMask = VkAccessFlags.TransferWriteBit }], [], []);
+
         Transition(commands, _scratch, VkImageLayout.TransferDstOptimal, VkImageLayout.TransferSrcOptimal, VkPipelineStageFlags.TransferBit, VkAccessFlags.TransferReadBit, range,
             VkAccessFlags.TransferWriteBit);
         commands.CopyImage(_scratch, VkImageLayout.TransferSrcOptimal, _image, VkImageLayout.TransferDstOptimal,

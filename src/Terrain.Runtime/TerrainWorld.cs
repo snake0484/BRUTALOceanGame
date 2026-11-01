@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Brutal.Concurrency.Jobs;
 using BrutalGame.Engine.Jobs;
 using BrutalGame.Physics;
@@ -42,13 +43,15 @@ public sealed class TerrainWorld : IDisposable
     private readonly Stack<ChunkRecord> _recordPool = new(8192);
     private readonly HashSet<ChunkCoord> _desired = new(8192);
     private readonly List<ChunkCoord> _desiredOrder = new(8192);
+
+    /// <summary>Each desired leaf's priority (distance in its own voxels), parallel to <see cref="_desiredOrder"/> and sorted with it.</summary>
+    private readonly List<float> _desiredKeys = new(8192);
     private readonly List<ChunkCoord> _scratch = new(8192);
     private static readonly long RetireBudget = Stopwatch.Frequency / 2000;
     private int _retireCursor;
     private readonly List<ChunkCoord> _dirty = new(256);
     private readonly List<BrushOp> _ops = new(1024);
     private readonly int[] _leavesPerLod = new int[MaxLodCount];
-    private readonly Comparison<ChunkCoord> _byPriority;
     private Vector3 _camera;
     private ChunkCoord _cameraChunk = new(int.MinValue, 0, 0);
     private bool _bathymetryDirty;
@@ -105,7 +108,6 @@ public sealed class TerrainWorld : IDisposable
         _renderer = renderer;
         _physics = physics;
         _scheduler = new JobScheduler((uint)WorkerBudget.Streaming, "Terrain", ThreadPriority.BelowNormal);
-        _byPriority = ComparePriority;
 
         for (var i = 0; i < JobPoolSize; i++)
             _pool.Push(new ChunkJob());
@@ -221,6 +223,7 @@ public sealed class TerrainWorld : IDisposable
         var start = Stopwatch.GetTimestamp();
         _desired.Clear();
         _desiredOrder.Clear();
+        _desiredKeys.Clear();
         Array.Clear(_leavesPerLod);
 
         var root = ChunkCoord.FromWorld(_camera, MaxLod);
@@ -233,7 +236,7 @@ public sealed class TerrainWorld : IDisposable
                 for (var x = -RootRadius; x <= RootRadius; x++)
                     Select(new ChunkCoord(root.X + x, y, root.Z + z, MaxLod));
 
-        _desiredOrder.Sort(_byPriority);
+        CollectionsMarshal.AsSpan(_desiredKeys).Sort(CollectionsMarshal.AsSpan(_desiredOrder));
         LastSelectMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
         Selects++;
     }
@@ -257,6 +260,7 @@ public sealed class TerrainWorld : IDisposable
 
         _desired.Add(node);
         _desiredOrder.Add(node);
+        _desiredKeys.Add(DistanceToNode(node) / node.VoxelScale);
         _leavesPerLod[node.Lod]++;
     }
 
@@ -267,9 +271,6 @@ public sealed class TerrainWorld : IDisposable
         var closest = Vector3.Clamp(_camera, min, min + new Vector3(size));
         return Vector3.Distance(_camera, closest);
     }
-
-    private int ComparePriority(ChunkCoord a, ChunkCoord b) =>
-        (DistanceToNode(a) / a.VoxelScale).CompareTo(DistanceToNode(b) / b.VoxelScale);
 
     private void CollectBatch()
     {
