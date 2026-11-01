@@ -17,8 +17,8 @@ namespace BrutalGame.Terrain.Runtime.Rendering;
 public sealed unsafe class TerrainRenderer : IDisposable
 {
     public const int MaxHandles = 8192;
-    public const int VertexStride = 28;
-    public const long VertexArenaBytes = 96L << 20;
+    public const int VertexStride = PackedTerrainVertex.SizeInBytes;
+    public const long VertexArenaBytes = 48L << 20;
     public const long IndexArenaBytes = 96L << 20;
     public const int StagingRegionBytes = 16 << 20;
     public const int MaxUploadsPerFrame = 1024;
@@ -101,8 +101,8 @@ public sealed unsafe class TerrainRenderer : IDisposable
     {
         _fog = fog;
 
-        if (sizeof(TerrainVertex) != VertexStride)
-            throw new InvalidOperationException($"TerrainVertex is {sizeof(TerrainVertex)} bytes, expected {VertexStride}.");
+        if (sizeof(PackedTerrainVertex) != VertexStride)
+            throw new InvalidOperationException($"PackedTerrainVertex is {sizeof(PackedTerrainVertex)} bytes, expected {VertexStride}.");
 
         var context = renderer.Context;
         _device = context.Device;
@@ -209,7 +209,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
         var src = regionStart + _stagingCursor;
         var dst = (byte*)_staging.Mapped + src;
 
-        MemoryMarshal.AsBytes(mesh.Vertices.AsSpan(0, vertexCount)).CopyTo(new Span<byte>(dst, vertexBytes));
+        MemoryMarshal.AsBytes(mesh.Packed.AsSpan(0, vertexCount)).CopyTo(new Span<byte>(dst, vertexBytes));
         MemoryMarshal.AsBytes(mesh.Indices.AsSpan(0, indexCount)).CopyTo(new Span<byte>(dst + vertexBytes, indexBytes));
 
         _vertexCopies[_copyCount] = new VkBufferCopy
@@ -328,7 +328,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
             if (slot.IndexCount == 0 || slot.CopiedAt >= _submission || !Visible(planes, slot.Origin, slot.VoxelScale))
                 continue;
 
-            push = new Vector4(slot.Origin, 0f);
+            push = new Vector4(slot.Origin, slot.VoxelScale * PackedTerrainVertex.InvStepsPerVoxel);
             commands.PushConstants(_layout, VkShaderStageFlags.VertexBit, 0, new ReadOnlySpan<byte>(&push, PushConstantSize));
             commands.DrawIndexed(slot.IndexCount, 1, slot.IndexOffset, slot.VertexOffset, 0);
             drawn++;
@@ -496,16 +496,15 @@ public sealed unsafe class TerrainRenderer : IDisposable
                 };
                 var attributes = stackalloc VkVertexInputAttributeDescription[]
                 {
-                    new() { Location = 0, Binding = 0, Format = VkFormat.R32G32B32SFloat, Offset = (ByteSize32)0 },
-                    new() { Location = 1, Binding = 0, Format = VkFormat.R32G32B32SFloat, Offset = (ByteSize32)12 },
-                    new() { Location = 2, Binding = 0, Format = VkFormat.R32UInt, Offset = (ByteSize32)24 },
+                    new() { Location = 0, Binding = 0, Format = VkFormat.R16G16B16A16UInt, Offset = (ByteSize32)0 },
+                    new() { Location = 1, Binding = 0, Format = VkFormat.R16G16SNorm, Offset = (ByteSize32)8 },
                 };
 
                 var vertexInput = new VkPipelineVertexInputStateCreateInfo
                 {
                     VertexBindingDescriptionCount = 1,
                     VertexBindingDescriptions = &binding,
-                    VertexAttributeDescriptionCount = 3,
+                    VertexAttributeDescriptionCount = 2,
                     VertexAttributeDescriptions = attributes,
                 };
                 var inputAssembly = new VkPipelineInputAssemblyStateCreateInfo { Topology = VkPrimitiveTopology.TriangleList };

@@ -8,6 +8,7 @@ namespace BrutalGame.Terrain;
 /// Skirts (docs/terrain-lod.md): a border vertex is one whose cell index is -1 or 31 on some axis (the cell layers
 /// shared with a neighbour). An edge used by exactly one triangle whose two vertices share a border face is open;
 /// each open edge gets a quad extruded 1 voxel against the edge's average normal, wound like its triangle.
+/// Ends by packing the GPU vertices (<see cref="PackedTerrainVertex"/>) on the meshing thread.
 /// </summary>
 public sealed class SurfaceNetsMesher
 {
@@ -130,6 +131,8 @@ public sealed class SurfaceNetsMesher
 
         if (skirts)
             AddSkirts(output, scale);
+
+        output.Pack(scale);
     }
 
     private void AddSkirts(ChunkMesh output, float scale)

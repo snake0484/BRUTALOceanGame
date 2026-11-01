@@ -84,16 +84,24 @@ public static class TerrainGenerator
 
 ```csharp
 [StructLayout(LayoutKind.Sequential)]
-public struct TerrainVertex      // 28 bytes, matches the GPU vertex input
+public struct TerrainVertex      // 28 bytes, full precision: collision and meshing
 {
     public Vector3 Position;     // chunk-local metres
     public Vector3 Normal;       // normalised, pointing into air
     public uint Material;
 }
 
+public struct PackedTerrainVertex  // 12 bytes, the GPU vertex input (terrain.vert)
+{
+    public ushort X, Y, Z;       // chunk-local, 1/1024 voxel steps from 16 voxels below the origin: [-16, 48) voxels
+    public ushort Material;
+    public short NormalU, NormalV; // octahedral normal, snorm16
+}
+
 public sealed class ChunkMesh  // reusable output buffers; grows capacity when needed, never shrinks
 {
     public TerrainVertex[] Vertices;
+    public PackedTerrainVertex[] Packed; // written by Pack at the end of Mesh, on the meshing thread
     public int VertexCount;
     public uint[] Indices;
     public int IndexCount;
@@ -108,6 +116,9 @@ public sealed class SurfaceNetsMesher   // one per worker thread; not thread-saf
 
 - **Vertices:** one per cell with a sign change, placed at the average of the edge crossings (classic Surface Nets).
 - **Normal:** the trilinear gradient of the cell's 8 corner densities, pointing toward positive (air).
+- **GPU vertex:** surface vertices sit on a 1/256 voxel grid, so the 1/1024 voxel fixed point holds them exactly (seams
+  match the float mesh bit for bit); skirt vertices round to within 0.49 mm × voxel size. Normals round-trip within
+  0.004°. The shader rebuilds the position as `(q - 16384) × voxelSize / 1024 + origin` (`tests/Terrain.Tests/PackedTerrainVertexTests.cs`).
 - **Material:** the most common solid material among the cell's corners.
 - **Watertight seams:** a chunk emits quads only for crossing edges whose base corner lies in local [0, 32). Vertices for apron cells (local index −1) are computed as needed. Two neighbouring chunks therefore produce bit-identical positions on their shared boundary, and each boundary quad is emitted exactly once.
 - **Winding:** counter-clockwise when viewed from the air side, with Vulkan's y-down clip handled by the projection matrix. Equivalently: the triangle normal (cross(b − a, c − a)) points into air, i.e. agrees with the vertex normal.

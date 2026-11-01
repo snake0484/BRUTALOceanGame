@@ -4,6 +4,9 @@ public sealed class ChunkMesh(int vertexCapacity = 4096, int indexCapacity = 163
 {
     public TerrainVertex[] Vertices = new TerrainVertex[vertexCapacity];
     public int VertexCount;
+
+    /// <summary>The GPU copy of <see cref="Vertices"/>, written by <see cref="Pack"/>.</summary>
+    public PackedTerrainVertex[] Packed = new PackedTerrainVertex[vertexCapacity];
     public uint[] Indices = new uint[indexCapacity];
     public int IndexCount;
 
@@ -15,6 +18,20 @@ public sealed class ChunkMesh(int vertexCapacity = 4096, int indexCapacity = 163
     {
         VertexCount = 0;
         IndexCount = 0;
+    }
+
+    /// <summary>Encodes the vertices for the GPU; positions are chunk-local metres at <paramref name="voxelScale"/>.</summary>
+    public void Pack(float voxelScale)
+    {
+        if (Packed.Length < VertexCount)
+            Packed = new PackedTerrainVertex[Vertices.Length];
+
+        var invScale = 1f / voxelScale;
+        var vertices = Vertices;
+        var packed = Packed;
+
+        for (var i = 0; i < VertexCount; i++)
+            packed[i] = PackedTerrainVertex.Encode(vertices[i], invScale);
     }
 
     internal void EnsureCapacity(int vertices, int indices)
