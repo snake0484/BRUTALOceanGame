@@ -138,36 +138,13 @@ public sealed unsafe class Renderer : IDisposable
 
         const VkAccessFlags writes = VkAccessFlags.ColorAttachmentWriteBit | VkAccessFlags.DepthStencilAttachmentWriteBit;
         const VkAccessFlags reads = VkAccessFlags.ColorAttachmentReadBit | VkAccessFlags.DepthStencilAttachmentReadBit;
-        var dependencies = stackalloc VkSubpassDependency[2];
 
-        if (opaque)
+        // Identical in both passes, as render pass compatibility requires. Into the pass: the previous frame's depth
+        // writes (the shared depth image is cleared), or the opaque pass and the copies out of it. Out of the pass:
+        // the colour and depth copied for reflections.
+        var dependencies = stackalloc VkSubpassDependency[]
         {
-            // Shared depth image: previous frame's depth writes must finish before this frame clears it.
-            dependencies[0] = new VkSubpassDependency
-            {
-                SrcSubpass = VK.SUBPASS_EXTERNAL,
-                DstSubpass = 0,
-                SrcStageMask = stages,
-                DstStageMask = stages,
-                SrcAccessMask = VkAccessFlags.DepthStencilAttachmentWriteBit,
-                DstAccessMask = writes,
-            };
-
-            // The colour and depth are copied after the pass.
-            dependencies[1] = new VkSubpassDependency
-            {
-                SrcSubpass = 0,
-                DstSubpass = VK.SUBPASS_EXTERNAL,
-                SrcStageMask = stages,
-                DstStageMask = VkPipelineStageFlags.TransferBit,
-                SrcAccessMask = writes,
-                DstAccessMask = VkAccessFlags.TransferReadBit,
-            };
-        }
-        else
-        {
-            // After the opaque pass and the copies out of it (skipped while reflections are off).
-            dependencies[0] = new VkSubpassDependency
+            new VkSubpassDependency
             {
                 SrcSubpass = VK.SUBPASS_EXTERNAL,
                 DstSubpass = 0,
@@ -175,8 +152,17 @@ public sealed unsafe class Renderer : IDisposable
                 DstStageMask = stages,
                 SrcAccessMask = writes,
                 DstAccessMask = reads | writes,
-            };
-        }
+            },
+            new VkSubpassDependency
+            {
+                SrcSubpass = 0,
+                DstSubpass = VK.SUBPASS_EXTERNAL,
+                SrcStageMask = stages,
+                DstStageMask = VkPipelineStageFlags.TransferBit,
+                SrcAccessMask = writes,
+                DstAccessMask = VkAccessFlags.TransferReadBit,
+            },
+        };
 
         return Context.Device.CreateRenderPass(
             new VkRenderPassCreateInfo
@@ -185,7 +171,7 @@ public sealed unsafe class Renderer : IDisposable
                 Attachments = attachments,
                 SubpassCount = 1,
                 Subpasses = &subpass,
-                DependencyCount = opaque ? 2 : 1,
+                DependencyCount = 2,
                 Dependencies = dependencies,
             },
             null
