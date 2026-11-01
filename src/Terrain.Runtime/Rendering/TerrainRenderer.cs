@@ -140,6 +140,8 @@ public sealed unsafe class TerrainRenderer : IDisposable
 
     public int DrawnLastFrame { get; private set; }
 
+    public int TrianglesLastFrame { get; private set; }
+
     public long VertexBytesUsed => (long)_vertexRanges.Used * VertexStride;
 
     public long IndexBytesUsed => (long)_indexRanges.Used * sizeof(uint);
@@ -321,6 +323,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
         var planes = stackalloc Vector4[6];
         ExtractPlanes(viewProj, planes);
         var drawn = 0;
+        var indices = 0;
         var push = Vector4.Zero;
 
         for (var i = 0; i < _liveCount; i++)
@@ -334,9 +337,11 @@ public sealed unsafe class TerrainRenderer : IDisposable
             commands.PushConstants(_layout, VkShaderStageFlags.VertexBit, 0, new ReadOnlySpan<byte>(&push, PushConstantSize));
             commands.DrawIndexed(slot.IndexCount, 1, slot.IndexOffset, slot.VertexOffset, 0);
             drawn++;
+            indices += slot.IndexCount;
         }
 
         DrawnLastFrame = drawn;
+        TrianglesLastFrame = indices / 3;
     }
 
     // Row-vector convention (clip = v * M): clip component j is column j. Planes: w±x, w±y, z >= 0, w - z >= 0 (reverse-Z near).

@@ -46,6 +46,9 @@ public sealed class WeatherMap
 
     public int Rebuilds { get; private set; }
 
+    /// <summary>Bumped whenever the snapshot pair <see cref="Sample(float, float)"/> blends between changes.</summary>
+    public int Version { get; private set; }
+
     /// <summary>Advances to weather time <paramref name="time"/> (s); snapshots started from now on centre on <paramref name="centre"/>.</summary>
     public void Tick(double time, Vector2 centre)
     {
@@ -65,25 +68,43 @@ public sealed class WeatherMap
 
     public WeatherSample Sample(float x, float z)
     {
-        var t = (float)Math.Clamp((Time - _from.Time) / Interval, 0.0, 1.0);
-        return WeatherSample.Lerp(Sample(_from, x, z), Sample(_to, x, z), t);
+        var t = Blend;
+        var from = TrySample(_from, x, z, out var a) ? a : Field.Sample(x, z, _from.Time);
+        var to = TrySample(_to, x, z, out var b) ? b : Field.Sample(x, z, _to.Time);
+        return WeatherSample.Lerp(from, to, t);
     }
 
-    private WeatherSample Sample(Snapshot snapshot, float x, float z)
+    /// <summary>As <see cref="Sample(float, float)"/> from the snapshots alone: false, without the analytic fallback, off their grid.</summary>
+    public bool TrySample(float x, float z, out WeatherSample sample)
+    {
+        sample = default;
+
+        if (!TrySample(_from, x, z, out var from) || !TrySample(_to, x, z, out var to))
+            return false;
+
+        sample = WeatherSample.Lerp(from, to, Blend);
+        return true;
+    }
+
+    private float Blend => (float)Math.Clamp((Time - _from.Time) / Interval, 0.0, 1.0);
+
+    private static bool TrySample(Snapshot snapshot, float x, float z, out WeatherSample sample)
     {
         var u = (x - snapshot.Origin.X) / Spacing;
         var v = (z - snapshot.Origin.Y) / Spacing;
         var i = (int)MathF.Floor(u);
         var j = (int)MathF.Floor(v);
+        sample = default;
 
         if (i < 0 || j < 0 || i >= Size - 1 || j >= Size - 1)
-            return Field.Sample(x, z, snapshot.Time);
+            return false;
 
         var cells = snapshot.Cells;
         var c = j * Size + i;
         var near = WeatherSample.Lerp(cells[c], cells[c + 1], u - i);
         var far = WeatherSample.Lerp(cells[c + Size], cells[c + Size + 1], u - i);
-        return WeatherSample.Lerp(near, far, v - j);
+        sample = WeatherSample.Lerp(near, far, v - j);
+        return true;
     }
 
     /// <summary>Into the next interval: the baked snapshot becomes the far end and the one after starts baking.</summary>
@@ -92,6 +113,7 @@ public sealed class WeatherMap
         BakeRows(Size);
         (_from, _to, _baking) = (_to, _baking, _from);
         _interval++;
+        Version++;
         StartBake(_baking, (_interval + 2) * Interval, centre);
     }
 
@@ -108,6 +130,7 @@ public sealed class WeatherMap
 
         LastRebuildMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
         Rebuilds++;
+        Version++;
     }
 
     private void StartBake(Snapshot snapshot, double time, Vector2 centre)

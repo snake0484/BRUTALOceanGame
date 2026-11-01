@@ -98,6 +98,13 @@ public sealed class GameApp : IDisposable
     private readonly int _terrainScope;
     private readonly int _uploadScope;
 
+    /// <summary>Pipeline statistics scopes (<see cref="PipelineStats"/>): sequential, never nested.</summary>
+    private readonly int _terrainStats;
+    private readonly int _oceanStats;
+    private readonly int _waterStats;
+    private readonly int _rainStats;
+    private readonly int _uiStats;
+
     /// <param name="camera">Optional start pose: x, y, z, yaw degrees, pitch degrees.</param>
     public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool floodTest = false, int waterRate = 240, bool hideUi = false, bool seasideTest = false, bool coastal = true, double benchSeconds = 0.0, bool breakers = false, bool surfTest = false, bool faces = true, bool lips = true, bool flyTest = false, bool surfCam = false, bool surfSide = false, float[]? swell = null, bool foldLip = false, bool surfBack = false, bool chainLips = false, bool weather = true, float weatherOffset = 0f, float rain = -1f, bool benchRain = false, bool roofTest = false, string? caveTest = null, bool waterPipes = false, bool pondTest = false, string? lakeTest = null, bool benchFog = false, bool fogOn = true, bool benchSsr = false, bool ssrOn = true, bool voxelSwell = true, string? riverTest = null)
     {
@@ -123,7 +130,6 @@ public sealed class GameApp : IDisposable
         _imgui = new ImGuiLayer(_window, _renderer);
         _rainCover = new RainCover(_renderer.Context);
         _fog = new WaterFogVolume(_renderer.Context) { SeaColour = new System.Numerics.Vector4(WaterColour.R(WaterColour.Sea), WaterColour.G(WaterColour.Sea), WaterColour.B(WaterColour.Sea), WaterColour.A(WaterColour.Sea)) / 255f };
-        _profiler = new ProfilerPanel(_stats, _renderer, _rainCover, _fog);
         _reflections = new ScreenReflections(_renderer) { Enabled = ssrOn };
 
         var wind = new SwellParams
@@ -184,6 +190,7 @@ public sealed class GameApp : IDisposable
         _ocean = new OceanRenderer(_renderer, _oceanFft, _bathymetry.View, _bathymetry.Sampler, _rainCover, _fog, _reflections) { FacesEnabled = faces };
         _rain = new RainRenderer(_renderer, _ocean);
         _flyTest = flyTest ? new FlyTest(_camera, _terrain, _bathymetry, _coastal, _rainCover) : null;
+        _profiler = new ProfilerPanel(_stats, _renderer, _rainCover, _fog, _terrainRenderer, _ocean, _waterRenderer);
 
         _uploadScope = _renderer.GpuTimer.Register("Uploads");
         _fftScope = _renderer.GpuTimer.Register("Ocean FFT");
@@ -195,6 +202,13 @@ public sealed class GameApp : IDisposable
         _fogScope = _renderer.GpuTimer.Register("Fog volume");
         _reflectionScope = _renderer.GpuTimer.Register("Reflection copy");
         _uiScope = _renderer.GpuTimer.Register("ImGui");
+
+        var pipelineStats = _renderer.PipelineStats;
+        _terrainStats = pipelineStats.Register("Terrain", PipelinePass.Opaque);
+        _oceanStats = pipelineStats.Register("Ocean", PipelinePass.Water);
+        _waterStats = pipelineStats.Register("Voxel water", PipelinePass.Water);
+        _rainStats = pipelineStats.Register("Rain", PipelinePass.Water);
+        _uiStats = pipelineStats.Register("ImGui", PipelinePass.Overlay);
 
         _clearSky = SceneLightingFromOcean();
         UpdateWeather();
@@ -305,6 +319,7 @@ public sealed class GameApp : IDisposable
                 var aspect = extent.Width / (float)extent.Height;
                 var renderTime = _swell.Time + _clock.Alpha * _clock.TickSeconds;
                 var gpu = _renderer.GpuTimer;
+                var pipe = _renderer.PipelineStats;
                 var viewProj = _camera.ViewProjection(aspect);
 
                 mark = Stopwatch.GetTimestamp();
@@ -356,7 +371,9 @@ public sealed class GameApp : IDisposable
                 _renderer.BeginOpaquePass(commands);
 
                 gpu.Begin(commands, _terrainScope);
+                pipe.Begin(commands, _terrainStats);
                 _terrainRenderer.Draw(commands, _renderer.FrameIndex, extent, viewProj, _camera.Position, TerrainLightingFromOcean());
+                pipe.End(commands, _terrainStats);
                 gpu.End(commands, _terrainScope);
 
                 // The opaque scene, before any water, is what every water reflects.
@@ -367,22 +384,31 @@ public sealed class GameApp : IDisposable
                 _renderer.BeginWaterPass(commands);
 
                 gpu.Begin(commands, _oceanScope);
+                pipe.Begin(commands, _oceanStats);
                 _ocean.Record(commands, _renderer.FrameIndex, extent, _camera.Position, _breakerFaces.SegmentCount);
+                pipe.End(commands, _oceanStats);
                 gpu.End(commands, _oceanScope);
 
                 gpu.Begin(commands, _waterScope);
+                pipe.Begin(commands, _waterStats);
                 _waterRenderer.Draw(commands, _renderer.FrameIndex, extent, viewProj, _camera.Position, SceneLightingFromOcean(), (float)(renderTime % 1000.0), _rain.Surface, _rain.Wind);
+                pipe.End(commands, _waterStats);
                 gpu.End(commands, _waterScope);
 
+                pipe.Begin(commands, _rainStats);
                 _rain.Record(commands, _renderer.FrameIndex, extent);
+                pipe.End(commands, _rainStats);
 
                 gpu.Begin(commands, _uiScope);
+                pipe.Begin(commands, _uiStats);
                 _imgui.Draw(commands);
+                pipe.End(commands, _uiStats);
                 gpu.End(commands, _uiScope);
                 _renderer.EndFrame();
             }
 
             _stats.Frame.Record((float)(frameSeconds * 1000.0));
+            _stats.RecordAllocations();
             _sections.Record = _stats.Record.Last;
             _sections.Present = _stats.Present.Last;
             _sections.GpuWait = _stats.GpuWait.Last;
@@ -499,6 +525,7 @@ public sealed class GameApp : IDisposable
         var uiStart = Stopwatch.GetTimestamp();
         _imgui.NewFrame();
         _profiler.Draw();
+        _renderer.PipelineStats.Enabled = _profiler.Open && _profiler.PipelineStatsOn;
         _oceanPanel.BreakerCount = _breakers.Count;
         _oceanPanel.SurfTexels = _breakers.SurfTexels;
         _oceanPanel.Draw();

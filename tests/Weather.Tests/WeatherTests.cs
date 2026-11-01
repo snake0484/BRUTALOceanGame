@@ -187,6 +187,21 @@ public sealed class WeatherTests(ITestOutputHelper output)
         Assert.True(maxCloud < 0.005f);
     }
 
+    /// <summary>The snapshot-only sample is the full sample on the grid and declines off it, where the full one falls back to the field.</summary>
+    [Fact]
+    public void TrySampleMatchesSampleOnTheGridOnly()
+    {
+        var map = new WeatherMap(Field(6));
+        map.Tick(1_000.0, Vector2.Zero);
+        map.Tick(1_002.5, Vector2.Zero);
+
+        Assert.True(map.TrySample(1_250f, -3_600f, out var inside));
+        AssertBitIdentical(inside, map.Sample(1_250f, -3_600f));
+        Assert.False(map.TrySample(15_600f, 0f, out _));
+        Assert.False(map.TrySample(0f, -16_100f, out _));
+        Assert.False(map.TrySample(40_000f, 40_000f, out _));
+    }
+
     [Fact]
     public void TimeJumpRebuildsAndMatchesField()
     {

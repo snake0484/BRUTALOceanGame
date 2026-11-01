@@ -99,6 +99,9 @@ public sealed unsafe class OceanRenderer : IDisposable
     /// <summary>Clipmap tiles drawn last frame, out of all of them.</summary>
     public int TilesDrawn { get; private set; }
 
+    /// <summary>Clipmap surface triangles drawn last frame (the patch, lips and spray not counted).</summary>
+    public int TrianglesLastFrame { get; private set; }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct FrameHeader
     {
@@ -1103,6 +1106,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         _timer.Begin(commands, _surfaceScope);
 
         var drawn = 0;
+        var indices = 0;
 
         for (var level = 0; level < Levels; level++)
         {
@@ -1135,12 +1139,14 @@ public sealed unsafe class OceanRenderer : IDisposable
 
                 commands.DrawIndexed(count, 1, _tileFirst[variant * Tiles + tile], 0, 0);
                 drawn++;
+                indices += count;
             }
 
             spacing *= 2f;
         }
 
         TilesDrawn = drawn;
+        TrianglesLastFrame = indices / 3;
 
         _timer.End(commands, _surfaceScope);
 

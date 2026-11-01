@@ -22,6 +22,7 @@ public sealed unsafe class Renderer : IDisposable
     public readonly VkRenderPass RenderPass;
     private readonly VkRenderPass _opaquePass;
     public readonly GpuTimer GpuTimer;
+    public readonly PipelineStats PipelineStats;
     public float4 ClearColor = new(0.02f, 0.05f, 0.09f, 1f);
 
     private readonly GlfwWindow _window;
@@ -59,6 +60,7 @@ public sealed unsafe class Renderer : IDisposable
 
         GpuTimer = new GpuTimer(Context.Device, Context.GraphicsQueue.Family, FramesInFlight);
         _frameScope = GpuTimer.Register("Frame");
+        PipelineStats = new PipelineStats(Context, FramesInFlight);
     }
 
     public bool VSync
@@ -253,6 +255,7 @@ public sealed unsafe class Renderer : IDisposable
         commands = frame.Commands;
         commands.Begin(VkCommandBufferUsageFlags.OneTimeSubmitBit);
         GpuTimer.BeginFrame(commands, _frameIndex);
+        PipelineStats.BeginFrame(commands, _frameIndex);
         GpuTimer.Begin(commands, _frameScope);
         return true;
     }
@@ -362,6 +365,7 @@ public sealed unsafe class Renderer : IDisposable
         }
 
         GpuTimer.Dispose();
+        PipelineStats.Dispose();
         Swapchain.Dispose();
         device.DestroyRenderPass(RenderPass, null);
         device.DestroyRenderPass(_opaquePass, null);

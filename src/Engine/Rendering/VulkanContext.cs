@@ -22,6 +22,9 @@ public sealed unsafe class VulkanContext : IDisposable
     public readonly PipelineCache Pipelines;
     public readonly bool ValidationEnabled;
     public readonly string DeviceName;
+
+    /// <summary>The device's pipelineStatisticsQuery feature, enabled when supported (<see cref="PipelineStats"/>).</summary>
+    public readonly bool PipelineStatistics;
     private readonly VkDebugUtilsMessengerEXT _messenger;
 
     public VulkanContext(GlfwWindow window, bool enableValidation)
@@ -45,7 +48,8 @@ public sealed unsafe class VulkanContext : IDisposable
 
         PhysicalDevice = PickPhysicalDevice(out var queueFamily);
         DeviceName = PhysicalDevice.GetDeviceName();
-        Device = CreateDevice(PhysicalDevice, queueFamily);
+        PipelineStatistics = PhysicalDevice.GetFeatures().PipelineStatisticsQuery;
+        Device = CreateDevice(PhysicalDevice, queueFamily, PipelineStatistics);
         GraphicsQueue = Device.GetQueue(queueFamily, 0);
         Allocator = Device.CreateVmaAllocator(new VmaAllocatorCreateInfo
         {
@@ -145,7 +149,7 @@ public sealed unsafe class VulkanContext : IDisposable
         return -1;
     }
 
-    private static DeviceEx CreateDevice(PhysicalDevice physicalDevice, int queueFamily)
+    private static DeviceEx CreateDevice(PhysicalDevice physicalDevice, int queueFamily, bool pipelineStatistics)
     {
         var priority = 1f;
         Span<VkDeviceQueueCreateInfo> queues =
@@ -164,10 +168,12 @@ public sealed unsafe class VulkanContext : IDisposable
 
         // Core 1.3 features our shaders rely on: shaderc emits OpDemoteToHelperInvocation for `discard`.
         var features13 = new VkPhysicalDeviceVulkan13Features { ShaderDemoteToHelperInvocation = true };
+        var features = new VkPhysicalDeviceFeatures { PipelineStatisticsQuery = pipelineStatistics };
 
         return physicalDevice.CreateDevice(new DeviceEx.CreateInfo
         {
             Extensions = extensions,
+            Features = &features,
             QueueCreateInfos = queues,
             Next = &features13,
         });

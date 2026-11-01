@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Numerics;
 using Brutal.ImGuiApi;
 using Brutal.Numerics;
@@ -9,7 +10,8 @@ namespace BrutalGame.Debug;
 /// <summary>
 /// Climate tuning, the weather at the camera, and a map of the weather around it (Z down, so the view is from above):
 /// cloud as grey, rain as blue, storm cores red, wind arrows, each pressure system's extent, the camera in white.
-/// No GC allocation per frame.
+/// The map is shaded from the cached snapshots only (cells off them drawn as no data) and re-shaded when the snapshots,
+/// the map's cell or a step of their blend changes. No GC allocation per frame.
 /// </summary>
 public sealed class WeatherPanel
 {
@@ -17,15 +19,31 @@ public sealed class WeatherPanel
     private const float CellPixels = 8f;
     private const int ArrowEvery = 4;
     private const float ArrowPixelsPerMetrePerSecond = 0.8f;
+    private const int ArrowSide = WeatherMap.Size / ArrowEvery;
+
+    /// <summary>Re-shades per snapshot interval as the blend between the pair moves on.</summary>
+    private const int BlendSteps = 8;
 
     private static readonly float2 GraphSize = new(0f, 48f);
+    private static readonly ImColor8 NoData = new(40, 40, 46, 255);
 
     private readonly WeatherMap _map;
+    private readonly ImColor8[] _shades = new ImColor8[WeatherMap.Size * WeatherMap.Size];
+    private readonly Vector2[] _arrows = new Vector2[ArrowSide * ArrowSide];
+    private readonly bool[] _arrowValid = new bool[ArrowSide * ArrowSide];
     private WeatherClimate _edit;
     private int _seed;
+    private int _shadedVersion = -1;
+    private long _shadedStep;
+    private Vector2 _shadedOrigin;
+    private int _noDataCells;
 
     public readonly TimingRing TickMs = new(TimingSamples);
+    public readonly TimingRing MapMs = new(TimingSamples);
     public bool Open = true;
+
+    /// <summary>The old map: every cell sampled every frame, the analytic field filling cells off the snapshots.</summary>
+    public bool AnalyticMap;
     public bool DriveOcean = true;
     public bool DriveSky = true;
 
@@ -108,6 +126,16 @@ public sealed class WeatherPanel
         const float pixelsPerMetre = CellPixels / WeatherMap.Spacing;
 
         var origin = new Vector2(MathF.Floor(camera.X / WeatherMap.Spacing) * WeatherMap.Spacing - half, MathF.Floor(camera.Y / WeatherMap.Spacing) * WeatherMap.Spacing - half);
+        var start = Stopwatch.GetTimestamp();
+        var step = (long)Math.Floor(_map.Time / WeatherMap.Interval * BlendSteps);
+
+        if (AnalyticMap || _shadedVersion != _map.Version || step != _shadedStep || origin != _shadedOrigin)
+        {
+            ShadeMap(origin);
+            _shadedVersion = _map.Version;
+            _shadedStep = step;
+            _shadedOrigin = origin;
+        }
 
         ImGui.SeparatorText("Map (32 km)"u8);
         var corner = ImGui.GetCursorScreenPos();
@@ -119,22 +147,21 @@ public sealed class WeatherPanel
         {
             for (var i = 0; i < WeatherMap.Size; i++)
             {
-                var s = _map.Sample(origin.X + (i + 0.5f) * WeatherMap.Spacing, origin.Y + (j + 0.5f) * WeatherMap.Spacing);
                 var min = corner + new float2(i * CellPixels, j * CellPixels);
-                list.AddRectFilled(min, min + new float2(CellPixels, CellPixels), Shade(s));
+                list.AddRectFilled(min, min + new float2(CellPixels, CellPixels), _shades[j * WeatherMap.Size + i]);
             }
         }
 
-        for (var j = ArrowEvery / 2; j < WeatherMap.Size; j += ArrowEvery)
+        for (var a = 0; a < _arrows.Length; a++)
         {
-            for (var i = ArrowEvery / 2; i < WeatherMap.Size; i += ArrowEvery)
-            {
-                var wind = _map.Sample(origin.X + i * WeatherMap.Spacing, origin.Y + j * WeatherMap.Spacing).Wind;
-                var tail = corner + new float2(i * CellPixels, j * CellPixels);
-                var head = tail + new float2(wind.X, wind.Y) * ArrowPixelsPerMetrePerSecond;
-                list.AddLine(tail, head, new ImColor8(255, 255, 255, 200), 1.5f);
-                list.AddCircleFilled(head, 2f, new ImColor8(255, 255, 255, 200), 6);
-            }
+            if (!_arrowValid[a])
+                continue;
+
+            var wind = _arrows[a];
+            var tail = corner + new float2((a % ArrowSide * ArrowEvery + ArrowEvery / 2) * CellPixels, (a / ArrowSide * ArrowEvery + ArrowEvery / 2) * CellPixels);
+            var head = tail + new float2(wind.X, wind.Y) * ArrowPixelsPerMetrePerSecond;
+            list.AddLine(tail, head, new ImColor8(255, 255, 255, 200), 1.5f);
+            list.AddCircleFilled(head, 2f, new ImColor8(255, 255, 255, 200), 6);
         }
 
         foreach (ref readonly var system in _map.Systems)
@@ -145,6 +172,46 @@ public sealed class WeatherPanel
 
         list.AddCircleFilled(corner + Pixels(camera - origin, pixelsPerMetre), 3.5f, new ImColor8(255, 255, 255, 255), 12);
         list.PopClipRect();
+
+        if (ImGui.Checkbox("Analytic map (slow)"u8, ref AnalyticMap))
+            _shadedVersion = -1;
+
+        MapMs.Record((float)Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+    }
+
+    /// <summary>Shades every cell (sampled at its centre) and the wind arrows from the snapshots; cells off them are no data.</summary>
+    private void ShadeMap(Vector2 origin)
+    {
+        _noDataCells = 0;
+
+        for (var j = 0; j < WeatherMap.Size; j++)
+        {
+            for (var i = 0; i < WeatherMap.Size; i++)
+            {
+                var found = SampleMap(origin.X + (i + 0.5f) * WeatherMap.Spacing, origin.Y + (j + 0.5f) * WeatherMap.Spacing, out var s);
+                _shades[j * WeatherMap.Size + i] = found ? Shade(s) : NoData;
+
+                if (!found)
+                    _noDataCells++;
+            }
+        }
+
+        for (var a = 0; a < _arrows.Length; a++)
+        {
+            var i = a % ArrowSide * ArrowEvery + ArrowEvery / 2;
+            var j = a / ArrowSide * ArrowEvery + ArrowEvery / 2;
+            _arrowValid[a] = SampleMap(origin.X + i * WeatherMap.Spacing, origin.Y + j * WeatherMap.Spacing, out var s);
+            _arrows[a] = s.Wind;
+        }
+    }
+
+    private bool SampleMap(float x, float z, out WeatherSample sample)
+    {
+        if (!AnalyticMap)
+            return _map.TrySample(x, z, out sample);
+
+        sample = _map.Sample(x, z);
+        return true;
     }
 
     private void DrawPerf()
@@ -152,6 +219,7 @@ public sealed class WeatherPanel
         ImGui.SeparatorText("Perf"u8);
         ImGui.Text($"Tick     {TickMs.Average,7:F4} ms  max {TickMs.Max,7:F4}");
         ImGui.Text($"Rebuild  {_map.LastRebuildMs,7:F3} ms  ({_map.Rebuilds} rebuilds)");
+        ImGui.Text($"Map      {MapMs.Average,7:F4} ms  max {MapMs.Max,7:F4}  ({_noDataCells} cells no data)");
         ImGui.Text($"Rain     {RainDrops} drops (GPU timings in the profiler)");
         ImGui.PlotLines("##weather"u8, TickMs.Values, TickMs.Offset, default, 0f, MathF.Max(TickMs.Max, 0.01f), GraphSize);
     }

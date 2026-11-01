@@ -2,17 +2,24 @@ using Brutal.ImGuiApi;
 using Brutal.Numerics;
 using BrutalGame.Engine.Rendering;
 using BrutalGame.Engine.Time;
+using BrutalGame.Terrain.Runtime.Rendering;
+using BrutalGame.Water.Rendering;
 
 namespace BrutalGame.Debug;
 
 /// <summary>
-/// CPU frame breakdown. Strings go through the ImString arena, so no GC allocation per frame.
+/// CPU frame breakdown, managed allocations, GPU timings and pipeline statistics. Strings go through the ImString arena,
+/// so no GC allocation per frame.
 /// </summary>
-public sealed class ProfilerPanel(FrameStats stats, Renderer renderer, RainCover cover, WaterFogVolume fog)
+public sealed class ProfilerPanel(FrameStats stats, Renderer renderer, RainCover cover, WaterFogVolume fog, TerrainRenderer terrain, OceanRenderer ocean, VoxelWaterRenderer water)
 {
     private static readonly float2 GraphSize = new(0f, 48f);
+    private static readonly float4 AllocColour = new(1f, 0.35f, 0.3f, 1f);
 
     public bool Open = true;
+
+    /// <summary>Pipeline statistics queries are recorded only while this is on and the panel is open.</summary>
+    public bool PipelineStatsOn = true;
 
     public void Draw()
     {
@@ -53,6 +60,9 @@ public sealed class ProfilerPanel(FrameStats stats, Renderer renderer, RainCover
             Row("Cover rebuild"u8, cover.BuildMs);
             Row("Fog fill"u8, fog.FillMs);
 
+            DrawMemory();
+            DrawGeometry();
+
             var gpu = renderer.GpuTimer;
             ImGui.SeparatorText("GPU (avg ms)"u8);
 
@@ -64,6 +74,84 @@ public sealed class ProfilerPanel(FrameStats stats, Renderer renderer, RainCover
         }
 
         ImGui.End();
+    }
+
+    /// <summary>GC collections and managed bytes allocated per frame; any allocating frame shows red.</summary>
+    private void DrawMemory()
+    {
+        ImGui.SeparatorText("Managed memory"u8);
+        ImGui.Text($"GC gen0 {GC.CollectionCount(0)}  gen1 {GC.CollectionCount(1)}  gen2 {GC.CollectionCount(2)}  heap {GC.GetTotalMemory(false) / (1024 * 1024)} MB");
+
+        var allocating = 0;
+        foreach (var bytes in stats.AllocBytes.Values)
+        {
+            if (bytes > 0f)
+                allocating++;
+        }
+
+        if (stats.AllocatedMain > 0)
+            ImGui.TextColored(AllocColour, $"main thread {stats.AllocatedMain} B last frame");
+        else
+            ImGui.Text("main thread 0 B last frame"u8);
+
+        ImGui.SameLine();
+        ImGui.Text($" all threads {stats.AllocatedAll / 1024} KB");
+
+        if (allocating > 0)
+            ImGui.TextColored(AllocColour, $"{allocating} of {stats.AllocBytes.Values.Length} frames allocated, max {stats.AllocBytes.Max:F0} B");
+        else
+            ImGui.Text($"0 of {stats.AllocBytes.Values.Length} frames allocated");
+
+        ImGui.PlotHistogram("##alloc"u8, stats.AllocBytes.Values, stats.AllocBytes.Offset, default, 0f, MathF.Max(stats.AllocBytes.Max, 1024f), GraphSize);
+    }
+
+    /// <summary>
+    /// Triangles each system submitted (counted on the CPU) and, per pipeline statistics scope, what the GPU did with
+    /// them: overdraw is fragment shader invocations per screen pixel.
+    /// </summary>
+    private void DrawGeometry()
+    {
+        ImGui.SeparatorText("Geometry"u8);
+        ImGui.Text($"tris  terrain {terrain.TrianglesLastFrame}  ocean {ocean.TrianglesLastFrame}  voxel water {water.TrianglesLastFrame}");
+
+        var pipeline = renderer.PipelineStats;
+
+        if (!pipeline.Supported)
+        {
+            ImGui.Text("pipeline statistics unsupported"u8);
+            return;
+        }
+
+        ImGui.Checkbox("Pipeline statistics"u8, ref PipelineStatsOn);
+
+        if (!PipelineStatsOn)
+            return;
+
+        var extent = renderer.Swapchain.Extent;
+        var pixels = MathF.Max(1f, (float)extent.Width * extent.Height);
+
+        ImGui.Text("scope           prims       vs clip out        fs overdraw"u8);
+
+        var opaque = default(PipelineCounts);
+        var waterPass = default(PipelineCounts);
+
+        for (var i = 0; i < pipeline.ScopeCount; i++)
+        {
+            ref readonly var counts = ref pipeline.Last(i);
+            StatsRow(pipeline.Name(i), counts, pixels);
+
+            if (pipeline.Pass(i) == PipelinePass.Opaque)
+                opaque.Add(counts);
+            else if (pipeline.Pass(i) == PipelinePass.Water)
+                waterPass.Add(counts);
+        }
+
+        ImGui.Text($"overdraw  opaque pass {opaque.FragmentInvocations / pixels:F2}  water pass {waterPass.FragmentInvocations / pixels:F2} (UI excluded)");
+    }
+
+    private static void StatsRow(ImString label, in PipelineCounts c, float pixels)
+    {
+        ImGui.Text($"{label,-12} {c.Primitives,8} {c.VertexInvocations,8} {c.ClippingPrimitives,8} {c.FragmentInvocations,9} {c.FragmentInvocations / pixels,8:F2}");
     }
 
     private static void Row(ImString label, TimingRing ring)
