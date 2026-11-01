@@ -42,6 +42,7 @@ public sealed unsafe class RainRenderer : IDisposable
     private const double TimeLoop = 1024.0;
 
     private readonly Device _device;
+    private readonly PipelineCache _pipelines;
     private readonly OceanRenderer _ocean;
     private readonly VkDescriptorSetLayout _setLayout;
     private readonly VkDescriptorPool _pool;
@@ -70,6 +71,7 @@ public sealed unsafe class RainRenderer : IDisposable
     public RainRenderer(Renderer renderer, OceanRenderer ocean)
     {
         _device = renderer.Context.Device;
+        _pipelines = renderer.Context.Pipelines;
         _ocean = ocean;
 
         for (var i = 0; i < Renderer.FramesInFlight; i++)
@@ -258,8 +260,7 @@ public sealed unsafe class RainRenderer : IDisposable
                 var dynamicStates = stackalloc VkDynamicState[] { VkDynamicState.Viewport, VkDynamicState.Scissor };
                 var dynamic = new VkPipelineDynamicStateCreateInfo { DynamicStateCount = 2, DynamicStates = dynamicStates };
 
-                return _device.CreateGraphicsPipeline(
-                    default,
+                return _pipelines.CreateGraphicsPipeline(
                     new VkGraphicsPipelineCreateInfo
                     {
                         StageCount = 2,
@@ -274,8 +275,7 @@ public sealed unsafe class RainRenderer : IDisposable
                         DynamicState = &dynamic,
                         Layout = _layout,
                         RenderPass = renderPass,
-                    },
-                    null
+                    }
                 );
             }
         }
@@ -294,20 +294,13 @@ public sealed unsafe class RainRenderer : IDisposable
         {
             fixed (byte* name = "main"u8)
             {
-                var pipeline = new VkPipeline();
-                _device.CreateComputePipelines(
-                    default,
-                    [
-                        new VkComputePipelineCreateInfo
-                        {
-                            Stage = new VkPipelineShaderStageCreateInfo { Stage = VkShaderStageFlags.ComputeBit, Module = module, Name = name },
-                            Layout = _layout,
-                        },
-                    ],
-                    null,
-                    new ReadOnlySpan<VkPipeline>(&pipeline, 1)
+                return _pipelines.CreateComputePipeline(
+                    new VkComputePipelineCreateInfo
+                    {
+                        Stage = new VkPipelineShaderStageCreateInfo { Stage = VkShaderStageFlags.ComputeBit, Module = module, Name = name },
+                        Layout = _layout,
+                    }
                 );
-                return pipeline;
             }
         }
         finally

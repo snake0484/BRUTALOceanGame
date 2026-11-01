@@ -33,6 +33,7 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
     private const float CullMargin = 1f;
 
     private readonly Device _device;
+    private readonly PipelineCache _pipelines;
     private readonly GpuBuffer _vertexArena;
     private readonly GpuBuffer _indexArena;
     private readonly GpuBuffer _staging;
@@ -139,6 +140,7 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
 
         var context = renderer.Context;
         _device = context.Device;
+        _pipelines = context.Pipelines;
 
         var vertexCapacity = (int)(VertexArenaBytes / VertexStride);
         var indexCapacity = (int)(IndexArenaBytes / sizeof(uint));
@@ -672,8 +674,7 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
                 var dynamicStates = stackalloc VkDynamicState[] { VkDynamicState.Viewport, VkDynamicState.Scissor };
                 var dynamic = new VkPipelineDynamicStateCreateInfo { DynamicStateCount = 2, DynamicStates = dynamicStates };
 
-                return _device.CreateGraphicsPipeline(
-                    default,
+                return _pipelines.CreateGraphicsPipeline(
                     new VkGraphicsPipelineCreateInfo
                     {
                         StageCount = 2,
@@ -688,8 +689,7 @@ public sealed unsafe class VoxelWaterRenderer : IDisposable
                         DynamicState = &dynamic,
                         Layout = _layout,
                         RenderPass = renderPass,
-                    },
-                    null
+                    }
                 );
             }
         }

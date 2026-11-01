@@ -31,6 +31,9 @@ public sealed class ProfilerPanel(FrameStats stats, Renderer renderer, RainCover
             ImGui.Text($"{fps:F0} fps  |  {frameMs:F2} ms avg  |  {stats.Frame.Max:F2} ms max");
             ImGui.Text($"sim t {stats.SimTime:F2}s  tick #{stats.TickIndex}  ticks/frame {stats.TicksThisFrame}");
 
+            var pipelines = renderer.Context.Pipelines;
+            ImGui.Text($"pipelines {pipelines.Created}  cache hits {pipelines.Hits}  driver {pipelines.DriverMs:F1} ms");
+
             var vsync = renderer.VSync;
             if (ImGui.Checkbox("VSync"u8, ref vsync))
                 renderer.VSync = vsync;

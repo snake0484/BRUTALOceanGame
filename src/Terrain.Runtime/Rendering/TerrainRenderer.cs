@@ -34,6 +34,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
     private const float CullMarginVoxels = 2f;
 
     private readonly Device _device;
+    private readonly PipelineCache _pipelines;
 
     /// <summary>The water fog an underwater camera sees the ground through (water_fog.glsl, bindings 1 and 2).</summary>
     private readonly WaterFogVolume _fog;
@@ -106,6 +107,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
 
         var context = renderer.Context;
         _device = context.Device;
+        _pipelines = context.Pipelines;
 
         var vertexCapacity = (int)(VertexArenaBytes / VertexStride);
         var indexCapacity = (int)(IndexArenaBytes / sizeof(uint));
@@ -531,8 +533,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
                 var dynamicStates = stackalloc VkDynamicState[] { VkDynamicState.Viewport, VkDynamicState.Scissor };
                 var dynamic = new VkPipelineDynamicStateCreateInfo { DynamicStateCount = 2, DynamicStates = dynamicStates };
 
-                return _device.CreateGraphicsPipeline(
-                    default,
+                return _pipelines.CreateGraphicsPipeline(
                     new VkGraphicsPipelineCreateInfo
                     {
                         StageCount = 2,
@@ -547,8 +548,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
                         DynamicState = &dynamic,
                         Layout = _layout,
                         RenderPass = renderPass,
-                    },
-                    null
+                    }
                 );
             }
         }

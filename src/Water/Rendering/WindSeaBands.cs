@@ -34,6 +34,7 @@ public sealed unsafe class WindSeaBands : IDisposable
     private const int Slopes = 3;
 
     private readonly Device _device;
+    private readonly PipelineCache _pipelines;
     private readonly VmaAllocator _allocator;
     private readonly VkImage[] _images = new VkImage[ImageCount];
     private readonly VmaAllocation[] _allocations = new VmaAllocation[ImageCount];
@@ -61,6 +62,7 @@ public sealed unsafe class WindSeaBands : IDisposable
     public WindSeaBands(Renderer renderer)
     {
         _device = renderer.Context.Device;
+        _pipelines = renderer.Context.Pipelines;
         _allocator = renderer.Context.Allocator;
 
         CreateImage(H0, VkFormat.R32G32B32A32SFloat, VkImageUsageFlags.StorageBit, Bands);
@@ -252,25 +254,18 @@ public sealed unsafe class WindSeaBands : IDisposable
         {
             fixed (byte* name = "main"u8)
             {
-                var pipeline = new VkPipeline();
-                _device.CreateComputePipelines(
-                    default,
-                    [
-                        new VkComputePipelineCreateInfo
+                return _pipelines.CreateComputePipeline(
+                    new VkComputePipelineCreateInfo
+                    {
+                        Stage = new VkPipelineShaderStageCreateInfo
                         {
-                            Stage = new VkPipelineShaderStageCreateInfo
-                            {
-                                Stage = VkShaderStageFlags.ComputeBit,
-                                Module = module,
-                                Name = name,
-                            },
-                            Layout = _layout,
+                            Stage = VkShaderStageFlags.ComputeBit,
+                            Module = module,
+                            Name = name,
                         },
-                    ],
-                    null,
-                    new ReadOnlySpan<VkPipeline>(&pipeline, 1)
+                        Layout = _layout,
+                    }
                 );
-                return pipeline;
             }
         }
         finally

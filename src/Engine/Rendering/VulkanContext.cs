@@ -19,6 +19,7 @@ public sealed unsafe class VulkanContext : IDisposable
     public readonly DeviceEx Device;
     public readonly Queue GraphicsQueue;
     public readonly VmaAllocator Allocator;
+    public readonly PipelineCache Pipelines;
     public readonly bool ValidationEnabled;
     public readonly string DeviceName;
     private readonly VkDebugUtilsMessengerEXT _messenger;
@@ -52,6 +53,7 @@ public sealed unsafe class VulkanContext : IDisposable
             Device = Device.Handle,
             VulkanApiVersion = (uint)ApiVersion,
         });
+        Pipelines = new PipelineCache(Device, PhysicalDevice.GetProperties());
 
         Vulkan.Log.Info($"GPU: {DeviceName}, validation: {ValidationEnabled}");
     }
@@ -174,6 +176,7 @@ public sealed unsafe class VulkanContext : IDisposable
     public void Dispose()
     {
         Device.WaitIdle();
+        Pipelines.Dispose();
         Device.DestroyVmaAllocator(Allocator);
         Device.Dispose();
         Instance.DestroySurfaceKHR(Surface, null);

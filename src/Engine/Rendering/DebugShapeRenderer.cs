@@ -26,6 +26,7 @@ public sealed unsafe class DebugShapeRenderer : IDisposable
     private const uint KindSphere = 1;
 
     private readonly Device _device;
+    private readonly PipelineCache _pipelines;
     private readonly GpuBuffer _uniforms;
     private readonly GpuBuffer _instances;
     private readonly VkDescriptorSetLayout _setLayout;
@@ -60,6 +61,7 @@ public sealed unsafe class DebugShapeRenderer : IDisposable
     {
         var context = renderer.Context;
         _device = context.Device;
+        _pipelines = context.Pipelines;
 
         _uniforms = new GpuBuffer(context, UniformStride * Renderer.FramesInFlight, VkBufferUsageFlags.UniformBufferBit, true);
         _instances = new GpuBuffer(context, InstanceFrameBytes * Renderer.FramesInFlight, VkBufferUsageFlags.StorageBufferBit, true);
@@ -291,8 +293,7 @@ public sealed unsafe class DebugShapeRenderer : IDisposable
                 var dynamicStates = stackalloc VkDynamicState[] { VkDynamicState.Viewport, VkDynamicState.Scissor };
                 var dynamic = new VkPipelineDynamicStateCreateInfo { DynamicStateCount = 2, DynamicStates = dynamicStates };
 
-                return _device.CreateGraphicsPipeline(
-                    default,
+                return _pipelines.CreateGraphicsPipeline(
                     new VkGraphicsPipelineCreateInfo
                     {
                         StageCount = 2,
@@ -307,8 +308,7 @@ public sealed unsafe class DebugShapeRenderer : IDisposable
                         DynamicState = &dynamic,
                         Layout = _layout,
                         RenderPass = renderPass,
-                    },
-                    null
+                    }
                 );
             }
         }
