@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Brutal.GlfwApi;
 using Brutal.Numerics;
 using BrutalGame.Debug;
+using BrutalGame.Engine.Jobs;
 using BrutalGame.Engine.Rendering;
 using BrutalGame.Engine.Scene;
 using BrutalGame.Engine.Time;
@@ -48,7 +49,7 @@ public sealed class GameApp : IDisposable
     private readonly TerrainWorld _terrain;
     private readonly BathymetryTexture _bathymetry;
     private readonly TerrainPanel _terrainPanel;
-    private readonly PhysicsWorld _physics = new();
+    private readonly PhysicsWorld _physics = new(workerThreads: WorkerBudget.Tick);
     private readonly TerrainBrush _brush;
     private readonly EditTest? _editTest;
     private readonly RoofTest? _roofTest;

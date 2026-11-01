@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Numerics;
 using Brutal.Concurrency.Jobs;
+using BrutalGame.Engine.Jobs;
 
 namespace BrutalGame.Water.Ocean;
 
@@ -49,7 +50,7 @@ public sealed class CoastalBuilder : IDisposable
         _back = new CoastalField(cell);
 
         // Background work nothing waits on: few workers, below normal priority, so it never starves per-tick jobs.
-        _scheduler = new JobScheduler((uint)Math.Max(1, Environment.ProcessorCount / 4), "Coastal", ThreadPriority.BelowNormal);
+        _scheduler = new JobScheduler((uint)WorkerBudget.Side, "Coastal", ThreadPriority.BelowNormal);
 
         for (var i = 0; i < _depthJobs.Length; i++)
             _depthJobs[i] = new CoastalDepthJob();

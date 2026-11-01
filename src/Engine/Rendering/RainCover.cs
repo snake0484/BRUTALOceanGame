@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using Brutal.Concurrency.Jobs;
 using Brutal.VulkanApi;
+using BrutalGame.Engine.Jobs;
 using BrutalGame.Engine.Time;
 
 namespace BrutalGame.Engine.Rendering;
@@ -101,7 +102,7 @@ public sealed unsafe class RainCover : IDisposable
     public RainCover(VulkanContext context)
     {
         // Background work nothing waits on: few workers, below normal priority, so it never starves per-tick jobs.
-        _scheduler = new JobScheduler((uint)Math.Max(1, Environment.ProcessorCount / 4), "Fetch", ThreadPriority.BelowNormal);
+        _scheduler = new JobScheduler((uint)WorkerBudget.Side, "Fetch", ThreadPriority.BelowNormal);
 
         for (var r = 0; r < Radials; r++)
             _radials[r] = new FetchRadialJob(_fetchOpen, -RadialSpread + 2f * RadialSpread * r / (Radials - 1));

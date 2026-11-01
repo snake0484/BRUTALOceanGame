@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Numerics;
 using Brutal.Concurrency.Jobs;
+using BrutalGame.Engine.Jobs;
 using BrutalGame.Physics;
 using BrutalGame.Terrain.Runtime.Rendering;
 
@@ -103,7 +104,7 @@ public sealed class TerrainWorld : IDisposable
     {
         _renderer = renderer;
         _physics = physics;
-        _scheduler = new JobScheduler((uint)Math.Max(1, Environment.ProcessorCount - 2), "Terrain", ThreadPriority.BelowNormal);
+        _scheduler = new JobScheduler((uint)WorkerBudget.Streaming, "Terrain", ThreadPriority.BelowNormal);
         _byPriority = ComparePriority;
 
         for (var i = 0; i < JobPoolSize; i++)

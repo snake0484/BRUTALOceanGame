@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Numerics;
 using Brutal.Concurrency.Jobs;
+using BrutalGame.Engine.Jobs;
 using BrutalGame.Engine.Rendering;
 using BrutalGame.Terrain.Runtime.Rendering;
 using BrutalGame.Terrain.Water;
@@ -284,11 +285,10 @@ public sealed class VoxelWaterSystem : IDisposable
 
         _generatedBlocks = GeneratedBlocks(Generated, Flows);
         _planeColumns = PlaneColumns(Generated);
-        var workers = (uint)Math.Max(1, Environment.ProcessorCount - 2);
         // The tick waits on step jobs, so they outrank streaming and activation, which only add latency.
-        _stepScheduler = new JobScheduler(workers, "WaterStep", ThreadPriority.AboveNormal);
-        _activationScheduler = new JobScheduler(Math.Max(1u, workers / 2), "WaterActivate", ThreadPriority.BelowNormal);
-        _meshScheduler = new JobScheduler(Math.Max(1u, workers / 2), "WaterMesh");
+        _stepScheduler = new JobScheduler((uint)WorkerBudget.Tick, "WaterStep", ThreadPriority.AboveNormal);
+        _activationScheduler = new JobScheduler((uint)WorkerBudget.Side, "WaterActivate", ThreadPriority.BelowNormal);
+        _meshScheduler = new JobScheduler((uint)WorkerBudget.Side, "WaterMesh");
 
         for (var i = 0; i < MaxBlocks; i++)
         {
