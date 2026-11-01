@@ -134,8 +134,11 @@ public sealed class ProfilerPanel(FrameStats stats, Renderer renderer, RainCover
         if (!PipelineStatsOn)
             return;
 
-        var extent = renderer.Swapchain.Extent;
-        var pixels = MathF.Max(1f, (float)extent.Width * extent.Height);
+        // The scene passes draw at the render scale, the UI at the window's size.
+        var scene = renderer.Extent;
+        var output = renderer.OutputExtent;
+        var pixels = MathF.Max(1f, (float)scene.Width * scene.Height);
+        var outputPixels = MathF.Max(1f, (float)output.Width * output.Height);
 
         ImGui.Text("scope           prims       vs clip out        fs overdraw"u8);
 
@@ -145,7 +148,7 @@ public sealed class ProfilerPanel(FrameStats stats, Renderer renderer, RainCover
         for (var i = 0; i < pipeline.ScopeCount; i++)
         {
             ref readonly var counts = ref pipeline.Last(i);
-            StatsRow(pipeline.Name(i), counts, pixels);
+            StatsRow(pipeline.Name(i), counts, pipeline.Pass(i) == PipelinePass.Overlay ? outputPixels : pixels);
 
             if (pipeline.Pass(i) == PipelinePass.Opaque)
                 opaque.Add(counts);
