@@ -8,19 +8,25 @@ using BrutalGame.Engine.Time;
 namespace BrutalGame.Engine.Rendering;
 
 /// <summary>
-/// Frame loop: wait, acquire, record an opaque pass (cleared) and a water pass over it, submit, present. Between the two
-/// the frame's colour and depth are left readable by transfer (ScreenReflections copies both for the water to sample).
-/// The passes are compatible: pipelines are made against <see cref="RenderPass"/> and drawn in either.
+/// Frame loop: wait, acquire, record an opaque pass (cleared) and a water pass over it into the offscreen
+/// <see cref="SceneTarget"/> at the render scale, bring that to the swapchain image (copied at scale 1, else a bilinear
+/// blit), draw the UI over it at native resolution, submit, present. Between the scene passes the frame's colour and depth
+/// are left readable by transfer (ScreenReflections copies both for the water to sample). The scene passes are
+/// compatible: pipelines are made against <see cref="RenderPass"/> and drawn in either; the UI's against <see cref="UiPass"/>.
 /// </summary>
 public sealed unsafe class Renderer : IDisposable
 {
     public const int FramesInFlight = 2;
+    public const float MinRenderScale = 0.5f;
+    public const float MaxRenderScale = 1f;
     private static readonly nint NoTimeout = nint.MaxValue;
 
     public readonly VulkanContext Context;
     public readonly Swapchain Swapchain;
     public readonly VkRenderPass RenderPass;
+    public readonly VkRenderPass UiPass;
     private readonly VkRenderPass _opaquePass;
+    private readonly SceneTarget _scene;
     public readonly GpuTimer GpuTimer;
     public readonly PipelineStats PipelineStats;
     public float4 ClearColor = new(0.02f, 0.05f, 0.09f, 1f);
@@ -34,6 +40,8 @@ public sealed unsafe class Renderer : IDisposable
     private bool _vsync;
     private long _recordStart;
     private readonly int _frameScope;
+    private readonly int _upscaleScope;
+    private float _renderScale;
 
     private struct FrameData
     {
@@ -43,23 +51,30 @@ public sealed unsafe class Renderer : IDisposable
         public VkSemaphore ImageAvailable;
     }
 
-    public Renderer(GlfwWindow window, FrameStats stats, bool enableValidation, bool vsync)
+    /// <param name="renderScale">Scene resolution per axis relative to the window, <see cref="MinRenderScale"/> to 1.</param>
+    public Renderer(GlfwWindow window, FrameStats stats, bool enableValidation, bool vsync, float renderScale = 1f)
     {
         _window = window;
         _stats = stats;
         _vsync = vsync;
+        _renderScale = Math.Clamp(renderScale, MinRenderScale, MaxRenderScale);
         Context = new VulkanContext(window, enableValidation);
 
+        // The scene keeps the swapchain's format (UNORM, written as is, no tonemap), so a copy at scale 1 is exact.
         var format = Swapchain.ChooseFormat(Context);
         RenderPass = CreateRenderPass(format.Format, opaque: false);
         _opaquePass = CreateRenderPass(format.Format, opaque: true);
-        Swapchain = new Swapchain(Context, format, Swapchain.ChoosePresentMode(Context, vsync), RenderPass, window.FramebufferSize);
+        UiPass = CreateUiPass(format.Format);
+        Swapchain = new Swapchain(Context, format, Swapchain.ChoosePresentMode(Context, vsync), UiPass, window.FramebufferSize);
+        _scene = new SceneTarget(Context, format.Format, RenderPass);
+        _scene.Recreate(ScaledExtent(Swapchain.Extent, _renderScale));
 
         for (var i = 0; i < FramesInFlight; i++)
             _frames[i] = CreateFrame();
 
         GpuTimer = new GpuTimer(Context.Device, Context.GraphicsQueue.Family, FramesInFlight);
         _frameScope = GpuTimer.Register("Frame");
+        _upscaleScope = GpuTimer.Register("Upscale");
         PipelineStats = new PipelineStats(Context, FramesInFlight);
     }
 
@@ -81,17 +96,37 @@ public sealed unsafe class Renderer : IDisposable
 
     public int FrameIndex => _frameIndex;
 
-    public VkExtent2D Extent => Swapchain.Extent;
+    /// <summary>
+    /// Scene resolution per axis relative to the window (<see cref="MinRenderScale"/> to 1). A change rebuilds the scene
+    /// target at the next <see cref="BeginFrame"/>.
+    /// </summary>
+    public float RenderScale
+    {
+        get => _renderScale;
+        set => _renderScale = Math.Clamp(value, MinRenderScale, MaxRenderScale);
+    }
 
-    /// <summary>This frame's swapchain image: in TRANSFER_SRC between <see cref="EndOpaquePass"/> and <see cref="BeginWaterPass"/>.</summary>
-    public VkImage ColourImage => Swapchain.Image(_imageIndex);
+    /// <summary>The scene's size (the render scale's share of the window): every scene pass draws at this.</summary>
+    public VkExtent2D Extent => _scene.Extent;
 
-    /// <summary>The depth image: in TRANSFER_SRC between <see cref="EndOpaquePass"/> and <see cref="BeginWaterPass"/>.</summary>
-    public VkImage DepthImage => Swapchain.DepthImage;
+    /// <summary>The swapchain's size: the UI draws at this.</summary>
+    public VkExtent2D OutputExtent => Swapchain.Extent;
+
+    /// <summary>The scene colour: in TRANSFER_SRC between <see cref="EndOpaquePass"/> and <see cref="BeginWaterPass"/>.</summary>
+    public VkImage ColourImage => _scene.Colour;
+
+    /// <summary>The scene depth: in TRANSFER_SRC between <see cref="EndOpaquePass"/> and <see cref="BeginWaterPass"/>.</summary>
+    public VkImage DepthImage => _scene.Depth;
+
+    private static VkExtent2D ScaledExtent(VkExtent2D extent, float scale) => new()
+    {
+        Width = Math.Max(1, (int)MathF.Round(extent.Width * scale)),
+        Height = Math.Max(1, (int)MathF.Round(extent.Height * scale)),
+    };
 
     /// <summary>
-    /// The opaque pass clears both attachments and leaves both in TRANSFER_SRC; the
-    /// water pass loads them from there and presents. Same formats and samples, so the two are compatible.
+    /// The opaque pass clears both attachments and leaves both in TRANSFER_SRC; the water pass loads them from there and
+    /// leaves the colour in TRANSFER_SRC for the swapchain. Same formats and samples, so the two are compatible.
     /// </summary>
     private VkRenderPass CreateRenderPass(VkFormat format, bool opaque)
     {
@@ -107,7 +142,7 @@ public sealed unsafe class Renderer : IDisposable
                 StencilLoadOp = VkAttachmentLoadOp.DontCare,
                 StencilStoreOp = VkAttachmentStoreOp.DontCare,
                 InitialLayout = opaque ? VkImageLayout.Undefined : VkImageLayout.TransferSrcOptimal,
-                FinalLayout = opaque ? VkImageLayout.TransferSrcOptimal : VkImageLayout.PresentSrcKHR,
+                FinalLayout = VkImageLayout.TransferSrcOptimal,
             },
             new VkAttachmentDescription
             {
@@ -141,9 +176,9 @@ public sealed unsafe class Renderer : IDisposable
         const VkAccessFlags writes = VkAccessFlags.ColorAttachmentWriteBit | VkAccessFlags.DepthStencilAttachmentWriteBit;
         const VkAccessFlags reads = VkAccessFlags.ColorAttachmentReadBit | VkAccessFlags.DepthStencilAttachmentReadBit;
 
-        // Identical in both passes, as render pass compatibility requires. Into the pass: the previous frame's depth
-        // writes (the shared depth image is cleared), or the opaque pass and the copies out of it. Out of the pass:
-        // the colour and depth copied for reflections.
+        // Identical in both passes, as render pass compatibility requires. Into the pass: the previous frame's writes and
+        // its copy to the swapchain (the shared images are cleared), or the opaque pass and the copies out of it. Out of
+        // the pass: the colour and depth copied for reflections, or the colour copied to the swapchain.
         var dependencies = stackalloc VkSubpassDependency[]
         {
             new VkSubpassDependency
@@ -175,6 +210,53 @@ public sealed unsafe class Renderer : IDisposable
                 Subpasses = &subpass,
                 DependencyCount = 2,
                 Dependencies = dependencies,
+            },
+            null
+        );
+    }
+
+    /// <summary>The swapchain image after the scene's copy: loaded from TRANSFER_DST, the UI drawn over it, presented.</summary>
+    private VkRenderPass CreateUiPass(VkFormat format)
+    {
+        var attachment = new VkAttachmentDescription
+        {
+            Format = format,
+            Samples = VkSampleCountFlags._1Bit,
+            LoadOp = VkAttachmentLoadOp.Load,
+            StoreOp = VkAttachmentStoreOp.Store,
+            StencilLoadOp = VkAttachmentLoadOp.DontCare,
+            StencilStoreOp = VkAttachmentStoreOp.DontCare,
+            InitialLayout = VkImageLayout.TransferDstOptimal,
+            FinalLayout = VkImageLayout.PresentSrcKHR,
+        };
+
+        var colorRef = new VkAttachmentReference { Attachment = 0, Layout = VkImageLayout.ColorAttachmentOptimal };
+        var subpass = new VkSubpassDescription
+        {
+            PipelineBindPoint = VkPipelineBindPoint.Graphics,
+            ColorAttachmentCount = 1,
+            ColorAttachments = &colorRef,
+        };
+
+        var dependency = new VkSubpassDependency
+        {
+            SrcSubpass = VK.SUBPASS_EXTERNAL,
+            DstSubpass = 0,
+            SrcStageMask = VkPipelineStageFlags.TransferBit,
+            DstStageMask = VkPipelineStageFlags.ColorAttachmentOutputBit,
+            SrcAccessMask = VkAccessFlags.TransferWriteBit,
+            DstAccessMask = VkAccessFlags.ColorAttachmentReadBit | VkAccessFlags.ColorAttachmentWriteBit,
+        };
+
+        return Context.Device.CreateRenderPass(
+            new VkRenderPassCreateInfo
+            {
+                AttachmentCount = 1,
+                Attachments = &attachment,
+                SubpassCount = 1,
+                Subpasses = &subpass,
+                DependencyCount = 1,
+                Dependencies = &dependency,
             },
             null
         );
@@ -222,6 +304,15 @@ public sealed unsafe class Renderer : IDisposable
         }
 
         var device = Context.Device;
+        var sceneExtent = ScaledExtent(Swapchain.Extent, _renderScale);
+
+        // Rare (a resize or a new render scale), so it waits for the device rather than tracking frames.
+        if (sceneExtent.Width != _scene.Extent.Width || sceneExtent.Height != _scene.Extent.Height)
+        {
+            device.WaitIdle();
+            _scene.Recreate(sceneExtent);
+        }
+
         ref var frame = ref _frames[_frameIndex];
 
         var waitStart = Stopwatch.GetTimestamp();
@@ -260,7 +351,7 @@ public sealed unsafe class Renderer : IDisposable
         return true;
     }
 
-    /// <summary>Opens the opaque pass: the swapchain colour + depth, cleared.</summary>
+    /// <summary>Opens the opaque pass: the scene colour + depth, cleared.</summary>
     public void BeginOpaquePass(CommandBuffer commands)
     {
         var clear = stackalloc VkClearValue[]
@@ -272,8 +363,8 @@ public sealed unsafe class Renderer : IDisposable
             new VkRenderPassBeginInfo
             {
                 RenderPass = _opaquePass,
-                Framebuffer = Swapchain.Framebuffer(_imageIndex),
-                RenderArea = new VkRect2D { Extent = Swapchain.Extent },
+                Framebuffer = _scene.Framebuffer,
+                RenderArea = new VkRect2D { Extent = _scene.Extent },
                 ClearValueCount = 2,
                 ClearValues = clear,
             },
@@ -281,18 +372,79 @@ public sealed unsafe class Renderer : IDisposable
         );
     }
 
-    /// <summary>Closes the opaque pass: <see cref="ColourImage"/> is left in TRANSFER_SRC, the depth in SHADER_READ_ONLY.</summary>
+    /// <summary>Closes the opaque pass: <see cref="ColourImage"/> and <see cref="DepthImage"/> are left in TRANSFER_SRC.</summary>
     public void EndOpaquePass(CommandBuffer commands) => commands.EndRenderPass();
 
-    /// <summary>Opens the water pass over the opaque one (water, rain, UI); <see cref="EndFrame"/> closes it.</summary>
+    /// <summary>Opens the water pass over the opaque one (water, rain); <see cref="BeginUiPass"/> closes it.</summary>
     public void BeginWaterPass(CommandBuffer commands)
     {
         commands.BeginRenderPass(
             new VkRenderPassBeginInfo
             {
                 RenderPass = RenderPass,
+                Framebuffer = _scene.Framebuffer,
+                RenderArea = new VkRect2D { Extent = _scene.Extent },
+            },
+            VkSubpassContents.Inline
+        );
+    }
+
+    /// <summary>
+    /// Closes the water pass, brings the scene to this frame's swapchain image (a copy at the same size, else a bilinear
+    /// blit) and opens the UI pass over it at native resolution; <see cref="EndFrame"/> closes it.
+    /// </summary>
+    public void BeginUiPass(CommandBuffer commands)
+    {
+        commands.EndRenderPass();
+        GpuTimer.Begin(commands, _upscaleScope);
+
+        // After the acquire semaphore's wait (colour attachment output); the image's old contents are discarded.
+        var image = Swapchain.Image(_imageIndex);
+        commands.PipelineBarrier(
+            VkPipelineStageFlags.ColorAttachmentOutputBit,
+            VkPipelineStageFlags.TransferBit,
+            VkDependencyFlags.None,
+            [],
+            [],
+            [
+                new VkImageMemoryBarrier
+                {
+                    DstAccessMask = VkAccessFlags.TransferWriteBit,
+                    OldLayout = VkImageLayout.Undefined,
+                    NewLayout = VkImageLayout.TransferDstOptimal,
+                    SrcQueueFamilyIndex = VK.QUEUE_FAMILY_IGNORED,
+                    DstQueueFamilyIndex = VK.QUEUE_FAMILY_IGNORED,
+                    Image = image,
+                    SubresourceRange = new VkImageSubresourceRange { AspectMask = VkImageAspectFlags.ColorBit, LevelCount = 1, LayerCount = 1 },
+                },
+            ]
+        );
+
+        var src = _scene.Extent;
+        var dst = Swapchain.Extent;
+        var layers = new VkImageSubresourceLayers { AspectMask = VkImageAspectFlags.ColorBit, LayerCount = 1 };
+
+        if (src.Width == dst.Width && src.Height == dst.Height)
+        {
+            var size = new VkExtent3D { Width = src.Width, Height = src.Height, Depth = 1 };
+            commands.CopyImage(_scene.Colour, VkImageLayout.TransferSrcOptimal, image, VkImageLayout.TransferDstOptimal,
+                [new VkImageCopy { SrcSubresource = layers, DstSubresource = layers, Extent = size }]);
+        }
+        else
+        {
+            var blit = new VkImageBlit { SrcSubresource = layers, DstSubresource = layers };
+            blit.SrcOffsets[1] = new VkOffset3D { X = src.Width, Y = src.Height, Z = 1 };
+            blit.DstOffsets[1] = new VkOffset3D { X = dst.Width, Y = dst.Height, Z = 1 };
+            commands.BlitImage(_scene.Colour, VkImageLayout.TransferSrcOptimal, image, VkImageLayout.TransferDstOptimal, [blit], VkFilter.Linear);
+        }
+
+        GpuTimer.End(commands, _upscaleScope);
+        commands.BeginRenderPass(
+            new VkRenderPassBeginInfo
+            {
+                RenderPass = UiPass,
                 Framebuffer = Swapchain.Framebuffer(_imageIndex),
-                RenderArea = new VkRect2D { Extent = Swapchain.Extent },
+                RenderArea = new VkRect2D { Extent = dst },
             },
             VkSubpassContents.Inline
         );
@@ -366,7 +518,9 @@ public sealed unsafe class Renderer : IDisposable
 
         GpuTimer.Dispose();
         PipelineStats.Dispose();
+        _scene.Dispose();
         Swapchain.Dispose();
+        device.DestroyRenderPass(UiPass, null);
         device.DestroyRenderPass(RenderPass, null);
         device.DestroyRenderPass(_opaquePass, null);
         Context.Dispose();

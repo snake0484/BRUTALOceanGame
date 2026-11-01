@@ -11,7 +11,7 @@ namespace BrutalGame.Engine.Rendering;
 /// Screen-space reflections on every water surface (water_ssr.glsl, docs/water-ssr.md). Between the opaque pass and the
 /// water, <see cref="Record"/> copies the frame's colour and depth (the terrain, before any water) for the water's rays to
 /// march through, and writes the ray's uniforms. Water pipelines bind <see cref="Set"/> at their WATER_SSR_SET with
-/// <see cref="SetLayout"/>. The copies follow the swapchain's size; a resize waits for the device and rewrites the sets.
+/// <see cref="SetLayout"/>. The copies follow the scene's size; a resize waits for the device and rewrites the sets.
 /// </summary>
 public sealed unsafe class ScreenReflections : IDisposable
 {
@@ -151,7 +151,7 @@ public sealed unsafe class ScreenReflections : IDisposable
         SubresourceRange = range,
     };
 
-    /// <summary>New copies at the swapchain's size. Rare, so it waits for the device rather than tracking frames.</summary>
+    /// <summary>New copies at the scene's size. Rare, so it waits for the device rather than tracking frames.</summary>
     private void Resize(VkExtent2D extent)
     {
         _device.WaitIdle();

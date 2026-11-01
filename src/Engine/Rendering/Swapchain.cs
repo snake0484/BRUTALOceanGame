@@ -2,12 +2,12 @@ using Brutal;
 using Brutal.Numerics;
 using Brutal.VulkanApi;
 using Brutal.VulkanApi.Abstractions;
-using Brutal.VulkanApi.Vma;
 
 namespace BrutalGame.Engine.Rendering;
 
 /// <summary>
-/// Swapchain plus per-image views, framebuffers and render-finished semaphores.
+/// Swapchain plus per-image views, UI-pass framebuffers and render-finished semaphores. The scene is drawn offscreen
+/// (<see cref="SceneTarget"/>) and copied or blitted in; only the UI draws into these images.
 /// Per-image semaphores avoid reusing a semaphore the presentation engine may still hold.
 /// </summary>
 public sealed unsafe class Swapchain : IDisposable
@@ -28,9 +28,6 @@ public sealed unsafe class Swapchain : IDisposable
     private VkImageView[] _views = [];
     private VkFramebuffer[] _framebuffers = [];
     private VkSemaphore[] _renderFinished = [];
-    private VkImage _depthImage;
-    private VmaAllocation _depthAllocation;
-    private VkImageView _depthView;
 
     public Swapchain(VulkanContext context, VkSurfaceFormatKHR format, VkPresentModeKHR presentMode, VkRenderPass renderPass, int2 size)
     {
@@ -44,8 +41,6 @@ public sealed unsafe class Swapchain : IDisposable
     public VkFramebuffer Framebuffer(int imageIndex) => _framebuffers[imageIndex];
 
     public VkImage Image(int imageIndex) => _images[imageIndex];
-
-    public VkImage DepthImage => _depthImage;
 
     public VkSemaphore RenderFinished(int imageIndex) => _renderFinished[imageIndex];
 
@@ -120,7 +115,7 @@ public sealed unsafe class Swapchain : IDisposable
                 ImageColorSpace = Format.ColorSpace,
                 ImageExtent = Extent,
                 ImageArrayLayers = 1,
-                ImageUsage = VkImageUsageFlags.ColorAttachmentBit | VkImageUsageFlags.TransferSrcBit,
+                ImageUsage = VkImageUsageFlags.ColorAttachmentBit | VkImageUsageFlags.TransferDstBit,
                 ImageSharingMode = VkSharingMode.Exclusive,
                 PreTransform = caps.CurrentTransform,
                 CompositeAlpha = VkCompositeAlphaFlagsKHR.OpaqueBitKHR,
@@ -149,10 +144,6 @@ public sealed unsafe class Swapchain : IDisposable
         _framebuffers = new VkFramebuffer[count];
         _renderFinished = new VkSemaphore[count];
         device.GetSwapchainImagesKHR_Write(Handle, _images);
-        CreateDepth();
-
-        var attachments = stackalloc VkImageView[2];
-        attachments[1] = _depthView;
 
         for (var i = 0; i < count; i++)
         {
@@ -172,13 +163,13 @@ public sealed unsafe class Swapchain : IDisposable
                 null
             );
 
-            attachments[0] = _views[i];
+            var view = _views[i];
             _framebuffers[i] = device.CreateFramebuffer(
                 new VkFramebufferCreateInfo
                 {
                     RenderPass = _renderPass,
-                    AttachmentCount = 2,
-                    Attachments = attachments,
+                    AttachmentCount = 1,
+                    Attachments = &view,
                     Width = Extent.Width,
                     Height = Extent.Height,
                     Layers = 1,
@@ -190,57 +181,9 @@ public sealed unsafe class Swapchain : IDisposable
         }
     }
 
-    private void CreateDepth()
-    {
-        var result = _context.Allocator.CreateImage(
-            new VkImageCreateInfo
-            {
-                ImageType = VkImageType._2D,
-                Format = DepthFormat,
-                Extent = new VkExtent3D { Width = Extent.Width, Height = Extent.Height, Depth = 1 },
-                MipLevels = 1,
-                ArrayLayers = 1,
-                Samples = VkSampleCountFlags._1Bit,
-                Tiling = VkImageTiling.Optimal,
-                Usage = VkImageUsageFlags.DepthStencilAttachmentBit | VkImageUsageFlags.TransferSrcBit,
-                SharingMode = VkSharingMode.Exclusive,
-                InitialLayout = VkImageLayout.Undefined,
-            },
-            new VmaAllocationCreateInfo { Usage = VmaMemoryUsage.AutoPreferDevice },
-            out _depthImage,
-            out _depthAllocation,
-            out _
-        );
-
-        if (result != VkResult.Success)
-            throw new InvalidOperationException($"vmaCreateImage failed: {result}");
-
-        _depthView = _context.Device.CreateImageView(
-            new VkImageViewCreateInfo
-            {
-                Image = _depthImage,
-                ViewType = VkImageViewType._2D,
-                Format = DepthFormat,
-                SubresourceRange = new VkImageSubresourceRange
-                {
-                    AspectMask = VkImageAspectFlags.DepthBit,
-                    LevelCount = 1,
-                    LayerCount = 1,
-                },
-            },
-            null
-        );
-    }
-
     private void DestroyImageResources()
     {
         var device = _context.Device;
-        if (!_depthImage.IsNull())
-        {
-            device.DestroyImageView(_depthView, null);
-            _context.Allocator.DestroyImage(_depthImage, _depthAllocation);
-            _depthImage = default;
-        }
 
         for (var i = 0; i < _images.Length; i++)
         {

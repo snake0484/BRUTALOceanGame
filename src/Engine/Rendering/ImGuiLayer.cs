@@ -7,7 +7,7 @@ using Brutal.VulkanApi;
 namespace BrutalGame.Engine.Rendering;
 
 /// <summary>
-/// Dear ImGui context with GLFW platform and Vulkan renderer backends, drawn in the swapchain pass.
+/// Dear ImGui context with GLFW platform and Vulkan renderer backends, drawn in the UI pass at native resolution.
 /// </summary>
 public sealed class ImGuiLayer : IDisposable
 {
@@ -29,7 +29,7 @@ public sealed class ImGuiLayer : IDisposable
         {
             Device = renderer.Context.Device,
             GraphicsQueue = renderer.Context.GraphicsQueue,
-            RenderPass = renderer.RenderPass,
+            RenderPass = renderer.UiPass,
             MinImageCount = Math.Max(2, renderer.Swapchain.MinImageCount),
             ImageCount = Math.Max(2, renderer.Swapchain.ImageCount),
             SampleCount = VkSampleCountFlags._1Bit,

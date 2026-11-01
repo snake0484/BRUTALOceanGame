@@ -46,7 +46,14 @@ public sealed class ProfilerPanel(FrameStats stats, Renderer renderer, RainCover
                 renderer.VSync = vsync;
 
             ImGui.SameLine();
-            ImGui.Text($"{renderer.PresentMode}  {renderer.Swapchain.Extent.Width}x{renderer.Swapchain.Extent.Height}");
+            ImGui.Text($"{renderer.PresentMode}  {renderer.OutputExtent.Width}x{renderer.OutputExtent.Height}");
+
+            var scale = renderer.RenderScale;
+            if (ImGui.SliderFloat("Render scale"u8, ref scale, Renderer.MinRenderScale, Renderer.MaxRenderScale, "%.2f"u8))
+                renderer.RenderScale = scale;
+
+            ImGui.SameLine();
+            ImGui.Text($"{renderer.Extent.Width}x{renderer.Extent.Height}");
 
             ImGui.SeparatorText("Frame"u8);
             Plot("##frame"u8, stats.Frame);

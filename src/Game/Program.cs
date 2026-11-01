@@ -51,6 +51,8 @@ var benchSsr = false;
 var ssrOn = true;
 var voxelSwell = true;
 var fogOn = true;
+// Scene resolution per axis relative to the window (0.5..1); the UI stays native.
+var renderScale = 1f;
 var roofTest = false;
 // --cave-test site: all, cave, pool or cove; null = off.
 string? caveTest = null;
@@ -91,6 +93,8 @@ for (var i = 0; i < args.Length; i++)
         benchFog = true;
         benchSeconds = benchSeconds > 0.0 ? benchSeconds : 12.0;
     }
+    else if (args[i] == "--render-scale" && i + 1 < args.Length)
+        renderScale = float.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture);
     else if (args[i] == "--no-voxel-swell")
         voxelSwell = false;
     else if (args[i] == "--no-ssr")
@@ -186,5 +190,5 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
-using var app = new GameApp(windSpeed, foamDebug, editTest, camera, floodTest, waterRate ?? (waterPipes ? 60 : 240), hideUi, seasideTest, coastal, benchSeconds, breakers, surfTest, faces, lips, flyTest, surfCam, surfSide, swell, foldLip, surfBack, chainLips, weather ?? true, weatherOffset, rain, benchRain, roofTest, caveTest, waterPipes, pondTest, lakeTest, benchFog, fogOn, benchSsr, ssrOn, voxelSwell, riverTest);
+using var app = new GameApp(windSpeed, foamDebug, editTest, camera, floodTest, waterRate ?? (waterPipes ? 60 : 240), hideUi, seasideTest, coastal, benchSeconds, breakers, surfTest, faces, lips, flyTest, surfCam, surfSide, swell, foldLip, surfBack, chainLips, weather ?? true, weatherOffset, rain, benchRain, roofTest, caveTest, waterPipes, pondTest, lakeTest, benchFog, fogOn, benchSsr, ssrOn, voxelSwell, riverTest, renderScale);
 app.Run();

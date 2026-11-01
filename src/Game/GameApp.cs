@@ -106,7 +106,7 @@ public sealed class GameApp : IDisposable
     private readonly int _uiStats;
 
     /// <param name="camera">Optional start pose: x, y, z, yaw degrees, pitch degrees.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool floodTest = false, int waterRate = 240, bool hideUi = false, bool seasideTest = false, bool coastal = true, double benchSeconds = 0.0, bool breakers = false, bool surfTest = false, bool faces = true, bool lips = true, bool flyTest = false, bool surfCam = false, bool surfSide = false, float[]? swell = null, bool foldLip = false, bool surfBack = false, bool chainLips = false, bool weather = true, float weatherOffset = 0f, float rain = -1f, bool benchRain = false, bool roofTest = false, string? caveTest = null, bool waterPipes = false, bool pondTest = false, string? lakeTest = null, bool benchFog = false, bool fogOn = true, bool benchSsr = false, bool ssrOn = true, bool voxelSwell = true, string? riverTest = null)
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool floodTest = false, int waterRate = 240, bool hideUi = false, bool seasideTest = false, bool coastal = true, double benchSeconds = 0.0, bool breakers = false, bool surfTest = false, bool faces = true, bool lips = true, bool flyTest = false, bool surfCam = false, bool surfSide = false, float[]? swell = null, bool foldLip = false, bool surfBack = false, bool chainLips = false, bool weather = true, float weatherOffset = 0f, float rain = -1f, bool benchRain = false, bool roofTest = false, string? caveTest = null, bool waterPipes = false, bool pondTest = false, string? lakeTest = null, bool benchFog = false, bool fogOn = true, bool benchSsr = false, bool ssrOn = true, bool voxelSwell = true, string? riverTest = null, float renderScale = 1f)
     {
         if (camera is not null)
         {
@@ -126,7 +126,7 @@ public sealed class GameApp : IDisposable
         });
         _window.OnKey += OnKey;
 
-        _renderer = new Renderer(_window, _stats, Validation, vsync: benchSeconds <= 0.0);
+        _renderer = new Renderer(_window, _stats, Validation, vsync: benchSeconds <= 0.0, renderScale);
         _imgui = new ImGuiLayer(_window, _renderer);
         _rainCover = new RainCover(_renderer.Context);
         _fog = new WaterFogVolume(_renderer.Context) { SeaColour = new System.Numerics.Vector4(WaterColour.R(WaterColour.Sea), WaterColour.G(WaterColour.Sea), WaterColour.B(WaterColour.Sea), WaterColour.A(WaterColour.Sea)) / 255f };
@@ -316,7 +316,8 @@ public sealed class GameApp : IDisposable
             if (_renderer.BeginFrame(out var commands))
             {
                 var extent = _renderer.Extent;
-                var aspect = extent.Width / (float)extent.Height;
+                var output = _renderer.OutputExtent;
+                var aspect = output.Width / (float)output.Height;
                 var renderTime = _swell.Time + _clock.Alpha * _clock.TickSeconds;
                 var gpu = _renderer.GpuTimer;
                 var pipe = _renderer.PipelineStats;
@@ -399,6 +400,8 @@ public sealed class GameApp : IDisposable
                 _rain.Record(commands, _renderer.FrameIndex, extent);
                 pipe.End(commands, _rainStats);
 
+                // The scene to the swapchain at native size (Upscale), then the UI over it, sharp at any render scale.
+                _renderer.BeginUiPass(commands);
                 gpu.Begin(commands, _uiScope);
                 pipe.Begin(commands, _uiStats);
                 _imgui.Draw(commands);
@@ -530,7 +533,7 @@ public sealed class GameApp : IDisposable
         _oceanPanel.SurfTexels = _breakers.SurfTexels;
         _oceanPanel.Draw();
         _breakerOverlay.Enabled = _oceanPanel.ShowBreakers;
-        var extent = _renderer.Extent;
+        var extent = _renderer.OutputExtent;
         _breakerOverlay.Draw(_breakers, _camera.ViewProjection(extent.Width / (float)Math.Max(1u, extent.Height)));
         _terrainPanel.Draw();
         _weatherPanel.Draw(CameraXZ);
