@@ -136,15 +136,25 @@ public sealed unsafe class OceanRenderer : IDisposable
     }
 
     private readonly OceanFft _fft;
-    // Layer B maps: buffers shared by all frames. A new field is copied into one no frame in flight still reads, a
-    // sixteenth per frame, and drawn once complete; until then the GPU keeps drawing the field it replaces.
+    // Layer B maps: device-local buffers shared by all frames. A new field is staged and copied into one no frame in
+    // flight still reads, a sixteenth per frame, and drawn once complete; until then the GPU keeps drawing the field it replaces.
     /// <summary>Near and far fields: the current pair, the pair fading out, and a field being copied.</summary>
     private const int CoastalSlots = 6;
     private const int CoastalCopyChunks = 16;
+    private const int CoastalFloats = CoastalField.Resolution * CoastalField.Resolution * CoastalField.TexelFloats;
+    private const int CoastalChunkFloats = (CoastalFloats + CoastalCopyChunks - 1) / CoastalCopyChunks;
+
+    /// <summary>Chunks staged per frame: one per field of the current and previous pairs.</summary>
+    private const int CoastalCopiesPerFrame = 4;
     private readonly GpuBuffer[] _coastal = new GpuBuffer[CoastalSlots];
+    private readonly GpuBuffer _coastalStaging;
+    private readonly VkBufferCopy[] _coastalCopies = new VkBufferCopy[CoastalCopiesPerFrame];
+    private readonly int[] _coastalCopySlots = new int[CoastalCopiesPerFrame];
     private readonly int[] _coastalVersion = new int[CoastalSlots];
     private readonly int[] _coastalCopied = new int[CoastalSlots];
     private readonly long[] _coastalUsed = new long[CoastalSlots];
+    private int _coastalCopyCount;
+    private int _coastalStagingBase;
     private long _frameNumber;
     private const int BreakerBinding = 2 + SampledMaps;
     private const int BreakerHeaderBytes = 48;
@@ -228,7 +238,7 @@ public sealed unsafe class OceanRenderer : IDisposable
     private readonly (int Version, float K0, float Ref)[] _atlasKey = new (int, float, float)[2];
     private readonly int[] _tapVersion = [-1, -1];
     private int _atlasRebuild;
-    private bool _atlasReady;
+    private bool _initialised;
     private Vector4 _depthRect;
     private Vector4 _surfFoamRect;
 
@@ -271,9 +281,11 @@ public sealed unsafe class OceanRenderer : IDisposable
 
         for (var s = 0; s < CoastalSlots; s++)
         {
-            _coastal[s] = new GpuBuffer(renderer.Context, CoastalBytes, VkBufferUsageFlags.StorageBufferBit, true);
+            _coastal[s] = new GpuBuffer(renderer.Context, CoastalBytes, VkBufferUsageFlags.StorageBufferBit | VkBufferUsageFlags.TransferDstBit, false);
             _coastalUsed[s] = -Renderer.FramesInFlight - 1;
         }
+
+        _coastalStaging = new GpuBuffer(renderer.Context, CoastalChunkFloats * sizeof(float) * CoastalCopiesPerFrame * Renderer.FramesInFlight, VkBufferUsageFlags.TransferSrcBit, true);
 
         for (var i = 0; i < Renderer.FramesInFlight; i++)
         {
@@ -284,11 +296,9 @@ public sealed unsafe class OceanRenderer : IDisposable
             _zoneFlow[i].AsSpan<byte>()[..32].Clear();
         }
 
-        _spray = new GpuBuffer(renderer.Context, SprayBytes, VkBufferUsageFlags.StorageBufferBit, true);
-        _spray.AsSpan<byte>().Clear();
-        _surfFoam = new GpuBuffer(renderer.Context, SurfFoamBytes, VkBufferUsageFlags.StorageBufferBit, true);
-        _surfFoam.AsSpan<byte>().Clear();
-        _lipBases = new GpuBuffer(renderer.Context, LipBaseBytes, VkBufferUsageFlags.StorageBufferBit, true);
+        _spray = new GpuBuffer(renderer.Context, SprayBytes, VkBufferUsageFlags.StorageBufferBit | VkBufferUsageFlags.TransferDstBit, false);
+        _surfFoam = new GpuBuffer(renderer.Context, SurfFoamBytes, VkBufferUsageFlags.StorageBufferBit | VkBufferUsageFlags.TransferDstBit, false);
+        _lipBases = new GpuBuffer(renderer.Context, LipBaseBytes, VkBufferUsageFlags.StorageBufferBit, false);
         _allocator = renderer.Context.Allocator;
         _carrierAtlasView = CreateCarrierAtlas(out _carrierAtlas, out _carrierAtlasAllocation);
         _atlasKey[0] = _atlasKey[1] = (-1, 0f, 0f);
@@ -986,11 +996,17 @@ public sealed unsafe class OceanRenderer : IDisposable
         Barrier(commands, VkPipelineStageFlags.VertexShaderBit, VkAccessFlags.ShaderReadBit, VkPipelineStageFlags.ComputeShaderBit, VkAccessFlags.ShaderReadBit | VkAccessFlags.ShaderWriteBit);
         commands.BindDescriptorSets(VkPipelineBindPoint.Compute, _layout, 0, [_sets[frameIndex]], []);
 
-        if (!_atlasReady)
+        if (!_initialised)
         {
             TransitionAtlasToGeneral(commands);
-            _atlasReady = true;
+            commands.FillBuffer(_spray.Handle, (ByteSize64)0, (ByteSize64)SprayBytes, 0);
+            commands.FillBuffer(_surfFoam.Handle, (ByteSize64)0, (ByteSize64)SurfFoamBytes, 0);
+            var shaders = VkPipelineStageFlags.ComputeShaderBit | VkPipelineStageFlags.VertexShaderBit | VkPipelineStageFlags.FragmentShaderBit;
+            Barrier(commands, VkPipelineStageFlags.TransferBit, VkAccessFlags.TransferWriteBit, shaders, VkAccessFlags.ShaderReadBit | VkAccessFlags.ShaderWriteBit);
+            _initialised = true;
         }
+
+        RecordCoastalCopies(commands);
 
         // The carrier atlas, for the taps whose field or carrier changed (Prepare), before anything this frame reads it.
         if (_atlasRebuild != 0)
@@ -1206,6 +1222,8 @@ public sealed unsafe class OceanRenderer : IDisposable
 
         _tapVersion[0] = -1;
         _tapVersion[1] = -1;
+        _coastalCopyCount = 0;
+        _coastalStagingBase = frameIndex * CoastalCopiesPerFrame * CoastalChunkFloats;
 
         header->CoastFarRect = Vector4.Zero;
         header->CoastFarPrevRect = Vector4.Zero;
@@ -1368,13 +1386,39 @@ public sealed unsafe class OceanRenderer : IDisposable
         if (_coastalCopied[slot] < total)
         {
             _coastalUsed[slot] = _frameNumber;
-            var chunk = Math.Min((total + CoastalCopyChunks - 1) / CoastalCopyChunks, total - _coastalCopied[slot]);
-            field.Texels.AsSpan(_coastalCopied[slot], chunk).CopyTo(_coastal[slot].AsSpan<float>().Slice(_coastalCopied[slot]));
+
+            if (_coastalCopyCount == CoastalCopiesPerFrame)
+                return -1;
+
+            var chunk = Math.Min(CoastalChunkFloats, total - _coastalCopied[slot]);
+            var staged = _coastalStagingBase + _coastalCopyCount * CoastalChunkFloats;
+            field.Texels.AsSpan(_coastalCopied[slot], chunk).CopyTo(_coastalStaging.AsSpan<float>().Slice(staged, chunk));
+            _coastalCopies[_coastalCopyCount] = new VkBufferCopy
+            {
+                SrcOffset = (ByteSize64)((long)staged * sizeof(float)),
+                DstOffset = (ByteSize64)((long)_coastalCopied[slot] * sizeof(float)),
+                Size = (ByteSize64)((long)chunk * sizeof(float)),
+            };
+            _coastalCopySlots[_coastalCopyCount++] = slot;
             _coastalCopied[slot] += chunk;
             return -1;
         }
 
         return slot;
+    }
+
+    /// <summary>The coastal chunks <see cref="Prepare"/> staged, then visible to every later read of the maps.</summary>
+    private void RecordCoastalCopies(CommandBuffer commands)
+    {
+        if (_coastalCopyCount == 0)
+            return;
+
+        for (var i = 0; i < _coastalCopyCount; i++)
+            commands.CopyBuffer(_coastalStaging.Handle, _coastal[_coastalCopySlots[i]].Handle, new ReadOnlySpan<VkBufferCopy>(_coastalCopies, i, 1));
+
+        var shaders = VkPipelineStageFlags.ComputeShaderBit | VkPipelineStageFlags.VertexShaderBit | VkPipelineStageFlags.FragmentShaderBit;
+        Barrier(commands, VkPipelineStageFlags.TransferBit, VkAccessFlags.TransferWriteBit, shaders, VkAccessFlags.ShaderReadBit);
+        _coastalCopyCount = 0;
     }
 
     public void Dispose()
@@ -1400,6 +1444,8 @@ public sealed unsafe class OceanRenderer : IDisposable
 
         foreach (var buffer in _coastal)
             buffer.Dispose();
+
+        _coastalStaging.Dispose();
 
         foreach (var buffer in _breakers)
             buffer.Dispose();

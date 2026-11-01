@@ -122,8 +122,7 @@ public sealed unsafe class OceanFft : IDisposable
         );
 
         _uniforms = new GpuBuffer(renderer.Context, UniformAlignment * Renderer.FramesInFlight, VkBufferUsageFlags.UniformBufferBit, true);
-        _foamStats = new GpuBuffer(renderer.Context, FoamStatsBytes, VkBufferUsageFlags.StorageBufferBit, true);
-        _foamStats.AsSpan<byte>().Clear();
+        _foamStats = new GpuBuffer(renderer.Context, FoamStatsBytes, VkBufferUsageFlags.StorageBufferBit | VkBufferUsageFlags.TransferDstBit, false);
         _setLayout = CreateSetLayout();
         _pool = CreatePool();
         AllocateSets();
@@ -364,6 +363,8 @@ public sealed unsafe class OceanFft : IDisposable
         if (!_initialised)
         {
             TransitionToGeneral(commands);
+            commands.FillBuffer(_foamStats.Handle, (ByteSize64)0, (ByteSize64)FoamStatsBytes, 0);
+            Barrier(commands, VkPipelineStageFlags.TransferBit, VkAccessFlags.TransferWriteBit, VkPipelineStageFlags.ComputeShaderBit, VkAccessFlags.ShaderReadBit | VkAccessFlags.ShaderWriteBit);
             _initialised = true;
         }
         else
