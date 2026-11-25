@@ -3,6 +3,9 @@
     <RootNamespace>BrutalGame.Terrain</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Ahwoo.BRUTAL.Numerics" />
+  </ItemGroup>
+  <ItemGroup>
     <InternalsVisibleTo Include="Terrain.Tests" />
   </ItemGroup>
 </Project>

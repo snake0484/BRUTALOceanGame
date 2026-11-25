@@ -99,6 +99,69 @@ internal static class Noise
         return Lerp(a, b, w);
     }
 
+    /// <summary>
+    /// |Δn| ≤ this × |Δx| for <see cref="Gradient3(double, double, double, uint)"/>: per axis |∂n| ≤ 1.875 (quintic fade
+    /// slope) × 4 (two |g·d| ≤ 2) + 1 = 8.5, times √3 for the L2 step. Loose but rigorous; height bounds rely on it.
+    /// </summary>
+    public const float GradientLipschitz = 14.73f;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint Fold(long v) => (uint)v ^ ((uint)(v >> 32) * 0x9E3779B1u);
+
+    /// <summary><see cref="Grad3"/>'s 16 gradients as a table (x, y, z, pad): a dot product instead of unpredictable branches.</summary>
+    private static readonly float[] GradientTable =
+    [
+        1f, 1f, 0f, 0f, -1f, 1f, 0f, 0f, 1f, -1f, 0f, 0f, -1f, -1f, 0f, 0f,
+        1f, 0f, 1f, 0f, -1f, 0f, 1f, 0f, 1f, 0f, -1f, 0f, -1f, 0f, -1f, 0f,
+        0f, 1f, 1f, 0f, 0f, -1f, 1f, 0f, 0f, 1f, -1f, 0f, 0f, -1f, -1f, 0f,
+        1f, 1f, 0f, 0f, 0f, -1f, 1f, 0f, -1f, 1f, 0f, 0f, 0f, -1f, -1f, 0f,
+    ];
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float Dot(uint hash, float x, float y, float z)
+    {
+        var i = (int)(hash & 15) * 4;
+        var g = GradientTable;
+        return g[i] * x + g[i + 1] * y + g[i + 2] * z;
+    }
+
+    /// <summary>
+    /// Double-lattice gradient noise for planet-scale coordinates: the cell index comes from a double floor as long and is
+    /// hashed, only the in-cell fraction is float (a float position steps by 6 cm at 1e6 m). Branch-free gradients.
+    /// </summary>
+    public static float Gradient3(double x, double y, double z, uint seed)
+    {
+        var fx0 = Math.Floor(x);
+        var fy0 = Math.Floor(y);
+        var fz0 = Math.Floor(z);
+        var x0 = (long)fx0;
+        var y0 = (long)fy0;
+        var z0 = (long)fz0;
+        var fx = (float)(x - fx0);
+        var fy = (float)(y - fy0);
+        var fz = (float)(z - fz0);
+        var hx0 = seed ^ (Fold(x0) * 0x8DA6B343u);
+        var hx1 = seed ^ (Fold(x0 + 1) * 0x8DA6B343u);
+        var hy0 = Fold(y0) * 0xD8163841u;
+        var hy1 = Fold(y0 + 1) * 0xD8163841u;
+        var hz0 = Fold(z0) * 0xCB1AB31Fu;
+        var hz1 = Fold(z0 + 1) * 0xCB1AB31Fu;
+        var u = Fade(fx);
+        var v = Fade(fy);
+        var w = Fade(fz);
+        var n000 = Dot(Mix(hx0 ^ hy0 ^ hz0), fx, fy, fz);
+        var n100 = Dot(Mix(hx1 ^ hy0 ^ hz0), fx - 1f, fy, fz);
+        var n010 = Dot(Mix(hx0 ^ hy1 ^ hz0), fx, fy - 1f, fz);
+        var n110 = Dot(Mix(hx1 ^ hy1 ^ hz0), fx - 1f, fy - 1f, fz);
+        var n001 = Dot(Mix(hx0 ^ hy0 ^ hz1), fx, fy, fz - 1f);
+        var n101 = Dot(Mix(hx1 ^ hy0 ^ hz1), fx - 1f, fy, fz - 1f);
+        var n011 = Dot(Mix(hx0 ^ hy1 ^ hz1), fx, fy - 1f, fz - 1f);
+        var n111 = Dot(Mix(hx1 ^ hy1 ^ hz1), fx - 1f, fy - 1f, fz - 1f);
+        var a = Lerp(Lerp(n000, n100, u), Lerp(n010, n110, u), v);
+        var b = Lerp(Lerp(n001, n101, u), Lerp(n011, n111, u), v);
+        return Lerp(a, b, w);
+    }
+
     public static float Fbm2(float x, float y, int octaves, uint seed)
     {
         var sum = 0f;
