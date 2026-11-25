@@ -189,21 +189,10 @@ public sealed class ZoneFlowSim
 
     public float MaxSpeed { get; private set; }
 
-    /// <summary>Debug: world x, depth, world z of the fastest cell.</summary>
-    public Vector3 MaxSpeedAt { get; private set; }
-
     public float Volume { get; private set; }
-
-    /// <summary>Mean foam over wet zone cells (0..1): how white the zone reads.</summary>
-    public float MeanFoam { get; private set; }
 
     /// <summary>Where water slammed into a wall or landed from a pour as of the last <see cref="FindSplashes"/>: the ocean renderer throws spray there.</summary>
     public ReadOnlySpan<WaterSplash> Splashes => _splashes.AsSpan(0, _splashCount);
-
-    /// <summary>Mean and highest turbulence over wet zone cells as of the last <see cref="StepTurbulence"/>.</summary>
-    public float MeanTurbulence { get; private set; }
-
-    public float MaxTurbulence { get; private set; }
 
     /// <summary>
     /// The sim's flow for the GPU as of the last <see cref="PackFlow"/>: (world x, world z of the grid's corner, cell size,
@@ -692,9 +681,6 @@ public sealed class ZoneFlowSim
                     speed = 0f;
                 }
 
-                if (speed > maxSpeed)
-                    MaxSpeedAt = new Vector3(CellCentre(x, z).X, _depth[i], CellCentre(x, z).Y);
-
                 maxSpeed = MathF.Max(maxSpeed, speed);
                 volume += _depth[i] * area;
             }
@@ -724,9 +710,6 @@ public sealed class ZoneFlowSim
         _splashCount = 0;
         var decay = MathF.Exp(-TurbulenceDecay * dt);
         var spread = TurbulenceSpread * dt / (CellSize * CellSize);
-        var total = 0f;
-        var highest = 0f;
-        var wet = 0;
 
         for (var z = 0; z < _nz; z++)
         {
@@ -781,15 +764,10 @@ public sealed class ZoneFlowSim
                 var carried = Sample(_turbulence, back.X, back.Y);
                 var next = MathF.Min(1f, (carried + spread * eddies) * decay + source * TurbulenceBuild * dt);
                 _turbulenceNext[i] = next;
-                total += next;
-                highest = MathF.Max(highest, next);
-                wet++;
             }
         }
 
         (_turbulence, _turbulenceNext) = (_turbulenceNext, _turbulence);
-        MeanTurbulence = wet > 0 ? total / wet : 0f;
-        MaxTurbulence = highest;
     }
 
     private void AddSplash(Vector4 positionSpeed, Vector4 direction)
@@ -907,8 +885,6 @@ public sealed class ZoneFlowSim
     private void StepFoam(float dt)
     {
         var decay = MathF.Exp(-FoamDecay * dt);
-        var total = 0f;
-        var wet = 0;
 
         for (var z = 0; z < _nz; z++)
         {
@@ -950,13 +926,10 @@ public sealed class ZoneFlowSim
                 }
 
                 _foamNext[i] = MathF.Min(1f, carried * decay + churn * FoamBuild * dt);
-                total += _foamNext[i];
-                wet++;
             }
         }
 
         (_foam, _foamNext) = (_foamNext, _foam);
-        MeanFoam = wet > 0 ? total / wet : 0f;
     }
 
     /// <summary>A per-cell field bilinear at fractional cell coordinates, clamped to the grid.</summary>

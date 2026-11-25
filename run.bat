@@ -1,18 +1,12 @@
 @echo off
 rem Builds the game in Release and runs it. Any arguments are passed to the game, e.g.:
 rem   run.bat --wind 14 --breakers
-rem   run.bat --surf-test
 rem   run.bat --bench 12
-rem   run.bat --surf-test --no-lips
-rem   run.bat --surf-cam side --fold-lip   (prototype: the lip as a fold of the ocean mesh instead of the ribbon)
-rem   run.bat --surf-cam --wind 16       (camera follows the curl; add "side" after --surf-cam for the shoulder view, "back" for the broken side)
 rem   run.bat --fly-test                 (flies the coast and logs the slowest frames)
-rem   run.bat --surf-test --wind 4 --swell 1.8 15 0   (groundswell: height m, period s, direction travelling toward in degrees; light wind; --swell 0 0 0 for none)
+rem   run.bat --wind 4 --swell 1.8 15 0   (groundswell: height m, period s, direction travelling toward in degrees; light wind; --swell 0 0 0 for none)
 rem   run.bat --weather-offset 120          (weather starts 120 min into its timeline; --wind pins the sea and turns weather off, --weather forces it on)
-rem   run.bat --weather-offset 725 --rain 0.9 (rain at 0.9 whatever the weather; --roof-test floats a roof over the camera, --bench-rain benches rain on/off)
-rem   run.bat --seaside-test --water-automaton (voxel water as the old cell automaton instead of the 3D pipe model)
-rem   run.bat --pond-test                    (a pond dug in the hillside, filled, then breached: voxel water alone, no sea zone)
-rem   run.bat --lake-test [hole|tunnel|deep] (a dig into the crater lake: a hole at its edge, a tunnel out through the rim, or one up through its bed)
+rem   run.bat --weather-offset 725 --rain 0.9 (rain at 0.9 whatever the weather; --bench-rain benches rain on/off)
+rem   run.bat --water-automaton          (voxel water as the old cell automaton instead of the 3D pipe model)
 setlocal
 cd /d "%~dp0"
 

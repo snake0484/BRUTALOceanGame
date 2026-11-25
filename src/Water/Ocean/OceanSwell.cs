@@ -93,9 +93,6 @@ public sealed class OceanSwell
     /// <summary>The crests' break clocks (BreakerSet.BreakDistance), set by <see cref="OceanSurface"/>: the drawn carrier holds its breaking height while a lip is in the air (BreakerFace.HeldCap).</summary>
     public BreakerSet? Breaking;
 
-    /// <summary>The coherent surf carrier's deep-water height crest to trough (m), before shoaling and sets.</summary>
-    public float CarrierHeight => 2f * MathF.Sqrt(MaxCoherence * _carrierEnergy);
-
     /// <summary>
     /// Sets: the surf wave's height is modulated by a group envelope that travels with its crests (phase GroupRatio × the
     /// carrier's spatial phase − GroupRatio ω t, so a set every 1 / GroupRatio waves), with mean square 1 so the energy is

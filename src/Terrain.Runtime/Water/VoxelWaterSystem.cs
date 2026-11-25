@@ -101,8 +101,6 @@ public sealed class VoxelWaterSystem : IDisposable
     private readonly List<Vector4> _discShapes = new(16);
     private readonly List<Vector4> _remaining = new(8);
     public float DiscSettleSeconds = 3f;
-    public int Discs => _discs.Count;
-    public int Outlets { get; private set; }
 
     /// <summary>
     /// A block is calm while its fills change under this a step and no face moves more than this (m³/s): the pour is
@@ -204,19 +202,6 @@ public sealed class VoxelWaterSystem : IDisposable
     private int _bedVersion = -1;
 
     public float LastZoneMs { get; private set; }
-
-    /// <summary>The slowest zone tick since the last <see cref="TakePeakZoneMs"/> (growth and remerge ticks resize the sim).</summary>
-    public float TakePeakZoneMs()
-    {
-        var peak = _peakZoneMs;
-        _peakZoneMs = 0f;
-        return peak;
-    }
-
-    private float _peakZoneMs;
-
-    /// <summary>Part of <see cref="LastZoneMs"/>: splashes, turbulence and packing the flow for the GPU.</summary>
-    public float LastAgitateMs { get; private set; }
 
     public int ZoneDiscs => _zones.Count;
     private readonly WaterStepJob[] _stepJobs = new WaterStepJob[MaxBlocks];
@@ -360,26 +345,6 @@ public sealed class VoxelWaterSystem : IDisposable
     }
 
     public bool Pipes { get; }
-
-    /// <summary>Diagnostics: the voxel water (m³) in the 1 m column at (x, z) between heights y0 and y1, over loaded blocks.</summary>
-    public float ColumnWater(float x, float z, float y0, float y1)
-    {
-        // A voxel's sample point is its integer world position.
-        var (cx, cz) = (MathF.Round(x), MathF.Round(z));
-        var sum = 0f;
-
-        for (var y = MathF.Ceiling(y0); y <= y1; y += 1f)
-        {
-            var coord = ChunkCoord.FromWorld(new Vector3(cx, y, cz));
-            if (!_blocks.TryGetValue(coord, out var slot))
-                continue;
-
-            var o = coord.WorldOrigin;
-            sum += slot.Block.Water[ChunkConstants.Index((int)(cx - o.X), (int)(y - o.Y), (int)(cz - o.Z))];
-        }
-
-        return sum;
-    }
 
     /// <summary>
     /// Where voxel water slammed into a wall or landed from a pour this tick, after the sea zones' own: the ocean renderer
@@ -557,55 +522,11 @@ public sealed class VoxelWaterSystem : IDisposable
     }
 
     /// <summary>
-    /// Diagnostics: free (not held) water over loaded blocks (m³), the largest fill of any free cell, the count of free wet
-    /// cells, and the highest free surface (world m: a free cell with no water over it).
-    /// </summary>
-    public (float Free, float MaxFill, int Cells, float Top) FreeWater()
-    {
-        var free = 0.0;
-        var max = 0f;
-        var cells = 0;
-        var top = float.NegativeInfinity;
-
-        foreach (var (_, slot) in _blocks)
-        {
-            if (slot.Pending)
-                continue;
-
-            var block = slot.Block;
-
-            for (var z = 0; z < ChunkConstants.Size; z++)
-                for (var y = 0; y < ChunkConstants.Size; y++)
-                    for (var i = ChunkConstants.Index(0, y, z); i < ChunkConstants.Index(ChunkConstants.Size, y, z); i++)
-                    {
-                        var w = block.Water[i];
-
-                        if (w <= 0f || (block.Flags[i] & Held) != 0)
-                            continue;
-
-                        free += w;
-                        max = MathF.Max(max, w);
-                        cells++;
-
-                        if (w > WaterSurfaceMesher.WetThreshold && block.Water[i + ChunkConstants.Padded] <= WaterSurfaceMesher.WetThreshold)
-                            top = MathF.Max(top, block.Coord.WorldOrigin.Y + y - 0.5f + MathF.Min(w, 1f));
-                    }
-        }
-
-        return ((float)free, max, cells, top);
-    }
-
-    /// <summary>
     /// Diagnostics: the body's held cells over loaded blocks: all of them, those farther than <paramref name="radius"/>
     /// from <paramref name="centre"/> (world xz), and those floating (the cell under them open and neither held nor full),
     /// with the highest floating cell's world y.
     /// </summary>
-    public (int Held, int Outside, int Floating, float FloatTop) HeldCells(ushort body, Vector2 centre, float radius)
-        => HeldCells(body, centre, radius, float.PositiveInfinity, out _);
-
-    /// <inheritdoc cref="HeldCells(ushort, Vector2, float)"/>
-    /// <param name="highY">With <paramref name="highFree"/>: free water (m³) farther than <paramref name="radius"/> whose cells lie at or over this world y.</param>
-    public (int Held, int Outside, int Floating, float FloatTop) HeldCells(ushort body, Vector2 centre, float radius, float highY, out float highFree)
+    private (int Held, int Outside, int Floating, float FloatTop) HeldCells(ushort body, Vector2 centre, float radius)
     {
         const int P = ChunkConstants.Padded;
         var held = 0;
@@ -613,7 +534,6 @@ public sealed class VoxelWaterSystem : IDisposable
         var floating = 0;
         var top = float.NegativeInfinity;
         var r2 = radius * radius;
-        var high = 0.0;
 
         foreach (var (_, slot) in _blocks)
         {
@@ -628,10 +548,6 @@ public sealed class VoxelWaterSystem : IDisposable
                     for (var x = 0; x < ChunkConstants.Size; x++)
                     {
                         var i = ChunkConstants.Index(x, y, z);
-
-                        if ((block.Flags[i] & (byte)WaterFlags.Reservoir) == 0 && origin.Y + y >= highY
-                            && Vector2.DistanceSquared(new Vector2(origin.X + x, origin.Z + z), centre) > r2)
-                            high += block.Water[i];
 
                         if ((block.Flags[i] & (byte)WaterFlags.Reservoir) == 0 || block.Body[i] != body)
                             continue;
@@ -650,7 +566,6 @@ public sealed class VoxelWaterSystem : IDisposable
                     }
         }
 
-        highFree = (float)high;
         return (held, outside, floating, top);
     }
 
@@ -711,48 +626,11 @@ public sealed class VoxelWaterSystem : IDisposable
         return text.ToString();
     }
 
-    /// <summary>Diagnostics: activations and refreshes waiting to be dispatched, blocks being (re)activated, blocks being meshed.</summary>
-    public (int Queued, int Pending, int Meshing) Activity
-    {
-        get
-        {
-            var pending = 0;
-            foreach (var (_, slot) in _blocks)
-                pending += slot.Pending ? 1 : 0;
-
-            return (_activationRequests.Count, pending, _meshing.Count);
-        }
-    }
-
     public int Blocks => _blocks.Count;
 
     public int AwakeBlocks { get; private set; }
 
     public float LastStepMs { get; private set; }
-
-    /// <summary>The slowest tick's voxel steps, swell included, since the last call: job waits show here, not in <see cref="LastStepMs"/>'s samples.</summary>
-    public float TakePeakStepMs()
-    {
-        var peak = _peakStepMs;
-        _peakStepMs = 0f;
-        return peak;
-    }
-
-    private float _peakStepMs;
-
-    /// <summary>Of the last tick's steps: the time spent taking the swell (sampling it, waking on it, laying it over blocks).</summary>
-    public float LastSwellMs { get; private set; }
-
-    /// <summary>Diagnostics: the largest gap (m) between a lattice point's run-on swell and its fresh sample, since last taken.</summary>
-    public float TakeSwellStray()
-    {
-        var stray = _swellStray;
-        _swellStray = 0f;
-        return stray;
-    }
-
-    private float _swellStray;
-    private long _swellTime;
 
     public float Mass { get; private set; }
 
@@ -854,99 +732,6 @@ public sealed class VoxelWaterSystem : IDisposable
                 }
 
         return WaterBodies.None;
-    }
-
-    /// <summary>
-    /// Fills every open cell inside a sphere up to <paramref name="top"/> (world y) with water: a pond, a flooded room. It
-    /// lands at rest: the cell the surface crosses part full, those under it at the pressure of the water above (as a
-    /// body's held cells). Filled whole up to a layer's top, the surface sat on full cells, where the head grows 50 times
-    /// as steep, and a pond chattered there and never slept. The blocks it touches are created if needed; the water lands
-    /// in each at the start of the first step it is ready in (never while a mesh job reads it). Not for per-frame use.
-    /// </summary>
-    /// <param name="colour">The poured water's colour and fog density (<see cref="WaterColour"/>).</param>
-    public void Fill(Vector3 centre, float radius, float top, uint colour = WaterColour.Pond)
-    {
-        var fill = new PendingFill(centre, radius, top, colour);
-        var min = ChunkCoord.FromWorld(centre - new Vector3(radius));
-        var max = ChunkCoord.FromWorld(centre + new Vector3(radius));
-
-        for (var z = min.Z; z <= max.Z; z++)
-            for (var y = min.Y; y <= max.Y; y++)
-                for (var x = min.X; x <= max.X; x++)
-                {
-                    var coord = new ChunkCoord(x, y, z);
-                    Request(coord, refresh: false);
-                    fill.Waiting.Add(coord);
-                }
-
-        _fills.Add(fill);
-    }
-
-    private sealed class PendingFill(Vector3 centre, float radius, float top, uint colour)
-    {
-        public readonly Vector3 Centre = centre;
-        public readonly float Radius = radius;
-        public readonly float Top = top;
-        public readonly uint Colour = colour;
-        public readonly HashSet<ChunkCoord> Waiting = new();
-    }
-
-    private readonly List<PendingFill> _fills = new(4);
-
-    /// <summary>Pours pending fills into the blocks that are ready; a fill is done once every block it touches has had it.</summary>
-    private void ApplyFills()
-    {
-        for (var f = _fills.Count - 1; f >= 0; f--)
-        {
-            var fill = _fills[f];
-            _scratch.Clear();
-
-            foreach (var coord in fill.Waiting)
-            {
-                if (!_blocks.TryGetValue(coord, out var slot) || slot.Pending || slot.Meshing)
-                    continue;
-
-                FillBlock(slot, fill);
-                _scratch.Add(coord);
-            }
-
-            foreach (var coord in _scratch)
-                fill.Waiting.Remove(coord);
-
-            if (fill.Waiting.Count == 0)
-                _fills.RemoveAt(f);
-        }
-    }
-
-    private static void FillBlock(Slot slot, PendingFill fill)
-    {
-        var block = slot.Block;
-        var origin = block.Coord.WorldOrigin;
-        var poured = false;
-
-        for (var z = 0; z < ChunkConstants.Size; z++)
-            for (var y = 0; y < ChunkConstants.Size; y++)
-                for (var x = 0; x < ChunkConstants.Size; x++)
-                {
-                    var world = origin + new Vector3(x, y, z);
-                    var i = ChunkConstants.Index(x, y, z);
-                    var over = fill.Top - (world.Y + 0.5f);
-                    if (over <= -1f || Vector3.DistanceSquared(world, fill.Centre) > fill.Radius * fill.Radius || (block.Flags[i] & Held) != 0)
-                        continue;
-
-                    var had = block.Water[i];
-                    block.Water[i] = MathF.Max(had, over >= 0f ? 1f + WaterFlow.Compression * over : 1f + over);
-                    block.Colour[i] = WaterColour.Blend(block.Colour[i], had, fill.Colour, block.Water[i] - had);
-                    poured = true;
-                }
-
-        if (!poured)
-            return;
-
-        block.Revision++;
-        block.Asleep = false;
-        block.QuietSteps = 0;
-        slot.MeshDirty = true;
     }
 
     /// <summary>Adds a sea zone disc (world x, world z, radius): grid mask, zone sim domain, and held cells for the 3D automaton.</summary>
@@ -1056,8 +841,6 @@ public sealed class VoxelWaterSystem : IDisposable
     /// </summary>
     private void SettleDiscs(float dt)
     {
-        Outlets = 0;
-
         for (var d = _discs.Count - 1; d >= 0; d--)
         {
             var disc = _discs[d];
@@ -1077,8 +860,6 @@ public sealed class VoxelWaterSystem : IDisposable
             {
                 if (!disc.IsOutlet || !DrainOutlet(disc, dt))
                     RemoveDisc(d);
-                else
-                    Outlets++;
 
                 continue;
             }
@@ -1115,7 +896,6 @@ public sealed class VoxelWaterSystem : IDisposable
                 continue;
 
             Grow(d, disc, dt);
-            Outlets += disc.IsOutlet ? 1 : 0;
         }
     }
 
@@ -1570,7 +1350,6 @@ public sealed class VoxelWaterSystem : IDisposable
             var since = _swellClock - point.Sampled;
             var now = point.Height + point.Rate * (float)since;
             var ahead = since > 0.0 ? h + (float)((h - point.Fresh) / since * interval) : h;
-            _swellStray = MathF.Max(_swellStray, MathF.Abs(h - now));
             point.Height = now;
             point.Rate = (float)((ahead - now) / interval);
             point.Fresh = h;
@@ -1836,16 +1615,13 @@ public sealed class VoxelWaterSystem : IDisposable
         // Budgeted: after an edit wakes many blocks a step can take tens of ms; stop once the budget is spent and drop
         // the backlog, so water slows down for a moment instead of the frame rate collapsing (and the clock spiralling).
         var budget = (long)(StepBudgetMs * Stopwatch.Frequency / 1000.0);
-        _swellTime = 0;
 
         if (Pipes && SeaSurface is not null)
         {
-            var swell = Stopwatch.GetTimestamp();
             _swellClock += dt;
             _swellTick++;
             RefreshSwell(dt);
             WakeOnSwell();
-            _swellTime += Stopwatch.GetTimestamp() - swell;
         }
 
         while (_meshing.Count == 0 && _accumulator >= stepTime && steps < MaxStepsPerTick && Stopwatch.GetTimestamp() - start < budget)
@@ -1860,12 +1636,7 @@ public sealed class VoxelWaterSystem : IDisposable
 
         // The voxel steps alone: the zone sim below has its own timing (LastZoneMs).
         if (steps > 0)
-        {
-            var ms = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
-            _peakStepMs = MathF.Max(_peakStepMs, ms);
-            LastStepMs = ms / steps;
-            LastSwellMs = (float)(_swellTime * 1000.0 / Stopwatch.Frequency);
-        }
+            LastStepMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds / steps;
 
         StartMeshing();
         StepZones(dt);
@@ -1903,9 +1674,6 @@ public sealed class VoxelWaterSystem : IDisposable
 
     private void Step()
     {
-        if (_fills.Count > 0)
-            ApplyFills();
-
         WakeNeighboursOfAwake();
 
         _awake.Clear();
@@ -1946,9 +1714,7 @@ public sealed class VoxelWaterSystem : IDisposable
 
             if (Pipes)
             {
-                var swell = Stopwatch.GetTimestamp();
                 PrepareSwell(slot.Block);
-                _swellTime += Stopwatch.GetTimestamp() - swell;
 
                 if (Flows.Count > 0)
                     PrepareFlowEdges(slot.Block);
@@ -2201,9 +1967,7 @@ public sealed class VoxelWaterSystem : IDisposable
         for (var i = 0; i < ZoneSubsteps; i++)
             Zones.Step(substep);
 
-        var agitate = Stopwatch.GetTimestamp();
         Zones.Agitate((float)dt);
-        LastAgitateMs = (float)Stopwatch.GetElapsedTime(agitate).TotalMilliseconds;
 
         // Violent flow or a surge past the edge grows the zone (rate-limited, reach-limited and capped inside the sim);
         // grown discs that have settled remerge into the ocean.
@@ -2224,12 +1988,9 @@ public sealed class VoxelWaterSystem : IDisposable
 
         _fadedOut.Clear();
 
-        var pack = Stopwatch.GetTimestamp();
         Zones.PackFlow();
-        LastAgitateMs += (float)Stopwatch.GetElapsedTime(pack).TotalMilliseconds;
         Zones.Publish(_bathymetry);
         LastZoneMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
-        _peakZoneMs = MathF.Max(_peakZoneMs, LastZoneMs);
     }
 
     /// <summary>

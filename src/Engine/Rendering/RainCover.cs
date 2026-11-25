@@ -129,18 +129,6 @@ public sealed unsafe class RainCover : IDisposable
     /// <summary>Fetch maps swept on the job system so far.</summary>
     public int FetchSweeps => _fetchRevision;
 
-    /// <summary>Debug: wind exposure and fetch (m) of the column at world xz in the last window built; null outside it.</summary>
-    public (float Exposure, float Fetch)? WindAt(Vector2 xz)
-    {
-        var i = (int)MathF.Floor((xz.X - _built.Corner.X) / _cell);
-        var j = (int)MathF.Floor((xz.Y - _built.Corner.Y) / _cell);
-        if ((uint)i >= Side || (uint)j >= Side)
-            return null;
-
-        var c = ColumnFloats * (i + j * Side);
-        return (_columns[c + 1], _columns[c + 2]);
-    }
-
     /// <summary>
     /// This frame's cover: (window corner x, corner z, cell, side), (fetch map corner x, corner z, cell, side), (cell tops
     /// corner x, corner z, cell, side), the fetch map row by row, the cell tops row by row, then (top, wind exposure,

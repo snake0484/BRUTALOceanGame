@@ -32,24 +32,6 @@ public sealed class BreakerSetTests(ITestOutputHelper output)
     private static OceanSwell Beach(float direction, float windSpeed = 16f, float slope = 0.05f, float swellHeight = 0f, float swellPeriod = 12f) =>
         Build((x, _) => Depth(x, slope), direction, windSpeed, swellHeight, swellPeriod);
 
-    /// <summary>
-    /// The storm scene (20 m/s with the 1.2 m, 13 s swell) on a 1:50 beach whose shoreline bows 40 m along the coast and
-    /// carries, over 180 m of it, a 36 m skewed bar 1.6 m deep in about 2.8 m of water with a 5 m trough behind it, like
-    /// the surf test's bar: the trough is deeper than the surf mask's bound, so crest chains split there, and a crest's
-    /// length inside the mask grows as it comes in over the bowed band, so chains are resampled. For the lip seed tests.
-    /// </summary>
-    internal static OceanSwell BarBeachForProbe(float direction) => Build(BarDepth, direction, 20f, 1.2f, 13f);
-
-    private static float BarDepth(float x, float z)
-    {
-        var shore = 820f + 40f * MathF.Cos(MathF.Tau * z / (N * Cell));
-        var depth = 0.02f * (shore - x);
-        var along = BreakerFaces.Smooth((90f - MathF.Abs(z - 512f)) / 20f);
-        var bar = (x - 640f - 0.35f * (z - 512f)) / 12f;
-        var trough = (x - 690f - 0.35f * (z - 512f)) / 15f;
-        return depth - MathF.Max(depth - 1.6f, 0f) * MathF.Exp(-bar * bar) * along + 5f * MathF.Exp(-trough * trough) * along;
-    }
-
     private static OceanSwell Build(Func<float, float, float> depth, float direction, float windSpeed, float swellHeight, float swellPeriod)
     {
         var depths = new float[N * N];

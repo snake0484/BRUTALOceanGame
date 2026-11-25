@@ -10,7 +10,6 @@ var windSpeed = 10f;
 float[] swell = [1.2f, 13f, 0f];
 var foamDebug = false;
 var editTest = false;
-var floodTest = false;
 // Voxel water steps per second; by default 240 for the automaton (it spreads diffusively) and 60 for the pipe model,
 // which is stable there (docs/voxel-water.md, v2).
 int? waterRate = null;
@@ -19,22 +18,13 @@ int? waterRate = null;
 // automaton instead (no momentum, no flow or foam for the renderer).
 var waterPipes = true;
 var hideUi = false;
-var seasideTest = false;
-var pondTest = false;
-// --lake-test scene: hole (default), tunnel, deep or bank; null = off.
-string? lakeTest = null;
-string? riverTest = null;
 var coastal = true;
 var benchSeconds = 0.0;
 var breakers = false;
-var surfTest = false;
 var faces = true;
 var lips = true;
 var foldLip = true;
 var flyTest = false;
-var surfCam = false;
-var surfSide = false;
-var surfBack = false;
 var chainLips = false;
 
 // Weather drives the ocean wind and the sky unless --wind pins the sea (tests, benchmarks); --weather forces it on.
@@ -53,9 +43,6 @@ var voxelSwell = true;
 var fogOn = true;
 // Scene resolution per axis relative to the window (0.5..1); the UI stays native.
 var renderScale = 1f;
-var roofTest = false;
-// --cave-test site: all, cave, pool or cove; null = off.
-string? caveTest = null;
 float[]? camera = null;
 for (var i = 0; i < args.Length; i++)
 {
@@ -72,15 +59,6 @@ for (var i = 0; i < args.Length; i++)
         weatherOffset = float.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture);
     else if (args[i] == "--rain" && i + 1 < args.Length)
         rain = float.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture);
-    else if (args[i] == "--roof-test")
-        roofTest = true;
-    else if (args[i] == "--cave-test")
-    {
-        caveTest = "all";
-
-        if (i + 1 < args.Length && args[i + 1] is "cave" or "pool" or "cove")
-            caveTest = args[++i];
-    }
     else if (args[i] == "--bench-rain")
     {
         benchRain = true;
@@ -113,8 +91,6 @@ for (var i = 0; i < args.Length; i++)
         foamDebug = true;
     else if (args[i] == "--edit-test")
         editTest = true;
-    else if (args[i] == "--flood-test")
-        floodTest = true;
     else if (args[i] == "--hide-ui")
         hideUi = true;
     else if (args[i] == "--bench")
@@ -137,45 +113,12 @@ for (var i = 0; i < args.Length; i++)
         chainLips = true;
     else if (args[i] == "--fly-test")
         flyTest = true;
-    else if (args[i] == "--surf-cam")
-    {
-        surfCam = true;
-
-        if (i + 1 < args.Length && args[i + 1] == "side")
-        {
-            surfSide = true;
-            i++;
-        }
-        else if (i + 1 < args.Length && args[i + 1] == "back")
-        {
-            surfBack = true;
-            i++;
-        }
-    }
     else if (args[i] == "--no-faces")
         faces = false;
-    else if (args[i] == "--surf-test")
-        surfTest = true;
     else if (args[i] == "--breakers")
         breakers = true;
     else if (args[i] == "--no-coastal")
         coastal = false;
-    else if (args[i] == "--seaside-test")
-        seasideTest = true;
-    else if (args[i] == "--pond-test")
-        pondTest = true;
-    else if (args[i] == "--lake-test")
-    {
-        lakeTest = "hole";
-        if (i + 1 < args.Length && !args[i + 1].StartsWith("--"))
-            lakeTest = args[++i];
-    }
-    else if (args[i] == "--river-test")
-    {
-        riverTest = "walk";
-        if (i + 1 < args.Length && !args[i + 1].StartsWith("--"))
-            riverTest = args[++i];
-    }
     else if (args[i] == "--water-pipes")
         waterPipes = true;
     else if (args[i] == "--water-automaton")
@@ -190,5 +133,5 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
-using var app = new GameApp(windSpeed, foamDebug, editTest, camera, floodTest, waterRate ?? (waterPipes ? 60 : 240), hideUi, seasideTest, coastal, benchSeconds, breakers, surfTest, faces, lips, flyTest, surfCam, surfSide, swell, foldLip, surfBack, chainLips, weather ?? true, weatherOffset, rain, benchRain, roofTest, caveTest, waterPipes, pondTest, lakeTest, benchFog, fogOn, benchSsr, ssrOn, voxelSwell, riverTest, renderScale);
+using var app = new GameApp(windSpeed, foamDebug, editTest, camera, waterRate ?? (waterPipes ? 60 : 240), hideUi, coastal, benchSeconds, breakers, faces, lips, flyTest, swell, foldLip, chainLips, weather ?? true, weatherOffset, rain, benchRain, waterPipes, benchFog, fogOn, benchSsr, ssrOn, voxelSwell, renderScale);
 app.Run();
