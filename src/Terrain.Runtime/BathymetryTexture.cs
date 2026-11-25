@@ -9,12 +9,9 @@ using Region = BrutalGame.Terrain.Runtime.BathymetryGrid.Region;
 namespace BrutalGame.Terrain.Runtime;
 
 /// <summary>
-/// GPU copy of <see cref="BathymetryGrid"/>: RGBA16F (signed depth, zone level, zone flag, whitewater) in two layers,
-/// 0 = the latest sim tick and 1 = the tick before, so the ocean blends sea-zone levels between ticks by the clock's alpha.
-/// Only what changed is uploaded: the regions the terrain re-merged, and once per tick the zone cells that moved. When the
-/// grid re-centres its data moves, and so does the texture's, on the GPU (via a scratch image); only the strips that came
-/// in are filled. The whole map goes up only on the first upload. Layer 1 only differs from layer 0 on zone cells, so
-/// everything else is filled once and copied into both layers.
+/// GPU copy of <see cref="BathymetryGrid"/>: R16F signed depth. Only what changed is uploaded: the regions the terrain
+/// re-merged. When the grid re-centres its data moves, and so does the texture's, on the GPU (via a scratch image); only
+/// the strips that came in are filled. The whole map goes up only on the first upload.
 /// </summary>
 public sealed unsafe class BathymetryTexture : IDisposable
 {
@@ -30,24 +27,14 @@ public sealed unsafe class BathymetryTexture : IDisposable
     private const float MinLandDepth = -20f;
 
     /// <summary>
-    /// Depth for dry sea-zone cells. Strongly negative so the interpolated thickness fades to 0 close to the wet cell:
-    /// the surface between a wet rim and a dry hole floor slants through open air and must not be drawn.
-    /// </summary>
-    public const float ZoneDry = -4f;
-
-    private const int Channels = 4;
-    private const int Layers = 2;
-    private const int LayerHalves = Texels * Channels;
-
-    /// <summary>
     /// Cells (2 m) a below-sea-level column may lie from open sea, through other below-sea-level columns, and still count
-    /// as sea. The voxel sea flag reads the sea-level voxel layer, which is mostly solid where the ground sits just under
-    /// the surface, so the shoreline band reads "dry"; without this it was discarded as a pit and left a hole at the beach.
+    /// as sea. The sea flag reads the sea-level voxel layer, which is mostly solid where the ground sits just under the
+    /// surface, so the shoreline band reads "dry"; without this it was discarded as a pit and left a hole at the beach.
     /// </summary>
     private const int ShoreReach = 4;
 
-    /// <summary>Upload rectangles per record: the grid's changed regions plus the zone-level/blend one.</summary>
-    private const int MaxUploads = 42;
+    /// <summary>Upload rectangles per record: at most the grid's changed regions.</summary>
+    private const int MaxUploads = 32;
 
     private readonly byte[] _reach = new byte[Texels];
     private readonly byte[] _reachScratch = new byte[Texels];
@@ -61,17 +48,9 @@ public sealed unsafe class BathymetryTexture : IDisposable
     private readonly VmaAllocation _scratchAllocation;
     private readonly GpuBuffer _staging;
     private bool _initialised;
-    private long _uploadedTick = -1;
-
-    /// <summary>Layers 0 and 1 as last uploaded. Layer 0 becomes layer 1 for cells that change on the next tick.</summary>
-    private readonly Half[] _shown = new Half[LayerHalves];
-    private readonly Half[] _shownPrevious = new Half[LayerHalves];
-
-    /// <summary>Cells where layer 1 differs from layer 0 (zone cells that moved last tick).</summary>
-    private Region _blend;
 
     private readonly Region[] _uploads = new Region[MaxUploads];
-    private readonly VkBufferImageCopy[] _copies = new VkBufferImageCopy[MaxUploads * Layers];
+    private readonly VkBufferImageCopy[] _copies = new VkBufferImageCopy[MaxUploads];
 
     public BathymetryTexture(Renderer renderer)
     {
@@ -85,9 +64,9 @@ public sealed unsafe class BathymetryTexture : IDisposable
             new VkImageViewCreateInfo
             {
                 Image = _image,
-                ViewType = VkImageViewType._2DArray,
-                Format = VkFormat.R16G16B16A16SFloat,
-                SubresourceRange = new VkImageSubresourceRange { AspectMask = VkImageAspectFlags.ColorBit, LevelCount = 1, LayerCount = Layers },
+                ViewType = VkImageViewType._2D,
+                Format = VkFormat.R16SFloat,
+                SubresourceRange = new VkImageSubresourceRange { AspectMask = VkImageAspectFlags.ColorBit, LevelCount = 1, LayerCount = 1 },
             },
             null
         );
@@ -104,7 +83,7 @@ public sealed unsafe class BathymetryTexture : IDisposable
             null
         );
 
-        _staging = new GpuBuffer(renderer.Context, LayerHalves * Layers * sizeof(Half) * Renderer.FramesInFlight, VkBufferUsageFlags.TransferSrcBit, true);
+        _staging = new GpuBuffer(renderer.Context, Texels * sizeof(Half) * Renderer.FramesInFlight, VkBufferUsageFlags.TransferSrcBit, true);
     }
 
     private (VkImage, VmaAllocation) CreateImage(VkImageUsageFlags usage)
@@ -113,10 +92,10 @@ public sealed unsafe class BathymetryTexture : IDisposable
             new VkImageCreateInfo
             {
                 ImageType = VkImageType._2D,
-                Format = VkFormat.R16G16B16A16SFloat,
+                Format = VkFormat.R16SFloat,
                 Extent = new VkExtent3D { Width = BathymetryGrid.Resolution, Height = BathymetryGrid.Resolution, Depth = 1 },
                 MipLevels = 1,
-                ArrayLayers = Layers,
+                ArrayLayers = 1,
                 Samples = VkSampleCountFlags._1Bit,
                 Tiling = VkImageTiling.Optimal,
                 Usage = usage,
@@ -153,46 +132,18 @@ public sealed unsafe class BathymetryTexture : IDisposable
     /// <summary>Uploads recorded so far.</summary>
     public int Uploads { get; private set; }
 
-    /// <summary>
-    /// Uploads what changed. Record outside a render pass. The first call always uploads so the image is valid.
-    /// Zone levels go up once per sim <paramref name="tick"/>: the cells that changed get their previous value in layer 1,
-    /// and a tick later, once they stop changing, layer 1 is set equal to layer 0 so the blend settles.
-    /// </summary>
-    public void Record(CommandBuffer commands, int frameIndex, BathymetryGrid grid, long tick)
+    /// <summary>Uploads what changed. Record outside a render pass. The first call always uploads so the image is valid.</summary>
+    public void Record(CommandBuffer commands, int frameIndex, BathymetryGrid grid)
     {
         var full = !_initialised || grid.ChangedAll;
-        var changed = grid.Dirty;
-        var newTick = tick != _uploadedTick;
-        var due = newTick && (grid.LevelsDirty || !_blend.Empty);
-        if (!full && !changed && !due)
-        {
-            _uploadedTick = tick;
+        if (!full && !grid.Dirty)
             return;
-        }
 
-        var levels = newTick ? LevelRegion(grid.TakeLevelRect()) : default;
-        var moved = _initialised && grid.Shift != default;
-        var shift = moved && !full ? grid.Shift : default;
-
-        // On a tick the cells that changed in it blend from their last value; between ticks (a bathymetry change) the
-        // running blend is kept. Everything else is shown as it is now, on both layers. Moved data restarts the blend.
-        var blend = !_initialised || moved ? default : newTick ? levels : _blend;
-        var stale = _blend;
-        _blend = blend;
-        _uploadedTick = tick;
-
+        var shift = _initialised && !full ? grid.Shift : default;
         var start = Stopwatch.GetTimestamp();
-        if (shift != default)
-        {
-            BathymetryGrid.ShiftCells(_shown, shift.X, shift.Z, default, Channels);
-            BathymetryGrid.ShiftCells(_shownPrevious, shift.X, shift.Z, default, Channels);
-        }
-
         UpdateShoreReach(grid);
         LastReachMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
 
-        // Terrain regions show the same on both layers; the zone region (cells that moved this tick, and those that
-        // stop blending) gets its own layer 1. It is filled and copied last, so its layer 1 wins where they overlap.
         // The strips a shift brings in are cleared on the GPU (RecordShift); regions the grid rebuilt there are uploaded over them.
         var count = 0;
         if (full)
@@ -203,29 +154,20 @@ public sealed unsafe class BathymetryTexture : IDisposable
                 _uploads[count++] = region;
         }
 
-        var zone = full ? default : Join(levels, stale);
-        var offset = frameIndex * LayerHalves * Layers;
-        var cells = zone.Area;
+        var offset = frameIndex * Texels;
+        var cells = 0;
         for (var i = 0; i < count; i++)
         {
-            FillRows(grid, _uploads[i], default, null, offset);
+            FillRows(grid, _uploads[i], offset);
+            _copies[i] = Copy(offset, _uploads[i]);
             cells += _uploads[i].Area;
         }
-
-        if (!zone.Empty)
-            FillRows(grid, zone, blend, newTick ? _shown : _shownPrevious, offset);
 
         LastUploadMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
         LastUploadCells = cells;
         Uploads++;
 
-        for (var i = 0; i < count; i++)
-        {
-            _copies[2 * i] = Copy(offset, _uploads[i], 0);
-            _copies[2 * i + 1] = Copy(offset, _uploads[i], 1);
-        }
-
-        var range = new VkImageSubresourceRange { AspectMask = VkImageAspectFlags.ColorBit, LevelCount = 1, LayerCount = Layers };
+        var range = new VkImageSubresourceRange { AspectMask = VkImageAspectFlags.ColorBit, LevelCount = 1, LayerCount = 1 };
 
         if (shift != default)
             RecordShift(commands, shift, range);
@@ -234,17 +176,7 @@ public sealed unsafe class BathymetryTexture : IDisposable
                 VkPipelineStageFlags.VertexShaderBit | VkPipelineStageFlags.FragmentShaderBit, 0, range);
 
         if (count > 0)
-            commands.CopyBufferToImage(_staging.Handle, _image, VkImageLayout.TransferDstOptimal, _copies.AsSpan(0, 2 * count));
-
-        if (!zone.Empty)
-        {
-            if (count > 0)
-                commands.PipelineBarrier(VkPipelineStageFlags.TransferBit, VkPipelineStageFlags.TransferBit, VkDependencyFlags.None,
-                    [new VkMemoryBarrier { SrcAccessMask = VkAccessFlags.TransferWriteBit, DstAccessMask = VkAccessFlags.TransferWriteBit }], [], []);
-
-            commands.CopyBufferToImage(_staging.Handle, _image, VkImageLayout.TransferDstOptimal,
-                [Copy(offset, zone, 0), Copy(offset + LayerHalves, zone, 1)]);
-        }
+            commands.CopyBufferToImage(_staging.Handle, _image, VkImageLayout.TransferDstOptimal, _copies.AsSpan(0, count));
 
         commands.PipelineBarrier(
             VkPipelineStageFlags.TransferBit,
@@ -272,8 +204,6 @@ public sealed unsafe class BathymetryTexture : IDisposable
         _initialised = true;
     }
 
-    private static Region Join(Region a, Region b) => a.Empty ? b : b.Empty ? a : a.Union(b);
-
     /// <summary>
     /// Moves the texture's contents with the grid: all of it into the scratch image, then back offset by the shift (an
     /// image can't copy onto itself where the regions overlap). Leaves the texture in TRANSFER_DST for the uploads.
@@ -281,7 +211,7 @@ public sealed unsafe class BathymetryTexture : IDisposable
     private void RecordShift(CommandBuffer commands, (int X, int Z) shift, VkImageSubresourceRange range)
     {
         const int n = BathymetryGrid.Resolution;
-        var layers = new VkImageSubresourceLayers { AspectMask = VkImageAspectFlags.ColorBit, LayerCount = Layers };
+        var layers = new VkImageSubresourceLayers { AspectMask = VkImageAspectFlags.ColorBit, LayerCount = 1 };
 
         Transition(commands, _image, VkImageLayout.ShaderReadOnlyOptimal, VkImageLayout.TransferSrcOptimal,
             VkPipelineStageFlags.VertexShaderBit | VkPipelineStageFlags.FragmentShaderBit, VkAccessFlags.TransferReadBit, range);
@@ -293,7 +223,7 @@ public sealed unsafe class BathymetryTexture : IDisposable
 
         Transition(commands, _image, VkImageLayout.TransferSrcOptimal, VkImageLayout.TransferDstOptimal, VkPipelineStageFlags.TransferBit, VkAccessFlags.TransferWriteBit, range);
 
-        // The strips that came in hold what the grid's do: unknown ground, no zone. Clearing it all and copying the kept
+        // The strips that came in hold what the grid's do: unknown ground. Clearing it all and copying the kept
         // part back over it fills them on the GPU instead of the CPU writing and uploading every exposed cell.
         var unknown = new VkClearColorValue { Float32 = new Brutal.Numerics.float4(BathymetryGrid.UnknownDepth, 0f, 0f, 0f) };
         commands.ClearColorImage(_image, VkImageLayout.TransferDstOptimal, &unknown, [range]);
@@ -340,55 +270,37 @@ public sealed unsafe class BathymetryTexture : IDisposable
         );
     }
 
-    /// <summary>The grid's inclusive zone-level rectangle as a region (empty when Max &lt; Min).</summary>
-    private static Region LevelRegion((int MinX, int MinZ, int MaxX, int MaxZ) rect) =>
-        rect.MaxX < rect.MinX ? default : new Region(rect.MinX, rect.MinZ, rect.MaxX + 1, rect.MaxZ + 1);
-
-    private static VkBufferImageCopy Copy(int layerOffset, Region region, int layer) => new()
+    private static VkBufferImageCopy Copy(int offset, Region region) => new()
     {
-        BufferOffset = (ByteSize64)((layerOffset + (region.X0 + region.Z0 * BathymetryGrid.Resolution) * Channels) * sizeof(Half)),
+        BufferOffset = (ByteSize64)((offset + region.X0 + region.Z0 * BathymetryGrid.Resolution) * sizeof(Half)),
         BufferRowLength = BathymetryGrid.Resolution,
         BufferImageHeight = BathymetryGrid.Resolution,
-        ImageSubresource = new VkImageSubresourceLayers { AspectMask = VkImageAspectFlags.ColorBit, BaseArrayLayer = layer, LayerCount = 1 },
+        ImageSubresource = new VkImageSubresourceLayers { AspectMask = VkImageAspectFlags.ColorBit, LayerCount = 1 },
         ImageOffset = new VkOffset3D { X = region.X0, Y = region.Z0 },
         ImageExtent = new VkExtent3D { Width = region.X1 - region.X0, Height = region.Z1 - region.Z0, Depth = 1 },
     };
 
     /// <summary>
-    /// Writes <paramref name="region"/> into this frame's staging at <paramref name="offset"/> halves: layer 0, and when
-    /// <paramref name="before"/> is given layer 1 as well, which is <paramref name="before"/> on zone cells inside
-    /// <paramref name="blend"/> and the new value elsewhere. The mirrors only track zone cells, the only ones that blend.
+    /// Writes <paramref name="region"/> into this frame's staging at <paramref name="offset"/> halves: signed depth, sea
+    /// level - ground (negative on dry land; Pit where the ocean must not draw). The shader fades the surface by its height
+    /// over the ground, so the water's edge is wherever the moving surface meets the beach.
     /// </summary>
-    private void FillRows(BathymetryGrid grid, Region region, Region blend, Half[]? before, int offset)
+    private void FillRows(BathymetryGrid grid, Region region, int offset)
     {
         const int n = BathymetryGrid.Resolution;
-        var current = (Half*)_staging.Mapped + offset;
-        var previous = current + LayerHalves;
+        var depths = (Half*)_staging.Mapped + offset;
         var tops = grid.Tops;
         var beds = grid.Beds;
         var sea = grid.Sea;
         var seaLods = grid.SeaLods;
-        var simulated = grid.Simulated;
-        var zoneWet = grid.ZoneWet;
-        var zoneOffset = grid.ZoneOffset;
-        var zoneDepth = grid.ZoneDepth;
-        var zoneWhite = grid.ZoneWhite;
-        var zoneWeight = grid.ZoneWeight;
 
-        // R = signed depth, sea level − ground (negative on dry land; Pit where the ocean must not draw), G = sim level
-        // offset, B = sea-zone flag, A = flow whitewater. The shader fades the surface by its height over the ground,
-        // so the water's edge is wherever the moving surface meets the beach.
         for (var z = region.Z0; z < region.Z1; z++)
         {
-            var rowBlends = z >= blend.Z0 && z < blend.Z1;
-
             for (var x = region.X0; x < region.X1; x++)
             {
                 var i = x + z * n;
                 var ground = BathymetryGrid.Ground(tops[i], beds[i], sea[i]);
                 float depth;
-                var level = 0f;
-                var zone = 0f;
 
                 if (float.IsNaN(ground))
                     depth = BathymetryGrid.UnknownDepth;
@@ -397,40 +309,7 @@ public sealed unsafe class BathymetryTexture : IDisposable
                 else
                     depth = MathF.Max(MinLandDepth, BathymetryGrid.SeaLevel - ground);
 
-                // A zone cell's depth is the sim's, blended in by its zone weight as the shader blends the surface, so a
-                // disc fading in or out changes the depth with the surface, not at once (a pit has no open-sea depth).
-                if (simulated[i])
-                {
-                    var simDepth = zoneWet[i] ? zoneDepth[i] : ZoneDry;
-                    level = zoneOffset[i];
-                    zone = zoneWeight[i];
-                    depth = depth == Pit ? simDepth : float.Lerp(depth, simDepth, zone);
-                }
-
-                var t = i * Channels;
-                current[t] = (Half)depth;
-                current[t + 1] = (Half)level;
-                current[t + 2] = (Half)zone;
-                current[t + 3] = (Half)zoneWhite[i];
-
-                if (!simulated[i])
-                {
-                    if (before is not null)
-                        new Span<Half>(current + t, Channels).CopyTo(new Span<Half>(previous + t, Channels));
-
-                    continue;
-                }
-
-                var blends = before is not null && rowBlends && x >= blend.X0 && x < blend.X1;
-                for (var c = 0; c < Channels; c++)
-                {
-                    var old = blends ? before![t + c] : current[t + c];
-                    _shown[t + c] = current[t + c];
-                    _shownPrevious[t + c] = old;
-
-                    if (before is not null)
-                        previous[t + c] = old;
-                }
+                depths[i] = (Half)depth;
             }
         }
     }

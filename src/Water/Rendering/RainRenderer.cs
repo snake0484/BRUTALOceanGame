@@ -92,9 +92,6 @@ public sealed unsafe class RainRenderer : IDisposable
         _dropScope = _timer.Register("Rain drops");
     }
 
-    /// <summary>The ocean's rain (intensity, looped time) as of the last <see cref="Prepare"/>, for the voxel water's rings.</summary>
-    public Vector2 Surface => new(_ocean.Rain, _ocean.RainTime);
-
     /// <summary>Drops drawn this frame.</summary>
     public int Drops => _active ? _drops : 0;
 

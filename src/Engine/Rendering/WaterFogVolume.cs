@@ -14,7 +14,7 @@ namespace BrutalGame.Engine.Rendering;
 /// stops a march; 0 = air). A window of <see cref="BlocksX"/> × <see cref="BlocksY"/> × <see cref="BlocksZ"/> blocks of
 /// <see cref="Block"/>³ cells, centred on the camera's block and stored toroidally (a cell's texel is its world cell mod
 /// the texture size), so a block that enters the window is the only thing uploaded, and a block whose water changed is
-/// uploaded again when its revision moves. The filler (the voxel water system) asks <see cref="Stale"/> per block and
+/// uploaded again when its revision moves. The filler (BathymetryFog) asks <see cref="Stale"/> per block and
 /// writes into <see cref="Reserve"/>'s span; <see cref="Record"/> copies this frame's blocks before the main pass.
 /// </summary>
 public sealed unsafe class WaterFogVolume : IDisposable

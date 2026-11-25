@@ -24,14 +24,10 @@ layout(std430, set = 1, binding = 1) RAIN_SPLASHES_ACCESS buffer Splashes { vec4
 // Splash crowns are drawn in a window of impact cells around the camera (out to SPLASH_FAR, rain_ripples.glsl).
 const int SPLASH_SIDE = 64;
 
-// The ocean is drawn at xz unless the column holds none (ocean.frag's discard: an inland pit, off the zones).
+// The ocean is drawn at xz unless the column holds none (ocean.frag's discard: an inland pit).
 bool oceanDrawnAt(vec2 xz)
 {
-    vec2 uv = (xz - frame.depthRect.xy) / frame.depthRect.z;
-    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))))
-        return true;
-    vec4 map = depthMapAt(uv);
-    return !(map.b < 0.5 && map.r < -500.0);
+    return waterDepth(xz) >= -500.0;
 }
 
 vec3 acesFitRain(vec3 x)

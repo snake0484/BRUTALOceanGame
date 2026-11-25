@@ -9,23 +9,13 @@ public record struct TerrainParams()
     public float IslandHeight = 110f;
 
     /// <summary>
-    /// A crater lake in the main island's summit (docs/voxel-water.md, "Lakes"): its radius at the waterline, its depth at
-    /// the centre, and the slope its banks rise at until they meet the island. The water stands under the lowest the
-    /// island's ground can be at that radius (shape, coast warp and detail all at their worst), so the rim holds it all
-    /// round. A radius of 0 means no lake.
+    /// A dry crater in the main island's summit: its radius at the rim's foot, its depth at the centre, and the slope its
+    /// banks rise at until they meet the island. Its level stands under the lowest the island's ground can be at that
+    /// radius (shape, coast warp and detail all at their worst), so the rim stands all round. A radius of 0 means none.
     /// </summary>
     public float LakeRadius = 170f;
     public float LakeDepth = 14f;
     public float LakeBankSlope = 0.3f;
-
-    /// <summary>
-    /// A permanent river from the crater lake to the sea (docs/voxel-water.md "Flows"): its heading out of the lake
-    /// (radians in x-z, 0 = +x), its bed width and the discharge it is carved for (m³/s), which a spring feeds the lake
-    /// with. A width of 0 means no river.
-    /// </summary>
-    public float RiverAngle = 1.1f;
-    public float RiverWidth = 8f;
-    public float RiverDischarge = 4f;
 
     public float SeabedUndulation = 6f;
     public float SeabedFrequency = 1f / 320f;

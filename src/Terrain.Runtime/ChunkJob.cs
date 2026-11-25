@@ -24,7 +24,10 @@ internal sealed class ChunkJob : IJob
     /// </summary>
     public readonly float[] ColumnBeds = new float[Columns];
 
-    /// <summary>Per voxel column: water in the voxel just below sea level. Only valid when <see cref="HasSeaLayer"/>.</summary>
+    /// <summary>
+    /// Per voxel column: sea, the voxel just below sea level open as generated (the ground lies below sea there) and not
+    /// filled since. A pit dug below sea level stays dry. Only valid when <see cref="HasSeaLayer"/>.
+    /// </summary>
     public readonly bool[] SeaFlags = new bool[Columns];
     public bool HasSeaLayer;
 
@@ -60,6 +63,7 @@ internal sealed class ChunkJob : IJob
     public void Run()
     {
         TerrainGenerator.Generate(Chunk, Params);
+        MarkSea();
         VoxelEditor.Apply(Chunk, _ops.AsSpan(0, _opCount));
         Mesh.Clear();
 
@@ -87,17 +91,28 @@ internal sealed class ChunkJob : IJob
         Shape = StaticMeshShape.Create(_positions.AsSpan(0, Mesh.VertexCount), Mesh.Indices.AsSpan(0, surfaceIndices));
     }
 
-    /// <summary>
-    /// Column tops for bathymetry, beds for the sea and the sea flag from the voxel layer just below sea level, per
-    /// voxel column.
-    /// </summary>
+    /// <summary>The voxel layer just below sea level, whether this chunk holds it, and the generated sea flags there.</summary>
+    private void MarkSea()
+    {
+        const int size = ChunkConstants.Size;
+        var seaY = SeaLayer();
+        HasSeaLayer = seaY >= 0 && seaY < size;
+
+        if (!HasSeaLayer)
+            return;
+
+        for (var z = 0; z < size; z++)
+            for (var x = 0; x < size; x++)
+                SeaFlags[x + z * size] = Chunk.Density[ChunkConstants.Index(x, seaY, z)] >= 0;
+    }
+
+    private int SeaLayer() => (int)MathF.Floor((Params.SeaLevel - Chunk.Coord.WorldOrigin.Y) / Chunk.Coord.VoxelScale - 1e-4f);
+
+    /// <summary>Column tops for bathymetry, beds for the sea, and the sea flags less what edits filled, per voxel column.</summary>
     private void SummariseColumns()
     {
         const int size = ChunkConstants.Size;
-        var scale = Chunk.Coord.VoxelScale;
-        var originY = Chunk.Coord.WorldOrigin.Y;
-        var seaY = (int)MathF.Floor((Params.SeaLevel - originY) / scale - 1e-4f);
-        HasSeaLayer = seaY >= 0 && seaY < size;
+        var seaY = SeaLayer();
 
         for (var z = 0; z < size; z++)
         {
@@ -112,7 +127,7 @@ internal sealed class ChunkJob : IJob
                 ColumnBeds[column] = seaY < 0 ? float.NaN : seaY >= size - 1 ? top : SurfaceFrom(x, z, seaY);
 
                 if (HasSeaLayer)
-                    SeaFlags[column] = Chunk.Water[ChunkConstants.Index(x, seaY, z)] > 127;
+                    SeaFlags[column] &= Chunk.Density[ChunkConstants.Index(x, seaY, z)] >= 0;
             }
         }
     }

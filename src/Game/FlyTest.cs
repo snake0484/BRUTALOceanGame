@@ -12,7 +12,6 @@ public struct FrameSections
 {
     public float Ticks;
     public float Terrain;
-    public float Water;
     public float Coastal;
     public float Ui;
     public float Uploads;
@@ -22,7 +21,7 @@ public struct FrameSections
     public float GpuWait;
 
     /// <summary>Main-thread work, everything but waiting on the GPU. Record spans all command recording, Uploads and Prepare included.</summary>
-    public readonly float Work => Ticks + Terrain + Water + Coastal + Ui + Record + Present;
+    public readonly float Work => Ticks + Terrain + Coastal + Ui + Record + Present;
 }
 
 /// <summary>
@@ -151,7 +150,7 @@ public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryText
         {
             var i = order[_count - 1 - k];
             var f = _frames[i];
-            Log.Info($"  #{i,5} {f.Work,6:F2} = {f.Ticks:F2} + {f.Terrain:F2} + {f.Water:F2} + {f.Coastal:F2} + {f.Ui:F2} + {f.Record:F2} ({f.Uploads:F2}, {f.Prepare:F2}) + {f.Present:F2} | {f.GpuWait:F2} | {Describe(_events[i])} | terrain: select {_terrain[i].Select:F2}, uploads {_terrain[i].Uploads:F2}, stream {_terrain[i].Stream:F2} (retire {_retire[i]:F2}), bathymetry {_terrain[i].Bathymetry:F2} | map: {_map[i].Cells} cells, reach {_map[i].Reach:F2}, total {_map[i].Total:F2}");
+            Log.Info($"  #{i,5} {f.Work,6:F2} = {f.Ticks:F2} + {f.Terrain:F2} + {f.Coastal:F2} + {f.Ui:F2} + {f.Record:F2} ({f.Uploads:F2}, {f.Prepare:F2}) + {f.Present:F2} | {f.GpuWait:F2} | {Describe(_events[i])} | terrain: select {_terrain[i].Select:F2}, uploads {_terrain[i].Uploads:F2}, stream {_terrain[i].Stream:F2} (retire {_retire[i]:F2}), bathymetry {_terrain[i].Bathymetry:F2} | map: {_map[i].Cells} cells, reach {_map[i].Reach:F2}, total {_map[i].Total:F2}");
         }
     }
 

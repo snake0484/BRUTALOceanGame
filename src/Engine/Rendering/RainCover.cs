@@ -15,8 +15,7 @@ namespace BrutalGame.Engine.Rendering;
 /// so nothing falls, splashes or ripples under a roof, an overhang or in a cave; and the shelter of cover, under which
 /// wind waves die out (a sea cave lies calm). Over the whole bathymetry grid, at 8 m, the fetch: the open water the wind
 /// has blown over, which limits how big a wind sea it raises (a pond stays rippled). It is measured everywhere the
-/// ocean draws its cascades, so far water is judged as near water is. Over the same cells, the highest top in each, so
-/// voxel water above sea level (a lake, a pond) can measure its fetch at its own level.
+/// ocean draws its cascades, so far water is judged as near water is.
 /// </summary>
 public sealed unsafe class RainCover : IDisposable
 {
@@ -28,7 +27,7 @@ public sealed unsafe class RainCover : IDisposable
     /// <summary>Bathymetry columns per fetch map cell side: one Vector128 of tops per row of a cell (8 m at 2 m columns).</summary>
     private const int FetchStride = 4;
 
-    public const int Bytes = (HeaderFloats + 2 * FetchSide * FetchSide + ColumnFloats * Side * Side) * sizeof(float);
+    public const int Bytes = (HeaderFloats + FetchSide * FetchSide + ColumnFloats * Side * Side) * sizeof(float);
 
     /// <summary>Metres under cover by which wind waves have died out.</summary>
     public const float ShelterDistance = 10f;
@@ -59,7 +58,7 @@ public sealed unsafe class RainCover : IDisposable
 
     /// <summary>A column with nothing known over it (rain_cover.glsl NO_TOP).</summary>
     private const float None = -1.0e6f;
-    private const int HeaderFloats = 12;
+    private const int HeaderFloats = 8;
     private const int ColumnFloats = 3;
     private const float Far = 1.0e6f;
     private const float Diagonal = 1.41421356f;
@@ -85,13 +84,6 @@ public sealed unsafe class RainCover : IDisposable
     private readonly bool[] _fetchOpen = new bool[FetchSide * FetchSide];
     private readonly float[] _fetchMap = new float[FetchSide * FetchSide];
     private readonly int[] _fetchWritten = new int[Renderer.FramesInFlight];
-
-    // The highest top in each fetch map cell (None where all unknown), re-read with the openness and copied to a frame's
-    // buffer when that holds an older one.
-    private readonly float[] _cellTops = new float[FetchSide * FetchSide];
-    private readonly int[] _cellTopsWritten = new int[Renderer.FramesInFlight];
-    private Vector2 _cellTopsOrigin;
-    private int _cellTopsRevision;
     private (Vector2 Origin, int Version, int Heading) _fetchRead = (new Vector2(float.NaN), 0, 0);
     private (Vector2 Origin, int Heading) _swept = (new Vector2(float.NaN), -1);
     private (Vector2 Origin, int Heading) _sweeping = (new Vector2(float.NaN), -1);
@@ -112,7 +104,6 @@ public sealed unsafe class RainCover : IDisposable
             _frames[i] = new GpuBuffer(context, Bytes, VkBufferUsageFlags.StorageBufferBit, true);
             new Span<float>(_frames[i].Mapped, Bytes / sizeof(float)).Fill(None);
             ((float*)_frames[i].Mapped)[7] = 0f; // no fetch map yet: open sea everywhere
-            ((float*)_frames[i].Mapped)[11] = 0f; // no cell tops yet
             _written[i] = _built;
         }
     }
@@ -130,9 +121,8 @@ public sealed unsafe class RainCover : IDisposable
     public int FetchSweeps => _fetchRevision;
 
     /// <summary>
-    /// This frame's cover: (window corner x, corner z, cell, side), (fetch map corner x, corner z, cell, side), (cell tops
-    /// corner x, corner z, cell, side), the fetch map row by row, the cell tops row by row, then (top, wind exposure,
-    /// fetch) per window column, row by row. Every frame, rain or not.
+    /// This frame's cover: (window corner x, corner z, cell, side), (fetch map corner x, corner z, cell, side), the fetch
+    /// map row by row, then (top, wind exposure, fetch) per window column, row by row. Every frame, rain or not.
     /// </summary>
     /// <param name="tops">Highest surface per column (NaN where unknown), row-major, <paramref name="resolution"/> per side from <paramref name="origin"/>.</param>
     /// <param name="version">Changes whenever <paramref name="tops"/> do.</param>
@@ -165,8 +155,6 @@ public sealed unsafe class RainCover : IDisposable
         {
             var changed = ReadOpenness(tops, seaLevel);
             _fetchRead = (origin, version, heading);
-            _cellTopsOrigin = origin;
-            _cellTopsRevision++;
             if (changed || _swept != (origin, heading))
                 StartSweep(origin, cell, heading);
 
@@ -199,16 +187,6 @@ public sealed unsafe class RainCover : IDisposable
             _fetchWritten[frameIndex] = _fetchRevision;
         }
 
-        if (_cellTopsWritten[frameIndex] != _cellTopsRevision)
-        {
-            block[8] = _cellTopsOrigin.X;
-            block[9] = _cellTopsOrigin.Y;
-            block[10] = cell * FetchStride;
-            block[11] = FetchSide;
-            _cellTops.CopyTo(new Span<float>(block + HeaderFloats + FetchSide * FetchSide, FetchSide * FetchSide));
-            _cellTopsWritten[frameIndex] = _cellTopsRevision;
-        }
-
         if (_written[frameIndex] == _built)
             return;
 
@@ -216,21 +194,19 @@ public sealed unsafe class RainCover : IDisposable
         block[1] = key.Corner.Y;
         block[2] = cell;
         block[3] = Side;
-        _columns.CopyTo(new Span<float>(block + HeaderFloats + 2 * FetchSide * FetchSide, ColumnFloats * Side * Side));
+        _columns.CopyTo(new Span<float>(block + HeaderFloats + FetchSide * FetchSide, ColumnFloats * Side * Side));
         _written[frameIndex] = _built;
     }
 
     /// <summary>
     /// Re-reads which fetch map cells (<see cref="FetchStride"/>² columns each) are open, a cell's row of columns at a
     /// time: open when every column in it is (a thin bar or a berm still blocks the wind). A column is blocked when its
-    /// top is at or over sea level; NaN, unknown, compares false and stays open. True if any cell changed. With it, each
-    /// cell's highest known top.
+    /// top is at or over sea level; NaN, unknown, compares false and stays open. True if any cell changed.
     /// </summary>
     private bool ReadOpenness(ReadOnlySpan<float> tops, float seaLevel)
     {
         var rows = MemoryMarshal.Cast<float, Vector128<float>>(tops);
         var level = Vector128.Create(seaLevel);
-        var none = Vector128.Create(None);
         var changed = false;
 
         for (var j = 0; j < FetchSide; j++)
@@ -238,16 +214,10 @@ public sealed unsafe class RainCover : IDisposable
             for (var i = 0; i < FetchSide; i++)
             {
                 var blocked = Vector128<float>.Zero;
-                var highest = none;
                 for (var z = j * FetchStride; z < (j + 1) * FetchStride; z++)
-                {
-                    var row = rows[i + z * FetchSide];
-                    blocked |= Vector128.GreaterThanOrEqual(row, level);
-                    highest = Vector128.Max(highest, Vector128.ConditionalSelect(Vector128.Equals(row, row), row, none));
-                }
+                    blocked |= Vector128.GreaterThanOrEqual(rows[i + z * FetchSide], level);
 
                 var c = i + j * FetchSide;
-                _cellTops[c] = MathF.Max(MathF.Max(highest[0], highest[1]), MathF.Max(highest[2], highest[3]));
                 var open = blocked.ExtractMostSignificantBits() == 0;
                 changed |= open != _fetchOpen[c];
                 _fetchOpen[c] = open;

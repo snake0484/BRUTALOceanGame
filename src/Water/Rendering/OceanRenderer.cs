@@ -147,22 +147,14 @@ public sealed unsafe class OceanRenderer : IDisposable
     /// <summary>Where rain can't reach (rain_cover.glsl): no rings under cover, and the rain pipelines read it through this set.</summary>
     private const int RainCoverBinding = 4 + SampledMaps;
 
-    // Zone flow (ocean_common.glsl zoneFlowAt): the sea-zone sim's velocity and turbulence on its own 1 m cells, one
-    // host-visible buffer per frame in flight. The surface's foam and ripples stream with it and roughen by it. A sim
-    // bigger than MaxFlowCells goes up empty (the zone's cap is 12,000 cells, but edit discs alone can pass it).
-    private const int ZoneFlowBinding = 5 + SampledMaps;
-
     /// <summary>The water fog the body is marched through (water_fog.glsl): its uniforms and its volume.</summary>
-    private const int FogUniformBinding = 6 + SampledMaps;
-    private const int FogVolumeBinding = 7 + SampledMaps;
+    private const int FogUniformBinding = 5 + SampledMaps;
+    private const int FogVolumeBinding = 6 + SampledMaps;
     private readonly WaterFogVolume _fog;
 
     /// <summary>The opaque scene copied for the surface's reflections (water_ssr.glsl, set 1).</summary>
     private readonly ScreenReflections _reflections;
-    private const int MaxFlowCells = 32768;
-    private const int ZoneFlowBytes = 32 + MaxFlowCells * 8;
-    private readonly GpuBuffer[] _zoneFlow = new GpuBuffer[Renderer.FramesInFlight];
-    private const int Bindings = 8 + SampledMaps;
+    private const int Bindings = 7 + SampledMaps;
     private readonly RainCover _rainCover;
     private readonly VmaAllocator _allocator;
     private readonly VkImage _carrierAtlas;
@@ -186,7 +178,7 @@ public sealed unsafe class OceanRenderer : IDisposable
     private readonly VkImageView _depthView;
     private readonly VkSampler _depthSampler;
 
-    /// <param name="depthView">Depth and sea-zone map, two array layers (latest tick, tick before), in SHADER_READ_ONLY_OPTIMAL.</param>
+    /// <param name="depthView">Signed depth map (BathymetryTexture), in SHADER_READ_ONLY_OPTIMAL.</param>
     public OceanRenderer(Renderer renderer, OceanFft fft, VkImageView depthView, VkSampler depthSampler, RainCover rainCover, WaterFogVolume fog, ScreenReflections reflections)
     {
         _rainCover = rainCover;
@@ -216,12 +208,6 @@ public sealed unsafe class OceanRenderer : IDisposable
         }
 
         _coastalStaging = new GpuBuffer(renderer.Context, CoastalChunkFloats * sizeof(float) * CoastalCopiesPerFrame * Renderer.FramesInFlight, VkBufferUsageFlags.TransferSrcBit, true);
-
-        for (var i = 0; i < Renderer.FramesInFlight; i++)
-        {
-            _zoneFlow[i] = new GpuBuffer(renderer.Context, ZoneFlowBytes, VkBufferUsageFlags.StorageBufferBit, true);
-            _zoneFlow[i].AsSpan<byte>()[..32].Clear();
-        }
 
         _surfFoam = new GpuBuffer(renderer.Context, SurfFoamBytes, VkBufferUsageFlags.StorageBufferBit | VkBufferUsageFlags.TransferDstBit, false);
         _allocator = renderer.Context.Allocator;
@@ -469,14 +455,6 @@ public sealed unsafe class OceanRenderer : IDisposable
             StageFlags = stages,
         };
 
-        bindings[ZoneFlowBinding] = new VkDescriptorSetLayoutBinding
-        {
-            Binding = ZoneFlowBinding,
-            DescriptorType = VkDescriptorType.StorageBuffer,
-            DescriptorCount = 1,
-            StageFlags = buffers,
-        };
-
         bindings[FogUniformBinding] = new VkDescriptorSetLayoutBinding
         {
             Binding = FogUniformBinding,
@@ -505,7 +483,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         {
             new() { Type = VkDescriptorType.UniformBuffer, DescriptorCount = 2 * Renderer.FramesInFlight },
             new() { Type = VkDescriptorType.CombinedImageSampler, DescriptorCount = Renderer.FramesInFlight * (SampledMaps + 1) },
-            new() { Type = VkDescriptorType.StorageBuffer, DescriptorCount = Renderer.FramesInFlight * (CoastalSlots + 3) },
+            new() { Type = VkDescriptorType.StorageBuffer, DescriptorCount = Renderer.FramesInFlight * (CoastalSlots + 2) },
             new() { Type = VkDescriptorType.StorageImage, DescriptorCount = Renderer.FramesInFlight },
         };
 
@@ -614,16 +592,6 @@ public sealed unsafe class OceanRenderer : IDisposable
                 BufferInfo = &cover,
             };
 
-            var zoneFlow = new VkDescriptorBufferInfo { Buffer = _zoneFlow[i].Handle, Range = (ByteSize64)ZoneFlowBytes };
-            writes[ZoneFlowBinding] = new VkWriteDescriptorSet
-            {
-                DstSet = _sets[i],
-                DstBinding = ZoneFlowBinding,
-                DescriptorCount = 1,
-                DescriptorType = VkDescriptorType.StorageBuffer,
-                BufferInfo = &zoneFlow,
-            };
-
             var fogInfo = new VkDescriptorBufferInfo
             {
                 Buffer = _fog.UniformBuffer,
@@ -729,15 +697,11 @@ public sealed unsafe class OceanRenderer : IDisposable
     }
 
     /// <summary>
-    /// Writes this frame's waves, camera, coastal maps and zone flow. Call once per frame before
-    /// <see cref="RecordCompute"/> and <see cref="Record"/>, which read them.
+    /// Writes this frame's waves, camera and coastal maps. Call once per frame before <see cref="RecordCompute"/> and
+    /// <see cref="Record"/>, which read them.
     /// </summary>
-    /// <param name="tickAlpha">Fraction of a sim tick since the last one: blends the depth map's sea-zone layers.</param>
     /// <param name="depthRect">(origin x, origin z, world size, depth outside the map).</param>
-    /// <param name="flowRect">The zone sim's grid: (corner x, corner z, cell size, cells across).</param>
-    /// <param name="flow">Per zone sim cell, half (velocity x, z) and half (turbulence, 0), row by row.</param>
-    public void Prepare(int frameIndex, OceanSwell swell, double renderTime, float tickAlpha, in Matrix4x4 viewProj, Vector3 cameraPos, Vector4 depthRect,
-        Vector4 flowRect, ReadOnlySpan<uint> flow)
+    public void Prepare(int frameIndex, OceanSwell swell, double renderTime, in Matrix4x4 viewProj, Vector3 cameraPos, Vector4 depthRect)
     {
         _frameNumber++;
         var block = (byte*)_buffer.Mapped + _frameOffsets[frameIndex];
@@ -758,7 +722,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         header->WaterScatter = new Vector4(WaterScatter, 0f);
         header->CascadeL = _fft.CascadeSizes;
         header->CascadeKLo = OceanFft.BandLow(swell.GpuSpectrum.Params.MinWavelength) with { W = _fft.FoamStrength };
-        header->FoamParams = new Vector4(Rain, RainTime, _fft.DebugView ? 1f : 0f, tickAlpha);
+        header->FoamParams = new Vector4(Rain, RainTime, _fft.DebugView ? 1f : 0f, 0f);
         header->DepthRect = depthRect;
         _depthRect = depthRect;
         WriteCoastal(header, frameIndex, swell);
@@ -766,22 +730,6 @@ public sealed unsafe class OceanRenderer : IDisposable
         header->WindSea = new Vector4(swell.GpuSpectrum.Params.WindSpeed, 0f, 0f, 0f);
         _atlasRebuild = AtlasStale(_fieldVersion, header->Carrier);
         header->WaveCount = swell.CopyGpuWaves(waves, renderTime);
-        WriteZoneFlow(frameIndex, flowRect, flow);
-    }
-
-    /// <summary>The zone flow header, (corner, cell size, 0) then (cells across, cells down, 0, 0), and its cells; none when it doesn't fit.</summary>
-    private void WriteZoneFlow(int frameIndex, Vector4 rect, ReadOnlySpan<uint> flow)
-    {
-        var block = (byte*)_zoneFlow[frameIndex].Mapped;
-        var cells = flow.Length / 2;
-        var across = (int)rect.W;
-        var fits = across > 0 && cells <= MaxFlowCells;
-        *(Vector4*)block = rect with { W = 0f };
-        ((int*)(block + 16))[0] = fits ? across : 0;
-        ((int*)(block + 16))[1] = fits ? cells / across : 0;
-
-        if (fits)
-            flow.CopyTo(new Span<uint>(block + 32, 2 * MaxFlowCells));
     }
 
     /// <summary>
@@ -1106,9 +1054,6 @@ public sealed unsafe class OceanRenderer : IDisposable
             buffer.Dispose();
 
         _coastalStaging.Dispose();
-
-        foreach (var buffer in _zoneFlow)
-            buffer.Dispose();
 
         _device.DestroyDescriptorPool(_pool, null);
         _device.DestroyDescriptorSetLayout(_setLayout, null);

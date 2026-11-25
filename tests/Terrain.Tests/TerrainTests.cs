@@ -107,7 +107,6 @@ public sealed class TerrainTests
             var c = Generate(coord, p);
             hv = Fnv(hv, MemoryMarshal.AsBytes(c.Density.AsSpan()));
             hv = Fnv(hv, c.Material);
-            hv = Fnv(hv, c.Water);
             hv = Fnv(hv, [c.HasSurface ? (byte)1 : (byte)0]);
             mesher.Mesh(c, mesh, skirts: false);
             hm = Fnv(hm, MemoryMarshal.AsBytes(mesh.VertexSpan));
@@ -129,17 +128,16 @@ public sealed class TerrainTests
         var c = Generate(new ChunkCoord(20, 0, 0), new TerrainParams());
         VoxelEditor.Apply(c, ops);
         var h = Fnv(14695981039346656037UL, MemoryMarshal.AsBytes(c.Density.AsSpan()));
-        h = Fnv(h, c.Material);
-        return Fnv(h, c.Water);
+        return Fnv(h, c.Material);
     }
 
     [Fact]
     public void Lod0OutputMatchesReference()
     {
         var (voxels, mesh) = Lod0Hashes();
-        Assert.Equal(2301151461472924951UL, voxels);
+        Assert.Equal(17430437274052174611UL, voxels);
         Assert.Equal(7113128240621187065UL, mesh);
-        Assert.Equal(3646996744844462313UL, Lod0EditHash());
+        Assert.Equal(15154270313198445626UL, Lod0EditHash());
     }
 
     [Fact]
@@ -407,162 +405,6 @@ public sealed class TerrainTests
         VoxelEditor.Apply(b, ops);
         Assert.Equal(a.Density, b.Density);
         Assert.Equal(a.Material, b.Material);
-    }
-
-    [Fact]
-    public void GenerationFillsSeaOnlyInAirBelowSeaLevel()
-    {
-        var p = new TerrainParams();
-        var chunk = Generate(new ChunkCoord(40, -1, 0), p); // open sea, well off the coast
-        var origin = chunk.Coord.WorldOrigin;
-        var wet = 0;
-
-        for (var z = -1; z <= ChunkConstants.Size; z++)
-        for (var y = -1; y <= ChunkConstants.Size; y++)
-        for (var x = -1; x <= ChunkConstants.Size; x++)
-        {
-            var i = ChunkConstants.Index(x, y, z);
-            var expected = chunk.Density[i] >= 0 && origin.Y + y < p.SeaLevel;
-            Assert.Equal(expected ? byte.MaxValue : (byte)0, chunk.Water[i]);
-            wet += expected ? 1 : 0;
-        }
-
-        Assert.True(wet > 0);
-        Assert.All(Generate(new ChunkCoord(10, 1, 0), p).Water, w => Assert.Equal(0, w));
-    }
-
-    /// <summary>
-    /// The crater lake: every open voxel at or under its top layer within its radius is full, none above it, and the rim
-    /// stands over the water all round but where the river leaves it, so the basin holds it.
-    /// </summary>
-    [Fact]
-    public void CraterLakeIsGeneratedFullAndHeldByItsRim()
-    {
-        var p = new TerrainParams();
-        var lake = TerrainGenerator.Lake(p);
-        Assert.True(lake.Exists);
-
-        var top = new Vector3(0f, lake.Top, 0f);
-        var coord = ChunkCoord.FromWorld(top);
-        var chunk = Generate(coord, p);
-        var local = top - coord.WorldOrigin;
-        var at = ChunkConstants.Index((int)local.X, (int)local.Y, (int)local.Z);
-        Assert.Equal(byte.MaxValue, chunk.Water[at]);
-        Assert.Equal(0, Generate(ChunkCoord.FromWorld(top + Vector3.UnitY), p).Water[ChunkConstants.Index((int)local.X, ((int)local.Y + 1) % ChunkConstants.Size, (int)local.Z)]);
-
-        var river = TerrainGenerator.River(p);
-        var lowest = float.MaxValue;
-        for (var a = 0; a < 360; a += 2)
-        {
-            var (sin, cos) = MathF.SinCos(a * MathF.PI / 180f);
-            var crest = float.MinValue;
-            var cut = false;
-
-            for (var r = lake.Radius; r < lake.Radius + 300f; r += 2f)
-            {
-                crest = MathF.Max(crest, TerrainGenerator.SurfaceHeight(cos * r, sin * r, p));
-                cut |= river is not null && river.Nearest(cos * r, sin * r, river.Reach, out _, out _);
-            }
-
-            if (!cut)
-                lowest = MathF.Min(lowest, crest);
-        }
-
-        Assert.True(lowest > lake.Top + 1.5f, $"the rim's lowest crest {lowest:F1} m should stand over the water at {lake.Top + 0.5f} m");
-        Assert.True(TerrainGenerator.SurfaceHeight(0f, 0f, p) < lake.Top - 8f, "the lake should be deep at its centre");
-    }
-
-    /// <summary>
-    /// The river (docs/voxel-water.md "Flows"): it leaves the lake over a sill the lake's level stands over by the weir
-    /// head of its discharge, its bed never rises downstream, the carved ground on its centreline is its bed, and it ends
-    /// under the sea.
-    /// </summary>
-    [Fact]
-    public void RiverRunsFromTheLakeOverItsSillToTheSea()
-    {
-        var p = new TerrainParams();
-        var lake = TerrainGenerator.Lake(p);
-        var river = TerrainGenerator.River(p);
-        Assert.NotNull(river);
-        Assert.Equal(lake.Surface - RiverPath.WeirHead(p.RiverDischarge, p.RiverWidth), river.Sill, 1e-4f);
-        Assert.Equal(lake.Surface, river.Surfaces[0], 1e-4f);
-        Assert.True(river.Points[0].Length() < lake.Radius, "the river should start inside the lake's fill");
-        Assert.True(river.Beds[^1] < p.SeaLevel - 2f, $"the river should end under the sea, its last bed {river.Beds[^1]:F1}");
-
-        for (var k = 1; k < river.Count; k++)
-        {
-            Assert.True(river.Beds[k] <= river.Beds[k - 1], $"the bed rises at station {k}");
-            Assert.True(river.Surfaces[k] <= river.Surfaces[k - 1], $"the surface rises at station {k}");
-            Assert.True(river.Surfaces[k] >= river.Beds[k], $"the surface is under the bed at station {k}");
-        }
-
-        for (var k = 0; k < river.Count; k += 25)
-        {
-            var at = river.Points[k];
-            var ground = TerrainGenerator.SurfaceHeight(at.X, at.Y, p);
-            Assert.True(ground <= river.Beds[k] + 1e-3f, $"the ground on the centreline at station {k} stands at {ground:F2}, over the bed {river.Beds[k]:F2}");
-        }
-    }
-
-    /// <summary>The river's voxels above the sea are generated with its water, the top layer part full.</summary>
-    [Fact]
-    public void RiverIsGeneratedWithItsWater()
-    {
-        var p = new TerrainParams();
-        var river = TerrainGenerator.River(p)!;
-        var k = river.Count * 2 / 5;
-        var at = new Vector3(river.Points[k].X, river.Surfaces[k], river.Points[k].Y);
-        Assert.True(at.Y > p.SeaLevel + 2f, $"station {k} should be well above the sea, its surface {at.Y:F1}");
-
-        var coord = ChunkCoord.FromWorld(at);
-        var chunk = Generate(coord, p);
-        var local = at - coord.WorldOrigin;
-        var (x, z) = ((int)MathF.Round(local.X), (int)MathF.Round(local.Z));
-        var wet = 0;
-        var part = 0;
-
-        for (var y = -1; y <= ChunkConstants.Size; y++)
-        {
-            var w = chunk.Water[ChunkConstants.Index(x, y, z)];
-            wet += w > 0 ? 1 : 0;
-            part += w is > 0 and < byte.MaxValue ? 1 : 0;
-        }
-
-        Assert.True(wet > 0, $"the river's column at station {k} ({at}) should hold water");
-        Assert.True(part <= 1, "only the top layer should be part full");
-    }
-
-    [Fact]
-    public void DigKeepsOpenWaterAndPlaceDisplacesIt()
-    {
-        var chunk = new VoxelChunk { Coord = new ChunkCoord(0, -1, 0) };
-        chunk.Fill(127, VoxelMaterial.Air);
-        TerrainGenerator.FillSea(chunk, 0f);
-        var probe = ChunkConstants.Index(16, 28, 16);
-        Assert.Equal(byte.MaxValue, chunk.Water[probe]);
-
-        VoxelEditor.Apply(chunk, [new BrushOp(new Vector3(16f, -4f, 16f), 3f, BrushMode.Dig, VoxelMaterial.Air)]);
-        Assert.Equal(byte.MaxValue, chunk.Water[probe]);
-
-        VoxelEditor.Apply(chunk, [new BrushOp(new Vector3(16f, -4f, 16f), 3f, BrushMode.Place, VoxelMaterial.Rock)]);
-        Assert.Equal(0, chunk.Water[probe]);
-        Assert.True(chunk.Density[probe] < 0);
-    }
-
-    [Fact]
-    public void InlandPitDugBelowSeaLevelIsDry()
-    {
-        var p = new TerrainParams();
-        var land = new Vector3(0f, TerrainGenerator.SurfaceHeight(0f, 0f, p), 0f);
-        Assert.True(land.Y > 10f, "island centre should be well above sea level");
-
-        var op = new BrushOp(new Vector3(0f, -2f, 0f), land.Y + 4f, BrushMode.Dig, VoxelMaterial.Air);
-        var chunk = Generate(new ChunkCoord(0, -1, 0), p);
-        VoxelEditor.Apply(chunk, [op]);
-
-        var i = ChunkConstants.Index(0, ChunkConstants.Size - 1, 0);
-        Assert.True(chunk.Density[i] >= 0, "the pit must be carved through the sea-level layer");
-        Assert.Equal(0, chunk.Water[i]);
     }
 
     private static void FillPlane(VoxelChunk chunk, float height)

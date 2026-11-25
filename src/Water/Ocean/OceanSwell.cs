@@ -517,28 +517,22 @@ public sealed class OceanSwell
     }
 
     /// <summary>Water surface height at world (x, z).</summary>
-    public float SampleHeight(float x, float z) => SampleHeight(x, z, InversionIterations);
-
-    /// <summary>
-    /// Water surface height at world (x, z), finding the rest point in <paramref name="iterations"/> steps: fewer is cheaper
-    /// and lands centimetres off on steep chop, enough for coarse consumers (the voxel water's 8 m swell lattice).
-    /// </summary>
-    public float SampleHeight(float x, float z, int iterations)
+    public float SampleHeight(float x, float z)
     {
         var current = new CoastalSample();
         var previous = new CoastalSample();
         var fields = SampleFields(x, z, ref current, ref previous);
         if (fields == 0)
-            return HeightOf(DeepWaves(), x, z, iterations);
+            return HeightOf(DeepWaves(), x, z);
 
         Span<float> scratch = stackalloc float[ScratchArrays * CoastalPadded];
-        var height = HeightOf(CoastalWaves(Coastal!.Direction, x, z, current, scratch), x, z, iterations);
-        return fields == 2 ? float.Lerp(HeightOf(CoastalWaves(PreviousDirection, x, z, previous, scratch), x, z, iterations), height, CoastalFade) : height;
+        var height = HeightOf(CoastalWaves(Coastal!.Direction, x, z, current, scratch), x, z);
+        return fields == 2 ? float.Lerp(HeightOf(CoastalWaves(PreviousDirection, x, z, previous, scratch), x, z), height, CoastalFade) : height;
     }
 
-    private float HeightOf(in Waves waves, float x, float z, int iterations)
+    private float HeightOf(in Waves waves, float x, float z)
     {
-        Invert(waves, x, z, iterations, out var x0, out var z0);
+        Invert(waves, x, z, InversionIterations, out var x0, out var z0);
         return SumHeight(waves, x0, z0);
     }
 
@@ -577,9 +571,9 @@ public sealed class OceanSwell
         };
     }
 
-    // Fully optimised from its first call: few callers sample the whole wave (a sea zone seeding the cells it grows over),
-    // so tiered compilation left it in its slow early tiers and promoted it on whichever tick crossed the threshold
-    // (10 samples took 13 ms on a zone's first growth, against 0.05 ms once promoted).
+    // Fully optimised from its first call: few callers sample the whole wave, so tiered compilation left it in its slow
+    // early tiers and promoted it on whichever tick crossed the threshold (10 samples took 13 ms on first use, against
+    // 0.05 ms once promoted).
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private WaveSample SampleOf(in Waves w, float x, float z)
     {

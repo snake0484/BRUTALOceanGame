@@ -1,5 +1,5 @@
 // Rain on water: drop impacts, the rings they spread and, where rings are too fine to resolve, the flash of their crowns.
-// Pure functions of rest position and time, world-anchored, shared by ocean.frag, voxel_water.frag and the rain shaders.
+// Pure functions of rest position and time, world-anchored, shared by ocean.frag and the rain shaders.
 // The impact grid is shared with the splash crowns (rain_splash.comp): every crown sits at the centre of its ring.
 #ifndef RAIN_RIPPLES_GLSL
 #define RAIN_RIPPLES_GLSL

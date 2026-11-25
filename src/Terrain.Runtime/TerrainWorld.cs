@@ -125,11 +125,8 @@ public sealed class TerrainWorld : IDisposable
 
     public int EditCount => _ops.Count;
 
-    /// <summary>Every brush op so far, in order. Read-only for other systems (voxel water replays them).</summary>
+    /// <summary>Every brush op so far, in order. Read-only for other systems.</summary>
     public IReadOnlyList<BrushOp> Ops => _ops;
-
-    /// <summary>Raised after an edit is recorded. Main thread.</summary>
-    public event Action<BrushOp>? EditApplied;
 
     /// <summary>Wall time of the last completed batch, and how many chunks it held.</summary>
     public float LastBatchMs { get; private set; }
@@ -156,7 +153,6 @@ public sealed class TerrainWorld : IDisposable
     public void ApplyBrush(in BrushOp op)
     {
         _ops.Add(op);
-        EditApplied?.Invoke(op);
 
         foreach (var (coord, record) in _chunks)
         {

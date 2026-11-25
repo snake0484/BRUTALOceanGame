@@ -9,8 +9,6 @@ using BrutalGame.Engine.Time;
 using BrutalGame.Physics;
 using BrutalGame.Terrain.Runtime;
 using BrutalGame.Terrain.Runtime.Rendering;
-using BrutalGame.Terrain.Runtime.Water;
-using BrutalGame.Terrain.Water;
 using BrutalGame.Water.Ocean;
 using BrutalGame.Water.Rendering;
 using BrutalGame.Weather;
@@ -22,7 +20,6 @@ public sealed class GameApp : IDisposable
     private const int TickRate = 60;
     private const int TimingSamples = 256;
     private const string Title = "BRUTALGame";
-    private const int VoxelSwellIterations = 2;
 #if DEBUG
     private const bool Validation = true;
 #else
@@ -43,7 +40,6 @@ public sealed class GameApp : IDisposable
     private readonly RainRenderer _rain;
     private readonly RainCover _rainCover;
     private readonly OceanFft _oceanFft;
-    private readonly WindSeaBands _windSea;
     private readonly FlyCamera _camera = new() { Pitch = -0.12f };
     private readonly TerrainRenderer _terrainRenderer;
     private readonly TerrainWorld _terrain;
@@ -54,10 +50,7 @@ public sealed class GameApp : IDisposable
     private readonly EditTest? _editTest;
     private FixedClock _clock = new(TickRate);
     private readonly int _oceanScope;
-    private readonly int _waterScope;
-    private readonly VoxelWaterSystem _water;
     private readonly CoastalSystem _coastal = new();
-    private bool _seaSamplerWarm;
     private readonly GpuBenchmark? _bench;
     private readonly bool _benchRain;
 
@@ -70,17 +63,16 @@ public sealed class GameApp : IDisposable
     private readonly FlyTest? _flyTest;
     private FrameSections _sections;
     private readonly long _startTime = Stopwatch.GetTimestamp();
-    private readonly VoxelWaterRenderer _waterRenderer;
 
-    /// <summary>The water fog volume around the camera (docs/water-fog.md): filled from the voxel water each frame, marched by the water and terrain shaders.</summary>
+    /// <summary>The water fog volume around the camera (docs/water-fog.md): filled from the bathymetry each frame, marched by the water and terrain shaders.</summary>
     private readonly WaterFogVolume _fog;
+    private readonly BathymetryFog _fogFill;
     private readonly int _fogScope;
 
     /// <summary>The opaque scene copied between the passes for every water's reflections (docs/water-ssr.md).</summary>
     private readonly ScreenReflections _reflections;
     private readonly int _reflectionScope;
     private readonly int _fftScope;
-    private readonly int _windSeaScope;
     private readonly int _oceanComputeScope;
     private readonly int _uiScope;
     private readonly int _terrainScope;
@@ -89,12 +81,11 @@ public sealed class GameApp : IDisposable
     /// <summary>Pipeline statistics scopes (<see cref="PipelineStats"/>): sequential, never nested.</summary>
     private readonly int _terrainStats;
     private readonly int _oceanStats;
-    private readonly int _waterStats;
     private readonly int _rainStats;
     private readonly int _uiStats;
 
     /// <param name="camera">Optional start pose: x, y, z, yaw degrees, pitch degrees.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, int waterRate = 240, bool hideUi = false, bool coastal = true, double benchSeconds = 0.0, bool flyTest = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float rain = -1f, bool benchRain = false, bool waterPipes = false, bool benchFog = false, bool fogOn = true, bool benchSsr = false, bool ssrOn = true, bool voxelSwell = true, float renderScale = 1f)
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, bool coastal = true, double benchSeconds = 0.0, bool flyTest = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float rain = -1f, bool benchRain = false, bool benchFog = false, bool fogOn = true, bool benchSsr = false, bool ssrOn = true, float renderScale = 1f)
     {
         if (camera is not null)
         {
@@ -117,7 +108,7 @@ public sealed class GameApp : IDisposable
         _renderer = new Renderer(_window, _stats, Validation, vsync: benchSeconds <= 0.0, renderScale);
         _imgui = new ImGuiLayer(_window, _renderer);
         _rainCover = new RainCover(_renderer.Context);
-        _fog = new WaterFogVolume(_renderer.Context) { SeaColour = new System.Numerics.Vector4(WaterColour.R(WaterColour.Sea), WaterColour.G(WaterColour.Sea), WaterColour.B(WaterColour.Sea), WaterColour.A(WaterColour.Sea)) / 255f };
+        _fog = new WaterFogVolume(_renderer.Context) { SeaColour = BathymetryFog.SeaColour };
         _reflections = new ScreenReflections(_renderer) { Enabled = ssrOn };
 
         var wind = new SwellParams
@@ -136,6 +127,7 @@ public sealed class GameApp : IDisposable
         _terrain = new TerrainWorld(_terrainRenderer, _physics);
         _fog.SeaLevel = _terrain.Params.SeaLevel;
         _fog.Enabled = fogOn;
+        _fogFill = new BathymetryFog(_terrain.Bathymetry);
 
         // Without --cam, 55 m off the west beach, 28 m up, looking at it.
         if (camera is null)
@@ -143,40 +135,19 @@ public sealed class GameApp : IDisposable
 
         _brush = new TerrainBrush(_terrain, _physics, _camera);
         _editTest = editTest ? new EditTest(_terrain, _physics, _brush, _camera) : null;
-        _water = new VoxelWaterSystem(_terrain, waterPipes) { StepsPerSecond = waterRate };
-
-        // Waves physically enter sea zones through their open-sea boundary.
-        _water.Zones.SeaSurface = (x, z) => _swell.SampleHeight(x, z);
-
-        // The same swell holds the sea's voxel cells, so free voxel water against the sea rises and falls with it. Its 8 m
-        // lattice takes the cheaper two-step inversion.
-        if (voxelSwell)
-            _water.SeaSurface = (x, z) => _swell.SampleHeight(x, z, VoxelSwellIterations);
-
-        _water.RainAt = (x, z) => _weatherPanel.OverrideRain ? _weatherPanel.RainOverride : _weatherPanel.DriveSky ? _weather.Map.Sample(x, z).Rain : 0f;
-        _water.Zones.SeaState = (x, z) =>
-        {
-            var s = _swell.Sample(x, z);
-            return new System.Numerics.Vector3(s.Height, s.Velocity.X, s.Velocity.Z);
-        };
         _surface = new OceanSurface(_swell);
-        _windSea = new WindSeaBands(_renderer);
-        _waterRenderer = new VoxelWaterRenderer(_renderer, _rainCover, _fog, _reflections, _windSea.SlopeView, _windSea.Sampler);
-
-        _terrainPanel = new TerrainPanel(_terrain, _terrainRenderer, _physics, _water, _waterRenderer, _fog, _reflections);
+        _terrainPanel = new TerrainPanel(_terrain, _terrainRenderer, _physics, _fog, _reflections);
         _bathymetry = new BathymetryTexture(_renderer);
         _ocean = new OceanRenderer(_renderer, _oceanFft, _bathymetry.View, _bathymetry.Sampler, _rainCover, _fog, _reflections);
         _rain = new RainRenderer(_renderer, _ocean);
         _flyTest = flyTest ? new FlyTest(_camera, _terrain, _bathymetry, _coastal, _rainCover) : null;
-        _profiler = new ProfilerPanel(_stats, _renderer, _rainCover, _fog, _terrainRenderer, _ocean, _waterRenderer);
+        _profiler = new ProfilerPanel(_stats, _renderer, _rainCover, _fog, _terrainRenderer, _ocean);
 
         _uploadScope = _renderer.GpuTimer.Register("Uploads");
         _fftScope = _renderer.GpuTimer.Register("Ocean FFT");
-        _windSeaScope = _renderer.GpuTimer.Register("Wind sea FFT");
         _oceanComputeScope = _renderer.GpuTimer.Register("Ocean compute");
         _terrainScope = _renderer.GpuTimer.Register("Terrain");
         _oceanScope = _renderer.GpuTimer.Register("Ocean");
-        _waterScope = _renderer.GpuTimer.Register("Voxel water");
         _fogScope = _renderer.GpuTimer.Register("Fog volume");
         _reflectionScope = _renderer.GpuTimer.Register("Reflection copy");
         _uiScope = _renderer.GpuTimer.Register("ImGui");
@@ -184,7 +155,6 @@ public sealed class GameApp : IDisposable
         var pipelineStats = _renderer.PipelineStats;
         _terrainStats = pipelineStats.Register("Terrain", PipelinePass.Opaque);
         _oceanStats = pipelineStats.Register("Ocean", PipelinePass.Water);
-        _waterStats = pipelineStats.Register("Voxel water", PipelinePass.Water);
         _rainStats = pipelineStats.Register("Rain", PipelinePass.Water);
         _uiStats = pipelineStats.Register("ImGui", PipelinePass.Overlay);
 
@@ -258,22 +228,10 @@ public sealed class GameApp : IDisposable
             _brush.Update(_window, (float)frameSeconds, _imgui.WantCaptureMouse);
             _editTest?.Update(_clock.SimTime);
             _terrainPanel.BrushRadius = _brush.Radius;
-            _terrainPanel.Probe = _brush.Probe;
             _terrain.Update(_camera.Position);
             _sections.Terrain = Lap(ref mark);
-            _water.Update(_camera.Position);
-            _sections.Water = Lap(ref mark);
             UpdateWeather();
             _coastal.Update(_terrain, _swell, _clock.SimTime, _oceanPanel.CoastalEnabled);
-
-            // The full swell sample's first call compiles it (OceanSwell.SampleOf): pay that while loading, not on the
-            // tick a sea zone first seeds the cells it grows over.
-            if (!_seaSamplerWarm && _coastal.Builds > 0)
-            {
-                _water.Zones.SeaState?.Invoke(_camera.Position.X, _camera.Position.Z);
-                _seaSamplerWarm = true;
-            }
-
             _oceanPanel.CoastalBuildMs = _coastal.LastBuildMs;
             _oceanPanel.CoastalBuilds = _coastal.Builds;
             UpdateBench();
@@ -295,19 +253,16 @@ public sealed class GameApp : IDisposable
                 mark = Stopwatch.GetTimestamp();
                 gpu.Begin(commands, _uploadScope);
                 _terrainRenderer.RecordUploads(commands, _renderer.FrameIndex);
-                _waterRenderer.BeginFrame(_renderer.FrameIndex);
-                _water.SubmitMeshes(_waterRenderer);
-                _waterRenderer.RecordUploads(commands);
-                _bathymetry.Record(commands, _renderer.FrameIndex, _terrain.Bathymetry, _clock.TickIndex);
+                _bathymetry.Record(commands, _renderer.FrameIndex, _terrain.Bathymetry);
                 (_terrainPanel.MapUploadMs, _terrainPanel.MapUploadCells) = (_bathymetry.LastUploadMs, _bathymetry.LastUploadCells);
                 gpu.End(commands, _uploadScope);
 
-                // The fog volume follows the camera; the stale blocks in its window are filled from the voxel water and
-                // the bathymetry under a per-frame budget and copied before the pass.
+                // The fog volume follows the camera; the stale blocks in its window are filled from the bathymetry under a
+                // per-frame budget and copied before the pass.
                 _fog.Begin(_renderer.FrameIndex, _camera.Position);
-                _fog.CameraInWater = CameraInWater(out var cameraSurface);
-                _fog.CameraSurface = cameraSurface;
-                _water.FillFog(_fog);
+                _fog.CameraSurface = _surface.SampleHeight(_camera.Position.X, _camera.Position.Z);
+                _fog.CameraInWater = _terrain.Bathymetry.IsSea(_camera.Position.X, _camera.Position.Z) && _camera.Position.Y < _fog.CameraSurface;
+                _fogFill.Fill(_fog);
                 gpu.Begin(commands, _fogScope);
                 _fog.Record(commands, _renderer.FrameIndex);
                 gpu.End(commands, _fogScope);
@@ -317,18 +272,8 @@ public sealed class GameApp : IDisposable
                 _oceanFft.Record(commands, _renderer.FrameIndex, _swell, renderTime, (float)frameSeconds);
                 gpu.End(commands, _fftScope);
 
-                // Only while voxel water is drawn (and once, to lay out its images); its first frame back samples the
-                // bands' last transform.
-                if (_waterRenderer.MeshesLastFrame > 0 || !_windSea.Ready)
-                {
-                    gpu.Begin(commands, _windSeaScope);
-                    _windSea.Record(commands, _renderer.FrameIndex, _rain.Wind, _swell.GpuSpectrum.Params.Spread, _swell.GpuSpectrum.SpreadNorm, renderTime);
-                    gpu.End(commands, _windSeaScope);
-                }
-
                 PrepareRain(_renderer.FrameIndex, renderTime, (float)frameSeconds, extent.Height);
-                _ocean.Prepare(_renderer.FrameIndex, _swell, renderTime, (float)_clock.Alpha, viewProj, _camera.Position, _bathymetry.Rect,
-                    _water.Zones.FlowRect, _water.Zones.PackedFlow);
+                _ocean.Prepare(_renderer.FrameIndex, _swell, renderTime, viewProj, _camera.Position, _bathymetry.Rect);
                 _sections.Prepare = Lap(ref mark);
                 gpu.Begin(commands, _oceanComputeScope);
                 _ocean.RecordCompute(commands, _renderer.FrameIndex, (float)frameSeconds, _clock.TickIndex);
@@ -355,12 +300,6 @@ public sealed class GameApp : IDisposable
                 _ocean.Record(commands, _renderer.FrameIndex, extent, _camera.Position);
                 pipe.End(commands, _oceanStats);
                 gpu.End(commands, _oceanScope);
-
-                gpu.Begin(commands, _waterScope);
-                pipe.Begin(commands, _waterStats);
-                _waterRenderer.Draw(commands, _renderer.FrameIndex, extent, viewProj, _camera.Position, SceneLightingFromOcean(), (float)(renderTime % 1000.0), _rain.Surface, _rain.Wind);
-                pipe.End(commands, _waterStats);
-                gpu.End(commands, _waterScope);
 
                 pipe.Begin(commands, _rainStats);
                 _rain.Record(commands, _renderer.FrameIndex, extent);
@@ -397,16 +336,6 @@ public sealed class GameApp : IDisposable
     }
 
     private System.Numerics.Vector2 CameraXZ => new(_camera.Position.X, _camera.Position.Z);
-
-    /// <summary>The camera is in voxel water (a lake, a pool) or under the sea's surface; surface = the water's surface over it.</summary>
-    private bool CameraInWater(out float surface)
-    {
-        if (_water.WaterAt(_camera.Position, out surface))
-            return true;
-
-        surface = _surface.SampleHeight(_camera.Position.X, _camera.Position.Z);
-        return _terrain.Bathymetry.IsSea(_camera.Position.X, _camera.Position.Z) && _camera.Position.Y < surface;
-    }
 
     /// <summary>
     /// Rain where the camera is (or the panel's override), carried by the local wind, hidden under terrain tops. The cover
@@ -453,8 +382,6 @@ public sealed class GameApp : IDisposable
     private void Tick(long tickIndex, double dt)
     {
         _physics.Step((float)dt);
-        _water.Zones.WavePeriod = _swell.PeakPeriod;
-        _water.Tick(dt);
 
         var start = Stopwatch.GetTimestamp();
         _weather.Tick(tickIndex * dt + _weatherPanel.TimeOffset, CameraXZ);
@@ -521,8 +448,6 @@ public sealed class GameApp : IDisposable
         _renderer.WaitIdle();
         Console.WriteLine($"fog fill: {_fog.Fills} blocks over the run; warm frames that filled: avg {_fog.FillMs.Average:F3} ms, peak {_fog.FillPeakMs:F3} ms for {_fog.FillPeakUploads} blocks; longest block {_fog.BlockPeakMs:F3} ms, longest keying {_fog.KeysPeakMs:F3} ms");
         _coastal.Dispose();
-        _water.Dispose();
-        _waterRenderer.Dispose();
         _terrain.Dispose();
         _terrainRenderer.Dispose();
         _physics.Dispose();
@@ -533,7 +458,6 @@ public sealed class GameApp : IDisposable
         _rainCover.Dispose();
         _bathymetry.Dispose();
         _oceanFft.Dispose();
-        _windSea.Dispose();
         _imgui.Dispose();
         _renderer.Dispose();
         _window.Dispose();

@@ -1,8 +1,7 @@
 // Where rain and wind can't reach (RainCover), per 2 m column around the camera. Rain below the highest solid surface
 // is under a roof, an overhang or in a cave: no drops, no crowns, no rings. The wind sea is limited by its fetch, the
 // open water upwind (an effective fetch over the wind's +-45 degrees, mapped over the whole bathymetry grid), and dies
-// out with distance under cover. Over the fetch map's cells, the highest top in each, for water above sea level to judge
-// its own fetch by (voxel_water.frag). Define RAIN_COVER_SET and RAIN_COVER_BINDING before including.
+// out with distance under cover. Define RAIN_COVER_SET and RAIN_COVER_BINDING before including.
 #ifndef RAIN_COVER_GLSL
 #define RAIN_COVER_GLSL
 
@@ -18,9 +17,7 @@ const int FETCH_SIDE = 128; // RainCover.FetchSide
 layout(std430, set = RAIN_COVER_SET, binding = RAIN_COVER_BINDING) readonly buffer RainCover {
     vec4 rect;             // xy = world corner of the window, z = cell size (m), w = cells per side
     vec4 fetchRect;        // fetch map over the bathymetry grid: xy = world corner, z = cell size (m), w = cells per side (0 = none yet)
-    vec4 cellTopsRect;     // the same for the cell tops
     float fetchMap[FETCH_SIDE * FETCH_SIDE];
-    float cellTops[FETCH_SIDE * FETCH_SIDE]; // highest surface (m) per fetch map cell, NO_TOP where unknown
     CoverColumn columns[];
 } rainCover;
 
@@ -41,16 +38,6 @@ float gridFetch(vec2 xz)
     vec2 t = f - vec2(c);
     int i = c.y * n + c.x;
     return mix(mix(rainCover.fetchMap[i], rainCover.fetchMap[i + 1], t.x), mix(rainCover.fetchMap[i + n], rainCover.fetchMap[i + n + 1], t.x), t.y);
-}
-
-// The highest surface in the fetch map cell over xz (8 m), NO_TOP outside the grid or where unknown.
-float cellTop(vec2 xz)
-{
-    int n = int(rainCover.cellTopsRect.w);
-    ivec2 c = ivec2(floor((xz - rainCover.cellTopsRect.xy) / rainCover.cellTopsRect.z));
-    if (n <= 0 || any(lessThan(c, ivec2(0))) || any(greaterThanEqual(c, ivec2(n))))
-        return NO_TOP;
-    return rainCover.cellTops[c.y * n + c.x];
 }
 
 float rainCoverTop(vec2 xz)

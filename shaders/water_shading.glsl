@@ -1,6 +1,5 @@
-// Water shading shared by the ocean surface (ocean.frag) and voxel water
-// (voxel_water.frag), so every water in the world is coloured and lit the same: the body by the water fog (water_fog.glsl,
-// marched near, closed form far), reflection of the scene (water_ssr.glsl) or the sky, sun, foam lace, tonemap and fog.
+// Water shading for the ocean surface (ocean.frag): the body by the water fog (water_fog.glsl, marched near, closed form
+// far), reflection of the scene (water_ssr.glsl) or the sky, sun, foam lace, tonemap and fog.
 // Needs a uniform block named frame with cameraPos (w = time), sunDir (w = intensity), skyZenith, skyHorizon (w = fog
 // density), waterDeep and waterScatter, WATER_FOG_SET / WATER_FOG_BINDING defined for the fog's bindings, and
 // WATER_SSR_SET for the scene's reflection (the sky only without it). Fragment stage only (gl_FragCoord).
@@ -11,7 +10,6 @@
 
 #ifndef WATER_NOISE_GLSL
 #define WATER_NOISE_GLSL
-const float FLOW_PERIOD = 1.0;  // s: each copy of the flow map slides for this long, by speed x this, before it fades out and resets
 const float LACE_WRAP = 600.0;  // seconds: foam texture clocks wrap so noise coordinates stay small
 
 float hash12(vec2 p)
@@ -40,13 +38,8 @@ const float WET_SAND = 0.7;                              // sand under water is 
 const float RAIN_ROUGHNESS = 0.3;                        // a sea roughened by rain: rings finer than a pixel ...
 const float RAIN_SKY_BLUR = 0.35;                        // ... scatter the sky's reflection toward its average
 
-// 0..1: how much rain roughens this pixel's surface (ocean.frag and voxel_water.frag set it).
+// 0..1: how much rain roughens this pixel's surface (ocean.frag sets it).
 float gRainRough = 0.0;
-
-// Slope variance of waves too short for this pixel to resolve as normals (voxel_water.frag sets it): they widen the sun's
-// glitter and blur the sky's reflection, as a microfacet roughness (GGX alpha² grows by twice the variance).
-float gSlopeVariance = 0.0;
-const float SLOPE_SKY_BLUR = 8.0; // sky blur per unit of that variance, toward its average
 
 // 0..1: how much of this pixel's water body the fog march shaded (1 near the camera, 0 by the far blend's end, with the
 // fog off, or with the camera under water), for callers that keep a depth rule for the far field.
@@ -77,7 +70,7 @@ float ggxSpecular(vec3 N, vec3 V, vec3 L)
     float NdotL = max(dot(N, L), 0.0);
     float NdotV = max(dot(N, V), 1e-4);
     float roughness = mix(ROUGHNESS, RAIN_ROUGHNESS, gRainRough);
-    float a2 = roughness * roughness * roughness * roughness + 2.0 * gSlopeVariance;
+    float a2 = roughness * roughness * roughness * roughness;
     float d = NdotH * NdotH * (a2 - 1.0) + 1.0;
     float D = a2 / (PI * d * d);
     float k = roughness * 0.5;
@@ -113,47 +106,9 @@ float lace(vec2 p, float t)
     return 0.5 * a * a + 0.3 * b * b + 0.2 * c * c;
 }
 
-// Flow mapping (ocean.frag, voxel_water.frag): the water's forward speed relative to the rest grid (a sea zone's or the
-// voxel water's current) slides whatever is drawn on it, the lace and the ripple detail, along dir: two copies
-// on one global clock half a period (FLOW_PERIOD) apart, each displaced by speed x its phase and fading out as it
-// resets, so the water visibly streams at its speed. The clock is global and only the displacement scales with the
-// speed: a clock that ran at the speed (time x speed / cycle) wrapped a different number of times per metre wherever the
-// speed varied, and after half a minute crushed whole cycles of texture into bands centimetres wide. With the global
-// clock the stretch along a speed gradient is at most half a period x the gradient, whatever the time. xy = the two phases
-// (−0.5 .. 0.5 of a period), z = the weight of the first.
-vec3 flowPhases()
-{
-    float t = fract(mod(frame.cameraPos.w, LACE_WRAP) / FLOW_PERIOD);
-    vec2 phase = vec2(t, fract(t + 0.5)) - 0.5;
-    return vec3(phase, 1.0 - abs(2.0 * t - 1.0));
-}
-
-const float LACE_MEAN = 0.47; // mean of lace() over the plane (sampled), the pivot of the flow blend below
-
-// The lace field under the foam at xz (callers pass the water's rest position, so it rides the orbital motion),
-// churning in place at the churn rate (fresh whitewater, churn 1, faster than foam left lying). Where the water flows
-// over the rest grid (speed > 0) it is the flow map's two copies blended by their weight. The blend is of the noise,
-// not of the lace thresholded from it, and it is rescaled about the mean so the field keeps its roughness (a plain mix
-// of two independent fields is 0.7 x as rough half-way through the period): one set of veins at every phase, morphing
-// from one copy's to the other's, instead of two thresholded sets fading through each other twice a second.
-float laceField(vec2 xz, vec2 dir, float speed, float churn)
-{
-    float t = mod(frame.cameraPos.w, LACE_WRAP) * mix(LACE_CALM, LACE_ROLLER, churn);
-    if (speed < 0.01)
-        return lace(xz * LACE_SCALE, t);
-
-    vec3 ph = flowPhases();
-    vec2 slide = dir * (speed * FLOW_PERIOD);
-    float l0 = lace((xz - slide * ph.x) * LACE_SCALE, t);
-    float l1 = lace((xz - slide * ph.y) * LACE_SCALE, t);
-    float w = ph.z;
-    return LACE_MEAN + (mix(l1, l0, w) - LACE_MEAN) * inversesqrt(w * w + (1.0 - w) * (1.0 - w));
-}
-
 // Surf foam as lace: coverage 0..1 sets how much of the lace field l is white, so a little foam is thin veins with the
 // water showing through and a fresh roller is a lumpy mass, thick on the lace's ridges and thin between, never flat
-// white. It evens out to its mean where a pixel can't resolve it: footprint is the pixel's size in lace cells (foamLace
-// measures it; a caller in non-uniform control flow, where derivatives are undefined, passes its own).
+// white. It evens out to its mean where a pixel can't resolve it: footprint is the pixel's size in lace cells.
 float laceVeins(float l, float footprint, float coverage)
 {
     float edge = 1.0 - 0.9 * coverage;
@@ -162,33 +117,20 @@ float laceVeins(float l, float footprint, float coverage)
     return mix(veins, 0.4 * coverage, smoothstep(0.3, 1.0, footprint));
 }
 
-float foamLaceAt(vec2 xz, float footprint, float coverage, float churn)
-{
-    if (coverage <= 0.01)
-        return 0.0;
-    return laceVeins(laceField(xz, vec2(1.0, 0.0), 0.0, churn), footprint, coverage);
-}
-
+// Foam lace at xz (callers pass the water's rest position, so it rides the orbital motion), churning in place at the
+// churn rate (fresh whitewater, churn 1, faster than foam left lying).
 float foamLace(vec2 xz, float coverage, float churn)
 {
-    return foamLaceAt(xz, length(fwidth(xz * LACE_SCALE)), coverage, churn);
-}
-
-float flowingLaceAt(vec2 xz, float footprint, vec2 dir, float speed, float coverage, float churn)
-{
+    float footprint = length(fwidth(xz * LACE_SCALE));
     if (coverage <= 0.01)
         return 0.0;
-    return laceVeins(laceField(xz, dir, speed, churn), footprint, coverage);
-}
-
-float flowingLace(vec2 xz, vec2 dir, float speed, float coverage, float churn)
-{
-    return flowingLaceAt(xz, length(fwidth(xz * LACE_SCALE)), dir, speed, coverage, churn);
+    float t = mod(frame.cameraPos.w, LACE_WRAP) * mix(LACE_CALM, LACE_ROLLER, churn);
+    return laceVeins(lace(xz * LACE_SCALE, t), footprint, coverage);
 }
 
 // The water body by depth alone, as before the fog (the fog off): deep tint, scatter through crests, and the sand seen
 // through the shallows.
-vec3 waterBodyDepth(vec3 worldPos, vec3 N, vec3 V, float depth, float thickness, float zone)
+vec3 waterBodyDepth(vec3 worldPos, vec3 N, vec3 V, float depth, float thickness)
 {
     vec3 L = frame.sunDir.xyz;
     float intensity = frame.sunDir.w;
@@ -196,10 +138,7 @@ vec3 waterBodyDepth(vec3 worldPos, vec3 N, vec3 V, float depth, float thickness,
     // Body colour: deep tint + subsurface scatter through wave crests + wrap diffuse.
     float sss = pow(max(dot(V, -L), 0.0), 4.0) * clamp((worldPos.y + 1.5) * 0.25, 0.0, 1.0);
     float wrap = max((dot(N, L) + 0.5) / 1.5, 0.0);
-    // Pits filled from the sea are stirred-up water, not deep ocean: cap the depth tint and add sediment turbidity.
-    float tintDepth = mix(depth, min(depth, 2.0), zone);
-    vec3 deepColour = mix(vec3(0.03, 0.20, 0.18), frame.waterDeep.rgb, smoothstep(0.0, 10.0, tintDepth));
-    deepColour = mix(deepColour, vec3(0.10, 0.22, 0.19), 0.45 * zone);
+    vec3 deepColour = mix(vec3(0.03, 0.20, 0.18), frame.waterDeep.rgb, smoothstep(0.0, 10.0, depth));
     vec3 body = deepColour * (0.2 + 0.3 * wrap * intensity)
               + frame.waterScatter.rgb * sss * intensity;
 
@@ -210,7 +149,7 @@ vec3 waterBodyDepth(vec3 worldPos, vec3 N, vec3 V, float depth, float thickness,
     float column = max(thickness, 0.0);
     vec3 seabed = WET_SAND * SAND_ALBEDO * (0.5 * max(L.y, 0.0) * intensity + 0.5 * frame.skyZenith.rgb) * exp(-2.0 * SEABED_ABSORPTION * column);
     vec3 sand = mix(seabed, SHALLOW_SCATTER * (0.3 + 0.4 * wrap * intensity), 1.0 - exp(-0.8 * column));
-    return mix(sand, body, smoothstep(0.0, 2.5, thickness) * (1.0 - zone));
+    return mix(sand, body, smoothstep(0.0, 2.5, thickness));
 }
 
 // The water body seen into from the surface at worldPos along -V, by the fog: marched through the volume near the
@@ -325,11 +264,11 @@ vec3 waterBodyFog(vec3 worldPos, vec3 N, vec3 V, float dist, float thickness, ou
 }
 
 // Display colour of water at worldPos with normal N: body colour (depth = water depth under it, thickness = water above
-// the ground there, zone = sea-zone weight), sky reflection, sun, foam over it, then tonemap and fog. through = the
+// the ground there), sky reflection, sun, foam over it, then tonemap and fog. through = the
 // share of the pixel that is what was drawn behind the water (the bed through the fog's transmittance, less the
 // reflection's and the foam's shares), for the caller's alpha; the colour returned holds an estimate of it. Under water the
 // surface is a window on the sky, and the water between the camera and it is marched.
-vec3 shadeWater(vec3 worldPos, vec3 N, float depth, float thickness, float zone, float foam, out float through)
+vec3 shadeWater(vec3 worldPos, vec3 N, float depth, float thickness, float foam, out float through)
 {
     vec3 toCam = frame.cameraPos.xyz - worldPos;
     float dist = length(toCam);
@@ -352,7 +291,7 @@ vec3 shadeWater(vec3 worldPos, vec3 N, float depth, float thickness, float zone,
     R = normalize(R);
     vec3 reflection = sky(R);
     float share = F * (1.0 - foam);
-    float blur = min(RAIN_SKY_BLUR * gRainRough + SLOPE_SKY_BLUR * gSlopeVariance, 0.6);
+    float blur = min(RAIN_SKY_BLUR * gRainRough, 0.6);
     if (!under && share > SSR_MIN_SHARE)
     {
         vec3 scene;
@@ -375,7 +314,7 @@ vec3 shadeWater(vec3 worldPos, vec3 N, float depth, float thickness, float zone,
     else if (fogEnabled())
         body = waterBodyFog(worldPos, N, V, dist, thickness, through);
     else
-        body = waterBodyDepth(worldPos, N, V, depth, thickness, zone);
+        body = waterBodyDepth(worldPos, N, V, depth, thickness);
 
     vec3 colour = mix(body, reflection, F);
     through *= 1.0 - F;

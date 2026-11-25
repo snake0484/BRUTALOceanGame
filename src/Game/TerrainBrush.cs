@@ -18,9 +18,6 @@ public sealed class TerrainBrush(TerrainWorld world, PhysicsWorld physics, FlyCa
     public float Radius = 3f;
     public VoxelMaterial PlaceMaterial = VoxelMaterial.Rock;
     public RayHit LastHit;
-
-    /// <summary>Where the terrain panel's water probe looks: the ground under the cursor while P is held.</summary>
-    public Vector3? Probe;
     private float _cooldown;
 
     public void Update(GlfwWindow window, float dt, bool uiWantsMouse)
@@ -33,9 +30,6 @@ public sealed class TerrainBrush(TerrainWorld world, PhysicsWorld physics, FlyCa
             Radius = MathF.Min(16f, Radius + 4f * dt);
 
         LastHit = physics.CastRay(camera.Position, CursorRay(window), MaxDistance);
-
-        if (LastHit.Hit && window.GetKey(GlfwKey.P) == GlfwKeyAction.Press)
-            Probe = LastHit.Point;
 
         if (uiWantsMouse || window.GetMouseButton(GlfwMouseButton.Left) != GlfwButtonAction.Press || _cooldown > 0f || !LastHit.Hit)
             return;

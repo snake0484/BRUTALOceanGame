@@ -94,7 +94,6 @@ public static class VoxelEditor
 
         var density = chunk.Density;
         var material = chunk.Material;
-        var water = chunk.Water;
         const float scale = ChunkConstants.DensityScale;
         var dig = op.Mode == BrushMode.Dig;
 
@@ -114,9 +113,6 @@ public static class VoxelEditor
                 if (value > old)
                     density[i] = value;
 
-                // Water is left alone: carved former solid already holds none (so it starts dry until the flow sim
-                // refills it), and existing open water the brush overlaps must not be cut away.
-
                 continue;
             }
 
@@ -126,9 +122,6 @@ public static class VoxelEditor
                 continue;
 
             density[i] = solid;
-
-            if (solid < 0)
-                water[i] = 0;
 
             if (solid < 0 && (old >= 0 || distance < radius))
                 material[i] = (byte)op.Material;

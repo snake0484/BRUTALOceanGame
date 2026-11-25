@@ -7,8 +7,8 @@ namespace BrutalGame.Terrain.Runtime;
 /// Seabed height and sea state per 2 m column around the camera, rebuilt from the ready terrain leaves of any LOD.
 /// Depth = max(0, sea level - ground), the ground being the bed (the top at or below the sea-level voxel layer) where it
 /// lies under sea level and the top otherwise (<see cref="Ground"/>). Tops and beds come from the finest leaf with a
-/// surface in the column (max within that LOD); sea state comes from the finest leaf containing the sea-level voxel layer
-/// (docs/voxel-water.md, docs/terrain-lod.md). Unknown cells are deep sea.
+/// surface in the column (max within that LOD); sea state (ground below sea: the sea-level voxel layer open) comes from
+/// the finest leaf containing that layer (docs/terrain-lod.md). Unknown cells are deep sea.
 /// </summary>
 public sealed class BathymetryGrid
 {
@@ -35,28 +35,6 @@ public sealed class BathymetryGrid
     // above (whose quantised voxels can report a spurious surface near its bottom) never overrides the real seabed.
     private readonly byte[] _topLod = new byte[Resolution * Resolution];
     private readonly byte[] _bedLod = new byte[Resolution * Resolution];
-    private readonly bool[] _simulated = new bool[Resolution * Resolution];
-    private readonly float[] _zoneWeight = new float[Resolution * Resolution];
-
-    /// <summary>Width (m) inside a disc edge over which the sim surface blends into the open-sea swell.</summary>
-    public float ZoneBlendWidth = 5f;
-
-    /// <summary>
-    /// Seconds over which a disc's zone weight fades in when it is added and out when it goes back to the ocean, so the
-    /// drawn surface hands over between the swell and the sim instead of switching in a tick (a new disc a second
-    /// popped the sea around a dig).
-    /// </summary>
-    public float ZoneFadeSeconds = 1.5f;
-    private readonly bool[] _zoneWet = new bool[Resolution * Resolution];
-    private readonly float[] _zoneOffset = new float[Resolution * Resolution];
-    private readonly float[] _zoneDepth = new float[Resolution * Resolution];
-
-    private readonly float[] _zoneWhite = new float[Resolution * Resolution];
-    private readonly List<Vector3> _discs = new();
-
-    // Per disc: its zone weight's fade (0..1) and which way it is going (+1 in, -1 out, 0 settled).
-    private readonly List<float> _fades = new();
-    private readonly List<sbyte> _fading = new();
     private readonly Region[] _changed = new Region[MaxChanged];
 
     // The cells of the region being re-merged as they were before (BeginRegion), so EndRegion reports only real changes.
@@ -81,7 +59,7 @@ public sealed class BathymetryGrid
     public bool Dirty { get; set; } = true;
 
     /// <summary>
-    /// What changed since <see cref="ClearChanged"/>: the regions re-merged from terrain or zone discs (always tracked),
+    /// What changed since <see cref="ClearChanged"/>: the regions re-merged from terrain (always tracked),
     /// whether everything must be re-uploaded anyway (a re-centre moved the data), and the cells the data moved by
     /// (new cell x holds what old cell x + Shift.X held).
     /// </summary>
@@ -110,36 +88,12 @@ public sealed class BathymetryGrid
     /// <summary>LOD of the leaf each cell's sea state came from (byte.MaxValue = none); its voxels are 2^lod m.</summary>
     public ReadOnlySpan<byte> SeaLods => _seaLod;
 
-    /// <summary>Cells whose sea is run by the voxel water sim (docs/voxel-water.md). The ocean draws them at the sim's level.</summary>
-    public ReadOnlySpan<bool> Simulated => _simulated;
-
-    /// <summary>0..1 blend from swell to sim surface: 1 deep inside a zone, ramping to 0 at its edge.</summary>
-    public ReadOnlySpan<float> ZoneWeight => _zoneWeight;
-
-    public ReadOnlySpan<bool> ZoneWet => _zoneWet;
-
-    /// <summary>Absolute water surface height (m) of sea-zone cells, from the zone flow sim.</summary>
-    public ReadOnlySpan<float> ZoneOffset => _zoneOffset;
-
-    public ReadOnlySpan<float> ZoneDepth => _zoneDepth;
-
-    /// <summary>Foam 0..1 for sea-zone cells, from the zone flow sim (pours, fast flow), advected and settling.</summary>
-    public ReadOnlySpan<float> ZoneWhite => _zoneWhite;
-
-    /// <summary>Zone levels changed inside <see cref="TakeLevelRect"/>; cheaper to upload than full <see cref="Dirty"/> changes.</summary>
-    public bool LevelsDirty { get; private set; }
-
-    private int _levelMinX = Resolution;
-    private int _levelMinZ = Resolution;
-    private int _levelMaxX = -1;
-    private int _levelMaxZ = -1;
-
     public float LastRebuildMs { get; private set; }
 
     /// <summary>
     /// Re-centres on the camera when it drifts. The seabed data moves with the grid by whole chunks, so only the strips
     /// that moved in from outside (unknown until the caller rebuilds them) are new; (dx, dz) is the shift in cells, and
-    /// Resolution or more on the first call. Zone state is re-stamped from the discs. Returns false if nothing moved.
+    /// Resolution or more on the first call. Returns false if nothing moved.
     /// </summary>
     public bool Recenter(Vector3 cameraPos, out int dx, out int dz)
     {
@@ -157,40 +111,26 @@ public sealed class BathymetryGrid
         Origin = origin;
         _centred = true;
 
-        // Everything here is anchored to the world, so it all moves with the grid; discs reaching into the strips that
-        // came in are stamped again.
+        // Everything here is anchored to the world, so it all moves with the grid.
         ShiftCells(_top, dx, dz, float.NaN);
         ShiftCells(_bed, dx, dz, float.NaN);
         ShiftCells(_sea, dx, dz, SeaState.Unknown);
         ShiftCells(_seaLod, dx, dz, NoLod);
         ShiftCells(_topLod, dx, dz, NoLod);
         ShiftCells(_bedLod, dx, dz, NoLod);
-        ShiftCells(_simulated, dx, dz, false);
-        ShiftCells(_zoneWeight, dx, dz, 0f);
-        ShiftCells(_zoneWet, dx, dz, false);
-        ShiftCells(_zoneOffset, dx, dz, 0f);
-        ShiftCells(_zoneDepth, dx, dz, 0f);
-        ShiftCells(_zoneWhite, dx, dz, 0f);
         Shift = (Shift.X + dx, Shift.Z + dz);
         Dirty = true;
 
         if (Math.Abs(Shift.X) >= Resolution || Math.Abs(Shift.Z) >= Resolution)
             ChangedAll = true;
 
-        for (var d = 0; d < _discs.Count; d++)
-        {
-            StampDisc(_discs[d], _fades[d], Region.All);
-            MarkChanged(DiscRegion(_discs[d]));
-        }
-
         return true;
     }
 
     /// <summary>
-    /// Moves a per-cell array (<paramref name="stride"/> values per cell) by (dx, dz) cells: new [x, z] = old
-    /// [x + dx, z + dz]; cells from outside get fill.
+    /// Moves a per-cell array by (dx, dz) cells: new [x, z] = old [x + dx, z + dz]; cells from outside get fill.
     /// </summary>
-    public static void ShiftCells<T>(T[] cells, int dx, int dz, T fill, int stride = 1)
+    public static void ShiftCells<T>(T[] cells, int dx, int dz, T fill)
     {
         const int n = Resolution;
         if (Math.Abs(dx) >= n || Math.Abs(dz) >= n)
@@ -199,13 +139,12 @@ public sealed class BathymetryGrid
             return;
         }
 
-        var width = n * stride;
-        var keep = (n - Math.Abs(dx)) * stride;
+        var keep = n - Math.Abs(dx);
         for (var k = 0; k < n; k++)
         {
             // Rows move toward lower z when dz > 0, so walk in that direction to read each source row before it is overwritten.
             var z = dz >= 0 ? k : n - 1 - k;
-            var row = cells.AsSpan(z * width, width);
+            var row = cells.AsSpan(z * n, n);
             var from = z + dz;
 
             if ((uint)from >= n)
@@ -214,8 +153,8 @@ public sealed class BathymetryGrid
                 continue;
             }
 
-            cells.AsSpan(from * width + Math.Max(dx, 0) * stride, keep).CopyTo(row.Slice(Math.Max(-dx, 0) * stride, keep));
-            row.Slice(dx >= 0 ? keep : 0, width - keep).Fill(fill);
+            cells.AsSpan(from * n + Math.Max(dx, 0), keep).CopyTo(row.Slice(Math.Max(-dx, 0), keep));
+            row.Slice(dx >= 0 ? keep : 0, n - keep).Fill(fill);
         }
     }
 
@@ -429,187 +368,6 @@ public sealed class BathymetryGrid
         LastRebuildMs = (float)elapsedMs;
     }
 
-    /// <summary>Marks a disc (world x, world z, radius) as simulated sea; its zone weight fades in (<see cref="ZoneFadeSeconds"/>).</summary>
-    public void AddSimulatedDisc(float x, float z, float radius)
-    {
-        var disc = new Vector3(x, z, radius);
-        _discs.Add(disc);
-        _fades.Add(0f);
-        _fading.Add(1);
-        StampDisc(disc, 0f, Region.All);
-        MarkChanged(DiscRegion(disc));
-    }
-
-    /// <summary>Starts handing a disc back to the open sea: its zone weight fades out, then <see cref="AdvanceZoneFades"/> removes it.</summary>
-    public void FadeOutDisc(Vector3 disc)
-    {
-        var d = _discs.IndexOf(disc);
-        if (d >= 0)
-            _fading[d] = -1;
-    }
-
-    /// <summary>
-    /// Once a tick: moves fading discs' zone weights on and re-stamps the cells they cover, which go up with the zone's
-    /// levels. Discs that have faded out are removed and listed in <paramref name="gone"/>.
-    /// </summary>
-    public void AdvanceZoneFades(float dt, List<Vector3> gone)
-    {
-        var step = dt / MathF.Max(ZoneFadeSeconds, 1e-3f);
-        var region = new Region(Resolution, Resolution, 0, 0);
-
-        for (var d = _discs.Count - 1; d >= 0; d--)
-        {
-            if (_fading[d] == 0)
-                continue;
-
-            var disc = _discs[d];
-            _fades[d] = Math.Clamp(_fades[d] + _fading[d] * step, 0f, 1f);
-
-            if (_fades[d] <= 0f)
-            {
-                gone.Add(disc);
-                RemoveSimulatedDisc(disc);
-                continue;
-            }
-
-            if (_fades[d] >= 1f)
-                _fading[d] = 0;
-
-            var cells = DiscRegion(disc);
-            region = new Region(Math.Min(region.X0, cells.X0), Math.Min(region.Z0, cells.Z0), Math.Max(region.X1, cells.X1), Math.Max(region.Z1, cells.Z1));
-        }
-
-        if (region.Empty)
-            return;
-
-        for (var gz = region.Z0; gz < region.Z1; gz++)
-            _zoneWeight.AsSpan(region.X0 + gz * Resolution, region.X1 - region.X0).Clear();
-
-        for (var d = 0; d < _discs.Count; d++)
-            StampDisc(_discs[d], _fades[d], region);
-
-        MarkLevel(region.X0, region.Z0);
-        MarkLevel(region.X1 - 1, region.Z1 - 1);
-    }
-
-    private Region DiscRegion(Vector3 disc)
-    {
-        var cells = CellsInDisc(disc.X, disc.Y, disc.Z);
-        return new Region(cells.MinX, cells.MinZ, cells.MaxX + 1, cells.MaxZ + 1);
-    }
-
-    /// <summary>Hands a disc back to the open sea: clears the zone state under it and re-stamps the remaining discs.</summary>
-    public void RemoveSimulatedDisc(Vector3 disc)
-    {
-        var d = _discs.IndexOf(disc);
-        if (d < 0)
-            return;
-
-        _discs.RemoveAt(d);
-        _fades.RemoveAt(d);
-        _fading.RemoveAt(d);
-
-        // A disc the grid has re-centred away from clamps to an empty (inverted) range.
-        var cells = CellsInDisc(disc.X, disc.Y, disc.Z);
-        var count = cells.MaxX - cells.MinX + 1;
-        for (var gz = cells.MinZ; count > 0 && gz <= cells.MaxZ; gz++)
-        {
-            var row = cells.MinX + gz * Resolution;
-            _simulated.AsSpan(row, count).Clear();
-            _zoneWeight.AsSpan(row, count).Clear();
-            _zoneWet.AsSpan(row, count).Clear();
-            _zoneWhite.AsSpan(row, count).Clear();
-        }
-
-        for (var i = 0; i < _discs.Count; i++)
-            StampDisc(_discs[i], _fades[i], Region.All);
-
-        MarkChanged(DiscRegion(disc));
-    }
-
-    /// <summary>Marks a disc's cells inside <paramref name="clip"/> simulated and raises their zone weight to its ramp times its fade.</summary>
-    private void StampDisc(Vector3 disc, float fade, in Region clip)
-    {
-        var cells = CellsInDisc(disc.X, disc.Y, disc.Z);
-        var x0 = Math.Max(cells.MinX, clip.X0);
-        var x1 = Math.Min(cells.MaxX, clip.X1 - 1);
-
-        for (var gz = Math.Max(cells.MinZ, clip.Z0); gz <= Math.Min(cells.MaxZ, clip.Z1 - 1); gz++)
-            for (var gx = x0; gx <= x1; gx++)
-            {
-                var distance = Vector2.Distance(CellCentre(gx, gz), new Vector2(disc.X, disc.Y));
-                if (distance > disc.Z)
-                    continue;
-
-                var i = gx + gz * Resolution;
-                _simulated[i] = true;
-                _zoneWeight[i] = MathF.Max(_zoneWeight[i], fade * Math.Clamp((disc.Z - distance) / ZoneBlendWidth, 0f, 1f));
-            }
-    }
-
-    public (int MinX, int MinZ, int MaxX, int MaxZ) CellsInDisc(float x, float z, float radius) =>
-    (
-        Math.Max(0, (int)MathF.Floor((x - radius - Origin.X) / CellSize)),
-        Math.Max(0, (int)MathF.Floor((z - radius - Origin.Y) / CellSize)),
-        Math.Min(Resolution - 1, (int)MathF.Floor((x + radius - Origin.X) / CellSize)),
-        Math.Min(Resolution - 1, (int)MathF.Floor((z + radius - Origin.Y) / CellSize))
-    );
-
-    public Vector2 CellCentre(int gx, int gz) => Origin + new Vector2((gx + 0.5f) * CellSize, (gz + 0.5f) * CellSize);
-
-    /// <summary>Cells whose zone level, depth or foam changed since the last call (empty when Max &lt; Min); clears it.</summary>
-    public (int MinX, int MinZ, int MaxX, int MaxZ) TakeLevelRect()
-    {
-        var rect = (_levelMinX, _levelMinZ, _levelMaxX, _levelMaxZ);
-        (_levelMinX, _levelMinZ, _levelMaxX, _levelMaxZ) = (Resolution, Resolution, -1, -1);
-        LevelsDirty = false;
-        return rect;
-    }
-
-    private void MarkLevel(int gx, int gz)
-    {
-        _levelMinX = Math.Min(_levelMinX, gx);
-        _levelMinZ = Math.Min(_levelMinZ, gz);
-        _levelMaxX = Math.Max(_levelMaxX, gx);
-        _levelMaxZ = Math.Max(_levelMaxZ, gz);
-        LevelsDirty = true;
-    }
-
-    /// <param name="surface">Absolute water surface height from the zone sim (m).</param>
-    public void SetZoneLevel(int gx, int gz, float surface, float depth, float foam)
-    {
-        var i = gx + gz * Resolution;
-        _zoneWet[i] = true;
-        _zoneOffset[i] = surface;
-        _zoneDepth[i] = depth;
-        _zoneWhite[i] = foam;
-        MarkLevel(gx, gz);
-    }
-
-    /// <param name="surface">Where to place the (discarded) surface: below the ground and no higher than the water beside it, so interpolation dives under the ground rather than climbing a wall.</param>
-    public void SetZoneDry(int gx, int gz, float surface)
-    {
-        var i = gx + gz * Resolution;
-        if (!_zoneWet[i] && _zoneOffset[i] == surface)
-            return;
-
-        _zoneWet[i] = false;
-        _zoneOffset[i] = surface;
-        _zoneWhite[i] = 0f;
-        MarkLevel(gx, gz);
-    }
-
-    /// <summary>Foam that has drifted out of a zone onto the open sea around it (drawn on the ocean's own surface).</summary>
-    public void SetSpillFoam(int gx, int gz, float foam)
-    {
-        var i = gx + gz * Resolution;
-        if (_simulated[i] || MathF.Abs(_zoneWhite[i] - foam) < 1e-3f)
-            return;
-
-        _zoneWhite[i] = foam;
-        MarkLevel(gx, gz);
-    }
-
     /// <summary>Terrain top at world xz, bilinear over the 2 m cells. Unknown cells read as deep seabed.</summary>
     public float SampleTop(float x, float z)
     {
@@ -649,7 +407,7 @@ public sealed class BathymetryGrid
         return float.IsNaN(ground) ? SeaLevel - UnknownDepth : ground;
     }
 
-    /// <summary>Bumped on every rebuild, so the zone sim knows when to re-read the bed.</summary>
+    /// <summary>Bumped on every rebuild.</summary>
     public int Version { get; private set; }
 
     public bool IsSea(float x, float z)

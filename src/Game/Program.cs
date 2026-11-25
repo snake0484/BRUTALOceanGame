@@ -10,13 +10,6 @@ var windSpeed = 10f;
 float[] swell = [1.2f, 13f, 0f];
 var foamDebug = false;
 var editTest = false;
-// Voxel water steps per second; by default 240 for the automaton (it spreads diffusively) and 60 for the pipe model,
-// which is stable there (docs/voxel-water.md, v2).
-int? waterRate = null;
-
-// Voxel water runs the 3D pipe model with momentum (docs/voxel-water.md, v2); --water-automaton runs the old cell
-// automaton instead (no momentum, no flow or foam for the renderer).
-var waterPipes = true;
 var hideUi = false;
 var coastal = true;
 var benchSeconds = 0.0;
@@ -34,7 +27,6 @@ var benchRain = false;
 var benchFog = false;
 var benchSsr = false;
 var ssrOn = true;
-var voxelSwell = true;
 var fogOn = true;
 // Scene resolution per axis relative to the window (0.5..1); the UI stays native.
 var renderScale = 1f;
@@ -68,8 +60,6 @@ for (var i = 0; i < args.Length; i++)
     }
     else if (args[i] == "--render-scale" && i + 1 < args.Length)
         renderScale = float.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture);
-    else if (args[i] == "--no-voxel-swell")
-        voxelSwell = false;
     else if (args[i] == "--no-ssr")
         ssrOn = false;
     else if (args[i] == "--bench-ssr")
@@ -102,12 +92,6 @@ for (var i = 0; i < args.Length; i++)
         flyTest = true;
     else if (args[i] == "--no-coastal")
         coastal = false;
-    else if (args[i] == "--water-pipes")
-        waterPipes = true;
-    else if (args[i] == "--water-automaton")
-        waterPipes = false;
-    else if (args[i] == "--water-rate" && i + 1 < args.Length)
-        waterRate = int.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture);
     else if (args[i] == "--cam" && i + 5 < args.Length)
     {
         camera = new float[5];
@@ -116,5 +100,5 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
-using var app = new GameApp(windSpeed, foamDebug, editTest, camera, waterRate ?? (waterPipes ? 60 : 240), hideUi, coastal, benchSeconds, flyTest, swell, weather ?? true, weatherOffset, rain, benchRain, waterPipes, benchFog, fogOn, benchSsr, ssrOn, voxelSwell, renderScale);
+using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, coastal, benchSeconds, flyTest, swell, weather ?? true, weatherOffset, rain, benchRain, benchFog, fogOn, benchSsr, ssrOn, renderScale);
 app.Run();

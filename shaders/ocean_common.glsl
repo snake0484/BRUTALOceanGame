@@ -14,7 +14,7 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 waterScatter;
     vec4 cascadeL;     // xyz = patch size L per cascade (m), w = cascade count
     vec4 cascadeKLo;   // xyz = band low |k| per cascade, w = persistent foam strength
-    vec4 foamParams;   // x = rain 0..1, y = rain time (s, looped), z = debug view (1 = Jacobian/foam), w = sim tick alpha
+    vec4 foamParams;   // x = rain 0..1, y = rain time (s, looped), z = debug view (1 = Jacobian/foam), w unused
     vec4 depthRect;    // xy = depth map world origin, z = world size, w = depth outside the map
     vec4 coastRect;    // layer B near field: xy = world origin, z = cell size, w = resolution (0 = none)
     vec4 refEnergy[3]; // swell variance per coastal reference frequency
@@ -35,7 +35,7 @@ layout(set = 0, binding = 0, std140) uniform Frame {
 layout(set = 0, binding = 1) uniform sampler2DArray dispMap;  // (λDx, h, λDz, λDxz)
 layout(set = 0, binding = 2) uniform sampler2DArray derivMap; // (hx, hz, λDxx, λDzz)
 layout(set = 0, binding = 3) uniform sampler2DArray foamMap;  // r = persistent foam
-layout(set = 0, binding = 4) uniform sampler2DArray depthMap; // see depthMapAt
+layout(set = 0, binding = 4) uniform sampler2D depthMap; // signed depth (BathymetryTexture), see waterDepth
 
 // Layer B coastal maps (CoastalField): 7 vec4 per texel = (depth, active, 0, 0), then (lag, amp, lag, amp) x 6. Six
 // buffers shared by all frames (OceanRenderer.Slot); counts.w says which hold the current near field and, while a rebuild
@@ -62,12 +62,6 @@ const float BREAKING_GAMMA = 0.55;
 const float SHORE_CALM = 0.0; // m of water under the surface (oceanFinish) at which the GPU band's chop is gone ...
 const float SHORE_FULL = 1.5; // ... and from which it is at full strength
 const float CASCADE_N = 256.0; // FFT resolution, fixed in C#
-// Share of each cascade a fully turbulent sea-zone pool shows, wind or not: a churned plunge pool's chop is short and
-// steep, so mostly the 3 m and 12 m cascades' ripples, a little over the open sea's in the finest.
-const vec3 TURBULENCE_SHARE = vec3(0.2, 0.8, 1.2);
-const float EDDY_SPEED = 1.2;  // m/s of swirl in fully turbulent sea-zone water ...
-const float EDDY_SCALE = 0.25; // ... in eddies about 4 m across ...
-const float EDDY_RATE = 0.15;  // ... turning over as the noise drifts this fast
 const float COHERENT_KH = 0.4;   // OceanSwell: fully coherent surf at or below this carrier k h
 const float INCOHERENT_KH = 1.2; // ... and none above this
 const float BAND_INNER = 0.5;    // peak band: within this many reference steps of the carrier ...
@@ -105,7 +99,6 @@ const float TWO_PI = 6.28318530718;
 
 #ifndef WATER_NOISE_GLSL
 #define WATER_NOISE_GLSL
-const float FLOW_PERIOD = 1.0;  // s: each copy of the flow map slides for this long, by speed x this, before it fades out and resets
 const float LACE_WRAP = 600.0;  // seconds: foam texture clocks wrap so noise coordinates stay small
 
 float hash12(vec2 p)
@@ -312,61 +305,6 @@ layout(std430, set = 0, binding = 6) SURF_FOAM_ACCESS buffer SurfFoam
     float values[];
 } surfFoam;
 
-// Zone flow (OceanRenderer.WriteZoneFlow, from ZoneFlowSim.PackFlow): the sea-zone sim's own 1 m cells, per cell
-// half (velocity x, z) and half (turbulence, 0). Empty (size 0) when there is no sim or it is too big.
-layout(std430, set = 0, binding = 9) readonly buffer ZoneFlow
-{
-    vec4 rect;   // xy = world corner of the grid, z = cell size (m)
-    ivec4 size;  // x = cells across, y = cells down
-    uvec2 cells[];
-} zoneFlow;
-
-vec3 zoneFlowCell(int i)
-{
-    uvec2 c = zoneFlow.cells[i];
-    return vec3(unpackHalf2x16(c.x), unpackHalf2x16(c.y).x);
-}
-
-// The sim's flow at xz, bilinear between cell centres: xy = velocity (m/s), z = turbulence (0..1). Still outside it.
-vec3 zoneFlowAt(vec2 xz)
-{
-    ivec2 n = zoneFlow.size.xy;
-    vec2 f = (xz - zoneFlow.rect.xy) / max(zoneFlow.rect.z, 1e-3) - 0.5;
-    ivec2 c = ivec2(floor(f));
-    if (any(lessThan(c, ivec2(0))) || any(greaterThanEqual(c, n - 1)))
-        return vec3(0.0);
-
-    vec2 t = f - vec2(c);
-    int i = c.y * n.x + c.x;
-    vec3 a = mix(zoneFlowCell(i), zoneFlowCell(i + 1), t.x);
-    vec3 b = mix(zoneFlowCell(i + n.x), zoneFlowCell(i + n.x + 1), t.x);
-    return mix(a, b, t.y);
-}
-
-// Bathymetry map (BathymetryTexture): r = signed depth (m), g = sim level, b = sea-zone flag, a = flow whitewater.
-// Layer 0 is the latest sim tick, layer 1 the tick before; sea-zone cells blend between them by the tick alpha
-// (foamParams.w), so the 60 Hz sim moves smoothly at any frame rate. Pit sentinels never blend.
-vec4 depthMapAt(vec2 uv)
-{
-    vec4 now = textureLod(depthMap, vec3(uv, 0.0), 0.0);
-    if (now.b <= 0.0 && now.a <= 0.0)
-        return now;
-
-    vec4 before = textureLod(depthMap, vec3(uv, 1.0), 0.0);
-    vec4 m = mix(before, now, frame.foamParams.w);
-    m.r = min(now.r, before.r) < -500.0 ? now.r : m.r;
-    return m;
-}
-
-// Sea-zone sample: g = absolute sim surface height (m), b = zone flag. Zero outside the map.
-vec2 zoneSurface(vec2 xz)
-{
-    vec2 uv = (xz - frame.depthRect.xy) / frame.depthRect.z;
-    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))))
-        return vec2(0.0);
-    return depthMapAt(uv).gb;
-}
-
 // The wind sea the cascades show at xz, per cascade: returned, the share of its height (displacement); slopes, the share
 // of its slopes (normals, whitecaps). Over F m of open water upwind (rain_cover.glsl windCover) the wind U raises waves
 // only up to the JONSWAP peak kp = (22 (g² / (U F))^(1/3))² / g: shorter ones are saturated as on the open sea, longer
@@ -388,13 +326,14 @@ vec3 windSea(vec2 xz, out vec3 slopes)
     return wind.x * mix(sqrt(heights), vec3(1.0), grown);
 }
 
-// Water depth (m) from the bathymetry map; deep outside it.
+// Water depth (m) from the bathymetry map: sea level - ground, negative on land, below -500 in pits cut off from the
+// sea; deep outside it.
 float waterDepth(vec2 xz)
 {
     vec2 uv = (xz - frame.depthRect.xy) / frame.depthRect.z;
     if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))))
         return frame.depthRect.w;
-    return depthMapAt(uv).r;
+    return textureLod(depthMap, uv, 0.0).r;
 }
 
 // Swash (docs/breaking-waves.md): run-up events per shoreline point. Each bore that reaches the shoreline below a beach
@@ -520,14 +459,11 @@ float surfFoamAt(vec2 xz)
 struct OceanPoint
 {
     vec3 position;     // displaced world position
-    vec4 cpuPartials;  // (hx, hz, λDxx, λDzz), zone-mixed
+    vec4 cpuPartials;  // (hx, hz, λDxx, λDzz)
     float cpuDxz;
     vec3 shore;        // per cascade, the share of its slopes drawn: 0 on the beach, in a pond, deep in a sea cave .. 1 on open deep water
     float surfFoam;    // whitewater left behind by the surf (ocean_surf_foam.comp)
-    float zone;        // 0..1 sea-zone weight (the sim owns the surface where 1)
     float swashEdge;   // 1 at the edge of the swash sheet drawn here, 0 half a metre behind it or where the sea is the surface (ocean.frag's edge line)
-    vec2 flow;         // the water's forward speed (m/s): in sea zones the sim's current
-    float turbulence;  // sea-zone water churned by a pour, a crash or a wall (ZoneFlowSim.Agitate), 0..1
 };
 
 // The analytic swell's height, displacement and their partials at a rest position.
@@ -694,7 +630,7 @@ OceanPoint oceanAt(vec2 x0, float se)
     return oceanFinish(x0, se, swellShare(x0, se, 0, 1));
 }
 
-// Everything on top of the swell: swash, the GPU cascades, sea zones.
+// Everything on top of the swell: swash and the GPU cascades.
 OceanPoint oceanFinish(vec2 x0, float se, Swell sw)
 {
     float height = sw.height;
@@ -724,21 +660,10 @@ OceanPoint oceanFinish(vec2 x0, float se, Swell sw)
         }
     }
 
-    // In sea zones the shallow-water sim owns the surface: swell arrives physically through its sea boundary, so the
-    // analytic swell is replaced by the sim height and only the FFT detail rides on top.
-    vec2 zs = zoneSurface(x0);
-    float zone = zs.y; // smooth 0..1 ramp inside disc edges: sim surface blends into the swell
-
-    // The sim's own flow there (zoneFlowAt): the ripples and foam stream with its current, and its turbulence, where
-    // water has poured, crashed or slammed a wall, roughens the surface whatever the wind (TURBULENCE_SHARE).
-    vec3 simFlow = zone > 0.0 ? zoneFlowAt(x0) : vec3(0.0);
-    vec3 rough = simFlow.z * zone * TURBULENCE_SHARE;
-
     // GPU cascades: displacement only, faded out where the grid cannot resolve the band, and kept to the wind sea the
-    // wind raises over the water here (windSea) or the sim's turbulence churns up.
+    // wind raises over the water here (windSea).
     vec3 slopeShare;
-    vec3 heightShare = max(windSea(x0, slopeShare), rough);
-    slopeShare = max(slopeShare, rough);
+    vec3 heightShare = windSea(x0, slopeShare);
     vec3 cpuBand = vec3(Dx, height, Dz);
     vec3 fft = vec3(0.0);
     int cascades = min(int(frame.cascadeL.w), 3);
@@ -753,37 +678,23 @@ OceanPoint oceanFinish(vec2 x0, float se, Swell sw)
     }
 
     // The swell shoals and breaks through layer B; the FFT detail calms toward the land over SHORE_CALM-SHORE_FULL of the
-    // water column under it: the swell's crest or trough over the bed (a swash sheet's thickness, in sea zones the sim's
-    // own depth), so the chop comes in on the crests and settles in the troughs between them, and the thin water at the
+    // water column under it: the swell's crest or trough over the bed (a swash sheet's thickness), so the chop comes in
+    // on the crests and settles in the troughs between them, and the thin water at the
     // edge stays glassy. Fading it from 8 m of still depth left the whole surf zone glassy; over 0.2-1.5 m, a glassy
     // band that didn't move with the waves; capped at full strength down to half a metre, chop right up to the sand.
     float bed = waterDepth(x0);
-    float column = max(mix(bed + height, bed, zone), 0.0);
+    float column = max(bed + height, 0.0);
     float shore = smoothstep(SHORE_CALM, SHORE_FULL, column);
     vec3 fftBand = fft * shore;
     vec3 disp = cpuBand + fftBand;
 
     // CPU partials in contract form: dxx = 1 + λDxx, so λDxx = -jxx (likewise zz, xz).
-    // Swell rides on the simulated water level, so waves carry on into sea zones that are draining or filling.
     OceanPoint p;
-    p.position = vec3(x0.x + disp.x * (1.0 - zone), mix(disp.y, zs.x + fftBand.y, zone), x0.y + disp.z * (1.0 - zone));
-
-    // Zone slope from central differences of the sim surface (2 m cells): smooth normals for the pour and the pool.
-    const float cell = 2.0;
-    float zoneHx = (zoneSurface(x0 + vec2(cell, 0.0)).x - zoneSurface(x0 - vec2(cell, 0.0)).x) / (2.0 * cell);
-    float zoneHz = (zoneSurface(x0 + vec2(0.0, cell)).x - zoneSurface(x0 - vec2(0.0, cell)).x) / (2.0 * cell);
-
-    p.cpuPartials = mix(vec4(hx, hz, -jxx, -jzz), vec4(zoneHx, zoneHz, 0.0, 0.0), zone);
-    p.cpuDxz = -jxz * (1.0 - zone);
+    p.position = vec3(x0.x + disp.x, disp.y, x0.y + disp.z);
+    p.cpuPartials = vec4(hx, hz, -jxx, -jzz);
+    p.cpuDxz = -jxz;
     p.shore = shore * slopeShare;
-    p.surfFoam = surfFoamAt(x0) * (1.0 - zone);
-    p.zone = zone;
-    p.swashEdge = swashEdge * (1.0 - zone);
-    // Eddies in churned water (EDDY_*): a slowly turning swirl as strong as the water is turbulent, so foam over it boils
-    // about rather than lying in place.
-    float swirl = TWO_PI * valueNoise(x0 * EDDY_SCALE + frame.cameraPos.w * EDDY_RATE);
-    vec2 eddy = vec2(cos(swirl), sin(swirl)) * (EDDY_SPEED * simFlow.z);
-    p.flow = (simFlow.xy + eddy) * zone;
-    p.turbulence = simFlow.z * zone;
+    p.surfFoam = surfFoamAt(x0);
+    p.swashEdge = swashEdge;
     return p;
 }

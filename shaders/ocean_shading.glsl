@@ -1,17 +1,7 @@
-// The ocean surface's FFT detail (ocean.frag): cascade partials, flow-mapped with the water's current, and the
-// bathymetry sample. The shading itself (sky, body, foam lace, shadeWater) is water_shading.glsl, shared with voxel water.
-// Include after ocean_common.glsl.
+// The ocean surface's FFT detail (ocean.frag): cascade partials. The shading itself (sky, body, foam lace, shadeWater)
+// is water_shading.glsl. Include after ocean_common.glsl.
 
 #include "water_shading.glsl"
-
-// Full bathymetry sample: r = depth (m), g = sim level offset, b = sea-zone flag, a = flow whitewater.
-vec4 waterMap(vec2 xz)
-{
-    vec2 uv = (xz - frame.depthRect.xy) / frame.depthRect.z;
-    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))))
-        return vec4(frame.depthRect.w, 0.0, 0.0, 0.0);
-    return depthMapAt(uv);
-}
 
 // FFT cascade partials (hx, hz, λDxx, λDzz) and λDxz at rest position restXZ, faded where the pixel footprint cannot
 // resolve a cascade, and per cascade over the beach and to the wind sea there (shoreDamp, OceanPoint.shore);
@@ -36,19 +26,4 @@ vec4 cascadePartials(vec2 restXZ, float footprint, vec3 shoreDamp, out float pxz
     }
 
     return p;
-}
-
-vec4 flowingPartials(vec2 restXZ, vec2 dir, float speed, float footprint, vec3 shoreDamp, out float pxz, out float persistent)
-{
-    if (speed < 0.01)
-        return cascadePartials(restXZ, footprint, shoreDamp, pxz, persistent);
-
-    vec3 ph = flowPhases();
-    vec2 slide = dir * (speed * FLOW_PERIOD);
-    float pxz0, pxz1, per0, per1;
-    vec4 p0 = cascadePartials(restXZ - slide * ph.x, footprint, shoreDamp, pxz0, per0);
-    vec4 p1 = cascadePartials(restXZ - slide * ph.y, footprint, shoreDamp, pxz1, per1);
-    pxz = mix(pxz1, pxz0, ph.z);
-    persistent = mix(per1, per0, ph.z);
-    return mix(p1, p0, ph.z);
 }
