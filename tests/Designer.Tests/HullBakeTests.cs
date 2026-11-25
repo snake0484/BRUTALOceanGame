@@ -121,6 +121,51 @@ public class HullBakeTests
         Assert.Equal(1.0, baker.Mass.VolumeM3 / expected, 2);
     }
 
+    /// <summary>
+    /// Dual contouring puts a box's corners on the corners (within the 1/256-cell vertex snap and the 16-bit packing),
+    /// even off the sample lattice; surface nets rounds them off by about a third of a cell.
+    /// </summary>
+    [Fact]
+    public void DualContouring_KeepsBoxCornersSharp()
+    {
+        var session = new DesignSession();
+        session.Snap.Enabled = false;
+        HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 333, 1100, -77, 539, 300, 777, 0, UndoTests.Alloy);
+        session.TryGetBrush(session.Selection.Primary, out var box);
+        var half = BrushGeometry.Half(box);
+
+        foreach (var mesher in new[] { HullMesher.DualContouring, HullMesher.SurfaceNets })
+        {
+            using var baker = new HullBaker(2) { Mesher = mesher };
+            baker.Start(session.Doc.Brushes.AsSpan(), Densities);
+            baker.Wait();
+            var worst = 0.0;
+
+            for (var c = 0; c < 8; c++)
+            {
+                var corner = new Vector3d(box.PositionX + ((c & 1) != 0 ? half.X : -half.X), box.PositionY + ((c & 2) != 0 ? half.Y : -half.Y), box.PositionZ + ((c & 4) != 0 ? half.Z : -half.Z));
+                var nearest = double.MaxValue;
+
+                foreach (var brick in baker.Bricks)
+                {
+                    foreach (var v in brick.VertexSpan)
+                    {
+                        var p = v.DecodePosition(HullBins.CellMetres);
+                        double dx = brick.Origin.X + p.X - corner.X, dy = brick.Origin.Y + p.Y - corner.Y, dz = brick.Origin.Z + p.Z - corner.Z;
+                        nearest = Math.Min(nearest, Math.Sqrt(dx * dx + dy * dy + dz * dz));
+                    }
+                }
+
+                worst = Math.Max(worst, nearest);
+            }
+
+            if (mesher == HullMesher.DualContouring)
+                Assert.True(worst < 0.005, $"dual contouring corner off by {worst:F4} m");
+            else
+                Assert.True(worst > 0.03, $"surface nets corner off by {worst:F4} m");
+        }
+    }
+
     [Fact]
     public void SubtractOnly_HasNoBricks()
     {

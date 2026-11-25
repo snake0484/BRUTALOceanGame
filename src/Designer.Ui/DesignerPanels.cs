@@ -20,6 +20,7 @@ public sealed class DesignStats
     public int Reused;
     public int MaxBrushesPerBrick;
     public bool Baking;
+    public float PrepareMs;
     public PlanHash Hash;
     public readonly ValidationLog Validation = new();
     public string Message = "";
@@ -47,6 +48,7 @@ public sealed class DesignerPanels
     private bool _newSubtract;
     private float _wallMetres = 0.5f;
     private float _right;
+    private readonly MeshPanel _meshPanel = new();
 
     private struct Draft
     {
@@ -81,13 +83,14 @@ public sealed class DesignerPanels
     /// <summary>Where new brushes go: the host sets it to the camera target.</summary>
     public double3 PlaceAt;
 
-    public void Draw(DesignSession session, DesignStats stats)
+    public void Draw(DesignSession session, DesignStats stats, MeshEditState meshEdit)
     {
         Request = FileRequest.None;
         _right = ImGui.GetIO().DisplaySize.X - RightColumnWidth;
         DrawTools(session, stats);
         DrawBrushList(session);
         DrawProperties(session);
+        _meshPanel.Draw(session, meshEdit, _right - MeshPanel.Width - 10f);
         DrawStats(session, stats);
     }
 
@@ -248,13 +251,27 @@ public sealed class DesignerPanels
 
             ImGui.Text($"Brush #{brush.Id}  index {session.Doc.Brushes.IndexOf(id)}");
 
-            var shape = Math.Min((int)brush.Shape, ShapeNames.Length - 1);
-            ImGui.SetNextItemWidth(120f);
+            var isMesh = brush.Shape == BrushShape.Mesh;
 
-            if (Combo("Shape"u8, ref shape, ShapeNames))
+            if (isMesh)
             {
-                brush.Shape = (BrushShape)shape;
-                HullCommands.SetBrush(session, id, brush);
+                ImGui.Text($"Mesh brush (table entry {brush.Param})");
+            }
+            else
+            {
+                var shape = Math.Min((int)brush.Shape, ShapeNames.Length - 1);
+                ImGui.SetNextItemWidth(120f);
+
+                if (Combo("Shape"u8, ref shape, ShapeNames))
+                {
+                    brush.Shape = (BrushShape)shape;
+                    HullCommands.SetBrush(session, id, brush);
+                }
+
+                ImGui.SameLine();
+
+                if (ImGui.Button("To mesh"u8))
+                    Mesh.MeshCommands.ConvertToMesh(session, id);
             }
 
             var op = Math.Min((int)brush.Op, OpNames.Length - 1);
@@ -276,12 +293,15 @@ public sealed class DesignerPanels
             commit |= Field("X##pos"u8, ref _draft.X);
             commit |= Field("Y##pos"u8, ref _draft.Y);
             commit |= Field("Z##pos"u8, ref _draft.Z);
-            ImGui.SeparatorText(brush.Shape == BrushShape.Cylinder ? "Diameter, height (m)"u8 : "Size (m)"u8);
-            commit |= Field("X##size"u8, ref _draft.SizeX);
-            commit |= Field("Y##size"u8, ref _draft.SizeY);
+            if (!isMesh)
+            {
+                ImGui.SeparatorText(brush.Shape == BrushShape.Cylinder ? "Diameter, height (m)"u8 : "Size (m)"u8);
+                commit |= Field("X##size"u8, ref _draft.SizeX);
+                commit |= Field("Y##size"u8, ref _draft.SizeY);
 
-            if (brush.Shape != BrushShape.Cylinder)
-                commit |= Field("Z##size"u8, ref _draft.SizeZ);
+                if (brush.Shape != BrushShape.Cylinder)
+                    commit |= Field("Z##size"u8, ref _draft.SizeZ);
+            }
 
             ImGui.SeparatorText("Rotation (15 deg steps)"u8);
             commit |= StepField("Yaw"u8, ref _draft.Yaw);
@@ -344,6 +364,7 @@ public sealed class DesignerPanels
             ImGui.Separator();
             ImGui.Text($"bricks {stats.Bricks}  triangles {stats.Triangles}  max brushes/brick {stats.MaxBrushesPerBrick}");
             ImGui.Text($"bake {stats.BakeMs:F2} ms wall  {stats.BakeCpuMs:F2} ms cpu  rebaked {stats.Rebaked} reused {stats.Reused}{(stats.Baking ? "  (baking)" : "")}");
+            ImGui.Text($"mesh prepare {stats.PrepareMs:F2} ms (subdivide + BVH, cached by mesh hash)");
             ImGui.Text($"plan hash {stats.Hash}  undo {session.Undo.UndoCount} redo {session.Undo.RedoCount}");
             ImGui.SeparatorText($"Validation: {stats.Validation.Errors} errors, {stats.Validation.Warnings} warnings");
 
@@ -381,9 +402,13 @@ public sealed class DesignerPanels
         brush.PosX = (int)Math.Round(_draft.X * units);
         brush.PosY = (int)Math.Round(_draft.Y * units);
         brush.PosZ = (int)Math.Round(_draft.Z * units);
-        brush.HalfX = Half(_draft.SizeX * halfUnits);
-        brush.HalfY = Half(_draft.SizeY * halfUnits);
-        brush.HalfZ = brush.Shape == BrushShape.Cylinder ? brush.HalfX : Half(_draft.SizeZ * halfUnits);
+        if (brush.Shape != BrushShape.Mesh)
+        {
+            brush.HalfX = Half(_draft.SizeX * halfUnits);
+            brush.HalfY = Half(_draft.SizeY * halfUnits);
+            brush.HalfZ = brush.Shape == BrushShape.Cylinder ? brush.HalfX : Half(_draft.SizeZ * halfUnits);
+        }
+
         brush.Rotation = BrushRotation.FromSteps(_draft.Yaw / BrushRotation.DegreesPerStep, _draft.Pitch / BrushRotation.DegreesPerStep, _draft.Roll / BrushRotation.DegreesPerStep);
         brush.Flags = _draft.Interior ? brush.Flags | BrushFlags.Interior : brush.Flags & ~BrushFlags.Interior;
         return brush;

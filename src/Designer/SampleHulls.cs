@@ -1,3 +1,4 @@
+using BrutalGame.Designer.Mesh;
 using BrutalGame.Plans;
 using BrutalGame.Ships;
 
@@ -19,6 +20,106 @@ public static class SampleHulls
         HullCommands.AddBrush(session, BrushShape.Cylinder, BrushOp.Add, 0, 3 * m, 7 * m, (ushort)(1.5 * h), 3 * h, (ushort)(1.5 * h), BrushRotation.FromSteps(0, 6, 0), trim);
         HullCommands.AddBrush(session, BrushShape.Wedge, BrushOp.Add, 0, 7 * m, -2 * m, 3 * h, 1 * h, 2 * h, BrushRotation.Identity, trim);
         HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Subtract, 6 * m, 3 * m, 0, 1 * h, 1 * h, 1 * h, BrushRotation.Identity, hull);
+    }
+
+    /// <summary>
+    /// A mesh-modelled hull: a box converted to a mesh, loop cut at mid-length, its nose face extruded, inset and extruded
+    /// again, smoothed by two Catmull-Clark levels with the bottom edges kept creased, then cut by a primitive Subtract
+    /// (a cargo door) to show it stays cuttable, with a primitive turret on top.
+    /// </summary>
+    public static void MeshHull(DesignSession session, DefId hull, DefId trim)
+    {
+        const int m = HullBrush.PositionUnitsPerMetre;
+        const int h = HullBrush.HalfUnitsPerMetre;
+        var body = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, 3 * m, 0, 3 * h, 2 * h, 8 * h, BrushRotation.Identity, hull);
+        MeshCommands.ConvertToMesh(session, body);
+        var mesh = MeshCommands.MeshOf(session, body)!;
+        var front = FaceAlong(mesh, 2, 1);
+        var longEdge = LongEdge(mesh);
+        MeshCommands.Apply(session, body, b => MeshOps.LoopCut(b, longEdge, 0.5));
+        MeshCommands.Apply(session, body, b => MeshOps.ExtrudeFaces(b, [front], 3 * m));
+        MeshCommands.Apply(session, body, b => MeshOps.InsetFaces(b, [front], m / 2));
+        MeshCommands.Apply(session, body, b => MeshOps.ExtrudeFaces(b, [front], 2 * m));
+        MeshCommands.Apply(session, body, b =>
+        {
+            var bottom = new HashSet<(int, int)>();
+
+            foreach (var (a, c) in b.Creases)
+            {
+                if (b.Vertices[a].Y < 0 && b.Vertices[c].Y < 0)
+                    bottom.Add((a, c));
+            }
+
+            b.Creases.Clear();
+            b.Creases.UnionWith(bottom);
+            b.Levels = 2;
+            return true;
+        });
+        HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Subtract, 3 * m, 2 * m, -2 * m, 1 * h, 1 * h, (ushort)(1.5 * h), BrushRotation.Identity, hull);
+        HullCommands.AddBrush(session, BrushShape.Cylinder, BrushOp.Add, 0, 6 * m, -4 * m, (ushort)(0.75 * h), (ushort)(0.5 * h), (ushort)(0.75 * h), BrushRotation.Identity, trim);
+    }
+
+    private static int FaceAlong(HullMesh mesh, int axis, int sign)
+    {
+        var b = new MeshBuilder(mesh);
+
+        for (var f = 0; f < b.Faces.Count; f++)
+        {
+            var n = MeshOps.Normal(b, b.Faces[f]);
+
+            if ((axis == 0 ? n.X : axis == 1 ? n.Y : n.Z) * sign > 0.99)
+                return f;
+        }
+
+        return 0;
+    }
+
+    private static (int, int) LongEdge(HullMesh mesh)
+    {
+        var best = (0, 1);
+        long bestLength = 0;
+
+        for (var f = 0; f < mesh.FaceCount; f++)
+        {
+            var face = mesh.Face(f);
+
+            for (var i = 0; i < face.Length; i++)
+            {
+                var a = mesh.Vertices[face[i]];
+                var c = mesh.Vertices[face[(i + 1) % face.Length]];
+                var dz = Math.Abs((long)a.Z - c.Z);
+
+                if (dz > bestLength && a.X == c.X && a.Y == c.Y)
+                {
+                    bestLength = dz;
+                    best = (face[i], face[(i + 1) % face.Length]);
+                }
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>Converts every <paramref name="every"/>-th brush to a mesh brush, smoothed by <paramref name="levels"/> Catmull-Clark levels.</summary>
+    public static void MeshifyEvery(DesignSession session, int every, int levels)
+    {
+        var ids = new List<uint>();
+
+        for (var i = 0; i < session.Doc.Brushes.Count; i += every)
+            ids.Add(session.Doc.Brushes[i].Id);
+
+        foreach (var id in ids)
+        {
+            MeshCommands.ConvertToMesh(session, id);
+
+            if (levels > 0)
+                MeshCommands.Apply(session, id, b =>
+                {
+                    b.Creases.Clear();
+                    b.Levels = (byte)levels;
+                    return true;
+                });
+        }
     }
 
     /// <summary>

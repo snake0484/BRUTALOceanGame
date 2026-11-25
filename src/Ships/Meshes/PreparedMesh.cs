@@ -17,6 +17,9 @@ public sealed class PreparedMesh
     public readonly MeshTriangles Source;
     public readonly Vector3[] A, B, C;
     public readonly Vector3[] Normals;
+
+    /// <summary>Area-weighted vertex normals of the subdivided mesh, for smooth shading between facets.</summary>
+    public readonly Vector3[] VertexNormals;
     public readonly Vector3 Min, Max;
 
     private readonly int[] _order;
@@ -53,6 +56,22 @@ public sealed class PreparedMesh
             Max = Vector3.Max(Max, Vector3.Max(A[t], Vector3.Max(B[t], C[t])));
         }
 
+        VertexNormals = new Vector3[triangles.Vertices.Length];
+
+        for (var t = 0; t < n; t++)
+        {
+            var weighted = Vector3.Cross(B[t] - A[t], C[t] - A[t]);
+            VertexNormals[triangles.Indices[3 * t]] += weighted;
+            VertexNormals[triangles.Indices[3 * t + 1]] += weighted;
+            VertexNormals[triangles.Indices[3 * t + 2]] += weighted;
+        }
+
+        for (var v = 0; v < VertexNormals.Length; v++)
+        {
+            var length = VertexNormals[v].Length();
+            VertexNormals[v] = length > 0f ? VertexNormals[v] / length : Vector3.UnitY;
+        }
+
         _order = new int[n];
 
         for (var i = 0; i < n; i++)
@@ -65,6 +84,27 @@ public sealed class PreparedMesh
     }
 
     public int TriangleCount => A.Length;
+
+    /// <summary>The vertex normals interpolated at point <paramref name="p"/> on triangle <paramref name="t"/> (barycentric).</summary>
+    public Vector3 SmoothNormal(int t, Vector3 p)
+    {
+        var v0 = B[t] - A[t];
+        var v1 = C[t] - A[t];
+        var v2 = p - A[t];
+        float d00 = Vector3.Dot(v0, v0), d01 = Vector3.Dot(v0, v1), d11 = Vector3.Dot(v1, v1), d20 = Vector3.Dot(v2, v0), d21 = Vector3.Dot(v2, v1);
+        var denom = d00 * d11 - d01 * d01;
+
+        if (MathF.Abs(denom) < 1e-20f)
+            return Normals[t];
+
+        var v = Math.Clamp((d11 * d20 - d01 * d21) / denom, 0f, 1f);
+        var w = Math.Clamp((d00 * d21 - d01 * d20) / denom, 0f, 1f - v);
+        var u = 1f - v - w;
+        var idx = Source.Indices;
+        var n = VertexNormals[idx[3 * t]] * u + VertexNormals[idx[3 * t + 1]] * v + VertexNormals[idx[3 * t + 2]] * w;
+        var length = n.Length();
+        return length > 1e-6f ? n / length : Normals[t];
+    }
 
     public static Vector3 Metres(MeshVertex v) => new((float)(v.X * MetresPerUnit), (float)(v.Y * MetresPerUnit), (float)(v.Z * MetresPerUnit));
 

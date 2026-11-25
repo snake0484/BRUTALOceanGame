@@ -4,10 +4,13 @@ using BrutalGame.Terrain;
 
 namespace BrutalGame.Ships;
 
-/// <summary>Hermite data of one sign-change edge: where the surface crosses it (0..1 from the lower sample) and its normal toward air.</summary>
+/// <summary>
+/// Hermite data of one sign-change edge: where the surface crosses it (0..1 from the lower sample), its exact normal toward
+/// air (places the vertex) and a shading normal (smoothed across a subdivided mesh's facets; the same for primitives).
+/// </summary>
 public interface IHermiteField
 {
-    void Edge(int x, int y, int z, int axis, int densityA, int densityB, out float t, out Vector3 normal);
+    void Edge(int x, int y, int z, int axis, int densityA, int densityB, out float t, out Vector3 normal, out Vector3 shade);
 }
 
 /// <summary>
@@ -26,6 +29,8 @@ public sealed class HullDualContour
     private const float Quantise = 256f;
     private const float InvQuantise = 1f / Quantise;
     private const float Truncate = 0.05f;
+    private const float Margin = 0.25f;
+    private const float FarMargin = 1f;
 
     private static ReadOnlySpan<byte> EdgeA => [0, 2, 4, 6, 0, 1, 4, 5, 0, 1, 2, 3];
     private static ReadOnlySpan<byte> EdgeB => [1, 3, 5, 7, 2, 3, 6, 7, 4, 5, 6, 7];
@@ -33,6 +38,7 @@ public sealed class HullDualContour
     private readonly int[] _cellVertex = new int[ChunkConstants.PaddedVolume];
     private readonly float[] _edgeT = new float[ChunkConstants.PaddedVolume * 3];
     private readonly Vector3[] _edgeN = new Vector3[ChunkConstants.PaddedVolume * 3];
+    private readonly Vector3[] _edgeS = new Vector3[ChunkConstants.PaddedVolume * 3];
     private readonly int[] _edgeStamp = new int[ChunkConstants.PaddedVolume * 3];
     private int _stamp;
 
@@ -90,13 +96,13 @@ public sealed class HullDualContour
                     var indices = output.Indices;
 
                     if (((mask ^ (mask >> 1)) & 1) != 0)
-                        indexCount = Quad(indices, indexCount, cv[i - P - PP], cv[i - PP], cv[i], cv[i - P], solid);
+                        indexCount = Quad(indices, indexCount, output.Vertices, cv[i - P - PP], cv[i - PP], cv[i], cv[i - P], solid);
 
                     if (((mask ^ (mask >> 2)) & 1) != 0)
-                        indexCount = Quad(indices, indexCount, cv[i - 1 - PP], cv[i - 1], cv[i], cv[i - PP], solid);
+                        indexCount = Quad(indices, indexCount, output.Vertices, cv[i - 1 - PP], cv[i - 1], cv[i], cv[i - PP], solid);
 
                     if (((mask ^ (mask >> 4)) & 1) != 0)
-                        indexCount = Quad(indices, indexCount, cv[i - 1 - P], cv[i - P], cv[i], cv[i - 1], solid);
+                        indexCount = Quad(indices, indexCount, output.Vertices, cv[i - 1 - P], cv[i - P], cv[i], cv[i - 1], solid);
                 }
             }
         }
@@ -132,7 +138,7 @@ public sealed class HullDualContour
 
             if (_edgeStamp[key] != _stamp)
             {
-                field.Edge(x + ax, y + ay, z + az, axis, c[a], c[b], out _edgeT[key], out _edgeN[key]);
+                field.Edge(x + ax, y + ay, z + az, axis, c[a], c[b], out _edgeT[key], out _edgeN[key], out _edgeS[key]);
                 _edgeStamp[key] = _stamp;
             }
 
@@ -151,7 +157,7 @@ public sealed class HullDualContour
             a11 += n.Y * n.Y; a12 += n.Y * n.Z; a22 += n.Z * n.Z;
             atb += n * Vector3.Dot(n, p);
             mass += p;
-            nsum += n;
+            nsum += _edgeS[key];
             count++;
         }
 
@@ -163,10 +169,12 @@ public sealed class HullDualContour
         var r = atb - new Vector3(a00 * mass.X + a01 * mass.Y + a02 * mass.Z, a01 * mass.X + a11 * mass.Y + a12 * mass.Z, a02 * mass.X + a12 * mass.Y + a22 * mass.Z);
         var f = mass + SolvePseudoInverse(a00, a01, a02, a11, a12, a22, r);
 
-        if (!float.IsFinite(f.X) || !float.IsFinite(f.Y) || !float.IsFinite(f.Z))
+        // A minimiser far outside the cell is a near-degenerate system: fall back to the mass point. One a little
+        // outside is a real feature passing beside the cell (a curved crease): keep it, clamped to a margin.
+        if (!float.IsFinite(f.X) || !float.IsFinite(f.Y) || !float.IsFinite(f.Z) || Vector3.Max(Vector3.Abs(f - new Vector3(0.5f)), Vector3.Zero) is var off && MathF.Max(off.X, MathF.Max(off.Y, off.Z)) > 0.5f + FarMargin)
             f = mass;
 
-        f = Vector3.Clamp(f, Vector3.Zero, Vector3.One);
+        f = Vector3.Clamp(f, new Vector3(-Margin), new Vector3(1f + Margin));
         return new Vector3(MathF.Round(f.X * Quantise), MathF.Round(f.Y * Quantise), MathF.Round(f.Z * Quantise)) * InvQuantise;
     }
 
@@ -277,26 +285,32 @@ public sealed class HullDualContour
         return best;
     }
 
+    /// <summary>
+    /// Two triangles of a quad, split on the diagonal whose end vertices' normals agree most: a crease running diagonally
+    /// through the grid then follows triangle edges instead of zig-zagging across them.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int Quad(uint[] indices, int n, int a, int b, int c, int d, bool solidBase)
+    private static int Quad(uint[] indices, int n, TerrainVertex[] v, int a, int b, int c, int d, bool solidBase)
     {
-        indices[n] = (uint)a;
+        int p0 = a, p1 = solidBase ? b : d, p2 = c, p3 = solidBase ? d : b;
 
-        if (solidBase)
+        if (Vector3.Dot(v[p1].Normal, v[p3].Normal) > Vector3.Dot(v[p0].Normal, v[p2].Normal))
         {
-            indices[n + 1] = (uint)b;
-            indices[n + 2] = (uint)c;
-            indices[n + 3] = (uint)a;
-            indices[n + 4] = (uint)c;
-            indices[n + 5] = (uint)d;
+            indices[n] = (uint)p0;
+            indices[n + 1] = (uint)p1;
+            indices[n + 2] = (uint)p3;
+            indices[n + 3] = (uint)p1;
+            indices[n + 4] = (uint)p2;
+            indices[n + 5] = (uint)p3;
         }
         else
         {
-            indices[n + 1] = (uint)c;
-            indices[n + 2] = (uint)b;
-            indices[n + 3] = (uint)a;
-            indices[n + 4] = (uint)d;
-            indices[n + 5] = (uint)c;
+            indices[n] = (uint)p0;
+            indices[n + 1] = (uint)p1;
+            indices[n + 2] = (uint)p2;
+            indices[n + 3] = (uint)p0;
+            indices[n + 4] = (uint)p2;
+            indices[n + 5] = (uint)p3;
         }
 
         return n + 6;

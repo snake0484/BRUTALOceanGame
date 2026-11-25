@@ -368,16 +368,14 @@ public sealed class HullBrickBaker : IHermiteField
     /// mesh: the triangle the edge pierces) and a normal toward air. With two, the crossing nearer the quantised
     /// linear estimate wins. With none, the linear estimate and the density gradient along the edge.
     /// </summary>
-    public void Edge(int x, int y, int z, int axis, int densityA, int densityB, out float t, out Vector3 normal)
+    public void Edge(int x, int y, int z, int axis, int densityA, int densityB, out float t, out Vector3 normal, out Vector3 shade)
     {
         var i = ChunkConstants.Index(x, y, z);
         var j = i + (axis == 0 ? 1 : axis == 1 ? P : PP);
         var linear = densityA / (float)(densityA - densityB);
         t = linear;
-        normal = axis == 0 ? Vector3.UnitX : axis == 1 ? Vector3.UnitY : Vector3.UnitZ;
-
-        if (densityB < densityA)
-            normal = -normal;
+        normal = DensityGradient(x, y, z, axis, linear);
+        shade = normal;
 
         var best = float.MaxValue;
         Span<int> candidates = [_winner[i] - 1, _winner[j] - 1];
@@ -389,20 +387,39 @@ public sealed class HullBrickBaker : IHermiteField
             if (k < 0 || (c == 1 && k == candidates[0]))
                 continue;
 
-            if (Crossing(k, x, y, z, axis, out var tk, out var nk) && MathF.Abs(tk - linear) < best)
+            if (Crossing(k, x, y, z, axis, out var tk, out var nk, out var sk) && MathF.Abs(tk - linear) < best)
             {
                 best = MathF.Abs(tk - linear);
                 t = tk;
                 normal = nk;
+                shade = sk;
             }
         }
     }
 
-    private bool Crossing(int k, int x, int y, int z, int axis, out float t, out Vector3 normal)
+    /// <summary>Fallback normal: central differences of the density at the crossing, toward air.</summary>
+    private Vector3 DensityGradient(int x, int y, int z, int axis, float t)
+    {
+        var g0 = SampleGradient(x, y, z);
+        var g1 = SampleGradient(x + (axis == 0 ? 1 : 0), y + (axis == 1 ? 1 : 0), z + (axis == 2 ? 1 : 0));
+        var g = Vector3.Lerp(g0, g1, t);
+        var length = g.Length();
+        return length > 1e-6f ? g / length : axis == 0 ? Vector3.UnitX : axis == 1 ? Vector3.UnitY : Vector3.UnitZ;
+    }
+
+    private Vector3 SampleGradient(int x, int y, int z)
+    {
+        var d = _chunk.Density;
+        int D(int a, int b, int c) => d[ChunkConstants.Index(Math.Clamp(a, -1, HullBins.BrickCells), Math.Clamp(b, -1, HullBins.BrickCells), Math.Clamp(c, -1, HullBins.BrickCells))];
+        return new Vector3(D(x + 1, y, z) - D(x - 1, y, z), D(x, y + 1, z) - D(x, y - 1, z), D(x, y, z + 1) - D(x, y, z - 1));
+    }
+
+    private bool Crossing(int k, int x, int y, int z, int axis, out float t, out Vector3 normal, out Vector3 shade)
     {
         ref readonly var b = ref _brushes[k];
         t = 0f;
         normal = default;
+        shade = default;
         var step = axis == 0 ? new Vector3(HullBins.CellMetres, 0, 0) : axis == 1 ? new Vector3(0, HullBins.CellMetres, 0) : new Vector3(0, 0, HullBins.CellMetres);
         var pa = Relative(b, x, y, z);
         var la = ToLocal(b, pa);
@@ -416,6 +433,7 @@ public sealed class HullBrickBaker : IHermiteField
 
             t = (float)hit;
             normal = Vector3.Normalize(ToShip(b, b.Mesh.Normals[triangle] * sign));
+            shade = Vector3.Normalize(ToShip(b, b.Mesh.SmoothNormal(triangle, Vector3.Lerp(la, lb, t)) * sign));
             return true;
         }
 
@@ -471,6 +489,7 @@ public sealed class HullBrickBaker : IHermiteField
             return false;
 
         normal = ToShip(b, g * (sign / length));
+        shade = normal;
         return true;
     }
 
