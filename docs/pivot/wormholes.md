@@ -4,9 +4,11 @@
 
 A wormhole is a **pair of mouths**. Each mouth is a one-sided disc of radius `r`. The disc is the open front of a capped **throat shell**. Each mouth has its own frame (`FrameKind.Mouth`), which is fixed in a surface frame, fixed on a grid, or on Kepler rails.
 
+**Roles (round 5, D23):** **natural** wormholes are the **cheapest** way to travel (free to cross; you go where and when they go). **Manufactured** wormholes are the **fastest** (the instant class beats every other option within a system from 20,000 km). **Warp** is for going somewhere specific, relatively close by, cheaply. This replaces the old blanket "warp cheaper, wormholes costlier". Natural pairs are also the only link between star systems: a manufactured plan needs both ends under one `Solar` root (see Natural wormholes, Destinations).
+
 There are two **classes**:
-- **Instant** (the most expensive): the two fronts are joined by a fixed throat map `J`. Crossing a mouth is an ordinary zones frame transfer preceded by `J`, so velocity relative to the mouth and orientation are kept exactly, up to a crossing speed limit. Nothing moves during travel.
-- **Tunnel** (cheaper player wormholes, and every natural pair): the mouths open onto a **tunnel**, a place with its own frame (`FrameKind.Tunnel`), much shorter than the real distance (6 km for a planet → moon trip, 24 km for 1 AU). Ships fly through it under their own thrust, in ordinary physics bubbles. The flow becomes a **current** along the bore: ride it, or fight it with thrust, and a strong current against a weak ship is one-way by plain physics.
+- **Instant** (the most expensive, and the fastest): the two fronts are joined by a fixed throat map `J`. Crossing a mouth is an ordinary zones frame transfer preceded by `J`, so velocity relative to the mouth and orientation are kept exactly, up to a crossing speed limit. Nothing moves during travel.
+- **Tunnel** (the cheaper player wormholes, and every natural pair, so also the cheapest travel overall): the mouths open onto a **tunnel**, a place with its own frame (`FrameKind.Tunnel`), much shorter than the real distance (6 km for a planet → moon trip, 24 km for 1 AU). Ships fly through it under their own thrust, in ordinary physics bubbles. The flow becomes a **current** along the bore: ride it, or fight it with thrust, and a strong current against a weak ship is one-way by plain physics.
 
 The lifecycle is tick-exact and deterministic: **Plan → Charge → Commit → Open → Collapse**, with a **Scar** window after an early collapse. `TCommit`, `TOpen` and the planned `TClose` are fixed at charge start. The plan computes a path (a polyline in `Lca`, evaluated at the open tick) and a binding cost quote.
 
@@ -50,7 +52,7 @@ As with warp, the wire carries a few reliable events and no per-tick wormhole tr
 | | Instant | Tunnel (player) | Natural |
 | --- | --- | --- | --- |
 | Who makes it | Player generators, as a bought option | Player generators, the default | The system seed |
-| Cost | ×2.5 exotic matter and ×1.5 opening energy over tunnel (see Cost model) | The baseline formula. exotic-matter.md's per-class "cheaper than warp" checks are tunnel prices | Free. Redirecting an end costs as before |
+| Cost | ×2.5 exotic matter and ×1.5 opening energy over tunnel (see Cost model) | The baseline formula. exotic-matter.md's per-class single-ship check (a lone ship warps more cheaply than the cheapest wormhole it fits) is priced at tunnel class | Free to cross: the **cheapest** travel (D23). Redirecting an end costs as before |
 | Crossing | Portal: zones' transfer into A, `J`, the flow's `ΔV`, transfer out of B, in one tick | Cross A's disc into the tunnel, fly its length under your own thrust, cross B's disc out | As tunnel |
 | Frames | Two `Mouth` frames | Two `Mouth` frames plus one `Tunnel` frame | As tunnel |
 | Physics | Bubbles at each mouth only | Bubbles at each mouth, plus bubbles inside the tunnel frame wherever there are occupants | As tunnel |
@@ -121,8 +123,8 @@ As with warp, the wire carries a few reliable events and no per-tick wormhole tr
 | Ejection | Each ram or collapse ejection | Interest of the tunnel and of the landing point | The frame-change event, flagged, with the arc fraction |
 | Re-establish | Charge start inside the scar window | As "Charge visible", plus crew | A flagged `WormholeCharge` naming the collapsed wormhole |
 
-- Third parties at B learn nothing before commit. That matches warp's 3 s exit announcement, and is about what they would learn from seeing the mouth form anyway. A managed controller's owner learns of a booking when it is confirmed, because that is their own traffic control.
-- **A capture is revealed to the crew at commit, 3 s before open.** Mouths can be seen through, so hiding a capture would mean faking the view (open question 1).
+- Third parties at B learn nothing before commit, which is about what they would learn from seeing the mouth form anyway. This is deliberately more private than warp, which since round 5 (D18) broadcasts its arrival location as a safety beacon unless the ship is military or the wire is cut: a wormhole's far end is announced to B's interest at commit and the mouth itself is the warning, so no beacon is added. A managed controller's owner learns of a booking when it is confirmed, because that is their own traffic control.
+- **A capture is revealed to the crew at commit, 3 s before open.** Mouths can be seen through, so hiding a capture would mean faking the view (decided after revision 2: the view is always true).
 - **Signatures do not change when a capture is revealed.**
   - The contacts warning and `PathPull` say who *claims* to be pulling the path during charge, and how hard.
   - Whether a pull **wins** is decided only at commit, from the catchers eligible at that tick, and revealed only then.
@@ -162,8 +164,8 @@ Decision A of revision 3: an energy fight replaces "nothing can extend or close 
 - **Sources:**
   - **The generator,** while its host is within `FeedRange` (5 km) of either mouth, at up to its `ChargeRateW`. A generator that is feeding cannot charge another wormhole.
   - **Stabilisers** (decision B): a component in mode Feed, aimed at one wormhole. Battleships carry the full kit (`FeedW` 2 GW, range 5 km, efficiency 1), so they hold their own jumps. Dedicated **support ships** carry projectors (`FeedW` 1.5 GW, range 50 km, efficiency 0.7) and hold smaller ships' wormholes from a distance. All from `data/stabilisers/*.json`.
-  - **Frames** around natural mouths may carry stabilisers (proposed; open question 13).
-- **Range** is from the feeder's host centre to the nearer mouth centre, in normal space. Inside a tunnel, a feeder feeds the tunnel it is in, from anywhere along it (proposed; see Combat for why it is not struck).
+  - **Frames** around natural mouths may carry stabilisers (decided, round 5: former open question 13).
+- **Range** is from the feeder's host centre to the nearer mouth centre, in normal space. Inside a tunnel, a feeder feeds the tunnel it is in, from anywhere along it (decided, round 5; see Combat for why it is not struck).
 - **Rate:** `dEs/dt = Σ η_i · P_i`, capped at `FeedCapW = EsMax / 5 s` per wormhole (2 GW for r = 100 m), up to `Ψ = 1.25`.
 - Anyone may feed any wormhole. The owner cannot refuse a feeder, and cannot refuse a drainer either.
 - Power only, per the decision; the feeder's cores burn whatever they burn (exotic-matter.md).
@@ -213,7 +215,7 @@ Decision A of revision 3: an energy fight replaces "nothing can extend or close 
   - **Condition:** the remaining paid life `R = TClose − Tcs` is at least `MinOpenTicks`, and for a tunnel at least `2 · TunnelLead` (otherwise nothing could be admitted).
   - **Cost:** `X_re = 0.25 · X` (additives at the same mix, also at 0.25), and `E_re = 0.25 · (opening energy) + EsMax`. `X` is always the original plan's, so every re-establish in a chain pays a quarter of it, not a quarter of the last re-establish. The upkeep for `R` is already paid.
   - **Charge:** at once, no plan. `ChargeTicks_re = max(180, ceil(60 · E_re / ChargeRateW))`. Path, vias, class, `r`, `Depth`, β and flow bias are reused. Cancel rules are as for any charge.
-  - **Commit:** both scars are re-checked against suppression and pushed if hard, within the quote. **No capture runs:** the path is already drilled (open question 20). Then 180 ticks of Forming, `TClose' = TOpen' + R` and `TEnd'` from it. The paid *life* is kept, not the wall-clock end, so `TClose'` lies after the original `TClose` by the downtime; no upkeep is charged for the downtime and none is refunded.
+  - **Commit:** both scars are re-checked against suppression and pushed if hard, within the quote. **No capture runs:** the path is already drilled (decided, round 5: former open question 20). Then 180 ticks of Forming, `TClose' = TOpen' + R` and `TEnd'` from it. The paid *life* is kept, not the wall-clock end, so `TClose'` lies after the original `TClose` by the downtime; no upkeep is charged for the downtime and none is refunded.
   - A tunnel re-forms from the same tunnel seed, so it has the same geometry.
   - **Example:** r = 100 m tunnel over 1 AU, 300 s open. The original cost 119 EM and 129.6 GJ. The re-establish costs 30 EM and 24.9 GJ: a 12.5 s charge plus 3 s of Forming.
 - An unused scar lapses after 60 s and starts the generator's cooldown.
@@ -578,17 +580,18 @@ storms     cell active  ⇔  hash(TSeed, cell, ⌊t / 60⌋) < max(0, 1.9 · (u 
 
 **Ram ejection: tunnel arc to the planned path.**
 - **Point:** the arc fraction is `f = clamp(z_t / L_t, 0, 1)`. The path polyline is evaluated at the ejection tick, from A's current pose through the vias (fixed in `Lca` at `TOpen`) to B's current pose; `P(f)` is the point at fraction `f` of its length and `ê(f)` the tangent there.
+  - **Cross-system pairs** (natural only; the mouths sit under different `Solar` roots, so there is no `Lca`): the path is two **legs**, one per system. Each leg runs from its mouth's current pose, behind the disc (along `−n`), to a tip fixed in that system's root at `TNC_k`, `L_leg` away (seeded per pair, 0.05–1 AU), core-detoured as usual. `f ≤ 0.5` maps onto A's leg (A at 0, its tip at 0.5) and `f > 0.5` onto B's (its tip at 0.5, B at 1). Axes are carried within each leg. A ram therefore always lands inside one of the two systems, never in interstellar space, and still at a point known from the record. Same cost as one polyline.
 - **Axes:** `R_path(f)` starts as A's axes under the entry map (so the tunnel's z is A's `−n`) and is carried along the polyline by the minimal rotation between successive segment tangents. Deterministic, about 1 µs.
 - **Position:** `p' = P(f) + R_path(f) · (x_t, y_t, 0)`. The lateral offset is kept, so ships side by side stay separated. Along the path the bore is compressed by `L / L_t` (6.3 million for 1 AU), so two ships 50 m apart along `s` land 300,000 km apart, and `f` is taken at the body's centre only.
 - **Velocity:** `v' = v_drop(P(f)) + k_ej · R_path(f) · v_t`, with `k_ej = 0.5` (the rest is lost to the wall), the second term clamped to `VCrossMax`. `v_drop` is warp's **drop rule** (a circular orbit about the dominant body at `P(f)`, prograde with respect to the path tangent; circular heliocentric in `Solar`), the same rule warp uses for aborts. The earlier `(1 − f) · u_A + f · u_B` interpolation in `Lca` left a ship ejected 3,000 km from a planet nearly at rest in its inertial frame (warp's "frame rest" fall) and mixed in km/s of the far body's motion. Deadly places stay deadly through the position, not through an arbitrary velocity.
 - **Frame:** the band rule at `P(f)` (a surface frame inside a rotating band, a body's inertial frame inside its SOI, otherwise `Solar`), then a transfer as for a warp exit. The proper-acceleration history resets.
 - **Suppression:** natural terms are **ignored**. An ejection can land in a corona, an atmosphere, a forecast flare cone or a tidal zone; that is the danger. Occupancy terms are **applied** with warp's exit push: never into solid geometry or terrain, never inside a grid's exclusion radius without permission (so a tunnel can't insert a raid into a base), and a slide off warp exits, mouths and catch slots.
 - **Damage:** a ram is an impact `m · max(v_r, V_ram)` at the contact point plus a full discharge at `u = 1` strength, whatever the band, so the wall is never a cheap door. A collapse ejection is a discharge only.
-- **Ejection lockout:** a ram-ejected grid cannot spool a warp drive or start a wormhole charge for `EjectLockoutTicks` (1,800, 30 s). A deliberate ram is still a bail-out (open question 21), but not a free hop that skips interdiction fields and then warps on; and a cheap tunnel cannot be farmed as a line of free warp exits.
+- **Ejection lockout:** a ram-ejected grid cannot spool a warp drive or start a wormhole charge for `EjectLockoutTicks` (1,800, 30 s). A deliberate ram is still a bail-out (decided, round 5: former open question 21), but not a free hop that skips interdiction fields and then warps on; and a cheap tunnel cannot be farmed as a line of free warp exits.
 - **Budget:** warp's `ArrivalBooking` (64 per tick). If it is full, the body waits intangible in `Throat` placement for up to 8 ticks; after that it is placed outside the budget with the forced slide, as flush placements are, so an overtaken column always leaves.
 - **Cross-shard:** the shard that owns the landing frame receives a blob, as for a warp exit.
 - The reserve is drained by `e_m · m`.
-- **Accepted:** a deliberate ram is a bail-out to a known point along the path, paid for in damage (open question 21).
+- **Accepted:** a deliberate ram is a bail-out to a known point along the path, paid for in damage (decided, round 5: former open question 21).
 
 **Combat in a tunnel** (decision F).
 - Ordinary weapons work.
@@ -598,8 +601,8 @@ storms     cell active  ⇔  hash(TSeed, cell, ⌊t / 60⌋) < max(0, 1.9 · (u 
   - Missiles behave as ships (their own `κ` and thrust) but detonate on wall contact instead of being ejected.
   - Beams are straight and stop at the wall (v1).
 - **Retaliation:** the wormhole strikes anything projecting gravitons or anti-gravitons **outside its own hull** while the device's host is **in the tunnel frame**. Devices in normal space (a damper covering a mouth, a destabiliser at range) are never struck.
-  - **Triggers:** an active tractor beam; an armed anti-graviton charge; gravity weapons; a gravity damper (it projects up to 5 km); a stabiliser in mode Drain; an interdiction emitter; a catcher.
-  - **Exempt** (they act inside the hull): gravity plating, inertial dampening, tidal compensators and mag boots. A stabiliser in mode Feed pours into the throat, not outward, so it is exempt (proposed; open question 17).
+  - **Triggers:** an active tractor beam (requested or not: the wormhole reacts to the projection, not to consent, so a gate cannot tractor a ship through a tunnel even on request; round 5, D26); an armed anti-graviton charge; gravity weapons; a gravity damper (it projects up to 5 km); a stabiliser in mode Drain; an interdiction emitter; a catcher.
+  - **Exempt** (they act inside the hull): gravity plating, inertial dampening, tidal compensators and mag boots. A stabiliser in mode Feed pours into the throat, not outward, so it is exempt (decided, round 5: former open question 17).
   - **Strike:** on the tick the projection starts, then every 60 ticks while it lasts, a discharge from the nearest wall point to the projecting component. Damage is `RetK · (1 + n)`, with `n` the strikes so far on that component's **owner group** in this tunnel, so it escalates and a swarm of cheap projectors escalates fastest. The projecting component is disabled for 10 s, so a tractor lock breaks at once. Each strike drains `0.005 · EsMax`, within the drain cap (see Stability).
   - **Who takes the damage:** the projecting component and the grid it is mounted on, nothing else. The arc is drawn but hits no one in between, so a cheap projector parked beside an enemy is not a lightning rod. A projector clamped or docked onto a grid of another owner group is struck alone (its own body), never the foreign host, so planting a tractor limpet on an enemy hull cannot turn the wormhole on them.
   - **An armed charge is struck at once.** The strike breaches its trap, so it detonates on the next tick by exotic-matter.md's cascade rule. Inside the tunnel the pulse kicks and shears occupants as usual and drains `BombK · Y` (the point-blank value, rung down over 5 s) at its `s`. If that empties the reserve, the collapse starts there.
@@ -675,7 +678,7 @@ Charge   ChargeTicks = max(MinChargeTicks, ceil(60 · E / ChargeRateW · m_C))  
 Flux     F = Fk · r̂² · (1 + β)   kg/s per direction                                Fk = 1e6 kg/s
 Drain    e_m = 33 J/kg / (1 + β)                                                    per kg entering
 Tunnel   L_t = clamp(LtK · ℓ · m_L, 2 km, 60 km)                                     LtK = 2 km
-Fee      set by the managed controller's rules; escrowed at charge start, paid at commit;
+Fee      throat-grade EM content in grams (int; Q14), set by the managed controller's rules; escrowed at charge start, paid at commit;
          on an owner's cancel the controller keeps its CancelForfeit share
 ```
 
@@ -693,9 +696,10 @@ Fee      set by the managed controller's rules; escrowed at charge start, paid a
 | Planets 5 AU apart | 13.5 | Tunnel | 300 s | 135 | 138 | 69 s | 145 s (27 km) | 217 s | 830 s |
 | Planets 5 AU apart | 13.5 | Instant | 120 s | 338 | 135 | 68 s | 0 | 71 s | 830 s |
 
-- **Tuning invariants** (the user's "more expensive but faster"), checked by tests rather than by formula:
-  - **Cheaper:** the cheapest wormhole is tunnel class, so exotic-matter.md's per-generator-class check applies unchanged to tunnel prices. Instant pairs pass it with 2.5× the margin.
-  - **Faster:** with a capital generator, instant pairs beat warp for trips of 20,000 km and more (charge + 3 s), and tunnel pairs beat warp from about 0.7 AU (charge + 3 s + reference transit, at the minimum open time `2 · TunnelLead`; the test checks 1 AU). A tunnel to a moon is slower than warping: its value there is fleet capacity and cancelling frame velocity. A booked catch slot may delay `TOpen` by choice; the invariants use the unbooked charge.
+- **Tuning invariants** (round 5, D23: natural cheapest, manufactured fastest, warp cheap for close specific trips; replaces the earlier "more expensive but faster"), checked by tests rather than by formula:
+  - **Natural is cheapest:** crossing a natural pair costs no exotic matter, no fuel, no opening energy and no game-charged fee (fees exist only for a managed gate catching a generator's end; whoever holds a natural mouth's frame may demand payment, but that is a player's price enforced by weapons, not a game cost), so for any trip a natural pair serves it is cheaper than both warp and any manufactured wormhole. Redirecting a natural end is a fleet operation, not a travel cost.
+  - **Warp is cheap for one ship to a specific place:** exotic-matter.md's per-generator-class check stays, but as a **single-ship** rule, not a blanket one: a lone ship warps more cheaply than it can open the cheapest wormhole that fits it. The cheapest manufactured wormhole is tunnel class, so the check uses tunnel prices; instant pairs pass it with 2.5× the margin. A manufactured wormhole is paid once whoever crosses, so a fleet sharing one may pay less per ship than warping; that is allowed and intended.
+  - **Manufactured is fastest:** with a capital generator, instant pairs beat warp for trips of 20,000 km and more (charge + 3 s), and tunnel pairs beat warp from about 0.7 AU (charge + 3 s + reference transit, at the minimum open time `2 · TunnelLead`; the test checks 1 AU). The instant class is therefore the fastest **on-demand** option within a system from 20,000 km (a natural pair that happens to be open and well placed can beat it, but only on its own schedule and route). A tunnel to a moon is slower than warping (that range is warp's niche): its value there is fleet capacity and cancelling frame velocity. The table bears this out: 1 AU tunnel 197 s against warp 230 s, moon tunnel 69 s against warp 48 s, instant 31–71 s everywhere. A booked catch slot may delay `TOpen` by choice; the invariants use the unbooked charge.
 
 **Additives** (decision H; the items, mixing and crafting live in exotic-matter.md).
 - A generator's X may be a **blend**: throat-grade EM plus up to 2 additives, together at most 10 % of X's content. The blend must still meet the generator's `MinPurity` (0.85) on its true content, and additives count as impurity there, so additive blends need purer EM. Purity is capped below 1.0, so there is always a cost in purity.
@@ -717,15 +721,16 @@ Fee      set by the managed controller's rules; escrowed at charge start, paid a
 
 | | Warp | Wormhole |
 | --- | --- | --- |
+| Role (round 5, D23) | Somewhere specific, relatively close by, cheaply | Natural: the **cheapest** travel (free to cross, on its schedule and route). Manufactured: the **fastest** (instant from 20,000 km, tunnel from ~0.7 AU) |
 | Resource | Fuel ∝ mass · ln(1 + D/1e6), paid by **every ship** | Exotic matter ∝ r²·ℓ·(1 + Σ) (×2.5 for instant), plus power ∝ r²·duration plus the reserve. **Paid once, whoever crosses**. Plus any managed gate's fee, and the holders' power to keep it stable |
 | Time before you can go | 5 s spool | 10 s–1 min charge (power-limited), or until a booked catch slot, plus 3 s commit |
 | Travel time | 6 s (50 km) to 14 min (5 AU) | Instant: 0, crossing at transit speed up to `VCrossMax`, ±`ΔV` from flow. Tunnel: the bore's length at the speed the ship can hold, about 40 s to 2.5 min, longer when unstable or against the current |
 | Capacity | One root ship and its subtree. A fleet of ≤ 16 with synced timing | Anything that fits through `r` and `Depth`, flux F kg/s each way, anyone, until collapse. Each kilogram drains the reserve. Possibly one way only |
-| Exit | `WarpFloor`, arrival ring | The suppression field. Gates bring it down to a pad; managed gates assign the catch slot. Warp the last hop if needed. A tunnel can also throw you out anywhere along its path |
+| Exit | Anywhere along a smooth, planet-avoiding path (D15); no forced floor (D16), but exiting in low atmosphere makes a pressure wave with fines and blame for the damage | The suppression field (its floor stays a hard rule for mouths, see below). Gates bring it down to a pad; managed gates assign the catch slot. Warp the last hop if needed. A tunnel can also throw you out anywhere along its path |
 | Abort | Before `TCommit` | Cancel before `TCommit − 30`. After commit it can only be collapsed, by draining it |
 | Interdiction | `InterdictionField` forces a drop, with 3 s warning. Power only | Catcher capture at commit. 25× the power per unit area, plus exotic matter per capture. Pulls are readable during charge, but their signatures can be spoofed. Natural ends are redirected per cycle by fleet-scale power. Bombs and destabilisers can collapse an open wormhole |
-| Privacy | Destination crew-only until T1 − 3 s | Crew-only until commit. Public from then on, and enemies can follow. Signatures show who claims to own it |
-| Main risks | Forced drop, camped rings | Capture into a hazard, spoofed or noise signatures, followers, early collapse, the collapse flush or front, tunnel walls and wells, flares at the far end, flow against you |
+| Privacy | The arrival location is broadcast as a safety beacon (round 5, D18; off on military ships, or the wire cut at the risk of fines and blame). The last part of the trip is in real space | Crew-only until commit. Public from then on, and enemies can follow. Signatures show who claims to own it |
+| Main risks | Forced drop, camped rings, ambush at the beaconed arrival point, collision on the real-space last leg (D18) | Capture into a hazard, spoofed or noise signatures, followers, early collapse, the collapse flush or front, tunnel walls and wells, flares at the far end, flow against you |
 
 ### Suppression field
 
@@ -738,6 +743,7 @@ Fee      set by the managed controller's rules; escrowed at charge start, paid a
 - Terms come in two classes:
   - **Natural** terms are the *deadly* ones. Gates scale them down, and Interdict waives them.
   - **Occupancy** terms are the *invalid* ones. No catcher waives them.
+- **The floor is a wormhole rule.** `WarpFloor(body)` below keeps warp.md's formula (`max(AtmosphereTop, TerrainMax + 2 km, 0.01·R)`) as a constant of the body, even though round 5 (D16) removed it as a forced limit on warp exits. If warp.md drops the name, wormholes keep the same value as `MouthFloor`; nothing here changes.
 
 | Source | Class | Term (d = distance to source, r = mouth radius) | Hard when |
 | --- | --- | --- | --- |
@@ -745,6 +751,7 @@ Fee      set by the managed controller's rules; escrowed at charge start, paid a
 | Body tidal | Natural | `s_tidal = 4μr / (A_max · d³)`, with `A_max = 3e-3 m/s²` (knob). Summed over all bodies pruned by distance, not by patched conics, so SOI boundaries leave no gap | ≥ 1. On a 1000 km, 1 g body: r = 25 m is never hard above the surface (floor and atmosphere govern); r = 100 m is hard below 94 km; r = 150 m below 252 km; r = 400 m below 736 km |
 | Atmosphere | Natural | Inside `R + AtmosphereTop` | Always (part of the floor) |
 | Star | Natural | `s_tidal`, plus a corona `R_corona = 3 R★` (also a heat zone) | Inside the corona, or tidal ≥ 1 |
+| Black hole (owned by exotic-matter.md) | Occupancy core; Natural disc and jets | Core `InfallRadius + r` (64 km + r) **replaces** `R + WarpFloor + r`; Natural hard terms inside the disc slab and the jet cones, plus `s_tidal` as for any body. A forecast birth (`BlackHoleBirthForecast`) counts as a core from its forecast tick, and a pending collapse (forced or natural, D21) changes nothing, because `InfallRadius` already keeps mouths out of the remnant's volume | Inside the core; disc, jets or tidal ≥ 1 unless waived |
 | Grid (hull) | Occupancy | Geometric: `d < ρ_g + r + Depth + 100 m`. Without permission, warp's `ExclusionRadius`. Soft `(ρ_g/d)²`. The host is exempt for its own mounted mouth, which must still clear its hull by 2 m. A wormhole frame is exempt for its own natural mouth, but must clear that mouth's shell, disc cylinder and a `LaneMin` exit lane | Geometric always. Exclusion unless permitted |
 | Warp drive | Occupancy | A spool past its lock-in (from T0 − 30), or a committed warp exit `E` until T1 + 2 s | Within `5 km + r` |
 | Mouth | Occupancy | Committed, open or collapsing player mouths, each until its `TEnd`. Natural mouths over their scheduled Forming, Open and collapse windows (to the cycle's `TEnd`) that overlap the evaluated window (see Privacy). Confirmed catch slots, through their controller's slot ring. Soft `(4 r_m / d)²` | Within `max(4 r_m + r + 1 km, R_f,m + R_f)`, so no two flow fields ever overlap |
@@ -945,7 +952,7 @@ A fresh forgery usually outlasts a charge unless its key is stale. That is the i
 - Scanning noise yields nothing to copy.
 - Path pulls, mouth readings and frame sensing never yield copies.
 - **Active scans are visible:** the scanned emitter's owner sees a "being scanned" flag on the scanner's contact (`ScanAlert`).
-- Any emitter can load a copy: catchers, generators and frames. The decision names catchers; generators use the same mechanism (open question 11).
+- Any emitter can load a copy: catchers, generators, frames and stabilisers. The decision names catchers; generators, frames and stabilisers use the same mechanism (decided, round 5: former open question 11).
 
 **Key rotation:**
 - A faction's key holder rotates the key: `Epoch++`, with a 1 h cooldown.
@@ -983,6 +990,10 @@ A fresh forgery usually outlasts a charge unless its key is stale. That is the i
 
 - **Generation:**
   - 2–6 pairs per system, from a **server-only `NaturalSeed`**. The universe seed is on clients for terrain, so it can't be used.
+  - **Destinations (round 5, former open question 5):** natural pairs lead to **other star systems**. Each system is its own `Solar` root (on dedicated servers, its own shard; a listen server hosts them all), so a natural pair's mouths may sit under different roots; crossing is already a portal-map transfer, never a tree edge, so `Relative` stays unchanged. The frame-tree and sharding detail belongs to frames-and-zones.md (one `Solar` root per system, systems linked only by wormholes).
+    - "2–6 pairs per system" counts the pairs with an end in that system. The partner end is generated with its own system's validity rules, from the same server-only seed.
+    - **Manufactured wormholes stay inside one system.** A plan's path is a polyline in `Lca`, and two `Solar` roots have none, so a plan whose ends lie under different roots is refused ("no common frame"). This also keeps `ℓ = ln(1 + L / 1e6 m)` from pricing an interstellar throat at about twice a 1 AU one. Cross-system travel is natural pairs only, which fits D23 (natural is the cheapest; manufactured is the fastest within reach).
+    - The ejection path of a cross-system pair is two legs, one per system (see Tunnels, Ram ejection).
   - Each mouth is fixed for the life of the save. It is either on rails (a heliocentric orbit or a high orbit about a planet) or fixed in a body's surface frame, hovering inside the rotating band.
   - **Validity:** for rails mouths, the minimum orbit-orbit distance (MOID) to every body's orbit must exceed that body's hard radius for this mouth, plus a margin. Hovering mouths are checked against their own body's core and against the MOID to its moons' orbits. Both checks are exact forever, unlike sampling one synodic period.
   - **Size: usually immensely large.** Radius 150–1,200 m, skewed large (median ~500 m), so most exceed anything a player generator opens. `Depth = min(2r, 2 km)`. **Every natural pair is tunnel class.** Flux, the natural stability level and recovery time, the mass drain, the tunnel length (5–40 km), `VCrossMax`, `A_fmax`, `V_flush` and the flow terms come from the seed.
@@ -995,7 +1006,7 @@ A fresh forgery usually outlasts a charge unless its key is stale. That is the i
   - Typical: open 5–20 min every 1–6 h.
   - At the end of each open window the tunnel collapses exactly as a player-made tunnel does at `TClose` (collapse flow, then each mouth's flush). If its reserve is drained to zero first, it collapses early and stays closed for the rest of the cycle. The next cycle forms on schedule; the schedule never moves.
 - **Stability:** each cycle forms at its seeded natural level `Ψ_nat,k` (0.45–0.95, so some cycles open Unstable) and relaxes back to it after drains or overfeeding (see Stability). Seeded parameters also set flux, schedule spread, `VCrossMax` and flow strength. Radius is constant, because a varying rim would complicate collisions for no gain.
-- **Ejection path:** a natural pair has no plan, but its tunnel needs a path for ejections. At each `TNC_k` the planner's core-detour rule runs between the two mouths' poses at `openStart_k`. Clients compute the same path from the record.
+- **Ejection path:** a natural pair has no plan, but its tunnel needs a path for ejections. At each `TNC_k` the planner's core-detour rule runs between the two mouths' poses at `openStart_k` (for a cross-system pair, along each mouth's own leg, with `L_leg` from `pairSeed`). Clients compute the same path from the record.
 - **Flow:** seeded per cycle and possibly reversing within it (see Flow). A strongly flowing natural pair (`|Φ| ≥ 0.83`) is one-way for part or all of its open window.
 - **Redirection** (replaces "cannot be captured"). A natural pair has no planned path (only the ejection path, fixed at `TNC_k`), so it is not captured. Instead, one end can be **dragged** for one cycle:
   - **Who can try:** a faction (or a factionless group) points interdict catchers at a **charted** mouth. Each catcher gets `RedirectTarget = MouthId`, which needs the record. Their catch points must lie within `ProjectRange` of that mouth's charted pose. A redirect catcher draws a chosen `PowerDrawW`, up to its host's `CatcherMaxPowerW`; its pull radius does not matter.
@@ -1480,7 +1491,7 @@ public struct AdditiveMix { public ushort A0, A1; public float F0, F1; }   // it
   - **Gravity and forces:** tunnel bubbles use the same scene-gravity-plus-delta scheme for wells. The current coupling is a per-awake-body force in the same pass, without activation.
   - **Placement:** every root entity inside a tunnel is `Simulated`. `Throat` placement is used for tunnel traffic only for cross-shard hand-offs and ejections waiting on the arrival budget.
   - **Warp:** no spool inside a tunnel. Ejections use `ArrivalBooking` and warp's exit push.
-  - **exotic-matter.md:** the mouth stall, its cap and its immunity are superseded by the pulse drain; its open question 2 is answered (early collapse through stability). Gravity dampers covering a mouth block pulse drains. Add a stabiliser device row (power only, per decision A). Its per-class "cheaper" table now prices tunnel class. Additive items and mixing belong there.
+  - **exotic-matter.md:** the mouth stall, its cap and its immunity are superseded by the pulse drain; its open question 2 is answered (early collapse through stability). Gravity dampers covering a mouth block pulse drains. Add a stabiliser device row (power only, per decision A). Its per-class "cheaper" table now prices tunnel class, and (round 5, D23) is a single-ship rule, not a blanket "warp cheaper" invariant. Its black-hole suppression terms are mirrored in the suppression table here. Additive items and mixing belong there.
   - **ship-hulls.md:** the bake exports `ρ_⊥` and `A_⊥` for the current coupling. Discharges and rams are ordinary damage brushes.
   - **README:** the Travel row gains classes, stability, tunnels and early collapse.
 - **Milestones:**
@@ -1610,7 +1621,8 @@ public struct AdditiveMix { public ushort A0, A1; public float F0, F1; }   // it
     - a cross-shard blob arriving seconds late is placed at B's pose at its landing tick.
   - Natural: schedule exact at ±1 tick over 1e9 ticks; Forming inside its cycle; MOID validity; a player commit near a mouth about to form is pushed; redirect contest order per faction and `P_redirect` threshold; the redirected mouth reverts next cycle; late interest joiners get `NaturalCommit`.
   - Flare occlusion behind a moon.
-  - Invariants: the cheapest (tunnel-class) wormhole passes exotic-matter.md's per-class check; instant pairs are faster than warp from 20,000 km; tunnel pairs with the reference transit are faster from 1 AU.
+  - Cross-system: a plan with ends under different `Solar` roots is refused; a cross-system natural ram lands on the nearer leg inside one system, identical on clients.
+  - Invariants (D23): crossing a natural pair costs no EM, fuel, opening energy or game fee; the cheapest (tunnel-class) wormhole passes exotic-matter.md's per-class single-ship check; instant pairs are faster than warp from 20,000 km; tunnel pairs with the reference transit are faster from 1 AU.
   - Stability:
     - client integration equals the server's to the kJ over 1e6 ticks of random feeds and drains;
     - a zero at `Tz` refuses admissions from `Tz`, sends `WormholeCollapse` and collapses at `Tz + 60`, and a feed in between does not revive it;
@@ -1642,41 +1654,47 @@ public struct AdditiveMix { public ushort A0, A1; public float F0, F1; }   // it
 - **A captured wormhole opens straight onto the captured destination.** The view through the mouth is always true; there is no faking. Open question 1 of revision 2 is settled this way.
 - **Interdiction never forces travel.** It only moves the far end. Getting a victim through takes a physical method:
   - **Tractor beams:** a component that applies force between two hulls, through the normal per-body force pass, limited by range and by the target's mass and thrust. A tractor lock already blocks warp spool, so it is both anti-escape and pull-in. The lock breaks when the victim crosses (see the crossing rules above), so the tractoring ship stays behind unless it follows.
+    - **Consent (round 5, D26):** a tractor lock on a ship that did not request it is a **weapon** use: a hostile act, with the same standing, fines and faction consequences as firing on it. Pulling an interdicted victim toward a mouth is therefore always an attack. A managed gate or station may tractor a ship to a dock or into its mouth's entry lane only when the ship's crew has **requested** it (a consent flag on a docking or tow request; catch slots place wormhole ends, not ships, so a `SlotRequest` carries none). Otherwise ships manoeuvre themselves.
+      - **Scope:** consent names one emitter owner group and lapses on release, on docking, on the ship crossing a mouth, or after 120 s without a lock. A third party locking a consenting ship is still a weapon use, and a ship cannot grant consent to stage a fake attack (the server judges by the flag, not by claims).
+      - Inside a tunnel the wall strikes any active tractor, requested or not (see Tunnels, retaliation), so consent never lets a gate tow a ship through a bore.
+    - Without antimatter a tractor can only **pull** (gravitons only); pushing needs anti-gravitons, so AM (round 5, D28). Pull-in is the interdiction use either way.
   - **Flow:** a captured wormhole with an inflow pulls nearby ships toward the mouth; a ship with enough thrust can escape.
   - Ordinary physics: rams, pushes, debris.
 
-### Open questions for the user
+### Decided in round 5 (formerly open questions)
 
-Answered and dropped: old question 4 (exotic matter's source: settled by exotic-matter.md's decisions), and exotic-matter.md's question 2 on bombs (settled by decision A).
+The user accepted the doc's proposals (round 5, D19). Where a question had no explicit proposal, the design as written is the decision. Every former question is now a decided rule; numbering is kept so older cross-references still resolve.
 
-1. ~~Seeing a capture~~: decided after revision 2.
-2. **Outflow push:** should the outflow mouth push space out with the same law as the inflow pull (proposed), or should only the inflow mouth pull?
-3. **Counterplay to catchers:** is the proposed set enough? It is charging faster than a catcher's 30 s spin-up, routing, cancelling, decoys, reading pulls, and rotating keys. Or should travellers be able to pay extra exotic matter to "stiffen" the path and shrink catchers' pull radius? (The stability additive could be that.)
-4. ~~Exotic matter source~~: answered by exotic-matter.md.
-5. **Other star systems:** do natural wormholes lead only within one system? Or do they lead to other systems, which would mean several `Solar` roots and a shard per system?
-6. **Mouths on moving ships:** generator ships are decided. Should a mouth be able to stay mounted on a moving ship while open (leashed, and the host can't warp, as proposed)? Or must a ship always project its mouth to a fixed or rails point?
-7. **How close to a planet may a big mouth open?** As proposed, an r = 100 m mouth may open down to 94 km over a 1 g, 1000 km planet, and r = 400 m down to 736 km.
-8. **Interdictor friendly fire:** should interdict catchers skip their own group's paths (proposed: yes), or their whole faction's?
-9. **Player flow from power asymmetry:** only a catcher that spends **hold power** above the generator's charge rate creates an asymmetry (proposed). Or should both ends' plain power ratings count?
-10. **Path pull reach:** `PathPull` reveals that hidden catchers exist, with an arc band and a signature, from 25 % charge. Acceptable, or strength only, with no signature, unless the catcher is in contacts?
-11. **Generator spoofing:** may generators, frames and stabilisers load copied keys too (proposed: yes, same mechanism), or only catchers?
-12. **Natural redirect reach:** a local drag within `ProjectRange` of the charted mouth (proposed), or from anywhere near the line between the mouths?
-13. **Frame defence:** should a powered frame add its power against redirects of its own mouth? Separately: frames may carry stabilisers to hold their natural mouth's reserve (proposed: yes).
-14. **Fees:** currency, exotic matter (exotic-matter.md suggests throat-grade EM), or items?
-15. **Natural size:** 150–1,200 m (median ~500 m). Immense enough, or too much?
-16. **Copy freshness:** keep copy ageing (half-life 6 h), or freshness from key rotation alone?
-17. **Projected stabiliser fields in a tunnel:** a stabiliser on Feed inside a tunnel pours into the throat and is not struck (proposed). Or does any stabiliser inside trigger retaliation, so battleships must stop feeding while they cross?
-18. **Stabilisers' cost:** power only (proposed, per decision A), or do they also burn field-grade EM like other gravity devices?
-19. **Energy-fight scale:** `EsK` 10 GJ·r̂², pulse drain 1 GJ per kg of yield, feed cap `EsMax / 5 s`, destabilisers at half efficiency. A 10 kg-yield charge at point blank collapses an unfed r = 100 m wormhole; a prepared one (overcharged, fed at the cap) survives 22.5 kg because pulses ring down over 5 s. Destabiliser drain shares the feed cap, so two Drain kits cancel one Feed kit at r = 100 m and more add nothing; bombs break the hold. Right balance?
-20. **Re-establish:** a 60 s window, 0.25 X, the remaining paid life kept, and **no capture** at re-commit because the path is drilled. Or should catchers get another chance?
-21. **Deliberate rams:** a ram is a bail-out to a known point along the path, paid in damage at `u = 1` strength and a 30 s warp and charge lockout (proposed). Or should only out-of-control contact eject?
-22. **Tunnel length:** `LtK` = 2 km per unit of ℓ makes tunnels slower than warp below roughly 0.7 AU and faster beyond (with the default warp drive, at the minimum open time). Right, or shorter?
-23. **Class prices:** instant at 2.5× exotic matter and 1.5× opening energy over tunnel. Right gap?
-24. **Collapse severity:** fronts at half the collapse flow. A C-class ship escapes from 160–330 m ahead of the collapse point; a 78,000 t capital ship needs 1.2–2 km. Harsher or gentler?
-25. **Ejection velocity:** half the tunnel-frame velocity is kept, rotated onto the path, on top of warp's drop-rule orbit at the landing point (proposed). Or should ejections arrive on the drop-rule orbit alone?
-26. **Tunnel open time:** a tunnel must be quoted open for at least twice its admission lead (`2 · TunnelLead`, 241 s for a 1 AU bore at `V_adm` = 200 m/s). Right, or should admission be per ship from its own transit estimate?
+Answered earlier and dropped: old question 4 (exotic matter's source: settled by exotic-matter.md's decisions), and exotic-matter.md's question 2 on bombs (settled by decision A).
 
-All costs are estimates. Nothing was built or run, and no repo files were changed.
+1. **Seeing a capture:** decided after revision 2 (the view is always true).
+2. **Outflow push:** the outflow mouth pushes space out with the same law as the inflow pull.
+3. **Counterplay to catchers:** the set as written is enough: charging faster than a catcher's 30 s spin-up, routing, cancelling, decoys, reading pulls, and rotating keys. There is no "stiffen the path" purchase that shrinks catchers' pull radius. (The stability additive only enlarges the reserve against drains after opening; it does not affect capture.)
+4. **Exotic matter source:** answered by exotic-matter.md.
+5. **Other star systems:** natural wormholes lead to other star systems (decided earlier in round 5). This means several `Solar` roots, a shard per system, and a natural pair whose two mouths may lie in different systems (see Natural wormholes). Manufactured plans need both ends under one `Solar` root, so only natural pairs cross between systems; a cross-system tunnel ejects along one leg per system.
+6. **Mouths on moving ships:** a mouth may stay mounted on a moving ship while open, leashed, and the host cannot warp while any mouth is mounted on it (until that mouth despawns or detaches; warp's validation refuses a carried subtree containing a mouth host).
+7. **How close to a planet may a big mouth open:** as written, `A_max = 3e-3`: an r = 100 m mouth may open down to 94 km over a 1 g, 1000 km planet, and r = 400 m down to 736 km.
+8. **Interdictor friendly fire:** interdict catchers skip their own group's paths (not the whole faction's).
+9. **Player flow from power asymmetry:** only a catcher that spends **hold power** above the generator's charge rate creates an asymmetry. Plain power ratings do not count.
+10. **Path pull reach:** as written. `PathPull` reveals that hidden catchers exist, with an arc band and a signature, from 25 % charge.
+11. **Generator spoofing:** generators, frames and stabilisers may load copied keys too, by the same mechanism as catchers.
+12. **Natural redirect reach:** a local drag within `ProjectRange` of the charted mouth.
+13. **Frame defence:** a powered frame adds **no** power against redirects of its own mouth (as written: a frame is held by the weapons on it, with no special rules). Frames **may** carry stabilisers to hold their natural mouth's reserve.
+14. **Fees:** paid in throat-grade exotic matter, as exotic-matter.md suggests. `Fee` fields hold throat-grade EM content in integer grams (1 EM = 1 kg of content, exotic-matter.md), escrowed and refunded as stacks that meet throat grade. Fees apply only to managed gates catching a generator's end; natural crossings carry no game fee.
+15. **Natural size:** 150–1,200 m (median ~500 m), as written.
+16. **Copy freshness:** copy ageing is kept (half-life 6 h), on top of key rotation.
+17. **Projected stabiliser fields in a tunnel:** a stabiliser on Feed inside a tunnel pours into the throat and is not struck. Battleships keep feeding while they cross.
+18. **Stabilisers' cost:** power only (per decision A). They burn no field-grade EM.
+19. **Energy-fight scale:** as written. `EsK` 10 GJ·r̂², pulse drain 1 GJ per kg of yield, feed cap `EsMax / 5 s`, destabilisers at half efficiency. A 10 kg-yield charge at point blank collapses an unfed r = 100 m wormhole; a prepared one (overcharged, fed at the cap) survives 22.5 kg. Two Drain kits cancel one Feed kit at r = 100 m and more add nothing; bombs break the hold. Values stay tunable data.
+20. **Re-establish:** a 60 s window, 0.25 X, the remaining paid life kept, and **no capture** at re-commit because the path is drilled. Catchers get no second chance.
+21. **Deliberate rams:** a ram is a bail-out to a known point along the path, paid in damage at `u = 1` strength and a 30 s warp and charge lockout.
+22. **Tunnel length:** `LtK` = 2 km per unit of ℓ, as written. Tunnels are slower than warp below roughly 0.7 AU and faster beyond (default warp drive, minimum open time). This fits round 5's roles (D23): close, specific trips are warp's niche, and the instant class is the fastest on-demand option within a system from 20,000 km (see Cost model, tuning invariants).
+23. **Class prices:** instant at 2.5× exotic matter and 1.5× opening energy over tunnel, as written. Instant is the premium, fastest manufactured class.
+24. **Collapse severity:** fronts at half the collapse flow, as written. A C-class ship escapes from 160–330 m ahead of the collapse point; a 78,000 t capital ship needs 1.2–2 km.
+25. **Ejection velocity:** half the tunnel-frame velocity is kept, rotated onto the path, on top of warp's drop-rule orbit at the landing point.
+26. **Tunnel open time:** a tunnel must be quoted open for at least twice its admission lead (`2 · TunnelLead`, 241 s for a 1 AU bore at `V_adm` = 200 m/s), as written. Admission is not per ship.
+
+There are no open questions left in this doc. All costs are estimates. Nothing was built or run, and no repo files were changed.
 
 ### Review notes
 
@@ -1948,3 +1966,30 @@ All costs are estimates. Nothing was built or run, and no repo files were change
 **Checked against warp.md, frames-and-zones.md and review.md:** the drop rule, exit push, `ArrivalBooking`, `GridInertial`/proper-acceleration resets, C2 (no activating forces), C12 (prediction scenes), C13 (int64 positions), P1 (own sphere tests) and R7 (predictive merge) are all used as those documents define them. `FrameKind.Tunnel` as a second root is consistent with `Relative` walking to a common ancestor (there is none, so it is refused). No further conflicts.
 
 All costs are estimates. Nothing was built or run, and no repo files were changed.
+
+## Revision (round 5) notes
+
+Applied the user's round-5 decisions D19, D23, D21 and D26 (decisions-r5.md wins over any earlier text here).
+
+- **D19, proposals accepted:** "Open questions for the user" is now "Decided in round 5 (formerly open questions)". All 26 items are decided statements with their numbers kept. Questions with no explicit proposal take the design as written: Q10 path-pull reach, Q13 frame defence (no power against redirects; frames may carry stabilisers), Q15 natural size, Q16 copy ageing kept, Q19 energy-fight scale, Q20 no capture on re-establish, Q22 `LtK` 2 km, Q23 instant 2.5×/1.5×, Q24 collapse severity, Q26 `2 · TunnelLead`. Q14 fees use exotic-matter.md's suggestion (throat-grade EM). Q5 records the earlier round-5 decision that natural pairs lead to other star systems, with a pointer added under Natural wormholes, Generation.
+- Inline "(proposed; open question N)" references in Stability, Re-establish, Tunnels (rams, retaliation) and Signatures now read "decided, round 5". The Signatures line now names frames and stabilisers as well as generators (Q11).
+- **D23, roles:** natural wormholes are the cheapest travel, manufactured wormholes the fastest, warp the cheap option for close, specific trips. This replaces the blanket "warp cheaper, wormholes costlier" and the "more expensive but faster" invariant. Changed: the recommendation paragraph (a Roles line, class labels), the class table's Cost row, the Cost model's tuning invariants, the warp comparison table (a new Role row) and the invariant test line.
+  - exotic-matter.md's per-generator-class check is kept, but only as a **single-ship** rule (a lone ship warps more cheaply than it can open the cheapest wormhole it fits). Fleets sharing a manufactured wormhole may pay less per ship than warping, and that is intended. exotic-matter.md should restate its invariant the same way.
+  - **Break-even checked:** the cost table is unchanged and consistent with the new roles. Instant (31–71 s) beats warp from 20,000 km, so manufactured is the fastest option there. Tunnel beats warp from ~0.7 AU (1 AU: 197 s against 230 s) and loses to it at moon range (69 s against 48 s), which is warp's close-range niche. The cost formulas and constants are unchanged.
+- **D21, black holes:** the suppression terms themselves are unchanged. (Corrected by the round 5 review: exotic-matter.md already overrides this doc's body-core term for black holes and adds disc and jet terms; those are now mirrored as a row in the suppression table, with forecast births counted as cores.)
+- **D26, tractor consent:** under Decided after revision 2, an unrequested tractor lock is a weapon use, so interdiction pull-in is always an attack. Gates and stations may tractor a ship in only on the crew's request (a consent flag on the slot or docking request). Tunnel retaliation still strikes any active tractor, requested or not, so no one can be tractored through a tunnel.
+- **Consistency touches from other round-5 decisions (no design change here):** the warp comparison table's Privacy cell now follows D18 (arrival location broadcast as a safety beacon, military or cut-wire opt-out, the last part of the trip in real space). The tractor note mentions D28 (pull only without antimatter).
+- The Review notes, Revision 2 and Revision 3 sections are history and were left as written. Nothing was built or run, and no repo files were changed.
+
+## Round 5 review notes
+
+Skeptical lead review of the round-5 edits against decisions-r5.md (D19, D23, D21, D26, plus D15, D16, D18 and D28 where this doc touches warp or tractors). Fixes are folded in above; this lists them.
+
+- **D19 verified:** all 26 former questions read as decided rules, and each matches the proposal or the body text (checked leash, friendly fire, copy ageing, outflow push, stabiliser exemption, frame rules). Fixed: Q3 claimed the stability additive "covers" path stiffening, but it only enlarges the reserve and never affects capture; Q6 said "until the last mouth despawns", now "while any mouth is mounted (until it despawns or detaches)", matching warp's validation step; the Signatures line listed only catchers, generators and frames as copy loaders, now stabilisers too (Q11).
+- **Q5 consequences (new rules, flag for the user):** natural pairs across systems broke two things. (1) A plan path is a polyline in `Lca`, which two `Solar` roots do not have, and `ℓ = ln(1 + L/1e6)` would price an interstellar throat at about twice a 1 AU one. Manufactured plans are now refused across roots; only natural pairs link systems. (2) Ram and collapse ejections map tunnel arc onto that path; a cross-system pair now uses two seeded legs (0.05–1 AU, one per system, from `pairSeed`, so the record does not grow), and an ejection never lands in interstellar space. Cost: one polyline as before. "2–6 pairs per system" now counts pairs with an end in the system; the shard-per-system wording is limited to dedicated servers.
+- **D23 verified and tightened:** the cost table, formulas and break-evens are unchanged and match the roles. Fixed: "natural costs nothing (at most a frame owner's or gate's fee)" invented a natural-crossing fee that no mechanism charges; fees exist only for managed gates catching a generator's end, and a frame holder's toll is player pricing by force. "Fastest in the game from 20,000 km" became "fastest on-demand option within a system", since an open, well-placed natural bore can beat a 31 s instant charge on its own schedule. exotic-matter.md's check is stated as single-ship on both sides (its line 774 already reads that way).
+- **Q14 fees:** `Fee` is `int`; it is now defined as throat-grade EM content in grams (an int of mg, the unit of `ContentMg`, would cap at 2.1 kg).
+- **D21:** the earlier note said this doc never references black holes, but exotic-matter.md already overrides the body-core term (`InfallRadius + r`) and adds disc and jet terms. That row is now in the suppression table, and a forecast birth counts as a core, which matters more now that collapses (and so rebirths) can be forced. A pending collapse needs no new term. Cost: one extra sphere per system in the pruned source list.
+- **D26:** the consent text let a gate tractor a ship "to its catch slot" via a `SlotRequest`; catch slots place wormhole ends, not ships, so consent now rides a docking or tow request. Consent is scoped to one emitter owner group and lapses on release, docking, crossing or after 120 s, so a third party can't ride it and a ship can't stage a fake attack. The rule that tunnel walls strike requested tractors too is kept (retaliation is physics, not law).
+- **D16/D18 consistency:** "matches warp's 3 s exit announcement" is gone (warp now beacons its arrival; wormholes stay private until commit, on purpose). The warp table's Exit cell no longer cites `WarpFloor` (no forced floor; low-atmosphere exits mean pressure waves and fines), and its risks add beacon ambush and the real-space last leg. The suppression floor stays a mouth rule, keeping warp's formula (as `MouthFloor` if warp.md drops the name). D28: tractor push needs AM.
+- **Other docs, not fixed here:** r5-warp.md has not yet had D15/D16/D18 applied (still has the 3 s exit announcement and the exit-floor question); tractor-beams.md still says wormholes.md has no tunnel retaliation rule; exotic-matter.md's "single-system v1" Dark Gate text and its open question 6 ("keeps warp cheaper, wormholes costlier") predate D23 and Q5. No perf-relevant additions beyond the notes above. Nothing was built or run, and no repo files were changed.

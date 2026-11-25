@@ -2,7 +2,7 @@
 
 ### Recommendation in one paragraph
 
-Split the user's "solar > planetary > ship grid" idea into two layers. **Frames** are a cheap double-precision tree with no limit on count: Solar root, then each celestial body's inertial frame, its rotating surface frame, and ship/station grids (grids can nest). **Physics scenes** are a flat, pooled, limited set of Jolt `PhysicsSystem`s. Each one simulates a float "bubble" around a cluster of interacting things inside one frame. Gameplay, networking and rendering speak frames. Only the physics layer knows about bubbles. Gravity is patched conics: only the dominant body pulls, and celestial bodies ride Kepler rails evaluated from the integer tick. Everything stores `double3` relative to its parent frame. int64 fixed point is used only on the wire.
+Split the user's "solar > planetary > ship grid" idea into two layers. **Frames** are a cheap double-precision forest with no limit on count: one Solar root per star system (systems are linked only by wormholes), then each celestial body's inertial frame, its rotating surface frame, Lagrange-point frames computed from two railed bodies, and ship/station grids (grids can nest). **Physics scenes** are a flat, pooled, limited set of Jolt `PhysicsSystem`s. Each one simulates a float "bubble" around a cluster of interacting things inside one frame. Gameplay, networking and rendering speak frames. Only the physics layer knows about bubbles. Gravity is patched conics: only the dominant body pulls (except inside a Lagrange zone, where the pair both pull), and celestial bodies ride Kepler rails evaluated from the integer tick, which stops while the server is empty. Everything stores `double3` relative to its parent frame. int64 fixed point is used only on the wire.
 
 ### What exists today (and what blocks multi-world)
 
@@ -18,8 +18,9 @@ Split the user's "solar > planetary > ship grid" idea into two layers. **Frames*
 ### Frames
 
 ```csharp
-public readonly record struct FrameId(ushort Value);          // 0 = Solar root
-public enum FrameKind : byte { Solar, BodyInertial, BodySurface, Grid }
+public readonly record struct FrameId(ushort Value);          // 0..SystemCount-1 = the Solar roots, one per star system
+public readonly record struct SystemId(ushort Value);         // == the FrameId of that system's Solar root
+public enum FrameKind : byte { Solar, BodyInertial, BodySurface, Lagrange, Grid, Mouth, Tunnel }   // Mouth, Tunnel: wormholes.md
 
 /// Pose of a frame relative to its parent, refreshed once per tick (rails, spin) or after the physics step (grids).
 public struct FramePose
@@ -30,13 +31,27 @@ public struct FramePose
     public double3 AngularVelocity; // of child axes, in parent, rad/s
 }
 
-/// SoA, preallocated (4096 frames), zero alloc. Index = FrameId.Value.
+/// SoA, preallocated (4096 frames; grids, mouths and live Lagrange points included), zero alloc in the tick;
+/// grown only in the maintenance window, up to the ushort limit. Index = FrameId.Value.
 public sealed class FrameTree
 {
     public FrameId[] Parent; public FrameKind[] Kind; public byte[] Depth;
+    public SystemId[] System;      // root of each frame's tree; Parent of a Solar root is itself
     public FramePose[] Local;
-    public int[] OwnerEntity;      // grid -> ship entity; body frames -> celestial index
-    public FramePose Relative(FrameId from, FrameId to); // walk to common ancestor, compose in double
+    public int[] OwnerEntity;      // grid -> ship entity; body frames -> celestial index; Lagrange -> LagrangePoint index
+    public bool TryRelative(FrameId from, FrameId to, out FramePose pose); // common ancestor, compose in double; false across systems
+}
+
+/// A Lagrange point of a railed pair (primary P, secondary S on rails about P). One per (pair, index), shared by
+/// every anchor there. Created lazily, only while an anchor holds (or is engaging) at that point; pool of 64, grown
+/// in the maintenance window (a full pool never refuses an engage).
+public struct LagrangePoint
+{
+    public FrameId Frame;            // parent = P's BodyInertial (Solar root when P is the star)
+    public int Primary, Secondary;   // celestial indices
+    public byte Index;               // 1..5
+    public double Xi, Eta;           // dimensionless position in the pair's rotating basis, from the mass ratio, solved once
+    public double ZoneRadius;        // bound of the zone: max over its anchored grids of |grid − origin| + r_grid + 2.6 km
 }
 
 public struct KeplerOrbit           // relative to parent BodyInertial (or Solar)
@@ -63,9 +78,16 @@ public struct Placement
 }
 ```
 
-- **Tree shape:** Solar → Planet inertial → {Planet surface (rotating), Moon inertial → Moon surface} → grids. A grid's parent is whatever frame its ship is in: a surface, an inertial frame, or another grid for a docked ship.
+- **Tree shape:** Solar → Planet inertial → {Planet surface (rotating), Moon inertial → Moon surface, Lagrange (lazy)} → grids. A grid's parent is whatever frame its ship is in: a surface, an inertial frame, a Lagrange frame, or another grid for a docked ship.
+- **Several Solar roots (user decision).** Natural wormholes lead to other star systems, so the frame structure is a forest: one tree per system, all in one `FrameTree` (the 4096 preallocated frames are shared; a system costs about 2 frames per body, so 8 systems of ~40 bodies take ~640).
+  - Systems have no pose relative to each other. `TryRelative` across systems returns false; nothing renders, senses or simulates across a system boundary except through a wormhole mouth's portal map (wormholes.md: clients near a mouth get the far side streamed and drawn through the disc, never through a tree edge). Each root carries a galactic position used only for the star backdrop and naming.
+  - Wormhole tunnels (`FrameKind.Tunnel`, wormholes.md) are further roots beside the Solar roots; they belong to no system and `TryRelative` refuses them too.
+  - The only way between systems is a wormhole transit (wormholes.md): a reliable frame-change event from a mouth frame in one tree to a mouth frame in the other, through the mouths' own transform. There is no cross-system warp (warp is for relatively close destinations).
+  - Celestial rails are evaluated only for systems that hold a bubble or a player's interest. Other systems cost nothing: rails are closed form in the tick, so a system is exact whenever it is next looked at.
 - **Why double3 and not int64 fixed point:** positions are always stored relative to the parent frame. Inside a 1000 km planet's SOI (around 5e7 m) the double ulp is about 1e-8 m. Even heliocentric at 40 AU it is about 1 mm, and only ships in transit live there. Rotation, Kepler and transform maths all need double anyway. Rejected: int64 fixed point in the sim (uniform precision isn't needed with hierarchical frames, and it makes every rotation and orbit awkward). int64 is used **on the wire** at 1/1024 m.
-- **Time:** one global `TickIndex`. Orbit phase and spin angle come from `tick % PeriodTicks`, so they never lose precision, even after years of server uptime.
+- **Time:** one global `TickIndex` for every system. Orbit phase and spin angle come from `tick % PeriodTicks`, so they never lose precision, even after years of server uptime.
+  - **Game time stops while the server is empty (user decision).** `FixedClock` advances only while at least one player is connected (a listen server always has its host). When the last player leaves, the server finishes the tick, persists `TickIndex` with the world, and pauses; nothing catches up on resume.
+  - Everything time-based in the sim is keyed on ticks, never on wall clock: rails, spin, weather, anchor reserves and warnings, sinking rails, wormhole and black-hole lifetimes, fines and cooldowns. So they all pause together, and an offline owner's anchored station loses nothing while nobody plays.
 
 ### Gravity and rails
 
@@ -79,11 +101,38 @@ public struct Placement
 - **Planets rotate.** Everything below the rotating band uses the **rotating surface frame**: terrain is static in Jolt, a landed ship sleeps, and the atmosphere co-rotates.
   - Fictitious forces are applied to awake bodies: centrifugal `−ω×(ω×r)` (0.085 m/s² at the equator for a 6 h day on a 1000 km planet) and Coriolis `−2ω×v` (0.17 m/s² at 300 m/s).
   - Rejected: an inertial frame for the surface (terrain would move at ωR ≈ 290 m/s inside Jolt).
+- **Atmospheric flight (user decision D10: both).** Every ship flies pure 6-DOF with flight assist everywhere; in an atmosphere, wing parts also give **lift**. Both are forces in the force pass, so frames only fix the reference:
+  - Airspeed is taken in `BodySurface`, where the atmosphere co-rotates: `v_air = v − wind(p)`, with `wind` from the planet's weather (planets.md, "Weather on a sphere"; `GasGiantWind` on a giant; ~0.3 µs analytic sample at 10 Hz per awake ship, lerped between samples).
+  - Drag `½ρ|v_air|²·Cd·A(dir)` on the hull and, per wing part, lift `½ρ|v_air|²·C_L(α)·S` normal to `v_air` in the wing's plane, applied at the part's centre of pressure (stall past `α_stall` from part data). About 40 ns per wing part per awake ship. Flight assist sees lift as one more force and trims thrusters against it.
+  - In the inertial frame above `RotatingTop` there is no air, so no lift or drag. A coasting rails ship whose trajectory meets the atmosphere top gets a wake event there (computed like impact-wake events), because drag and lift can't ride rails.
+
+### Lagrange frames and anchors (user decisions D25 and the Lagrange-point answer)
+
+**Lagrange frame.** A `FrameKind.Lagrange` frame sits at L1–L5 of a railed pair (star–planet or planet–moon), computed each tick from the two rails, so it costs nothing to store and is exact from the tick:
+```
+d     = r_S − r_P,  ḋ = v_S − v_P            (S's rail about P, in P's inertial frame)
+x̂ = d/|d|,  ẑ = (d × ḋ)/|d × ḋ|,  ŷ = ẑ × x̂     rotating, pulsating basis of the pair
+origin = r_P + |d| · (Xi · x̂ + Eta · ŷ)          Xi, Eta from the mass ratio m_S/(m_P+m_S): L4/L5 exact, L1–L3 solved once (Newton, ~1 µs)
+ω     = (d × ḋ)/|d|²                           frame angular velocity; the origin's velocity and acceleration follow from the Kepler state in closed form
+```
+- About 60 ns per live Lagrange frame per tick (only frames with an awake member; a frozen one is evaluated on demand). Lagrange frames exist only while an anchor holds, or is engaging, there (pool of 64, grown on demand), so there are no permanent frames per pair.
+- **Lagrange zone:** within `r_grid + 2 km` of any grid anchored at that point (as the anchored zone, leaving at `+ 2.6 km`; `ZoneRadius` is only the cheap bound tested first), the zone beats the SOI test and members sit in the Lagrange frame. Inside it, gravity is **both** bodies, `g = −μ_P r_P/|r_P|³ − μ_S r_S/|r_S|³` (one extra term, ~10 ns): the one deliberate exception to patched conics, kept to the zone. Outside the zone everything is patched conics as before.
+- Bubbles in the zone are `BubbleAnchor.Station` bubbles in the Lagrange frame: scene gravity = two-body gravity at the origin minus the frame origin's acceleration minus `ω×(ω×r) + ω̇×r` at the origin; per awake body the delta plus Coriolis. On an eccentric pair the frame pulsates, so these terms vary slowly over the orbit (they are recomputed at the 10 Hz membership pass).
+- Unanchored entities without a Jolt body leave the zone to ordinary rails about the dominant body. Nothing is `Frozen` in a Lagrange frame except anchored and docked grids, so a ship left near L1 can't hang there for free.
+
+**Anchors on any grid (D25).** exotic-matter's `StationAnchors` owns the anchor (cores, reserve, warnings, footprint, failure); this section is the frame side, and the Lagrange target is this doc's extension of it. An anchor holds any grid (ship or station) at a pose in a `BodySurface` frame (any altitude) or in a Lagrange frame. It can't target a minor body's or asteroid's frame, and it won't engage on a grid in contact with or tractored to an asteroid; tractor beams do that job (an anchored grid may still tractor an asteroid: the reaction is debited to the anchor and counts toward overload, tractor-beams.md).
+- **Activation at position and velocity** (exotic-matter's numbers). The pilot picks the target pose (frame + position + attitude). Engage requires the grid's centre of mass within `EngagePosTolM` (5 m) of the target, velocity relative to the target frame below `EngageMaxVelMs` (5 m/s: "mostly" at the right velocity) and `|ω_rel|` below 0.05 rad/s, out of contact with terrain. During the 600-tick spin-up the grid's own thrusters hold it against gravity; the anchor pulls it onto the pose along a critically damped path and pays the residual `m·Δv` as an impulse at `EmPerNs`. At engage the grid transfers to the target frame through the exact transfer maths.
+- **Hold cost** stays `EmPerNs · m · |a_hold|`, with `a_hold` = the acceleration of a point fixed in the target frame minus gravity there (two-body gravity in a Lagrange frame). It is zero at the equatorial synchronous radius and at an exact L4/L5 on a circular pair (already orbits, as exotic-matter's synchronous case), and small near L1/L2. On an eccentric pair `a_hold` varies over the orbit: billing uses its orbit average, computed once at engage (64 samples, ~5 µs) and settled lazily, but the overload test uses the orbit **maximum** and the drop footprint the worst of the 64 release phases, so an average can't hide an overload or a lethal release phase.
+- **Crawl (slow moves over days).** exotic-matter's crawl: target pose, speed up to `CrawlMaxMs` (0.05 m/s along the surface, 0.02 m/s in altitude: ~4.3 and ~1.7 km per game day), straight segments of at most 1 h, billing, footprint and claim checks per segment, never a frame change; plus a turn rate up to 1° per game hour. Frame side:
+  - The pose is piecewise linear in the tick per segment, `Local(t) = p0 + v_c·(t − t0)`, so an **unattended crawling grid stays `Frozen`** and costs nothing per tick (docked children ride on their fixed poses). A segment is planned only if its swept bounds clear terrain (height bounds + edit bounds) and other grids at plan time; anything that could later enter it must be near a player, which puts the grid in a bubble.
+  - In a bubble the grid becomes a **kinematic** compound (`MoveKinematic`, one per tick) while crawling, so walkers ride along and dynamic bodies are pushed, never it; static again when stopped. A kinematic body passes through static terrain, so a crawl also stops at the first terrain contact.
+  - The Station bubble, which never rebases at rest, rebases by a 32 m multiple once a crawl has carried the grid more than 512 m from the origin (about 3 game hours at 0.05 m/s).
+- **Release and drops.** Release or failure is as exotic-matter's: the grid returns to physics with its inertial velocity (plus the crawl velocity, at most 0.05 m/s). A dropped station is meant to be a rare disaster: it mostly burns up in the atmosphere (exotic-matter's entry heating) or hits the ground hard through the impact rules. Thrusters and warp drive are locked while anchored and **unlock at `AnchorFailing`** (before the release tick), so a station with enough thrust can hold itself or fly; escape pods are small grids launched through the normal transfer from the station's frame. A Lagrange-anchored grid released goes to ordinary rails about the dominant body.
 
 ### Physics scenes (bubbles)
 
 ```csharp
-public enum BubbleAnchor : byte { Surface, FreeFall, Grid }
+public enum BubbleAnchor : byte { Surface, FreeFall, Grid, Station, Tunnel }   // Station: an anchored grid's static bubble (BodySurface or Lagrange); Tunnel: wormholes.md
 
 public sealed class PhysicsBubble
 {
@@ -105,9 +154,18 @@ public sealed class PhysicsBubble
   - Relative velocities stay small, which keeps contacts, CCD and broadphase sweeps tight.
 - **Grid (interior) bubble:**
   - Lives in ship-local coordinates. Interior meshes and both faces of the hull are **static** there forever, however the ship moves.
-  - Gravity is the plating vector when powered. Otherwise it is real gravity minus the ship's proper acceleration, plus `−α×r − ω×(ω×r) − 2ω×v` on awake bodies.
+  - **Interior gravity is two separate devices (user decision D9): plating and the inertial dampener.**
+    - **Plating** adds floor gravity and cancels nothing (exotic-matter). `g_rest` is what the grid feels at rest in its frame (real gravity on a landed ship, `−a_hold` on an anchored one, 0 in free fall). A powered, fed plated room tops the floor up to its setting along the room's floor-down axis `n̂`: `g_floor = g_rest + n̂ · max(0, g_set − dot(g_rest, n̂))`, so a 1 g plate on a 1 g landed ship supplies (and bills) nothing instead of doubling gravity; unplated rooms have `g_floor = g_rest`. Recomputed on events (plating change, landing, anchoring), never per tick.
+    - **The inertial dampener** is its own device (ship-design's `fn.dampener`) with its own volume: the rooms inside its bubble radius (ship-hulls' coverage). It keeps everything inside moving with the ship, at the cost of energy, using exotic matter + power, up to its effective rating `a_damp` = ship-design's `a_eff = min(class cap, F_cap / m_in, delivered power and EM)`, lowered by its `Limit` input; a room covered by two dampeners takes the stronger. It cancels the **manoeuvre** part of the interior acceleration:
+      `a_man(r, v) = −(a_proper − a_rest) − α×r − ω×(ω×r) − 2ω×v`, where `a_rest` is the proper acceleration at rest in the frame (so landing or anchoring never shows up as a manoeuvre).
+    - **Fictitious forces are applied only above the dampener rating:** `g_interior = g_floor + a_man · max(0, 1 − a_damp/|a_man|)`. Inside a powered, fed dampener below its rating the interior is calm; above it, occupants and cargo feel only the excess. Outside any dampener volume (or with it unpowered, unfed or destroyed) the full `a_man` applies, which is the old real-effects branch.
+    - Scene gravity is `g_interior` at the bubble origin; per awake body, the delta of the `α×r`, `ω×(ω×r)` and `2ω×v` terms is added only for the leaking fraction (0 when fully damped, so a calm interior costs no per-body work).
+    - **Frozen contents** (no bubble) stay frozen while the leak is under `WakeLeak` (0.5 m/s², knob). A larger leak wakes the dampener volume's contents (drawing a grid scene from the pool) so cargo shifts and crew stumble; that is rare by design.
+    - **Cost** is exotic-matter's: power and EM in proportion to the mass inside × the cancelled acceleration. The force pass adds `m_in · min(|a_man|, a_damp)` from the ship-level `a_man` to the grid's ledger accumulator (one multiply per dampener per tick, `m_in` updated on events), and the 10 Hz ledger debits it, so it is paid with or without a bubble. Rest acceleration is never billed: a landed or anchored ship's dampener idles at standby.
+    - Velocity snaps from warp, flush and pulses stay excluded by the proper-acceleration history reset. While warp.md's `GridInertial` flag is set (in warp, and unanchored rails ships) the interior is plating or zero-g with no manoeuvre term, so the dampener draws nothing; in warp's real-space last segment the brake acts on every body alike (not felt), but contact impulses are, and the dampener absorbs them up to its rating (D17, D18). Neither device cancels tidal stretch (that is the tidal compensator's job, wormholes.md).
   - Coupling is one-way: the ship moves the interior; interior contents don't push the ship. Cargo mass is added to the hull compound on load and unload only.
 - **Size limits:** soft radius 2 km, hard 4 km (float ulp 0.24 mm and 0.49 mm). Jolt's own guidance is a few km in single precision.
+  - **Huge structures (user decision):** anything larger is built as several linked grids, each with its own frame and bubble, joined by fixed links (as docking collars) and stitched across the seams with kinematic proxies. Double-precision Jolt stays off the table.
 - **Who gets a Jolt body:**
   - Any entity within 2 km of a *physics anchor* (a player, or an entity in contact with something simulated). It leaves to rails or frozen at more than 3 km from all anchors, and only when contact-free.
   - Parked ships with nobody nearby are `Frozen` in the surface frame.
@@ -128,7 +186,10 @@ public sealed class PhysicsBubble
 
 | Transition | Enter when | Leave when | Hysteresis / extra rule |
 | --- | --- | --- | --- |
+| Solar root ↔ Solar root (other star system) | wormhole transit event | n/a | only through a wormhole mouth (wormholes.md); never by distance |
 | Solar ↔ body SOI | r < 0.98 r_SOI | r > 1.02 r_SOI | 4% band; gravity source switches with the frame |
+| Into a Lagrange frame | inside a live Lagrange zone (`r_grid + 2 km`) | outside `r_grid + 2.6 km` | the zone beats the SOI test; two-body gravity inside |
+| Anchored zone (`BodySurface`) | within `r_grid + 2 km` of an anchored grid | outside `r_grid + 2.6 km` | the zone beats the rotating-band rule |
 | Body inertial ↔ body surface (rotating) | altitude < `RotatingTop` | altitude > 1.3 × `RotatingTop` | `RotatingTop = max(atmo top, 0.05 R)`, e.g. 50 / 65 km on a 1000 km airless body |
 | Into a ship grid | centre inside the grid's interior volume by ≥ 0.5 m, **or** grounded / mag-booted on any hull surface (`CharacterVirtual` ground body) | outside interior volume + 1 m **and** not grounded on the grid for 0.25 s | the ground rule beats the volume rule (EVA on the hull stays in the grid) |
 | Ship into hangar (nested grid) | ship centre inside hangar volume shrunk by 0.5 × its radius | centre outside hangar volume + 2 m | ship body moves from the exterior scene into the host's grid scene; its own grid re-parents |
@@ -156,8 +217,8 @@ v_c = Rᵀ (v_p − u − ω × (p_p − o))
 - Warm-start contact cache is lost; the contact-free rule above makes that harmless.
 
 **Characters:**
-- With gravity (surface, or plated grid): `CharacterVirtual` with up = `−ĝ(p)`.
-- In zero-g (EVA in a free-fall bubble, unplated grid): a dynamic capsule body with thrusters.
+- With gravity (surface, plated grid, or an interior whose `g_interior` exceeds 0.5 m/s²): `CharacterVirtual` with up = `−ĝ(p)`.
+- In zero-g (EVA in a free-fall bubble, an unplated grid under its dampener rating): a dynamic capsule body with thrusters or mag boots.
 - Players inside a moving ship live in grid coordinates. Ship speed and spin never reach their controller.
 
 ### One Jolt system per bubble, pooled (the world-count answer)
@@ -185,6 +246,10 @@ v_c = Rᵀ (v_p − u − ω × (p_p − o))
 | Celestial rails + spin (≤ 64 bodies) | ~6 µs |
 | Frame pose cache (≤ 512 live frames) | ~10 µs |
 | Force pass (gravity delta, tidal / fictitious, thrust) | ~30 ns per awake body; 2000 bodies ≈ 60 µs |
+| Aero (drag + lift per wing part, wind sample at 10 Hz) | ~40 ns per wing part per awake ship in an atmosphere; +0.05 µs a tick per ship amortised for the wind (0.3 µs at 10 Hz) |
+| Dampener (ship-level `a_man`, cost integration) | ~10 ns per dampener per tick; per-body leak terms only while leaking |
+| Lagrange frames (pool 64, two-body gravity in zone) | ~60 ns each a tick; +10 ns per awake body in a zone |
+| Anchors, including crawl | 0 per tick when frozen (piecewise-linear pose, scheduled ≤ 1 h segments); one `MoveKinematic` per crawling grid per tick in a bubble |
 | Asleep or empty scene | 0 (Update skipped) |
 | Small scene, few awake bodies, single-threaded | ~20–50 µs, in parallel across workers |
 | Same scene on the thread pool | ~50–100 µs (barrier wake-ups): reason for the split above |
@@ -200,8 +265,8 @@ v_c = Rᵀ (v_p − u − ω × (p_p − o))
 - `ProfilerPanel` gets rows for Rails, Forces, Scenes (stepped / asleep / pool vs job), Characters, Maintenance, Transfers and Rebases.
 
 **Tick order:**
-1. Clock.
-2. Rails and pose cache.
+1. Clock (paused while no player is connected).
+2. Rails and pose cache (systems with interest only; Lagrange frames from their pairs' rails).
 3. Queued transfers and rebases.
 4. Inputs.
 5. Forces.
@@ -238,6 +303,7 @@ v_c = Rᵀ (v_p − u − ω × (p_p − o))
   | Same frame within 20 km | 10 Hz |
   | Same SOI | rails or 1 Hz |
   | Other SOIs | radar contacts at 0.2 Hz |
+  | Other star systems | nothing (system id and player list only) |
 
   Budget: 64 players × about 50 visible bodies × 30 Hz × 20 B ≈ 2 MB/s server out, about 30 KB/s per client.
 - **Frame changes** are reliable, tick-stamped events: "entity E → frame F at tick T, state S". The client applies them at T.
@@ -246,7 +312,7 @@ v_c = Rᵀ (v_p − u − ω × (p_p − o))
   - Piloting: predict the ship in the client's exterior bubble.
   - Reconcile only owned entities: snap to server state, then replay inputs through our own flight or character integrator. Collisions are left to error smoothing.
   - Full Jolt rollback isn't available (`SaveState` / `RestoreState` are not exported). Custom per-body snapshots via `BodyInterface` are enough for owned entities.
-- **Dedicated sharding later** goes by frame subtree: each planet SOI plus its grids is a shard, and interplanetary space is a shard. The hand-off is exactly the frame-change event above, at the SOI boundary with the same 4% hysteresis. Keep the transfer message serializable from day one.
+- **Dedicated sharding later** goes by frame subtree: each star system is the natural first cut (its only boundary is the wormhole transit event); inside a system, each planet SOI plus its grids is a shard, and interplanetary space is a shard. The hand-off is exactly the frame-change event above, at the SOI boundary with the same 4% hysteresis. Keep the transfer message serializable from day one.
 
 ### Files
 
@@ -269,7 +335,8 @@ v_c = Rᵀ (v_p − u − ω × (p_p − o))
   - `StaticMeshShape` and `TriangleBvh`: shapes are refcounted and shared across scenes and proxies.
   - `FixedClock`, `FrameStats`, `TimingRing`, `WorkerBudget` (add a Physics share for small-scene jobs).
 - **New:**
-  - `src/Frames/`, with no Jolt dependency: `FrameTree`, `KeplerOrbit`, `CelestialSystem`, `Gravity`, `FrameMath`.
+  - `src/Frames/`, with no Jolt dependency: `FrameTree` (forest of Solar roots), `KeplerOrbit`, `CelestialSystem`, `Gravity`, `FrameMath`, `LagrangeFrames`, `Anchors` (engage, crawl, hold rate; shared with exotic-matter's `StationAnchors`), `Aero` (drag, wing lift).
+  - `src/Physics/InteriorGravity.cs`: plating floor gravity and the dampener leak.
   - `src/Physics/`: `PhysicsRuntime`, `PhysicsScene`, `BubbleManager`, `Transfer`, `Proxies`.
   - `docs/frames-and-zones.md`.
 - **Cut:** the test scenes tied to water (`FloodTest`, `PondTest`, `LakeTest`, `RiverTest`, `CaveTest`, `SeasideTest`, `SurfTest`) leave with the water systems.
@@ -283,12 +350,32 @@ v_c = Rᵀ (v_p − u − ω × (p_p − o))
   - ship grids (walking in a ship at 1 km/s is about controller stability and local-frame prediction, not precision),
   - bubbles (needed for parallelism, sleep-skipping and interest anyway).
 - The upstream ask that matters more is exporting what the native lib lacks: `PhysicsSystem_SaveState` / `RestoreState`, `NarrowPhaseQuery_CastRay`, indexed `MeshShapeSettings`. Propose that to BRUTAL separately (no `BRUTAL/` edits).
-- Revisit double precision only if one bubble must span more than 4 km (see question 2).
+- Not needed: the user chose huge structures as several linked grids, so no single bubble spans more than 4 km.
 
 ### Open questions for the user
 
-1. **Interior gravity:** is gravity plating always on, Star Citizen style (calm interiors, and ship manoeuvres don't throw you around), or do you want real inertial effects inside unplated or damaged ships? It decides which fictitious forces the grid scenes apply.
-2. **Very large grids:** will players build ships or stations bigger than about 4 km, or fight capital battles spread over more than 4 km that must be one contiguous physics cluster? If yes, either big grids tile into several scenes or double-precision Jolt comes back on the table.
-3. **Patched conics** (one dominant body, rails, as in KSP): OK, or do you want n-body features (Lagrange points, perturbations)? n-body gives up rails, cheap extrapolation and near-zero network cost for orbits.
+None left from earlier rounds: interior gravity (D9), very large grids (linked grids) and patched conics (rails + SOI, with Lagrange-point stations held by anchors) are decided. New knobs to confirm when they are tuned in game, not blocking: `WakeLeak` 0.5 m/s², the crawl turn rate 1°/h, the Lagrange zone margin 2 km (engage and crawl limits are exotic-matter's data).
 
 All costs above are estimates. Nothing was built or run, and no files were changed.
+## Revision (round 5) notes
+
+User decisions 2026-11-25 (decisions.md round 5), applied in place above:
+- **Several Solar roots:** frames are a forest, one Solar root per star system, sharing one `FrameTree`; `SystemId`, `TryRelative` fails across systems; the only crossing is a wormhole transit event (new transition row); rails evaluated only for systems with interest; other systems send nothing on the wire; sharding cuts by system first.
+- **Game time stops while the server is empty:** `FixedClock` pauses with no player connected; everything time-based is keyed on ticks, so rails, weather, anchor reserves, lifetimes and fines all pause together; tick order step 1 notes it.
+- **D9 interior gravity:** plating (floor gravity) and a separate inertial dampener (own volume, EM + power, rating `a_damp`). Fictitious and manoeuvre forces reach the grid scene only above the dampener rating; landing/anchoring is not a manoeuvre (`a_rest`); `WakeLeak` wakes frozen contents; cost integrated per ship; characters' gravity rule updated.
+- **D10 flight model:** 6-DOF with flight assist everywhere plus wing lift in atmosphere; airspeed relative to the co-rotating air and the planet weather's wind; rails ships wake at the atmosphere top; cost row added.
+- **D25 anchors on any grid:** `BodySurface` or Lagrange targets, never asteroids (tractors); activation needs position within 50 m and velocity within 5 m/s, residual Δv paid in EM over spin-up; slow crawl over days (≤ 0.02 m/s, piecewise-linear pose, kinematic while crawling, rare Station-bubble rebase); thrusters unlock on release; escape pods; dropped stations are rare disasters.
+- **Lagrange-point frames:** new `FrameKind.Lagrange`, pose computed each tick from the two railed bodies, created lazily only while an anchor holds there; a Lagrange zone with two-body gravity is the single exception to patched conics; `BubbleAnchor.Station` added to the enum.
+- **Huge structures:** several linked grids/bubbles stitched by proxies; double-precision Jolt dropped.
+- **Open questions:** all three earlier ones removed as answered; three tuning knobs listed instead.
+
+## Round 5 review notes
+
+Lead review, 2026-11-25, against decisions-r5 (D9, D10, D25, Lagrange frames, several Solar roots, time stops when empty). Fixes made in place above:
+- **D9 faithful, now consistent with its owners.** `a_damp` is ship-design's `a_eff` (class cap, `F_cap / m_in`, delivered power and EM, `Limit` input), per covered room, stronger dampener wins on overlap. Plating now *adds* floor gravity as exotic-matter says ("cancels nothing"), but tops up to its setting instead of stacking, so a plated landed ship is not at 2 g and pays nothing for gravity it already has. Billing is the force-pass accumulator plus the 10 Hz ledger (exotic-matter, ship-design), on `min(|a_man|, a_damp)`; rest acceleration is never billed. Warp's `GridInertial` interior and the real-space last segment (D17, D18: brake not felt, collisions felt and damped up to the rating) are spelled out; "compensator" is the tidal compensator (wormholes).
+- **D25 aligned with exotic-matter, which owns anchors.** The engage tolerance was 50 m here and 5 m there: now 5 m / 5 m/s (`EngagePosTolM`, `EngageMaxVelMs`), thrusters hold the grid during spin-up. Crawl numbers now exotic's (0.05 m/s along, 0.02 m/s vertical, ≤ 1 h segments); the old "every 1 km" steps are gone. Thrusters and warp unlock at `AnchorFailing`, not at the release tick, so a failing station can still save itself. Tractoring an asteroid from an anchored grid stays legal (the user's "use tractor beams"), its reaction debited to the anchor.
+- **Exploits closed.** Eccentric-pair Lagrange anchors bill the orbit average but test overload on the orbit maximum and solve the drop footprint at the worst phase. One Lagrange frame per (pair, index), shared; the 64 pool grows instead of refusing, so griefers can't exhaust Lagrange points. A frozen crawling grid plans segments clear of terrain and grids, and a kinematic crawl stops at terrain contact (kinematic bodies pass through statics).
+- **Perf.** Unattended crawls stay `Frozen` (0 per tick) instead of exotic-matter's per-tick kinematic update; the cost row says one `MoveKinematic` only while in a bubble. Wind amortisation corrected to 0.05 µs a tick per ship (0.3 µs at 10 Hz), matching planets' 3 µs for 64 ships.
+- **Several Solar roots.** `FrameKind` gains wormholes' `Mouth` and `Tunnel`, `BubbleAnchor` gains `Tunnel`; tunnels are extra roots outside any system. "Nothing renders across a system boundary" now excepts the mouth's portal view, which wormholes streams. `FrameTree` capacity (4096) now counts grids and mouths and grows in the maintenance window.
+- **Time stops when empty, D10:** faithful; no change needed.
+- **For other docs (not edited here):** exotic-matter should (1) make unattended crawls `Frozen` with piecewise-linear poses, (2) add the Lagrange target to `StationAnchors`, (3) drop "a dampener there cancels `a_hold` all the time" (rest acceleration isn't a manoeuvre), (4) bill plating on the supplied top-up, (5) reconcile its `fc.inertial_dampener` (3/6/10 g, `MassMax`) with ship-design's `fn.dampener` (2–8 g, `F_cap`); ship-design owns the family. wormholes.md says "plating absorbs" throat drag (should be the dampener, up to its rating), and its `FrameKind`/`BubbleAnchor` enums lack `Lagrange`/`Station`.

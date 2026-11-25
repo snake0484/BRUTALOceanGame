@@ -7,7 +7,9 @@
   - Space Engineers' planets work this way.
 - **Shell:** voxels exist only in a **shell** around the surface. Selection classifies chunks outside it as uniform solid or air using a per-planet height-bounds pyramid, with no job and no storage. A chunk is generated deeper only where an edit reaches.
 - **Far LOD: one octree all the way, not a near-voxel / far-quadtree hybrid.** Leaves go up to LOD 12 (4 km voxels, 131 km chunks). LOD 13–15 are internal nodes only. Beyond about 800 km altitude the octree unloads and the planet is a **baked cube-sphere impostor**, so there is no voxel/quadtree seam to solve.
-- **Storage:** nothing is stored except edits. Ops are the edit, network and persistence unit, as now (`BrushOp` replay). Busy LOD-0 chunks compact into zlib snapshots.
+- **Storage:** nothing is stored except edits, and edits are **permanent** (user decision D32). Ops are the edit, network and persistence unit, as now (`BrushOp` replay). Busy LOD-0 chunks compact into zlib snapshots. Growth bounds: "Edits, storage and network".
+- **Limits on digging:** shores and seabeds are unminable (a precise protected band), and rock heats with depth until digging past ~1.7 km is impractical (D29, D30).
+- **Weather:** the pressure-system weather is ported to the sphere (D31).
 - **Precision:** planet frame in `double3`. Chunk origins are integer × size, so they are exact. Everything inside a chunk is float, relative to the chunk centre. Rendering and physics are camera-relative or zone-relative floats.
 - **Ocean:** a sea sphere at `SeaRadius`, drawn where an analytic sea mask says "sea". No voxel water.
   - Shore wash is kept. It runs as now on a 1 km tangent-plane depth map around the camera, which now holds **radial** depth, with a cheap replacement for the coastal carrier.
@@ -52,7 +54,7 @@ Rejected alternatives:
 |---|---|
 | Surface area | 4πR² = 1.26e13 m² |
 | LOD-0 chunks crossing the surface | ≈ 1.26e13 / 1024 × 1.4 ≈ **1.7e10** (never stored) |
-| Assumed relief (default; see open questions) | −8 km (sea floor) … +9 km; dig limit 2 km under the local surface |
+| Relief (decided, D29) | −8 km (sea floor) … +9 km; dig limit 2 km under the local surface, with heat making the last ~250 m impractical |
 | LOD-0 chunk coord range | ±(1,011 km / 32 m) = ±31,600; voxel coords ±1.01e6 (int32 fine) |
 | Octree | LOD 0..15 (LOD 15 = 1,048 km). 8 roots at LOD 15, coords −1..0, planet centre at the origin |
 | Leaf LODs | 0..12. LOD 13–15 always split, because a leaf spanning > ~8° of arc breaks the gnomonic height grid |
@@ -68,6 +70,8 @@ public readonly record struct PlanetParams(
     double SeaRadius,           // NaN = no ocean
     float MinHeight, float MaxHeight,   // relief bounds about Radius (m), e.g. -8000, +9000
     float DigDepth,             // 2000: how far below the local surface chunks may exist
+    float HeatOnsetDepth, float HeatExcessK,   // 800, 900: deep-rock heat (see "Deep heat")
+    float ShoreProtectHeight,   // 6: unedited ground at or below sea + this is unminable (see "Protected shores and seabeds")
     double SurfaceGravity,      // m/s^2 at Radius -> GM = g R^2
     double RotationPeriod, double3 SpinAxis, double RotationPhase0,
     BiomeSetId Biomes, AtmosphereId Atmosphere);
@@ -104,10 +108,11 @@ public readonly record struct BrushOp(double3 Centre, float Radius, BrushMode Mo
 /// Edits: three tiers so a coarse chunk never scans thousands of small ops.
 public sealed class EditStore
 {
-    Dictionary<ulong, OpBucket> _fine;      // key = LOD-5 cell (1 km); every op; read by LOD 0..2 leaves
-    Dictionary<ulong, OpBucket> _coarse;    // key = LOD-10 cell (32 km); ops with Radius >= 4 m; LOD 3..5
-    List<BrushOp> _huge;                    // Radius >= 32 m; LOD >= 6
-    Dictionary<ulong, ChunkSnapshot> _baked;// LOD-0 chunks compacted after 64 ops (zlib via Brutal.ZLib)
+    Dictionary<ulong, OpBucket> _fine;      // key = LOD-5 cell (1 km); every op; read by LOD 0 leaves (k = 2: smaller ops never show coarser)
+    Dictionary<ulong, OpBucket> _coarse;    // key = LOD-10 cell (32 km); ops with Radius >= 4 m; LOD 1..5
+    Dictionary<ulong, OpBucket> _huge;      // key = LOD-10 cell (32 km), op filed in every cell its AABB meets; Radius >= 32 m; LOD >= 6
+                                            // (keyed, not one list: edits are permanent, so a flat list would grow every coarse leaf's scan forever)
+    Dictionary<ulong, ChunkSnapshot> _baked;// LOD-0 chunks compacted after 64 ops; LOD-1..5 chunks baked by coarse compaction (zlib via Brutal.ZLib)
 }
 
 public struct CollisionAnchor { public double3 Position; public double3 Velocity; public float Radius; }
@@ -120,7 +125,7 @@ public struct CollisionAnchor { public double3 Position; public double3 Velocity
 **Height function `H(dir)`:**
 - 3D gradient fBm evaluated at `dir × Radius`. 3D noise on the sphere means no cube-face seams.
 - `Noise` gets a **double-lattice** variant: the cell index comes from `Math.Floor(double)` as `long` and is hashed, the fraction is float. At 1e6 m a float has a 6 cm ulp, which would step the 1/16 m-frequency detail.
-- A continent mask in the low octaves sets ocean basins against land. Where the mask says land, inland ground is clamped ≥ sea + 1 m (the same trick as the crater lake rim), so there are no dry pits below sea level that the sea sphere would flood.
+- A continent mask in the low octaves sets ocean basins against land. Where the mask is past its coastal ramp (inland), ground is clamped ≥ sea + `ShoreProtectHeight` + 1 m (the same trick as the crater lake rim, raised from sea + 1 m), so there are no dry pits below sea level that the sea sphere would flood, and the only ground at or below sea + `ShoreProtectHeight` is seabed or coast joined to the sea. That makes the protected band a pure height test.
 
 **Per chunk:**
 1. Build `ChunkFrame`.
@@ -135,7 +140,7 @@ public struct CollisionAnchor { public double3 Position; public double3 Velocity
    - The existing overhang term runs only inside the surface band.
 4. **Materials:** slope = 1 − the grid gradient magnitude in the tangent frame, plus altitude, latitude (`dot(Up, SpinAxis)`) and the biome. This is the existing `PickMaterial` with new inputs.
 5. **Early outs:** the `PlanetHeightBounds` classify in selection, plus min/max of the grid against the chunk's `w` range in the job.
-6. Replay ops (the tier chosen by LOD; ops with `Radius < s/2` are skipped at LOD ≥ 3), or load a snapshot and then replay later ops, then mesh, then collision if anchored.
+6. Replay ops (the tier chosen by LOD; ops with `Radius < s/2` are skipped at LOD ≥ 3), or load a snapshot and then replay later ops, then mesh, then collision if anchored. In columns flagged protected (step 2 sets a 32×32-bit mask, 128 B, from the height grid), removal is clamped to the generated density (see "Protected shores and seabeds").
 
 **Estimated cost per surface leaf on one core** (estimates; verify with `LastBatchMs / LastBatchChunks` plus per-stage counters before committing to budgets):
 
@@ -198,7 +203,7 @@ Throughput is not the limit. `WorkerBudget.Streaming` (≈ 7 workers on 16 cores
 | Per planet: height bounds | 1.5 MB |
 | Per planet: impostor at 256² per face (R16 height + BC1 albedo + BC5 normal) | ~1.2 MB |
 | Focus body impostor upgraded to 1024² | ~19 MB |
-| Edits | 40 B per op; snapshots ~3–8 KB per compacted LOD-0 chunk; resident only for loaded regions |
+| Edits (permanent) | 40 B per op; snapshots ~3–8 KB per compacted LOD-0 chunk; ≤ ~10.5 KB per touched chunk forever; resident only for loaded regions |
 
 **Bodies loaded at once (client):**
 - 1 **focus body** with the full octree.
@@ -212,18 +217,18 @@ Total for a system: roughly 150–200 MB GPU and 50–80 MB CPU.
 ### Precision, frames, gravity, rotation
 
 - **Planet frame:** `double3`, origin at the planet centre, rotating with the planet. Terrain never moves in it.
-  - The planet's pose in the solar frame (orbit position, plus the spin angle ω·t + phase) is evaluated in double from seed + time each tick.
+  - The planet's pose in the solar frame (orbit position, plus the spin angle ω·t + phase) is evaluated in double from seed + tick each tick (the tick stops while the server is empty, frames-and-zones).
   - The sun direction is transformed into the planet frame for lighting and day/night.
 - **Render:** the camera position is in the planet frame (double). Each leaf's origin is sent as `(float)(origin − camera)`; the push-constant slot is kept until indirect draws land, then it becomes an SSBO. `terrain.vert` math is unchanged.
   - At LOD 12 the relative origin can reach ~2e6 m, a 0.25 m ulp against 4 km voxels: invisible.
   - Reverse-Z infinite projection is already in use (`FlyCamera`).
-- **Physics:** the planet's physics zone is a float frame co-rotating with the planet, re-based near its player cluster (re-base past ~4 km, where precision is 0.5 mm). Chunk bodies sit at `(float)(chunkOrigin − zoneOrigin)`.
-  - Recommended rule for entering and leaving the planet grid: enter below the atmosphere top (0.25 R if there is no atmosphere) and leave 10% above it. On the transition, `v_inertial = v_rot + ω × r`. The physics-zones design owns this.
-- **Fictitious forces are ignored inside the co-rotating zone** (Star Citizen does the same). With a 6 h day, ω²R = 0.08 m/s² and Coriolis at 300 m/s = 0.17 m/s². Both are small, and leaving them out keeps landed ships still.
+- **Physics** (frames-and-zones owns all of this; summarised here): the planet's physics zones are Surface bubbles in the rotating `BodySurface` frame, rebased by 32 m multiples when the cluster centroid passes 1,024 m from the origin (soft radius 2 km, hard 4 km). Chunk bodies sit at `(float)(chunkOrigin − bubbleOrigin)`.
+  - Entering and leaving the rotating frame: enter below `RotatingTop = max(atmosphere top, 0.05 R)`, leave above 1.3 × `RotatingTop`. On the transition, `v_inertial = v_rot + ω × r` (the exact transfer maths).
+- **Fictitious forces are applied** to awake bodies (frames-and-zones): centrifugal 0.085 m/s² at the equator and Coriolis 0.17 m/s² at 300 m/s for a 6 h day. Landed ships still sleep, because the scene gravity already includes the centrifugal term at the origin.
 - **Gravity:**
-  - Jolt world gravity is 0. Each tick, each body gets `AddForce(m · GM / r² · −r̂)`, evaluated in double at its centre of mass.
-  - Characters take `up = r̂` each tick.
-  - Each chunk record stores `Up = normalize(Centre)` for slope classification, placement and character up.
+  - Scene gravity is `g(origin) + centrifugal(origin)`; each awake body adds `m·(g(p) − g(origin))` plus Coriolis, evaluated in double at its centre of mass.
+  - Characters take `up = −ĝ(p)` (gravity plus centrifugal), which differs from `r̂` by at most ~0.25° (at 45° latitude) on a 1 g, 6 h world.
+  - Each chunk record stores `Up = normalize(Centre)` for slope classification and placement.
 
 ### Collision (landing and walking)
 
@@ -237,15 +242,66 @@ Total for a system: roughly 150–200 MB GPU and 50–80 MB CPU.
 ### Edits, storage and network
 
 - **Server-authoritative.** The client sends an edit request. The server validates it, stamps `Seq`, appends it to the region's op log, and broadcasts it to clients whose interest regions overlap. Clients apply it through the existing `ApplyBrush` path, which marks dirty every loaded leaf at any LOD the op affects.
-- **Compaction:** after 64 ops a LOD-0 chunk is baked: final 32³ density + material, RLE then zlib (`Brutal.ZLib`, already in BRUTAL), ~3–8 KB. Its ops are dropped from the fine tier, but kept in the coarse tiers so distant views still show large craters.
+- **Compaction:** after 64 ops a LOD-0 chunk is baked: final 32³ density + material, RLE then zlib (`Brutal.ZLib`, already in BRUTAL), ~3–8 KB. Its ops are dropped from the fine tier, but kept in the coarse tiers (until the coarse cell compacts, below) so distant views still show large craters.
 - **Joining clients** download snapshots plus pending ops for their interest region.
 - **Persistence:** one file per LOD-10 region (32 km) holding snapshots plus the op log.
-  - `GeneratorVersion` is locked per universe: ops survive a generator change, snapshots do not.
+  - `GeneratorVersion` is locked per universe: ops survive a generator change, snapshots do not. Because edits are permanent and compaction drops fine ops, the lock is **for the life of the universe**: generator fixes ship behind a new `GeneratorVersion`, and old universes keep the old code path.
+
+**Permanence and growth bounds (user decision D32: planet edits are permanent).** Nothing regrows, and nothing is aged out. Growth is bounded by structure, not by time:
+- **Per LOD-0 chunk:** at most one snapshot (≤ 8 KB; a chunk dug out to air or filled solid compacts to a 16 B uniform record) plus fewer than 64 pending fine ops (< 2.6 KB). So **≤ ~10.5 KB per touched chunk, forever**, however many times it is edited.
+- **Coarse tiers:** ops with `Radius ≥ 4 m` were kept forever in the coarse tier for distant views. They now compact too: after 256 ops in a LOD-5 cell (1 km), the cell bakes one snapshot per touched **LOD-1..5 surface chunk** (32³ at that chunk's own voxel size, ~4–8 KB each), and its coarse ops drop. Baking only the LOD-5 chunk would show a 20 m crater at 32 m voxels from a LOD-2/3 leaf 1 km away; per-LOD snapshots keep each leaf at its own resolution. A fully worked km² holds ~480 such chunks (~4 MB), under a third of its LOD-0 bound (~1,400 chunks × 10.5 KB).
+- **Huge tier** (`Radius ≥ 32 m`: craters, bombs, impacts, dropped stations, warp arrivals that hit): 40 B per op, bounded by its cost (AM, impacts), filed by LOD-10 cell (32 km) so a leaf scans only the cells it covers (≤ 64 lists for a LOD-12 leaf). Once a cell's list passes 256 ops, it compacts like the coarse tier into snapshots of the touched LOD-6..12 surface chunks.
+- **Edit rate:** the server caps each player at 8 ops/s sustained (burst 32) through the existing validation; a drill is one op per stroke, not per voxel.
+- **Adversarial bound and byte budget:** the rate cap alone still lets a griefer put 64 ops into each new chunk (one fresh 8 KB snapshot per 8 s, ~3.6 MB per played hour, ~1.8 GB a day for 64 such players). The server therefore counts stored bytes per `Author` and, past a budget per played hour (knob, 1 MB; heavy honest mining is ≤ ~0.3 MB), drops that player to 1 op/s until the hour's average is back under. A cap on storage, not on digging where it already has been: re-editing a compacted chunk adds nothing.
+- **Worst-case growth** (estimates): a heavy miner tunnelling 3 m wide at 10 m/min crosses ~30 LOD-0 chunks an hour, ≤ ~300 KB/h. 64 such miners for 8 played hours a day is ≤ ~150 MB a day on disk, an upper bound: typical play (building, surface quarries reusing the same chunks) is about a tenth. Game time stops when the server is empty, so idle servers grow by nothing.
+- **Memory:** only regions near players are resident (snapshots plus ops of loaded LOD-10 regions), as before, so RAM does not grow with world age.
+- **Operator tools:** a disk quota warning in the server log and profiler (`EditStore` bytes on disk / resident), and an admin-only "restore region to generated" command for griefing cleanup. No automatic regrowth.
+
+### Protected shores and seabeds (user decision D30: unminable)
+
+There are no holes below sea level at the coast, so the sea sphere never has to flood anything.
+
+**The band, precisely.** A point `p` is protected iff its column's **unedited** surface is low:
+```
+h(dir) = H(dir)                          the generated surface height about Radius (edits never move it)
+protected(p) = h(dir) ≤ (SeaRadius − Radius) + ShoreProtectHeight      ShoreProtectHeight = 6 m (knob)
+               and |p| ≥ Radius + h(dir) − DigDepth                     the whole column, surface to the dig floor
+```
+- The generator's inland clamp (≥ sea + `ShoreProtectHeight` + 1 m past the coastal ramp) means this holds only for the **seabed** (every column under the sea) and the **coastal strip** inside the ramp. Its width is set by the beach slope: 6 m of rise is 30 m on a 20 % slope, 300 m on a 2 % beach. 6 m clears the highest swash run-up and the storm surge the sea shading draws.
+- It is a function of the column (seed only), so server and clients agree bit for bit, and a protected column stays protected forever.
+- Protection covers the **whole column** down to the dig floor, so nobody can tunnel under a beach or the seabed from inland either. Inland mines below sea level are allowed (no water reaches them).
+- A body with no ocean (`SeaRadius` = NaN) has no protected band and no inland clamp: all of it is minable.
+
+**What edits may do there.**
+- **Removal is clamped, not refused:** in a protected voxel, Subtract and Smooth can't take density below the **generated** density (`d = max(d_op, d_gen)`). A drill stroke that crosses the band still digs its inland part; it just stops at the protected face. The client shows the band as a shaded overlay when a mining tool is out.
+- **Adding is allowed** (piers, sea walls, fill), and added material above the generated surface may be removed again, since that never goes below the unedited ground.
+- **The same clamp applies to every terrain-removing brush:** impact craters, breach damage, anti-graviton and other bomb brushes. Seabeds and shores never crater.
+- **Cost:** the column mask is 128 B per chunk from the height grid already built in step 2. The clamp needs the generated densities during replay, a 32 KB job-scratch copy taken only for chunks that have protected columns and ops (a small share of coastal chunks). The server's validation uses the same mask, so a fully protected op is dropped before it is logged (no storage for it).
+- The `ShoreDepthMap` refinement scan (Ocean section) now only ever sees additions on the shore.
+
+### Deep heat (user decision D29)
+
+Digging stays limited to 2 km under the local surface (the shell). Past a depth, the rock heats until components fail, so in practice digging stops short of the floor.
+
+**Rock temperature** by depth `d` below the **unedited** surface (`Radius + H(dir) − |p|`, so digging a pit never moves the gradient):
+```
+T(d) = T_surf + 25 K/km · d + HeatExcessK · ((d − HeatOnsetDepth) / (DigDepth − HeatOnsetDepth))²    for d > HeatOnsetDepth (800 m)
+T(d) = T_surf + 25 K/km · d                                                                             above it
+```
+
+| Depth | 500 m | 1.0 km | 1.2 km | 1.4 km | 1.6 km | 1.8 km | 2.0 km |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| T at T_surf = 288 K | 300 K | 338 K | 418 K | 548 K | 728 K | 958 K | 1,238 K |
+
+- **Who feels it:** an entity's ambient temperature is `T(d)` when it is below the unedited surface (in a dug cavity or tunnel), else the atmosphere's. Checked at 1 Hz per entity below the surface (one `H(dir)` at ~0.2 µs; most entities skip it via the height bounds).
+- **Damage:** the gas giants' component rule, with a wear stage. Each component has `MaxAmbientK` (default 400 K, about 1.2 km down); above it, it loses `Integrity` at a rate proportional to `T / MaxAmbientK − 1`, is disabled above 1.25×, and is destroyed above 1.5×. Heat-rated variants (data; mining drills, cooled housings) raise `MaxAmbientK` to at most 900 K, about 1.75 km down, at a cost. Suits use the same rule for characters (heat damage, then lethal).
+- **Result:** default kit works to ~1.2 km, rated kit to ~1.6–1.75 km, and nothing lasts at the 2 km floor, so the floor is almost never reached and the shell bound stays a storage bound only. Deep rock can hold richer deposits as the reward (crafting data, not this doc).
+- **Visuals:** a heat tint on deep rock materials (from `T(d)` in `terrain.frag`, no new pass) and a heat shimmer post effect while the camera is below ~1.2 km. Under 0.05 ms.
 
 ### Ocean and shore wash on a sphere
 
-- **Sea:** a sphere at `SeaRadius`, drawn where the **sea mask** (the continent mask, analytic and also baked into the impostor) says sea. No voxel water, no lakes, no rivers.
-  - The underwater fog is the closed-form sea fog only (`WaterFogVolume` is cut).
+- **Sea:** a sphere at `SeaRadius`, drawn where the **sea mask** says sea. The mask is `H(dir) < SeaRadius − Radius` on the generated height, which the inland clamp makes equal to the continent mask's ocean plus its coastal ramp (analytic, and baked into the impostor). Edits never change it. No voxel water, no lakes, no rivers.
+  - The underwater fog is the closed-form sea fog only (`WaterFogVolume` is cut). "Under water" is `sea mask(dir) and |p| < SeaRadius`, so an inland mine dug below sea level is dry and fog-free.
 - **Near surface:** the existing clipmap (`OceanRenderer`, 10 levels) laid out in the camera's tangent plane. Each vertex `(u, v)` is placed at `normalize(r_c·Up + u·T1 + v·T2) × (SeaRadius + η)`, camera-relative. Swell, FFT and swash keep using `(u, v)` as their horizontal coordinates.
   - Distortion across the 12 km clipmap is 1e-4, irrelevant.
   - Past the clipmap, the planet's far shell (or the impostor) draws a shading-only sea: glint and wind roughness.
@@ -253,7 +309,7 @@ Total for a system: roughly 150–200 MB GPU and 50–80 MB CPU.
 - **Depth map** (`BathymetryGrid` becomes `ShoreDepthMap`: 512² × 2 m tangent grid around the camera):
   - The value is **radial** depth `SeaRadius − (Radius + H(dir))`, evaluated analytically on jobs.
   - The existing shift-by-strips and banded rebuild are kept. A 128 m strip is 32k samples ≈ 10 ms of one worker.
-  - Cells under an op's AABB are refined by a radial scan of loaded LOD-0/1 densities, so beach digs show.
+  - Cells under an op's AABB are refined by a radial scan of loaded LOD-0/1 densities, so beach builds (piers, fill) show. Beach digs can't go below the generated surface (protected band), so depth only ever gets shallower.
   - `BathymetryTexture` (R16F, regional upload, GPU shift) is reused as is.
 - **Swash on a curved coast:**
   - `swashSheet` already finds the shoreline along the depth gradient and the beach slope over ±6 m. Bays and headlands are handled by that gradient.
@@ -261,6 +317,32 @@ Total for a system: roughly 150–200 MB GPU and 50–80 MB CPU.
   - **What it loses:** the surf carrier comes from `CoastalField`'s lag map, which is cut. Replace it with a **shore carrier** pass: a compute pass over the depth map, rerun only when the map shifts (~0.02 ms GPU). It takes the shore-normal from the depth gradient smoothed over 32 m, and the phase lag by sweeping 1/c(h) along that normal from deep water. Waves arrive shore-normal, which is where refraction would mostly bring them anyway.
   - Swash cost stays inside the ocean pass as today. The water design decides whether breaker faces and lips survive.
 - **Atmosphere (brief):** per-planet precomputed scattering (Hillaire 2020 LUTs: transmittance, multi-scatter, sky-view, aerial-perspective froxels), ~0.1–0.2 GPU ms. It replaces the sky and fog terms in `terrain.frag` and `ocean.frag`, and hides the impostor ↔ octree switch.
+
+### Weather on a sphere (user decision D31: port the pressure-system weather)
+
+The island's `src/Weather` model (docs/weather.md: analytic pressure systems from seed + time, compact-support profiles, a 32 km snapshot map baked every 5 s) carries over. Only the spawn lattice, the steering wind and the map's plane change. It stays a pure function of seed + tick, so it costs no bandwidth and pauses with game time when the server is empty. Bodies without an atmosphere have no weather.
+
+**Climate per body** (from `PlanetParams.Atmosphere` and the seed):
+- **Steering wind by latitude:** a zonal profile `u(lat)` replaces the single prevailing wind: trades (easterly, 0–30°), westerlies (30–60°), polar easterlies (60–90°) for an Earth-like spin; the band count grows with spin rate (knob). Storminess and base cloud also vary by latitude band from the seed.
+- **Hemisphere sense:** circulation round lows and storms is cyclonic about local up in the north and reversed in the south (sign of `sin lat`). The pressure-gradient wind fades to 0 within 3–10° of the equator (`smoothstep`), so no cyclones spin on the equator.
+
+**Spawn lattice on the sphere.**
+- Rows of 24 km in latitude (1000 km planet: ~131 rows pole to pole). Row `j` holds `n_j = max(1, round(2πR cos lat_j / 24 km))` cells in longitude, so cells stay ~24 km wide to the poles (~22,000 cells on a 1000 km planet, never stored: cell and slot are hashed on demand).
+- Each row's cells drift with that row's steering wind in closed form, `lon_cell(t) = lon0 + u(lat_j)·(t − t0) / (R cos lat_j)` (as the gas giants' storms); a system also has its own drift ≤ 1.5 m/s, as now. Slots and lives (2 slots, 30–60 min periods) are unchanged.
+- **Neighbour bound:** a point looks at its own row and the rows above and below, and in each row the cells whose longitude span lies within 21.1 km (16 km radius + 5.1 km drift) of it (the angular window is taken at the row's poleward edge, so it is conservative). Equatorward of ~75° latitude that is at most 3 per row, still ≤ 9 cells and ≤ 18 candidate systems. Poleward of ~75° a row's cells narrow across its own 24 km width by more than the window's slack (`tan φ · 36 km / R` > 14 %), so up to 4 per row: ≤ 12 cells and ≤ 24 candidates there (the sampler's fixed buffer is sized 24). Rows with very few cells next to the pole simply contribute fewer. The existing bit-for-bit test (`PointSampleSeesEverySystemThatReachesIt`) is ported to the sphere.
+- **Geometry:** each candidate's centre is mapped into the sample point's tangent plane (gnomonic, from the planet-frame unit vectors). Over the ≤ 37 km a system reaches, curvature changes distances by < 0.05 %, so profiles and the no-sqrt wind ring are unchanged.
+
+**Snapshot map.** `WeatherMap` stays 32 × 32 nodes at 1 km, baked every 5 s of game time, one row per tick. Its plane is the camera's tangent plane at the camera's surface point snapped to the LOD-5 lattice (1,024 m), the same plane family the clipmap and `ShoreDepthMap` use. A snapshot's nodes are fixed once baked and samples lerp in time between two snapshots, so re-centring never pops; the from/to pair may differ slightly in node placement, within the map's measured interpolation error (0.12 m/s wind).
+
+**Who samples it:**
+- client: the sky, rain, the sea's wind (swell and FFT), audio, as on the island;
+- server and client: drag and wing lift (frames-and-zones, D10) use the wind relative to the co-rotating air. The server samples the analytic field per awake ship in an atmosphere at 10 Hz (≤ 18 systems, ~0.3 µs) and lerps; it bakes no maps.
+
+**Seen from afar.** For the focus body only, a planet-wide cloud and rain coverage map (cube-sphere 6 × 256², ~6 km texels) is baked on the **GPU** every 60 s of game time: the CPU enumerates the systems alive on the visible hemisphere (≤ ~22k slots × ~50 ns ≈ 1.1 ms worker per bake) and uploads them (≤ 0.7 MB); a compute pass evaluates ≤ 18 systems per texel (< 0.1 ms GPU). The impostor and atmosphere read it for clouds and cloud shadows. Other bodies use a static seeded cloud texture. This also closes weather.md's "visible weather at a distance" gap on planets.
+
+**Cost (estimates):** the tick stays as measured on the island (~0.0003 ms average, ~0.005 ms on bake ticks) plus the row lookup; server ~3 µs a tick for 64 awake ships in atmosphere (10 Hz × 0.3 µs, amortised); the far bake above. Lightning on rocky planets, if added, follows the gas giants' server-only `WeatherSeed` rule.
+
+**Files:** `src/Weather/` gains `SphereWeatherField.cs` (lattice, zonal steering, hemisphere sense) and `PlanetClimate.cs`; `WeatherMap` takes a tangent basis; `GasGiantWeather` can share the row lattice. Shader `weather_coverage.comp`.
 
 ### Seeding
 
@@ -290,15 +372,15 @@ Total for a system: roughly 150–200 MB GPU and 50–80 MB CPU.
 | `src/Terrain.Runtime/BathymetryGrid.cs` | **Change** into `ShoreDepthMap` (analytic radial depth; keep shift and banded rebuild; drop sea/zone/LOD arrays) |
 | `src/Terrain.Runtime/BathymetryTexture.cs` | Reuse |
 | `src/Physics/StaticMeshShape.cs` | Small change: pooled index buffer (zero-alloc) |
-| **New** | `EditStore.cs`, `ChunkSnapshot.cs` (RLE + zlib), `PlanetImpostor.cs` + shader, `ShoreCarrier` compute pass, `SystemGenerator.cs` |
+| **New** | `EditStore.cs` (with coarse compaction), `ChunkSnapshot.cs` (RLE + zlib), `ShoreProtection.cs` (column mask, removal clamp), `DeepHeat.cs` (`T(d)`, 1 Hz ambient), `PlanetImpostor.cs` + shader, `ShoreCarrier` compute pass, `SystemGenerator.cs`, `src/Weather/SphereWeatherField.cs`, `PlanetClimate.cs`, `weather_coverage.comp` |
 | `src/Terrain/Voxels/RiverPath.cs`, `src/Terrain/Water/*` (WaterBlock, WaterBodies, WaterColour, WaterFlow(.Simd), WaterFlows, WaterHalo, WaterMesh, WaterPipes, WaterSurfaceMesher), `src/Terrain.Runtime/Water/*` (VoxelWaterSystem, WaterJobs, ZoneFlowSim), `Rendering/VoxelWaterRenderer.cs`, `shaders/voxel_water.*`, `voxel_water_wind.glsl`, `Engine/Rendering/WaterFogVolume.cs`, `water_fog.glsl`, `Game/TerrainCoastalDepth.cs`, `CoastalSystem.cs`, `Coastline.cs`, island scene tests (Lake/River/Pond/Flood/Cave/Seaside/Surf/Roof) | **Cut** |
 | `src/Water/Ocean/CoastalField.cs`, `CoastalBuilder.cs` | **Cut** (shore carrier replaces the lag map). `OceanSwell` loses its `Coastal*` inputs; `OceanFft`, `Jonswap`, `WaveSet`, clipmap and `swashSheet` stay |
 
 ### Open questions for the user
 
-1. **Relief and dig depth.** Assumed tallest peaks +9 km, deepest sea floor −8 km, digging to 2 km under the local surface. Taller relief widens the shell and the far rings. Deeper digging (to a core?) needs nothing structural, but means more chunks to stream around miners. Are these the targets?
-2. **Edit permanence.** Should terrain edits persist forever for every server (unbounded op logs and snapshots, as in Space Engineers), or regrow after N days without players nearby? This sets disk and memory growth on dedicated servers.
-3. **Day length.** Is a realistic rotation period wanted (it sets the jump of 290 m/s at the equator, for a 6 h day, between the planet frame and space), or slow rotations that keep the frame change mild?
+Relief and dig depth (D29) and edit permanence (D32) are decided and removed from this list.
+
+1. **Day length.** Is a realistic rotation period wanted (it sets the jump of 290 m/s at the equator, for a 6 h day, between the planet frame and space), or slow rotations that keep the frame change mild?
 
 ### Gas giants
 
@@ -307,7 +389,7 @@ Proposed with rings-and-asteroids revision 3 (2026-11-25). User decision: gas gi
 **Body type.**
 - `CelestialKind.GasGiant` (beside exotic-matter's `BlackHole`): a `CelestialBody` on Kepler rails with a `BodyInertial` frame, a rotating `BodySurface` frame, an SOI and patched conics as usual. It has no octree, shell, `EditStore`, collision, deposits or sea.
 - `GasGiantParams(Seed, Radius /*1-bar datum*/, Gravity1Bar, RotationPeriod, SpinAxis, RotationPhase0, Atmosphere, BandStyle, StormStyle, Belt, RingParams? Ring)`, from the system generator or `data/systems/*.json`.
-- **Scale (game-compressed, like the 1000 km rocky worlds):** R = 6,000 km (range 4,000–10,000), 1.2 g at 1 bar (0.9–2.5; scales with README Q1), day 10 h (8–14). That gives μ = 4.24e14 m³/s², escape 11.9 km/s from the datum, low orbit (R + 700 km) 7.95 km/s, equatorial rotation 1.05 km/s, centrifugal 0.18 m/s² at the equator, Coriolis 0.1 m/s² at 300 m/s.
+- **Scale (game-compressed, like the 1000 km rocky worlds):** R = 6,000 km (range 4,000–10,000), 1.2 g at 1 bar (0.9–2.5; rocky worlds are decided at 1 g), day 10 h (8–14). That gives μ = 4.24e14 m³/s², escape 11.9 km/s from the datum, low orbit (R + 700 km) 7.95 km/s, equatorial rotation 1.05 km/s, centrifugal 0.18 m/s² at the equator, Coriolis 0.1 m/s² at 300 m/s.
 - **System generator:** 0–3 giants per system, in the outer system. Each has 2–8 voxel moons (rocky planets of 300–1,500 km radius) between 1.2 × the ring's outer radius and 0.5 × its SOI, and usually 1–3 rings (rings-and-asteroids: dense-leaning band presets, ring inner radius ≥ max(1.15 R, R + 1.3 × atmosphere top + 10 km), so rings stay in `BodyInertial`). Moons cut the rings' resonance gaps and nest under the giant in the frame tree (Solar → giant inertial → moon inertial → moon surface).
 
 **Depth and pressure (closed form, identical on server and clients).**
@@ -335,9 +417,9 @@ rho = p*M / (R_gas*T)           gravity: the point-mass μ/r² (patched conics),
 **Frames, flight, and why there is no landing.**
 - **Rotating band:** `RotatingTop` = atmosphere top (~700 km), leave at 1.3× (frames-and-zones' rule). The frame turns at the giant's interior (System III) rate. Differential rotation is the zonal **wind**, not frame motion.
 - **Bubbles** in the band are surface-anchored in the rotating frame with the C1/C2 rules (scene gravity `g(o)` + centrifugal; per-awake-body gravity delta + Coriolis; 32 m rebases). They hold no terrain colliders: there is nothing to touch.
-- **Landing does not exist.** Below the datum, pressure and heat rise until the crush and then the abyss. A ship stays up by thrust, by wings (if the flight model gets lift, README Q4), or by a station anchor (exotic-matter; very costly this far from an orbit). Buoyant aerostats are an open question.
+- **Landing does not exist.** Below the datum, pressure and heat rise until the crush and then the abyss. A ship stays up by thrust, by wings (the flight model has wing lift in atmosphere, D10), or by an anchor (any grid, D25; exotic-matter; very costly this far from an orbit). Buoyant aerostats are an open question.
 - **Unattended ships** can't be frozen in mid-air. A ship whose last anchor leaves while it is inside the band gets a **sinking rail** unless its orbit's periapsis is above `RailSafeP` (1e-5 bar, ~575 km): closed-form descent (ballistic down to the 0.1 bar level, then terminal velocity along the local wind), with a destruction event scheduled at 1.5 × its crush depth. It costs 0 per tick; the owner sees the predicted loss tick at logout. Only orbits with periapsis above `RailSafeP` get normal orbital rails (with drag decay evaluated at element refresh). (Review fix: the old test, "below 0.1 bar now", gave a ship hovering at 0.09 bar an ordinary rail that fell through the decks with no drag and no crush check.)
-- **Drag** is review's missing system 6, `½ρv²·Cd·A(dir)` relative to the wind, with this density profile. **Buoyancy** `ρ_gas·V_sealed·g` is added per ship (under 3 % of a ship's weight at 10 bar, so it matters only for aerostats).
+- **Drag and lift** are frames-and-zones' aero pass (D10: drag on the hull, lift per wing part, airspeed relative to `GasGiantWind`) with this density profile; it closes review's missing system 6. **Buoyancy** `ρ_gas·V_sealed·g` is added per ship (under 3 % of a ship's weight at 10 bar, so it matters only for aerostats).
 
 **Weather (deterministic from seed + tick, zero bandwidth).**
 - **Zonal bands:** 8–20 latitude bands from the seed, each with a jet speed `u(lat, depth)` (±50–180 m/s, alternating), a colour and deck heights. The band texture and its motion come from them.
@@ -401,7 +483,7 @@ propellant per kg gathered = (v_rel / v_e) * (1 + Cd*A_ship / (2 * eta_s * A_sco
 
 **Open questions.**
 1. **Scale:** R ≈ 6,000 km at 1.2 g (6× the rocky worlds, ~8 km/s to orbit), or smaller and lighter so dives are less of a launch each time?
-2. **Floating stations:** should buoyant aerostats (hot-hydrogen or vacuum envelopes) be a station type that floats at a pressure level, or are cloud bases only possible with costly station anchors?
+2. **Floating stations:** should buoyant aerostats (hot-hydrogen or vacuum envelopes) be a station type that floats at a pressure level, or are cloud bases only possible with costly anchors (now usable on any grid, D25)?
 3. **Belt antimatter traces:** keep AM strictly industrial (default), or enable `BeltAntiprotonYield` as a tiny flavour trickle? That reopens exotic-matter's revision 2 decision.
 4. **Deep reward:** is anything worth the crush zone below the water deck beyond noble gases (for example a rare deep species), or should depth stay a pure risk/cost gradient?
 5. **Lightning and pressure damage to crew:** are implosions and lightning lethal as proposed, or only damaging?
@@ -417,3 +499,27 @@ propellant per kg gathered = (v_rel / v_e) * (1 + Cd*A_ship / (2 * eta_s * A_sco
 - **Scooping abuse:** scoops take gas only. They can't vacuum rubble clouds or ring dust. Skims are self-limiting by Δv: depth changes the rate, not the economics. Ledgers are integer mg at 10 Hz. Gas is infinite, but its cost is propellant, heat and the climb, so abundance only affects prices: one 8.5 t/h skimmer yields ~0.25 kg/h of He-3, enough for ~100 fusion plants at 200 MW. Flagged to exotic-matter as an economy knob (the He-3 fraction), not an exploit.
 - **Perf:** the in-atmosphere cloud march (0.5–0.9 ms) is above the rings' 0.6 ms target. That is accepted only because the band draws no terrain or sea, and it gets its own ≤ 0.9 ms exit check. Server cost per giant is far below a rocky planet's.
 - **Still open:** questions 1–6 above. Q3 reopens exotic-matter's revision 2 decision only if the user wants the trace, and stays off by default.
+
+## Revision (round 5) notes
+
+User decisions 2026-11-25 (decisions.md round 5), applied in place above:
+- **D29 relief and dig depth:** −8…+9 km relief and the 2 km dig floor are decided. New "Deep heat" section: rock temperature `T(d)` by depth below the unedited surface (25 K/km, plus a quadratic excess of 900 K from 800 m to 2 km); components lose integrity above `MaxAmbientK` (400 K default ≈ 1.2 km; heat-rated ≤ 900 K ≈ 1.75 km), suits likewise; the last ~250 m is impractical. `PlanetParams` gains `HeatOnsetDepth`, `HeatExcessK`.
+- **D30 shores and seabeds unminable:** new "Protected shores and seabeds" section. The band is exact: columns whose unedited surface is ≤ sea + `ShoreProtectHeight` (6 m), from the surface to the dig floor; the generator's inland clamp is raised to sea + 7 m so only seabed and the coastal strip qualify. Removal is clamped to the generated density (adding allowed); all crater/bomb brushes obey it; 128 B column mask per chunk; `ShoreDepthMap` note updated.
+- **D31 weather ported to planets:** new "Weather on a sphere" section: latitude rows of 24 km cells with per-row zonal steering, hemisphere-dependent cyclone sense with an equatorial fade, the same ≤ 18-candidate neighbour bound, a tangent-plane snapshot map, server analytic sampling for drag and lift, a GPU-baked planet-wide coverage map for the focus body; costs and files.
+- **D32 edits permanent:** "Permanence and growth bounds": ≤ ~10.5 KB per touched chunk forever, coarse-tier compaction, an 8 ops/s per-player cap, a worst-case ~150 MB/day bound for 64 heavy miners, `GeneratorVersion` locked for the universe's life, admin region restore, no regrowth.
+- **Game time stops when empty:** noted for edit growth and weather (both keyed on ticks).
+- **Open questions:** relief/dig depth and edit permanence removed; day length kept. Gas-giant references updated for D10 (wing lift), D25 (anchors on any grid) and 1 g rocky worlds.
+- **Flagged, not changed:** "Fictitious forces are ignored inside the co-rotating zone" and the enter rule "0.25 R if there is no atmosphere" in "Precision, frames, gravity, rotation" disagree with frames-and-zones (fictitious forces applied; `RotatingTop = max(atmo top, 0.05 R)`); frames-and-zones owns both and should win. (Resolved in the round 5 review below.)
+
+## Round 5 review notes
+
+Lead review, 2026-11-25, against decisions-r5 (D29, D30, D31, D32, D10/D25 for gas giants, time stops when empty). Fixes made in place above:
+- **D29, D30, D31, D32 faithful.** Heat table re-derived (300 … 1,238 K), and the 400 K / 900 K component limits land at ~1.15 km and ~1.75 km as stated. The protected band is a pure seed function and the clamp covers every removing brush. Weather stays a function of seed + tick. No leftover text treats edits as decaying or seabeds as minable. Added: a body with no ocean has no band.
+- **Frame conflicts resolved (were flagged, not changed).** "Precision, frames, gravity, rotation" now defers to frames-and-zones: Surface bubbles with 1,024 m / 32 m rebases (not ~4 km), `RotatingTop = max(atmo top, 0.05 R)` with the 1.3× leave (not 0.25 R / +10 %), fictitious forces applied (not ignored), scene gravity plus per-body delta (not zero Jolt gravity plus `AddForce`), character up `−ĝ`. The pose is from seed + tick.
+- **D32 perf: unbounded huge tier.** `_huge` was one flat list that every LOD ≥ 6 leaf scanned. Edits are now permanent, so impacts, dropped stations and warp arrivals that hit would grow that scan forever. It is keyed by LOD-10 cell and compacts at 256 ops. Fine and coarse tiers now match the k = 2 rule (fine → LOD 0, coarse → LOD 1..5).
+- **D32 visual loss.** Coarse compaction used to bake only a 32 m-voxel LOD-5 snapshot, which would blur 4–64 m craters for LOD 1–4 leaves. It now bakes touched LOD-1..5 surface chunks at their own resolution (≤ ~4 MB per fully worked km², under a third of the LOD-0 bound).
+- **D32 exploit: storage griefing.** The 8 ops/s cap still allowed ~3.6 MB per played hour (64 ops per new chunk). A per-`Author` byte budget (1 MB per played hour, knob) now throttles to 1 op/s; honest heavy mining (≤ 0.3 MB/h) never hits it.
+- **D31 bound.** "≤ 3 cells per row" fails poleward of ~75° because row cells taper within the row. It is now ≤ 4 per row (≤ 24 candidates) there, and the sampler buffer is sized to match.
+- **D30 consistency.** The sea mask is defined as the generated `H(dir) < sea`, the same quantity the band and the inland clamp use, so the drawn sea, the band and dry inland mines (no underwater fog) can't disagree.
+- **Gas giants (D10).** Drag and lift point at frames-and-zones' aero pass with `GasGiantWind`.
+- **Still open:** day length (Q1) and the gas-giant questions.

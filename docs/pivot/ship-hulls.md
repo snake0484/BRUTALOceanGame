@@ -4,6 +4,8 @@
 
 A ship is a **blueprint**: an ordered list of compact, quantized CSG brushes (add, subtract, paint), plus a list of component placements. That list is the only thing that gets saved, sent over the network, edited or damaged. Every peer bakes it locally and in parallel:
 
+**Round 5 (D11, full mesh editing):** a brush is either an analytic primitive or a **mesh brush**: a closed, quantized polygon mesh authored in a vertex/edge/face mesh editor (extrude, loop cut, bevel, mirror, subdivision; see "Mesh brushes"). A mesh brush is one more `BrushShape`, so it sits in the same ordered list and takes the same Add / Subtract / Intersect / Paint ops. The brush list stays the only truth, and every boolean, interior cut, damage hole, mass, room and LOD still comes from the SDF bake. The mesh is never boolean'd as polygons.
+
 - brush list → padded 34³ SDF bricks at **0.25 m cells** (8 m bricks)
 - → dual contouring mesh (render), coarse 0.5 m occupancy (rooms, connectivity), mass moments, convex collision.
 
@@ -23,7 +25,7 @@ The SDF is scratch memory: it is thrown away after the bake, as terrain chunks a
 **Rejected:**
 - **(a) Fine voxel grid as truth:** MBs per ship, edits ship as voxel deltas, resolution locked forever, no clean source to re-bake LOD from.
 - **(b) Polygon CSG with exact booleans (BSP / mesh booleans):** float robustness (slivers, T-junctions), cost explodes with hundreds of damage holes, no rooms, mass or LOD for free, cross-client determinism fragile.
-- **(c) Poly/box modelling with boolean subtract:** needs a real vertex/edge modeller UI (players are bad at it), has (b)'s boolean robustness problems, and meshes don't compress for the network.
+- **(c) Poly/box modelling with boolean subtract *as the truth*:** has (b)'s boolean robustness problems, and meshes don't compress for the network. **Round 5:** the vertex/edge modeller itself is now wanted (D11), so it is kept as an *authoring tool for one brush type* rather than as the representation: each mesh brush is a closed solid that is converted to SDF at bake, and the booleans stay in the SDF. Primitives remain the default tools for players who do not want to model.
 - **Space Engineers block grid only:** not "3D modelling"; it can't cut arbitrary interiors.
 - **V-HACD convex decomposition:** seconds per ship, not deterministic, has to rerun on every hole.
 
@@ -32,9 +34,9 @@ The SDF is scratch memory: it is thrown away after the bake, as terrain chunks a
 ```csharp
 namespace BrutalGame.Ships;
 
-public enum BrushShape : byte { Box, Wedge, Cylinder, Capsule, Sphere, Cone, Prism, Convex }   // Prism/Convex: Param indexes PlaneTable
+public enum BrushShape : byte { Box, Wedge, Cylinder, Capsule, Sphere, Cone, Prism, Convex, Mesh }   // Prism/Convex: Param indexes PlaneTable; Mesh: Param indexes MeshTable
 public enum BrushOp    : byte { Add, Subtract, Paint, Intersect }
-[Flags] public enum BrushFlags : byte { None = 0, Interior = 1, NoCollide = 2, Damage = 4, Mirrored = 8 }
+[Flags] public enum BrushFlags : byte { None = 0, Interior = 1, NoCollide = 2, Damage = 4, Mirrored = 8, Inset = 16, BlowOut = 32 }   // Inset (Mesh only): SDF eroded by Bevel (the wall thickness); BlowOut: an eject or launch panel, evaluated after component cutters
 
 /// Wire + save format, blittable, little endian, 34 B. Order in the list is evaluation order.
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
@@ -49,22 +51,37 @@ public struct HullBrush
     public uint Rotation;         // smallest-three quaternion 2+3×10 bits; decode uses only mul/add/sqrt (no trig)
     public ushort HalfX, HalfY, HalfZ; // 1/256 m (≤256 m half extent)
     public ushort Bevel;          // 1/1024 m: edge rounding (Add) or smooth-union radius
-    public ushort Param;          // cone taper, or PlaneTable index for Prism/Convex
+    public ushort Param;          // cone taper, PlaneTable index for Prism/Convex, or MeshTable index for Mesh
 }
 
 public struct PlaneRef { public short OctU, OctV; public int Dist; }   // 8 B, octahedral normal + 1/1024 m distance; ≤16 per Convex
+
+/// Round 5 (D11): one closed control mesh, shared by every brush whose Param points at it (e.g. the Add brush and its Inset Subtract).
+public sealed class HullMesh
+{
+    public ulong MeshHash;                         // xxHash64 of the canonical bytes below: server "already validated" key
+    public NativeList<MeshVertex> Vertices;        // ≤ 4096
+    public NativeList<byte> FaceSizes;             // 3..16 corners per face, ≤ 4096 faces
+    public NativeList<ushort> Corners;             // vertex indices, CCW seen from outside
+    public NativeList<ulong> CreaseBits;           // 1 bit per canonical edge: sharp crease (kept by subdivision, frame member at construction)
+    public NativeList<ushort> FacePanel;           // per face: panel index (construction piece, aero strip group), ≤ 4096 panels (a 100 m hull needs ~700 at ≤ 25 m² each)
+    public byte SubdivLevels;                      // integer Catmull-Clark, 0..2
+}
+public struct MeshVertex { public int X, Y, Z; }   // 12 B, brush-local, 1/1024 m, |coord| ≤ 2^18 (256 m), so exact Int128 predicates
 
 public sealed class ShipBlueprint                  // also what a prefab is (hull chunk, component housing, or whole ship)
 {
     public ulong ContentHash;                      // xxHash64 of canonical bytes: prefab id + bake cache key
     public NativeList<HullBrush> Brushes;
     public NativeList<PlaneRef> PlaneTable;
+    public List<HullMesh> MeshTable;               // round 5: ≤ 256 entries, indexed by HullBrush.Param for Shape == Mesh
     public NativeList<HullChunkGroup> Chunks;      // authoring groups = the user's "hull chunks"
     public NativeList<ComponentPlacement> Components;
     public NativeList<ushort> Materials;           // ids into data/materials
 }
 
-public struct HullChunkGroup { public uint FirstBrushId, LastBrushId; public ulong SourcePrefab; public int NameIndex; }
+public enum ChunkKind : byte { Hull, Armour, Wing }   // round 5: Wing = lifting surface (D10), its planform is measured from the bake
+public struct HullChunkGroup { public uint FirstBrushId, LastBrushId; public ulong SourcePrefab; public int NameIndex; public ChunkKind Kind; public ushort AeroProfile; public uint WingFrame; }   // Wing only: AeroProfile = data airfoil index, WingFrame = smallest-three span/chord frame set by the Wing tool
 
 public struct ComponentPlacement                    // 30 B
 {
@@ -86,7 +103,7 @@ public sealed class ComponentDesign                 // bought prefab or player m
     public PortalDef Portal;                       // doors/vents: rooms edge when open
 }
 
-public enum SocketType : byte { Mount, Power, Fuel, Data, Coolant }
+public enum SocketType : byte { Mount, Power, Fuel, Data, Coolant, Control }   // round 5 (D17): Control = hard-wired discrete signal (cancel loop, e-stop, eject, arm); see ship-design-and-construction.md "Wiring"
 public struct Socket { public SocketType Type; public int PosX, PosY, PosZ; public uint Rotation; public ushort FootprintHalfX, FootprintHalfZ; }
 
 /// Fixed-point, exactly incremental: subtract old brick, add new, identical on every peer whatever the edit history.
@@ -129,7 +146,7 @@ public sealed class ShipHull                        // runtime, one per ship bod
 ### Evaluation and bake (`HullBrickJob`, modelled on `ChunkJob`)
 
 1. **Gather** the brushes whose AABB plus band overlaps the brick (`BrushBins`), in list order, adding cutters from placed components. Cap: **256 brushes per brick**; the build tool refuses placements past it.
-2. **Evaluate** each brush only over its own band ∩ brick, in order, into padded 34³ `sbyte` density + `byte` material, plus a `ushort` "winning brush" scratch array. Add = min, Subtract = max(d, −b), Paint = material only, Intersect = max. Smooth union uses Bevel as `k`. Ops are scalar plus SIMD, no trig, fixed order: bit-identical on x64. Correctness never depends on it, though: the server owns mass, rooms and splits.
+2. **Evaluate** each brush only over its own band ∩ brick, in order, into padded 34³ `sbyte` density + `byte` material, plus a `ushort` "winning brush" scratch array. Add = min, Subtract = max(d, −b), Paint = material only, Intersect = max. Smooth union uses Bevel as `k`. Ops are scalar plus SIMD, no trig, fixed order: bit-identical on x64. Correctness never depends on it, though: the server owns mass, rooms and splits. A **Mesh** brush is evaluated by its own path (sign by exact ray parity, distance only in the narrow band; "Mesh brushes" below) and then combined with the same min/max ops, so it counts as one brush against the 256 cap.
 3. **Damage layer:** subtract brushes with a jagged edge from `Noise.cs` (seeded by brush Id).
 4. **Outputs:**
    - **All peers:** `MassMoments`, coarse 0.5 m solid/air bitsets, local connected-component labels.
@@ -156,6 +173,69 @@ public sealed class ShipHull                        // runtime, one per ship bod
 - **Life support:** walks the room graph, ~1 µs per room (50 ships × 20 rooms ≈ 0.02 ms, jobified).
 - **Edits:** mass update is O(1) per changed brick (Int128 subtract/add). Collision update is one `MutableCompoundShape.ModifyShape` per changed section, then `MotionProperties.SetMassProperties`; estimated < 0.1 ms main thread.
 
+### Mesh brushes (round 5, D11: full mesh editing, still cuttable)
+
+**Representation.** A mesh brush is a normal `HullBrush` with `Shape = Mesh`: its `Pos`/`Rotation` place the mesh, `Half` is the mesh's AABB half extent (for binning), `Param` indexes `ShipBlueprint.MeshTable`, `Op` and `Material` work as for any brush. The `HullMesh` is a closed polygon control mesh (n-gons of 3–16 corners) in brush-local int32 at 1/1024 m, optional sharp-crease bits per edge, a panel index per face, and 0–2 levels of subdivision.
+- **Integer subdivision:** Catmull-Clark in int64 fixed point, rounding every level to the 1/1024 m grid (round half away from zero), creases by the sharp-edge rule. The subdivided mesh is integer, so every peer gets the same triangles, and every predicate on it (orientation, ray crossing, triangle-triangle) is exact in Int128. N-gons triangulate by a canonical ear clip (fixed start corner, fixed tie-break).
+- **Several brushes may share one mesh entry.** Mirror, duplicate and Hollow emit brushes that point at the same `HullMesh`, so they add 34 B, not a mesh.
+
+**SDF evaluation in `HullBrickJob`** (only for bricks the brush's AABB + band touches):
+1. Per mesh version, once: subdivide, triangulate, build a `TriangleBvh` (Jolt-free `src/Geometry`), cached by `MeshHash`. About 1–3 ms for 64k triangles.
+2. **Sign:** one ray per (y, z) row of the brick along the brick's +X axis, starting **outside the mesh's AABB** (not at the brick face, whose inside/outside state is unknown) and running through the whole BVH, crossings sorted; the parity of the crossings before each cell gives inside/outside for every cell of the row. Ray points are the cell centres taken into mesh-local space by the brush's fixed-point rotation (decoded once per brush, deterministic rounding) and rounded to the 1/1024 m grid, so they are integers; ties on edges and vertices are broken by symbolic perturbation, so the sign is exact and deterministic on every peer. A brick with no triangle within its band is uniform and takes a single ray. This is what mass, rooms and splits read.
+3. **Distance:** closest-triangle queries only for cells within the band (2 cells, or `Inset + 2` cells for an Inset brush) of a triangle, found by rasterising each triangle's band AABB into the brick. The winning triangle's normal is the Hermite normal, so dual contouring puts the mesh's edges and creases exactly where they are (the same reason primitives get sharp edges).
+4. Combine with the running density by the brush's `Op`. Paint, Subtract and Intersect with a mesh work exactly as with a primitive: a sculpted mesh can be a cutter (an intake, a sunken cockpit) and a primitive can cut a mesh hull.
+
+**Still cuttable, "and whatnot".** Because the booleans are in the SDF, a mesh hull loses nothing the primitive hull had:
+- **Interiors:** Hollow on a mesh brush emits an `Interior | Inset` Subtract brush pointing at the same mesh, `Bevel` = wall thickness (0.5–2 m): the mesh's SDF eroded by the wall, an exact offset inside the band. Cut room, cut corridor and any primitive or mesh Subtract still work over it.
+- **Damage holes, breaches, leaks, splits, repair patches:** unchanged; the damage layer subtracts from whatever the brush list made.
+- **In-world cutting:** a cutting torch (boarding, salvage, rescue) writes Subtract brushes into the damage layer along the cut path (a swept capsule per 0.5 m of cut, coalesced by the existing rule). A closed cut loop through a wall makes a hole; a cut across a whole section is a split. Same caps (4096 per ship, 64 per brick).
+- **Mass, CoM, inertia, rooms, LOD, collision:** read the bake, so they need no mesh-specific code.
+- **Dents:** still not modelled (open question 3), but a mesh brush is the natural place for them later: a dent could displace control vertices in a per-ship damage copy of the mesh.
+
+**Validation (designer locally on every commit; server on save and import; validated `MeshHash`es are cached so an unchanged mesh is never re-checked; the cache keeps the canonical bytes and compares them on every hit, because xxHash64 is not collision resistant and a crafted collision must not pass an invalid mesh):**
+
+| Check | Rule | Severity |
+| --- | --- | --- |
+| Closed | every edge has exactly two faces | Error |
+| Manifold | every vertex's faces form one fan; no duplicate faces | Error |
+| Oriented | adjacent faces traverse their shared edge in opposite directions; signed volume > 0 | Error |
+| No self-intersection | of the subdivided triangles: BVH pair traversal, exact Int128 triangle-triangle tests | Error |
+| Degenerate | no zero-area triangle, no edge under 1/64 m after subdivision | Error |
+| Limits | table below | Error |
+| Thin features | baked occupancy volume vs exact mesh volume; any region the bake drops (thinner than the 0.5 m wall) is outlined in the editor | Warning |
+| Self-overlap between meshes | allowed: CSG resolves it | none |
+
+**Mesh editor (designer tool; the "Hull modelling" tool's Mesh mode):**
+- **Select** vertex / edge / face / loop / panel; box and lasso; grow and shrink.
+- **Transform** with gizmos, snap to 1/64 m (1/1024 m quantum underneath), axis and normal constraints, proportional falloff (optional).
+- **Modelling ops:** extrude (face, region, edge, vertex), inset face, loop cut and slide, edge bevel and vertex bevel (≤ 4 segments), bridge edge loops, merge / weld by distance, dissolve (vertex, edge, face), knife constrained to a plane, fill hole, recalculate normals outward, crease toggle. Ops that would leave the mesh open (delete face, knife without closing) are allowed mid-edit, but the brush cannot be committed until it validates.
+- **Mirror:** live mirror across the brush's X, Y or Z plane, seam vertices welded and locked to the plane; committed as one symmetric mesh. The ship-level mirror still emits a second brush sharing the mesh.
+- **Subdivision:** 0–2 integer Catmull-Clark levels with creases; the viewport shows cage and result. Level 2 is refused if the result exceeds the triangle limit; the editor also refuses levels whose edges would fall under 0.125 m (finer than the bake can show).
+- **Convert:** any primitive brush to an editable mesh (box, wedge, cylinder with N sides, sphere as a quad sphere); "Apply group to mesh" (a group of primitives → one mesh by dual contouring the group's bake and decimating to the limits; lossy, so it is a copy, the originals are kept hidden).
+- **Panels:** faces are auto-partitioned into panels (flood fill over face adjacency, stopping at creases, ≤ 25 m² each); the designer can repaint. Panels are construction pieces and aero strip groups.
+- **Feedback:** while editing, the cage and its subdivided surface are drawn directly as polygons (cheap, no bake); committing an op bakes the touched bricks, and a toggle shows the baked result over the cage with lost-detail outlines. Each modelling op is one undoable op.
+
+**Limits and costs:**
+
+| Item | Limit or cost (estimates, measure in the "Ships" profiler panel) |
+| --- | --- |
+| Control mesh | ≤ 4096 vertices, ≤ 4096 faces, 3–16 corners per face, ≤ 4096 panels |
+| Subdivided mesh | ≤ 65,536 triangles per mesh; ≤ 8192 mesh triangles overlapping one brick |
+| Per ship | ≤ 256 `MeshTable` entries, ≤ 131,072 control vertices total, ≤ 1M subdivided triangles total |
+| Mesh bytes | 12 B per vertex + 1 B per face + 2 B per corner + 1 bit per edge + 2 B per face panel: a 1,000-vertex all-quad mesh ≈ 23 KB raw, ≈ 8 KB after delta + zlib; a fully mesh-modelled 100 m hull of ~20k control vertices ≈ 160 KB packed, about 6× a 2k-brush primitive ship |
+| Per-mesh prepare | subdivide + BVH, 1–3 ms per 64k triangles, once per `MeshHash` |
+| Bake per brick | +0.5–1 ms for sign rows and +0.3–1 ms for the band per mesh brush touching it (≈ 2–3× a primitive-only brick); server skips meshing as before |
+| Server validation | ≈ 1 ms topology per 4k faces + 5–30 ms self-intersection per 64k triangles, on low-priority workers, only for new `MeshHash`es; worst case for a whole ship (1M triangles) ≈ 0.5 s CPU, so new-mesh validation also has a per-player budget of 128k triangles per 10 s (ship-design-and-construction.md plan limits): a ship of all-new meshes imports over about 80 s, and 64 players at the cap stay under one core |
+| Edit | a vertex move re-bakes the bricks the moved faces' old and new band AABBs touch (often 4–30 for a large mesh, against 1–8 for a primitive); topology ops re-prepare the mesh |
+
+### Hull features for ship systems (round 5)
+
+- **Wings (D10).** A hull chunk of `Kind = Wing` is a lifting surface. Its planform is measured from the bake, not typed in: the chunk's occupancy is projected on its own chord plane and sliced into ≤ 16 spanwise **aero strips** (area, chord, quarter-chord point, local frame), stored next to `BrickState` (≈ 40 B per strip). `AeroProfile` picks a data airfoil (Cl(α), Cd(α), Cm, stall). A damage hole through a wing re-measures the strips of the touched bricks, so a holed wing loses lift on that side. Control surfaces are components hinged on a wing's trailing edge; flight physics are in ship-design-and-construction.md, "Aero".
+- **Core ejection channel (D12/D13).** A drive's ejectable core is mounted on an eject cradle whose design carries a **cutter for its eject path**: a swept box from the cradle to the hull surface, ending in a **blow-out panel** (an Add brush flagged `BlowOut`, blown off by a damage-layer subtract at eject; replacing it removes that damage brush). Evaluation order in a brick: hull brushes in list order, then component cutters, then `BlowOut` brushes, then the damage layer, so the cutter opens the channel and the panel still closes its mouth. Validation: the swept core volume is clear of other components' housings and of anything that survives the cutter except its own panel (another `BlowOut` brush); Error otherwise. The ejected core ignores collision with its former ship until it clears the hull AABB.
+- **Escape pod bays and station thrusters (D25).** A pod bay is a component whose cutter opens a launch tube to the hull surface (same clear-path rule) ending in an outer hatch (a door portal), so the bay stays a sealed room until launch; station thrusters are ordinary thruster placements.
+- **Inertial dampener coverage (D9).** A dampener's bubble covers the rooms (air components of the bake) whose **every** air cell lies inside its radius, plus designer-marked **bay volumes** (boxes) inside the radius for open hangars, which touch space and so are not rooms; bodies entering or leaving a bay box are grid-membership events. The covered list is recomputed with the rooms, on topology change only, and `m_in` on events (exotic-matter.md).
+- **Wiring (D17).** Cables are routes (`Medium` Power, Data, Control) laid along hull inner surfaces in trays, or **concealed** inside a hull brush through penetrations (harder to cut, costs a penetration fitting each way). Their segments are tested against damage brushes like framed beams (capsule vs brush); see ship-design-and-construction.md, "Wiring".
+
 ### Collision (Jolt)
 
 **Constraints found:**
@@ -176,22 +256,24 @@ public sealed class ShipHull                        // runtime, one per ship bod
 ### Authoring UX (build mode, ship-local grid)
 
 - **Place a primitive** (Box, Wedge, Cylinder, Capsule, Sphere, Cone, Prism by drawing a 2D convex outline, Convex), then drag faces with gizmos. Grid snap 1/8, 1/4, 1/2 or 1 m; rotation snap 15° (free with a modifier). Mode toggle: Add / Subtract / Paint.
+- **Mesh mode (round 5):** convert a primitive to a mesh or start from a cage, then model vertices, edges and faces (extrude, loop cut, bevel, mirror, subdivision...; "Mesh brushes" above). A mesh brush takes Add / Subtract / Paint like any brush, so modelled shapes and primitive cuts mix freely.
 - **Hollow ("cut the interior"):** select Add brushes, give a wall thickness ≥ 0.5 m, and it emits an inset Subtract brush flagged `Interior`. This is the main "interiors cut away" gesture. There is also a "Cut room" tool: drag a box inside the hull.
 - **Editing aids:** bevel handle, mirror planes (mirrored brushes are stored as real brushes), select / move / duplicate / group, and save a group as a HullChunk prefab.
 - **Viewing aids:** cross-section clip plane, hull X-ray, hide groups.
 - **Feedback while dragging:** a GPU-raymarched ghost of the one brush. Committing triggers the bake; nothing is baked per frame while dragging.
-- **Undo/redo** is brush list diffs. Edits go to the server as requests, the server validates them (materials, permissions, limits) and broadcasts with a sequence number.
+- **Undo/redo** is brush list diffs. Edits go to the server as requests, the server validates them (materials, permissions, limits) and broadcasts with a sequence number. (In survival play ship-design-and-construction.md supersedes this: build mode edits plans and the live ship changes through construction steps; this direct path is creative mode.)
 - **Components:**
   - Palette of bought prefabs and the player's own designs. Placing raycasts the hull (`TriangleBvh`) and aligns the Mount socket to the surface normal, snapped to the grid.
   - It is valid only if ≥ 70% of the mount footprint has solid hull behind it, sampled against the coarse occupancy.
   - Typed sockets (power, fuel, data) snap within 0.25 m.
   - A component's cutters carve the hull automatically, e.g. door openings.
-- **Player-made component** = modelled housing (same tools, 1/16 m cells, ≤ 8 m) + a crafted/bought **function core** (data-defined stats). A prefab is just a saved `ShipBlueprint` or `ComponentDesign` keyed by `ContentHash`. Each design is baked once and drawn instanced across every ship.
+- **Player-made component** = modelled housing (same tools including Mesh mode, 1/16 m cells, ≤ 8 m, ≤ 16 mesh entries per housing) + a crafted/bought **function core** (data-defined stats). A prefab is just a saved `ShipBlueprint` or `ComponentDesign` keyed by `ContentHash`. Each design is baked once and drawn instanced across every ship.
 
 ### Networking and saves
 
 - **On join or stream-in:** send `ContentHash`. The client asks for the blueprint only on a cache miss, then gets the brush array (delta + zlib via Brutal.ZLib). A 2k-brush ship is ~25 KB.
 - **Edits and damage:** `{shipId, seq, insert/remove/modify brush at index}` (~40 B), and `{shipId, seq, damage brush}` (34 B).
+- **Mesh entries (round 5):** fetched by `MeshHash` like blueprints (a ship that reuses a mesh prefab sends 8 B). A changed mesh goes as `MeshPatch {meshHashOld, firstVertex, count, int32×3 deltas}` when only positions moved, or a whole entry (≤ ~90 KB raw, typically 5–20 KB packed) after a topology op. In the plan model (ship-design-and-construction.md) these ride in the plan diff on save.
 - **Determinism:**
   - **Server-authoritative:** mass, rooms, splits and collision. Clients' local values are used only for prediction and visuals.
   - **Deterministic by construction anyway:** quantized inputs, fixed order, no trig, Int128 moments.
@@ -221,7 +303,7 @@ public sealed class ShipHull                        // runtime, one per ship bod
 - **Coalescing:** when overlap is > 50%, merge into the bounding sphere. Caps: 4096 per ship, 64 per brick.
 - **Split check:** after each damage event, run solid union-find over the touched bricks.
   - If it becomes disconnected, the piece with the most mass keeps the body.
-  - Each other piece becomes a new body whose blueprint is: the brushes whose AABB meets the piece's bounds (copied, re-centred) + the damage brushes + `KeepSeedCell`. The bake discards solid not connected to the seed. Seeds are a few bytes, so this stays network-compact and deterministic.
+  - Each other piece becomes a new body whose blueprint is: the brushes whose AABB meets the piece's bounds (copied, re-centred; mesh brushes keep pointing at their `HullMesh` by `MeshHash`, so no mesh bytes are copied) + the damage brushes + `KeepSeedCell`. The bake discards solid not connected to the seed. Seeds are a few bytes, so this stays network-compact and deterministic.
   - A piece of < 2 m³ becomes debris: a convex hull plus a mesh snapshot, no blueprint, despawned on a timer.
 - **Components** go with the piece holding their anchor cell. If the anchor cell is destroyed, the component detaches as its own dynamic body.
 
@@ -229,6 +311,7 @@ public sealed class ShipHull                        // runtime, one per ship bod
 
 - **Near:** LOD L re-bakes at 0.25·2^L m cells in 8·2^L m bricks, the same octree scheme as `ChunkCoord.Lod` and terrain skirts.
 - **LOD ≥ 2:** skips `Interior`-flagged brushes unless they breach the outer surface, so far ships carry no interior triangles at all.
+- **Mesh brushes at LOD ≥ 1** use one subdivision level fewer (level 0 at LOD ≥ 2): the SDF is re-baked at coarser cells anyway, so the finer cage would be wasted triangles in the BVH. Sign comes from the reduced mesh too, which can shift coarse occupancy by under one LOD cell; mass and rooms always come from the L0 bake, so this is visual only.
 - **Beyond ~2 km:** one whole-ship bake at 2–4 m cells.
 - **Beyond ~30 km:** impostor or lit point.
 - **L0 budget:** ≤ 400k tris per 100 m ship (~1M raw, ~100k after simplify). L0 mesh memory ~10–15 MB per 100 m ship; only nearby ships hold L0.
@@ -241,6 +324,9 @@ public sealed class ShipHull                        // runtime, one per ship bod
 | Hull brushes | ≤ 8192 per ship |
 | Damage brushes | ≤ 4096 per ship |
 | Brushes overlapping one brick | ≤ 256 |
+| Mesh brushes (round 5) | ≤ 256 `MeshTable` entries; ≤ 4096 control vertices and faces each; ≤ 65,536 subdivided triangles each; ≤ 131,072 control vertices and ≤ 1M subdivided triangles per ship; ≤ 8192 mesh triangles per brick |
+| Mesh inset (Hollow wall) | 0.5–2 m |
+| Wing aero strips (round 5) | ≤ 16 per Wing chunk, ≤ 16 Wing chunks per ship |
 | Hull cell size | 0.25 m |
 | Minimum hull wall / feature | 0.5 m (finer detail belongs in components, at 1/16 m cells, ≤ 8 m bounds) |
 | Render triangles | ≤ 8k per brick after simplify; ≤ 400k per ship at L0 |
@@ -258,17 +344,47 @@ public sealed class ShipHull                        // runtime, one per ship bod
 | `src/Terrain/Editing/BrushOp.cs` | **Pattern reused** (ops replayed after generation, band-limited apply loop). Terrain keeps its sphere ops; hulls get `HullBrush`. |
 | `src/Terrain.Runtime/ChunkJob.cs` | **Template** for `HullBrickJob`. |
 | `src/Physics/StaticMeshShape.cs` | **Reuse** for interior-zone static hull collision. |
-| `src/Physics/TriangleBvh.cs` | **Reuse** for build picking; make it public. |
+| `src/Physics/TriangleBvh.cs` | **Reuse** for build picking; make it public. Round 5: moved to Jolt-free `src/Geometry` (ship-design-and-construction.md) and also used for mesh-brush sign rays, band distance and self-intersection checks; needs integer (Int128) exact ray and triangle-triangle predicates beside its float queries. |
 | `src/Physics/PhysicsWorld.cs` | **Add** `AddDynamicCompound(shape, pose, MassMoments)`, `SetShape`, `SetMassProperties`, and compound/section handles. |
 | `src/Physics/ObjectLayers.cs` | **Add** ShipExterior and ShipInterior layers. |
 | `src/Terrain.Runtime/Rendering/TerrainRenderer.cs`, `src/Terrain.Runtime/Rendering/RangeAllocator.cs` | **Reuse** the arena, staging and indirect-draw code. Push constants become per-draw instance data (ship pose camera-relative from double, plus brick origin and scale). **Cut** the `WaterFogVolume` dependency. |
 | `src/Terrain/Voxels/Noise.cs` | **Reuse** for jagged damage edges. |
-| **New** | `src/Ships` (Blueprint, Brushes, Bake, Mass, Rooms, Damage, Components), `src/Ships.Runtime` (jobs, collision sections, renderer, build tools), `data/components`, `data/ship-materials`. |
+| **New** | `src/Ships` (Blueprint, Brushes, Bake, Mass, Rooms, Damage, Components), `src/Ships.Runtime` (jobs, collision sections, renderer, build tools), `data/components`, `data/ship-materials`. Round 5: `src/Ships/Meshes/` (`HullMesh.cs`, `MeshCanonical.cs` (canonical bytes, `MeshHash`), `IntSubdivision.cs` (integer Catmull-Clark, creases), `MeshSdf.cs` (sign rows, band distance, inset), `MeshValidate.cs`), `src/Ships/AeroStrips.cs` (wing planform from the bake), `src/Designer/Tools/MeshTool.cs` (editor ops, each an invertible op), `data/aero/airfoils.json`. |
 
 ### Open questions for the user
 
 1. **Hull resolution:** is 0.25 m cells with a 0.5 m minimum wall acceptable for hulls? Each halving costs about 4–8× in bake time and memory; finer detail would go into components.
-2. **Smooth hulls:** are primitives + convex brushes + bevel / smooth-union enough for the hull shapes you want, or do you need lofted / spline surfaces (Star Citizen-style organic hulls)? Those are a bigger tool and a new brush type.
+2. ~~**Smooth hulls**~~ (decided, D11: full mesh editing, still cuttable). Answered by mesh brushes with integer subdivision and creases; organic hulls are subdivision cages. Lofted / spline surfaces are not planned.
+   - **New sub-question:** mesh detail finer than the 0.25 m cell (thin fins, small chamfers) is lost in the bake and flagged by the thin-feature warning. Is that acceptable, or should small craft (≤ 30 m) get an optional 0.125 m hull cell (about 4–8× bake time and memory for those ships)?
 3. **Damage:** are CSG holes (clean or jagged) enough, or do you want dents and deformation? This representation doesn't do dents.
-4. **Player-made components:** do they work as "modelled housing + crafted/bought function core", or should players be able to design function too (e.g. engine performance from nozzle geometry)?
-5. **Survival building:** do brushes cost materials by volume and take weld time in place (Space Engineers), or are ships designed freely and then printed at a shipyard?
+4. ~~**Player-made components**~~ (answered by ship-design-and-construction.md: function is derived from a part graph, not from housing geometry).
+5. ~~**Survival building**~~ (answered by ship-design-and-construction.md: plans, bought or made parts, and construction steps; creative mode builds instantly).
+
+## Revision (round 5) notes
+
+User decisions round 5 (decisions-r5.md) applied in place; they win over earlier text.
+
+- **D11, full mesh editing, still cuttable.** New `BrushShape.Mesh` referencing a shared `HullMesh` in `ShipBlueprint.MeshTable`: closed n-gon control mesh in brush-local int32 1/1024 m, crease bits, face panels, 0–2 levels of integer Catmull-Clark. The CSG brush list stays the only truth; mesh brushes take Add / Subtract / Intersect / Paint and are converted to SDF at bake (exact ray-parity sign per brick row, narrow-band closest-triangle distance, triangle normals as Hermite data), so booleans, interiors, damage holes, mass, rooms, collision and LOD come from the bake unchanged. Rejected option (c) reworded: the modeller is now an authoring tool for one brush type, not the representation.
+- **Hollow on meshes** uses a new `BrushFlags.Inset` Subtract brush sharing the mesh, eroding its SDF by the wall thickness (0.5–2 m).
+- **In-world cutting** (cutting torch for boarding, salvage, rescue) writes swept-capsule Subtract brushes into the damage layer; works on primitives and meshes alike.
+- **Mesh validation** table (closed, manifold, oriented, no self-intersection with exact Int128 tests, no degenerates, limits; thin-feature warning), done locally on commit and on the server only for new `MeshHash`es.
+- **Mesh editor** tool list (select modes, snapped transforms, extrude, inset, loop cut, bevel, bridge, merge, dissolve, knife, fill, crease, live mirror, subdivision, convert primitive / group to mesh, panels) and its preview / commit model.
+- **Mesh limits and costs** (vertices, faces, triangles per mesh, per ship and per brick; bytes; prepare, bake, validation and edit costs, all estimates) added to the section and to the Limits table; mesh network messages (`MeshHash` fetch, `MeshPatch`); LOD drops one subdivision level per LOD step.
+- **Ship-system hull features:** `ChunkKind` (Hull, Armour, Wing) with `AeroProfile`; wing aero strips measured from the bake (D10); core eject path cutter and blow-out panel with a clear-path rule (D12/D13); escape pod bay launch tubes and station thrusters as placements (D25); dampener bubble room coverage (D9); `SocketType.Control` and concealed vs tray wiring with damage tests (D17). Behaviour of each lives in ship-design-and-construction.md.
+- Open question 2 marked decided; a sub-question on an optional 0.125 m cell for small craft added. Files table: `src/Ships/Meshes/`, `AeroStrips.cs`, `MeshTool.cs`, `data/aero/airfoils.json`; `TriangleBvh` gains exact integer predicates.
+
+## Round 5 review notes
+
+Skeptical lead review, 2026-11-25, against decisions-r5.md and the round 5 copies of ship-design-and-construction.md, exotic-matter.md, warp.md and frames-and-zones.md. Decisions were not re-litigated; every fix below is made in place above.
+
+- **D11 faithful:** full vertex / edge / face editing exists, and hulls stay cuttable (booleans, Hollow, damage, cutting torch) because the brush list stays the truth and meshes go through the SDF. Compact (mesh by hash, `MeshPatch`), deterministic and server-validated, as asked.
+- **Sign rays were wrong:** a parity ray started at the brick's −X face cannot know whether it starts inside. Rays now start outside the mesh AABB; their points are integer (fixed-point rotation, rounded to 1/1024 m) so the "exact Int128" claim holds for rotated brushes; uniform bricks take one ray (perf).
+- **Panel index overflow:** `FacePanel` was a byte (≤ 255 panels) but panels are ≤ 25 m², so a 100 m single-mesh hull (~16,000 m², ~700 panels) could not be partitioned. Now `ushort`, ≤ 4096; mesh bytes +1 B per face.
+- **Exploit, validated-mesh cache:** keyed by xxHash64 alone, a crafted collision could pass an invalid mesh. The cache now byte-compares on hit, like the plan store.
+- **Perf, server validation:** 0.5 s per ship "within the import rate limit" is 3.2 cores at 64 players. Added a per-player budget of 128k new triangles per 10 s (≈ 65 ms), matching ship-design-and-construction.md's plan limits.
+- **D12/D13 channel:** "an Add brush flagged as the panel" had no flag and no evaluation order, so component cutters would have cut the panel away too. Added `BrushFlags.BlowOut` and the order: hull, cutters, `BlowOut`, damage. The ejected core ignores its own ship's collision until clear.
+- **D25 pod bays:** a launch tube open to the hull surface would breach the bay room permanently; it now ends in an outer hatch.
+- **D9 coverage:** "rooms whose cells lie inside" was ambiguous, and open hangars (exotic-matter covers docked craft) are not rooms. Now: every air cell inside, plus designer-marked bay volumes.
+- **D10 wings:** the "chord plane" had no stored frame; `HullChunkGroup.WingFrame` added (set by the Wing tool).
+- **Leftovers:** `Param` comment names Mesh; splits keep mesh references by hash; open questions 4 and 5 marked answered by ship-design-and-construction.md; the direct-edit networking path is noted as creative mode under the plans model.
+- **D17 wiring:** concealed vs tray cables and capsule damage tests are consistent with ship-design-and-construction.md "Wiring"; nothing changed.

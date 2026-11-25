@@ -1,30 +1,31 @@
 # Exotic matter and antimatter
 
-Status: design only. Nothing has been built or run, and no repo files were changed. Written 2026-11-25 against README.md, warp.md, wormholes.md, frames-and-zones.md, planets.md and ship-hulls.md. **Revision 2** (2026-11-25) adds five user decisions: runaway bursts, antimatter made in industrial facilities, two warp drive kinds, pirate kit, and station anchors. They are listed under "Revision 2 notes". A skeptical review of Revision 2 corrected several formulas, numbers and exploits in place; those corrections are listed under "Revision 2 review notes". **Revision 3** (2026-11-25) follows the wormhole stability decisions (wormholes.md revision 3) from the exotic-matter side: a decay floor and a purity cap for crystal, wormhole additives, stabilisers and what they burn, anti-graviton pulses that drain wormhole stability (replacing the stall), and which devices draw a wormhole's retaliation inside a tunnel. They are listed under "Revision 3 notes" at the end. Every number is a knob and every cost is an estimate to measure. Where this doc changes another doc, the change is listed under "Changes to other docs". Review.md's rulings still win where they apply.
+Status: design only. Nothing has been built or run, and no repo files were changed. Written 2026-11-25 against README.md, warp.md, wormholes.md, frames-and-zones.md, planets.md and ship-hulls.md. **Revision 2** (2026-11-25) adds five user decisions: runaway bursts, antimatter made in industrial facilities, two warp drive kinds, pirate kit, and station anchors. They are listed under "Revision 2 notes". A skeptical review of Revision 2 corrected several formulas, numbers and exploits in place; those corrections are listed under "Revision 2 review notes". **Revision 3** (2026-11-25) follows the wormhole stability decisions (wormholes.md revision 3) from the exotic-matter side: a decay floor and a purity cap for crystal, wormhole additives, stabilisers and what they burn, anti-graviton pulses that drain wormhole stability (replacing the stall), and which devices draw a wormhole's retaliation inside a tunnel. They are listed under "Revision 3 notes" at the end. **Revision 5** (2026-11-25) applies the user's round 5 answers (D9, D12–D14, D20–D25, D28): a separate inertial dampener, the runaway override kept, core ejection as the main runaway counterplay, multiple drives whose bubbles support each other, very long-lived black holes with deliberate collapse equipment, EM supply from planets and asteroids (remnants rare), natural < warp < manufactured travel costs, lingering radiation, anchors on any grid that can crawl, and pull-only tractors without AM. They are listed under "Revision (round 5) notes" at the end and win over any older text; a skeptical review aligned them with warp.md, frames-and-zones.md and ship-design (see "Round 5 review notes"). Every number is a knob and every cost is an estimate to measure. Where this doc changes another doc, the change is listed under "Changes to other docs". Review.md's rulings still win where they apply.
 
 ## Recommendation in one paragraph
 
 **Exotic matter (EM)** is one item family with a continuous **purity** `q ∈ [0, QMax]`, where `QMax = 0.995`: complete purity is never reached. A stack stores its **mass and its content** (`ContentMg`, the EM-bearing part). Purity is content ÷ mass. Named grade bands are used for display and for each device's purity gates. Every amount is **content**: 1 EM = 1 kg of content, the unit wormholes.md already counts in (`Xk = 10 EM`). Stacks from crude refineries are **unassayed**: their shown (nominal) purity can be off from the true purity by up to a stated spread. Only the server knows the true value. An assay removes the error.
 
-Black holes make EM. Long ago their jets seeded EM into planets (rock at 0.02–0.2 %) and asteroids (0.3–3 %), so those deposits are poor. Black holes themselves yield 40–99 %. Each black hole collapses on a seeded tick into a small **remnant** planetoid that is EM-bearing rock all the way down. It is poorest at the surface and richest at the core, with crystal geodes at the centre. The whole remnant can be dug out.
+**Where EM comes from (decision D22):** black holes make EM, but there is no flood of it. All the EM that earlier generations of black holes made has long since been **recycled into planets and asteroids**, the way uranium came from earlier stars. Those deposits are the **main supply**: planet rock at 0.02–0.2 % and asteroids at 0.3–3 %, poor but everywhere. A living black hole yields 40–99 %, but only to the most advanced harvesters. Black holes **last a very long time** (decision D21), so their collapse into a small **remnant** planetoid (EM-bearing rock all the way down, poorest at the surface, richest at the core, crystal geodes at the centre, diggable whole) is a **rare, late event**, not a supply line. Equipment can deliberately force a collapse sooner, at great cost (see Deliberate collapse).
 
 Purity is raised in steps by **recrystallisation**. Ore first goes through a concentrator. Refining is one data-driven recipe family: each tier multiplies the odds of purity by a factor α, loses some yield, and leaves a residue that can be recycled. The top tier needs **seed crystals**, and the first seed crystals can only come from a black hole. Crude refineries anyone can build are cheaper, but they lose more yield and their output is unassayed. Crystal outside stasis decays, but only down to a **floor** (0.96, still throat grade), never to nothing.
 
 **Additives** are a crafting and trading layer on top: up to two additive items, together at most 10 % of the exotic matter's mass, can be mixed into a wormhole generator's throat-grade charge for specific effects (longer life, a wider mouth, flow bias or reversal, masking, faster charge, a bigger stability reserve), each with a trade-off. Additives count as impurity against the generator's purity gate, so heavy doping needs purer EM.
 
-**EM + antimatter (AM) → anti-gravitons**, at a fixed 0.005 kg of AM per kg of EM content. Every device that manipulates gravity runs on this reaction, and each one has a minimum purity:
-- **warp bubbles**, in two drive kinds:
+**EM + antimatter (AM) → anti-gravitons**, at a fixed 0.005 kg of AM per kg of EM content. **EM driven by bus power alone emits only gravitons** (decision D28): it can pull, never push. Every device that manipulates gravity runs on one of the two, and each one has a minimum purity:
+- **warp bubbles**, in two drive kinds (several drives on one ship form one supporting bubble, decision D14):
   - **slurry drives** burn a premixed slurry of crude EM and a mixing agent, all of it consumed. They are heavy per jump and can never run away.
   - **recirculating drives** dilute fuel-grade EM on board and recover about 95 % of the agent. They use about 3–5× less mass per jump and cost less to run, but cost more to build;
-- plating and inertial dampening;
-- tractor beams;
+- gravity plating (floor gravity);
+- the **inertial dampener**, a separate device (decision D9): it keeps everything inside its bubble moving with the ship, burning field-grade EM and bus energy (graviton emission, no AM) up to its rating; beyond the rating, occupants and cargo feel the excess;
+- tractor beams: **pull only** on graviton emission; pushing needs the AM reaction;
 - wormhole throats, catchers and natural redirects (high grade);
 - tidal compensators and gravity dampers;
-- **station anchors**, which hold a station fixed in a planet's rotating frame at any altitude. Their cost grows with mass × the acceleration the anchor must supply to hold the station co-rotating; it is zero at the equatorial synchronous radius.
+- **station anchors**, which hold a grid fixed in a planet's rotating frame at any altitude. Any grid can carry one (decision D25), but it engages only once the grid has reached the required position and, mostly, the required velocity. An anchored grid can crawl slowly to a new pose over days through the anchor's inputs. Anchors never attach to asteroids (tractors do that). Their cost grows with mass × the acceleration the anchor must supply to hold the grid co-rotating; it is zero at the equatorial synchronous radius.
 
 The warp interdiction emitter stays power-only, as README and wormholes.md decided. So do wormhole **stabilisers** (battleship kits and support-ship projectors that feed a wormhole's stability reserve, or drain it in reverse): they pour bus power into a throat that already exists rather than making anti-gravitons, so they burn AM only through the annihilation cores that supply GW-class power (about 5 mg/s for a 2 GW feed). Their crafting needs a throat-grade graviton lens.
 
-**Runaway:** a recirculating drive can run away when EM purer than its window reaches the reaction. That happens through a deliberate overfeed, off-spec unassayed stock, or a diluter breached by damage. The crew get a 3 s alarm, then an anti-graviton burst wrecks the ship and pulses its surroundings through the shared `PulseKick`. The crew can purge the line or eject the core. Slurry drives can't run away, whatever they burn; neither can recirculating drives whose feed is truly (assayed) low fuel grade, at most 0.42.
+**Runaway:** a recirculating drive can run away when EM purer than its window reaches the reaction. That happens through a deliberate overfeed, off-spec unassayed stock, or a diluter breached by damage. The crew get a 3 s alarm, then an anti-graviton burst wrecks the ship and pulses its surroundings through the shared `PulseKick`. The reaction chamber is very highly rated, so the no-warning chamber rupture is rare, and **the entire core can always be ejected** (decision D13): core ejection is the main counterplay, with purging the line as the other. The owner can also deliberately override the interlock as a scuttle or kamikaze (decision D12), with its safeguards kept. Slurry drives can't run away, whatever they burn; neither can recirculating drives whose feed is truly (assayed) low fuel grade, at most 0.42.
 
 **Antimatter is made only in power-hungry industrial facilities:** 2 TJ per gram. The round trip back through an annihilation core returns 20 %. AM is stored in traps and burnt in several places:
 - annihilation cores, the only GW-class power on a ship;
@@ -32,7 +33,7 @@ The warp interdiction emitter stays power-only, as README and wormholes.md decid
 - the anti-graviton reaction;
 - weapons (torpedo warheads and the annihilation lance).
 
-Annihilation radiation is dosed through the hull's occupancy shielding: the flares' `ShieldTable` for sources outside the ship, plus a baked internal path from each onboard source. Crude or lightly shielded use irradiates the crew and anything nearby.
+Annihilation radiation is dosed through the hull's occupancy shielding: the flares' `ShieldTable` for sources outside the ship, plus a baked internal path from each onboard source. Crude or lightly shielded use irradiates the crew and anything nearby. Radiation is both transient and lingering (decision D24): breaches and long exposure leave contamination that keeps dosing, short-term exposure can be treated with medicine, and long-term exposure causes health effects that need expensive treatment.
 
 **Power** means generators feeding a per-ship bus, with capacitors on that bus.
 
@@ -43,11 +44,12 @@ An **anti-graviton charge** (the crude mix) makes a gravity pulse:
 
 The stall of revision 2 is gone: wormholes.md revision 3 made `TClose` a paid maximum rather than a guarantee, so a bomb fight is now an energy fight. Feeders at the cap, overcharge, gravity dampers over the mouths (station cores, so at stations) and a cheap re-establish are the defence. An unfed r = 100 m wormhole falls to a 10 kg-yield charge at point blank; the same wormhole overcharged and fed at the cap survives 22.5 kg. Bombs, drive runaways, black-hole collapses and wormhole flushes all go through one shared `PulseKick`, which has a per-body kick budget.
 
-**Inside a tunnel** (wormholes.md, Tunnels), anything projecting gravitons or anti-gravitons outside its own hull draws a retaliation strike from the wormhole: tractors, gravity dampers, armed charges, destabilisers, emitters and catchers. Plating, dampening and tidal compensators act inside the hull and are never struck. Each function core's data says which kind it is.
+**Inside a tunnel** (wormholes.md, Tunnels), anything projecting gravitons or anti-gravitons outside its own hull draws a retaliation strike from the wormhole: tractors, gravity dampers, armed charges, destabilisers, emitters and catchers. Plating, the inertial dampener and tidal compensators act inside the hull and are never struck. Each function core's data says which kind it is.
 
 Everything runs on events or at 10 Hz (1 Hz for dose):
 - Ship upkeep (power, consumables, factories) is one staggered ledger at 10 Hz.
-- An anchor's rate is constant for its fixed pose, so its reserve is settled lazily and its warnings and failure are scheduled events. An anchor adds nothing per tick; an unattended anchored station is `Frozen` and costs no physics.
+- An anchor's rate is constant for its fixed pose (and per crawl segment while it crawls), so its reserve is settled lazily and its warnings and failure are scheduled events. An anchor adds nothing per tick; an unattended anchored grid that is not crawling is `Frozen` and costs no physics.
+- The inertial dampener's EM and energy are accumulated in the force pass with thrust (a few ns per grid) and debited in the 10 Hz ledger.
 - Batches, runaways and collapses are scheduled events. Crystal decay is evaluated lazily, and stops at the floor.
 - Stabiliser feeds are ordinary bus draws in the same ledger; wormholes.md integrates the reserve from slope events. Additives are drawn once, with X, at charge start.
 - The only per-body costs at 60 Hz are a few nanoseconds of thrust accounting, plus tidal torque and an integrated bubble origin near a black hole.
@@ -75,7 +77,7 @@ Everything runs on events or at 10 Hz (1 Hz for dose):
 4. **Pirates use what they can get:**
    - crude refinery systems: poor yield and inconsistent purity, which raises runaway risk in recirculating drives;
    - mixed fleets of both drive kinds;
-   - even two warp drives in one ship.
+   - even two warp drives in one ship (since round 5, D14: several drives whose bubbles support each other).
 5. **Planets rotate.** Stations can use a **station anchor**. It consumes EM, plus AM through the reaction, to keep the station in one place above a body where an orbit may not normally be possible, which simplifies low stations.
 
 **Revision 3** (the wormhole decisions A–H; this doc carries the exotic-matter side, wormholes.md the rest):
@@ -85,6 +87,19 @@ Everything runs on events or at 10 Hz (1 Hz for dose):
 - **D, E, G (tunnels, interiors, collapse flow):** wormholes.md only. Here: what tunnel discharges and collapses do to EM and AM devices on board.
 - **F, combat in tunnels:** anything projecting gravitons or anti-gravitons outside the ship draws a retaliation strike; gravity plating is fine. Here: which devices count.
 - **H, crystals and additives:** crystal decays only down to a set floor, not to nothing. Complete purity is not expected (a cap below 1.0). Additives can be mixed into throat-grade EM for specific wormhole effects (duration, mouth size, flow bias or reversal, signature masking, charge speed, stability), each with trade-offs: a crafting and trading layer.
+
+**Round 5** (the user's answers to the consolidated open questions; these win over any older text here):
+- **D9, interior gravity:** plating gives gravity; a **separate inertial dampener** keeps everything inside its bubble moving with the ship, at the cost of energy, using EM and energy up to a limit (beyond its rating, occupants and cargo feel the excess). See Gravity plating and the inertial dampener.
+- **D12, deliberate runaway override:** yes (scuttle or kamikaze), with its safeguards kept.
+- **D13, runaway severity:** the reaction chamber is very highly rated, and the **entire core can be ejected**; core ejection is the main counterplay.
+- **D14, several warp drives on one ship:** their bubbles **support each other**; the resulting quality is an average weighted by the power each provides (replaces "only one spools").
+- **D20, AM energy and production scale:** fine for now.
+- **D21, black-hole lifetime:** they naturally last a very long time, but equipment can deliberately make them collapse sooner.
+- **D22, remnant abundance:** no flood. All existing EM is assumed recycled into planets and asteroids (as uranium came from earlier stars); remnants are rare, late events, not the main supply.
+- **D23, travel economics:** natural wormholes are the **cheapest**, manufactured wormholes the **fastest**, and warp is for going somewhere specific, relatively close by, cheaply. This replaces the blanket "warp cheaper, wormholes costlier".
+- **D24, radiation:** both transient and lingering. Short-term exposure can be treated with medicine; long-term exposure causes health effects that need expensive treatment.
+- **D25, anchors:** usable on any grid, but activation needs the required position and (mostly) velocity first; anchored grids can move slowly over days through anchor inputs; no anchoring to asteroids (tractors do that); a dropped station is a serious, very uncommon disaster that mostly burns up in the atmosphere or hits the ground hard; stations should carry thrusters (in case they need to fly) and escape pods.
+- **D28, tractors:** without AM a tractor can only emit gravitons, so it can only **pull**; pushing needs anti-gravitons, so AM.
 
 ## Resource model
 
@@ -102,7 +117,7 @@ Bands exist for the UI and for device gates only.
 | Ore | < 0.15 | grey rock with violet veins | Feedstock only (concentrate first) |
 | Crude | 0.15–0.40 | dull violet grit | Slurry feed (≥ 0.17), anti-graviton charges, feedstock |
 | Fuel | 0.40–0.60 | violet glass | Recirculating-drive feed (safe from runaway up to a true 0.42, so only when assayed), feedstock |
-| Field | 0.60–0.85 | translucent purple | Recirculating feed (lighter per jump, runaway-prone), plating and dampening, tractors, tidal compensators, gravity dampers, station anchors, T3/T4 refining consumables |
+| Field | 0.60–0.85 | translucent purple | Recirculating feed (lighter per jump, runaway-prone), plating, inertial dampeners, tractors, tidal compensators, gravity dampers, station anchors, T3/T4 refining consumables |
 | Throat | 0.85–0.97 | clear purple | Wormhole generators, catchers (establish, capture), gates, natural redirects, graviton lenses for the `HorizonHarvester`, heavy scoops and stabilisers. The base for additive blends (0.89 or purer for a 5 % dose, 0.93 for the full 10 %). Refused by recirculating interlocks |
 | Crystal | 0.97–0.995 (`QMax`) | the "impossible" purple crystal, faint glow | **A crafting material, not a consumable:** T4 seed crystals, crystal graviton lenses for capital generators and redirect catchers, and the crystal fines in the Stability additive |
 
@@ -213,6 +228,7 @@ Residues bring the overall recovery back to roughly 0.3–0.35. With crude cores
 
 ### Planet deposits (terrain voxel material)
 
+- **Origin (decision D22):** planet and asteroid deposits are EM recycled from long-dead black holes, the way uranium came from earlier stars. Together they are the **main EM supply for the whole game**, not just the early game: every grade above Ore is refined from them, and black holes and remnants add only the rare top end (first seeds, crystal) and occasional local rushes.
 - **Material:** a new data-defined voxel material `ExoticOre` (`data/materials/voxel/exotic_ore.json`).
   - **Ore is never stored. It is derived.** A voxel is ore when its material is the generator's own rock (not a placed material) and it lies inside a lens's vein field.
     - Purity is a deterministic function `q(p)` of the lens that contains `p`.
@@ -246,7 +262,7 @@ Residues bring the overall recovery back to roughly 0.3–0.35. With crude cores
 
 ### Asteroids
 
-**Decision (user): asteroids carry deposits.** They are procedural belts of small voxel bodies, instantiated on demand and on rails. Asteroids are the main mid-game EM source: about 15× planet purity, and no gravity well to climb out of. They can come after M7; planet lenses carry the early game.
+**Decision (user): asteroids carry deposits.** They are procedural belts of small voxel bodies, instantiated on demand and on rails. Asteroids are the main mid- and late-game EM source (decision D22: recycled ancient EM, not remnant debris): about 15× planet purity, and no gravity well to climb out of. They can come after M7; planet lenses carry the early game. **Station anchors never attach to asteroids** (decision D25: a minor body has no rotating frame to hold in); a grid that wants to stay with an asteroid holds it with tractor beams, or holds station on thrusters.
 
 - **Belts:**
   - `AsteroidBelt` (data or system generator): a torus about a star or planet (a range, inclination spread, density), split into **bands of equal `a`**.
@@ -292,7 +308,7 @@ Residues bring the overall recovery back to roughly 0.3–0.35. With crude cores
 | Horizon harvesting band | 15–40 km | Circular speed 23–37 km/s; period about 4 s at 20 km. About 16 km/s of Δv down from the disc edge and about 13 km/s to escape back out |
 | Accretion disc | 200–2,000 km, thin slab | Heat zone (corona rule) plus dose `doseDisc · (1,000 km / d)²` Gy/s. Seeded EM debris on rails |
 | Jets | ±8° about the spin axis, to 10⁶ km | Permanent dose cones, `doseJet · (1,000 km / d)²` Gy/s, using the flare dose code with a fixed cone |
-| `WarpFloor(BH)` | `1.1 × DiscOuter` = 2,200 km | No warp exit inside. Paths are blocked by the floor sphere |
+| `RouteShell(BH)` / exit exclusion | `1.1 × DiscOuter` = 2,200 km | Warp routes avoid this sphere (warp.md `RouteShell`), and exits inside it are refused. This is a hazard exclusion like the kill sphere, not an atmosphere floor (D16 removed those for bodies with air): a 2 km/s real-space leg into the disc or the tidal zone is a death sentence, not a choice. Wormholes.md keeps `WarpFloor(BH)` at this value for its body core |
 | SOI at 30 AU | about 8.4e6 km | Ordinary Laplace SOI |
 
 **Physics.** It uses the zones scheme, with four additions:
@@ -346,13 +362,14 @@ H3 is where the first seed crystals come from.
 ### Black-hole collapse into a remnant
 
 **Everything is deterministic from `NaturalSeed` and the tick.** The slot's incarnation k has `BirthTick_k`, `CollapseTick_k = BirthTick_k + Life_k`, and its orbit.
-- **Life:** 60–180 days of server ticks (knob `BlackHoleLifeDays`). Single player defaults to 20 h of play, with the rebirth delay scaled the same way.
+- **Life (decision D21): very long.** The natural life is 5–20 years of server ticks (knob `BlackHoleLifeDays`, default 1,825–7,300 days), longer than most saves run, and game time does not advance while a server is empty. Single player uses the same ticks. In practice a black hole collapses when a player **forces** it (see Deliberate collapse); the natural collapse is a backstop that keeps the seeded schedule deterministic.
 - **Rebirth:**
   - Incarnation k+1 is born `RebirthDelay` (14 days) after the collapse, at a new seeded outer-system orbit.
   - That orbit is chosen with MOID clearance from every body, remnant and natural mouth.
   - **`BlackHoleBirthForecast` goes out 7 days ahead**, with the orbit and the public `InfallRadius`.
   - At birth, everything within `InfallRadius` of the new black hole is destroyed, as at collapse. Without the forecast, a black hole could appear on top of a player station.
-- **Remnants stay,** so the system gains one about every quarter, up to `MaxRemnants` (8). The slot then goes dormant (open question 1). Frames and the 64-body rails budget are finite.
+- **Remnants stay,** up to `MaxRemnants` (8); the slot then goes dormant (open question 1). Frames and the 64-body rails budget are finite. With natural lives of years and forced collapses costing a faction-scale effort, a system gains a remnant rarely (decision D22): a few per save, not one a quarter.
+- **The forced collapse** replaces `CollapseTick_k` with an earlier tick (below); everything after it (rebirth delay, forecasts, the next incarnation) follows from the new tick exactly as from a natural one.
 
 | Phase | Ticks | Effect |
 | --- | --- | --- |
@@ -375,7 +392,7 @@ H3 is where the first seed crystals come from.
    - Most orbiters become hyperbolic and leave at km/s, which is correct.
    - Kicked rails entries refresh their pose-cache entries for this tick.
    - Rails mouths keep their announced elements and period until they despawn (at most `TEnd`, wormholes.md revision 3: a tunnel's mouths outlive `TClose` while its collapse runs). They are kinematic and must not move.
-   - 10k entities ≈ 2 ms, once a quarter. Run it as a job announced at −24 h if that spike matters.
+   - 10k entities ≈ 2 ms, once per collapse (years apart, or a forced collapse; D21). Run it as a job announced at −24 h if that spike matters.
 4. **Frames:** the kind changes to `Remnant`, and the preallocated `BodySurface` frame activates (slow spin). The SOI shrinks (about 2e5 km at 20 AU); membership sorts itself out at 10 Hz. From here on station anchors can engage over the remnant.
 5. **Debris arc:** the disc becomes an EM-rich `AsteroidBelt` arc on heliocentric orbits co-orbital with the remnant (±10° of mean anomaly, 30 % EM-bearing). It uses the rigid-band scheme above.
 
@@ -394,10 +411,27 @@ H3 is where the first seed crystals come from.
   - the inner 20 % holds crystal geodes at q 0.97–0.99 (seeds). Crystal in the ground does not decay; its stamp is set at the mining tick;
   - three generator-only data materials: `RemnantRegolith`, `RemnantMantle`, `RemnantCore`. Placed rock never yields.
 - **Scale:** it is effectively unlimited (about 1e14 t of rock for a 40 km body). Digging rate, refinery throughput and the 30+ km tunnel to the crystal are the gates.
-  - **Economy consequence (intended, tunable):**
-    - one surface cubic metre (3 t × 0.08) holds about as much content as a tenth of a planet lens;
-    - a system's first remnant makes Crude and Fuel abundant there, and its core makes crystal non-scarce.
+  - **Economy consequence (decision D22: rare, late, local):**
+    - one surface cubic metre (3 t × 0.08) holds about as much content as a tenth of a planet lens, so a remnant is a local rush for whoever reaches it;
+    - remnants are rare (years of natural life, or a forced collapse that costs a faction-scale effort), so they never replace planets and asteroids as the supply. They make Crude and Fuel cheap near them for a while and give a second, contested source of seeds and crystal at the core.
 - **Multiplayer:** a server-wide event. The forecast, countdown and collapse are reliable broadcasts to the system. Clients get the remnant seed only at collapse, then generate its terrain like any body.
+
+### Deliberate collapse (decision D21)
+
+Black holes last a very long time on their own; equipment can make one collapse sooner. It is a T4, faction-scale project with public warning and real consequences.
+
+- **Equipment:** the `CollapseInducer`, a T4 function core (capital ship or station class, about 2,000 t with its shielding), crafted with a crystal graviton lens (5 kg). It projects anti-gravitons into the horizon from the harvesting band (15–40 km), so its host needs a `TidalCompensator`, a heavy hull and everything H3 needs.
+- **What it burns:** throat-grade EM (q ≥ 0.85) plus its AM through the reaction, plus bus power:
+  - each black hole has a destabilisation budget `CollapseWork` (data, default 2,000 kg of EM content, so 10 kg of AM at `AmPerEm`, scaled by `μ / 2e13`);
+  - an inducer delivers at most `InduceRateKgPerH` (data, 20 kg of content an hour, 0.1 kg of AM, plus 2 GW of bus power), so one inducer needs about 100 hours of station-keeping at the horizon and several work in parallel. The AM alone is about four months of an L factory or about 12 days of the system's foundry: a coalition's stockpile;
+  - accumulated work **relaxes** at `CollapseRelax` (data, 2 % of the budget an hour) whenever no inducer is feeding, so an interrupted attempt drains away and defenders can stop it by breaking the inducers.
+- **Public signature:** an active inducer is an `External` projector with a 50,000 km signature, and once accumulated work passes 25 % of the budget a `BlackHoleInduction` progress event goes to every client in the system (persisted, replayed to late joiners).
+- **When the budget fills:** the server sets `CollapseTick = now + 24 h` (never later than the natural tick), and the normal Waning phase runs: exact countdown, jet dose and jet yield ×4, then the collapse as above. The 7-day forecast is replaced by the induction progress events and the 24 h countdown, which gives everyone within `InfallRadius` a day to leave.
+- **Consequences:**
+  - the owners of every inducer that contributed are **attributed** for the collapse (infall destructions, shock damage, a lost H3 crystal source), in proportion to the work each delivered. Faction standing, fines and PvP rules read that attribution (the same hook as dose attribution);
+  - the black hole's H1–H3 harvesting ends; a remnant, a debris arc and a rebirth 14 days later at a new orbit follow exactly as for a natural collapse;
+  - inducers inside `InfallRadius` at the collapse tick are destroyed like anything else, so the inducing fleet must leave in the countdown.
+- **Determinism:** induction is integer kg of content and ticks on the server; relaxation is settled lazily on each feed change, and the fill tick is a scheduled event. No per-tick cost.
 
 ## Antimatter
 
@@ -472,13 +506,23 @@ pulse source:       D = κ · f_rad · E / (4π d²) · exp(−σ / σ0)   Gy
   - ≥ 0.5 Gy: radiation sickness I (stamina −25 %);
   - ≥ 2 Gy: sickness II (maximum health capped at 50 % until the dose falls below 1 Gy);
   - ≥ 5 Gy: lethal (wormholes.md's "about 5 Gy"), after 60 s.
-  - Treatment items are later work.
+- **Short-term treatment (decision D24):** medicine items treat acute exposure. An anti-radiation dose (`med.antirad`, a cheap crafted consumable) suppresses sickness I and II for 6 h and raises the recovery rate to 0.5 Gy a day while it acts; it does not raise the lethal threshold. Medicine never lowers the lifetime dose.
+- **Long-term exposure (decision D24):** each character also keeps a **lifetime dose** (`LifetimeGy`) that only grows, by every gray received.
+  - Above 2 Gy lifetime: chronic condition I (maximum stamina −10 %, slower healing).
+  - Above 5 Gy lifetime: chronic condition II (maximum health −20 %, and acute thresholds fall by 20 %).
+  - Above 10 Gy lifetime: chronic condition III (both, doubled).
+  - Conditions are cured only by an **expensive treatment**: a `MedBay` procedure (a T3 station core) that consumes costly medical items and hours of downtime, and lowers `LifetimeGy` to the bottom of the next band down. It is a deliberate money sink for crews who work around AM.
+  - All of it is lazy: settled at the 1 Hz dose pass or when read.
 - **Design limit:** the build tool's Rad view colours every crewed room by its dose rate at full rated AM output. Green is ≤ 1e-4 Gy/s (5 Gy in about 14 h of continuous full output); amber is up to 1e-3; red is above.
 - **Surroundings:**
   - the shadow shield protects only its own cone, so anyone off-axis or behind takes the drive's unshielded leakage. EVA crew within about 100 m of a full-throttle light plasma drive reach 5 Gy in about 20 s; a heavy AM thermal drive at full, off its cone, gives unshielded EVA crew 5 Gy in about 19 min at 5 km and about 5 h at 20 km (table below);
   - stations set an **AM thrust limit** inside `AmLimitRadius` (a permission hook, like the interdiction ban; default 20 km, never less than the exclusion radius, so a heavy thermal hovering at the edge leaves crewed rooms behind 0.5 m of hull in the green). Default limit 0: non-permitted ships have AM throttle clamped by the server inside the radius and dock on chemical, ion or RCS;
-  - dose received from another party's source is attributed to that source's owner (for faction and PvP rules);
-  - no persistent contamination in v1 (open question 10).
+  - dose received from another party's source is attributed to that source's owner (for faction and PvP rules).
+- **Lingering contamination (decision D24).** Radiation is not only transient:
+  - **what contaminates:** an AM breach (trap, cell, warhead, chamber buffer) contaminates every room its dose pulse reaches above 1 Gy and, on terrain, its crater; a lance bore contaminates the rooms within 5 m of it; long exposure of hull structure (a room or hull cell absorbing more than 50 Gy in total from a drive or core, typically inside or just off a shadow cone) activates it; black-hole disc and jet exposure activates hulls the same way;
+  - **model:** a contamination record per room (and per terrain chunk for craters) holds an activity `A` (a dose rate at 1 m, Gy/s) and a half-life, from data: `HullActivation` 3 days, `BreachFallout` 20 days. It is a source in the shared dose pass, `Ḋ = A · att(room)` for occupants of that room and its neighbours (the `InternalShield` march, baked once per new record), and decays as `A · 2^(−Δt / T½)`, settled lazily;
+  - **decontamination:** a `Decon` tool or station service strips a room's activity (time and consumables proportional to `A`); replacing activated hull cells removes their record; craters decay or can be dug out, and the dug material carries the activity as an item flag (contaminated rock stacks dose their cargo room until they decay). A stack carries its activity like content (mass-weighted on merge, settled lazily), and a room's stacks feed **one** aggregate record per room, updated on inventory events, so a hold full of dug crater rock costs the same as one record;
+  - **cost:** zero until a record exists; then one dose-pass multiply-add per (record, nearby occupant) at 1 Hz, and records are dropped when their dose rate falls below the 1e-6 Gy/s receiver floor. A breach makes at most one record per room it reaches.
 - **Components** keep wormholes.md's hardening threshold: above it they are disabled for `dose / rate` seconds.
 
 ## Power: what "power" means
@@ -517,7 +561,19 @@ m_AM = AmPerEm · c_EM          AmPerEm = 0.005  (1 g AM per 200 g of EM content
 - **Reaction chambers run on their own annihilation,** so a device's EM and AM rates need no bus power beyond small control loads.
 - **The reaction turns the AM's energy into anti-gravitons, not gamma.** A runaway burst therefore carries no dose pulse of its own; only the trap breaches it cascades into do. AM that breaches without reacting (a trap, or a chamber buffer whose line is safe) annihilates as an ordinary breach.
 
-Devices: warp bubbles, plating and dampening, tractors, wormhole devices, tidal compensators, gravity dampers, station anchors. **Not on the reaction:** the warp interdiction emitter and wormhole stabilisers, which are power-only (see Stabilisers).
+Devices: warp bubbles, plating, tractors in push mode, wormhole devices, tidal compensators, gravity dampers, station anchors. **Not on the reaction:** the warp interdiction emitter and wormhole stabilisers, which are power-only (see Stabilisers).
+
+**Graviton emission (no AM; decision D28).** EM driven by bus power emits gravitons only, so a device on it can **attract but never repel**:
+
+```
+graviton output ∝ c_EM (content at q ≥ the device's MinPurity)      m_AM = 0
+P_bus = GravitonWPerN · F                                            bus power drives the field in place of annihilation (GravitonWPerN = 1 W per N, a knob)
+```
+
+- It is the cheap, AM-free mode: tractor pull and the inertial dampener (D9: "EM and energy") run on it. The dampener qualifies because it only ever pulls its occupants along the hull's own acceleration; its field is projected over the bubble, not radiated from a point, so the pull can point any way the hull accelerates. Anything that must push (a tractor's push or hold, a warp bubble, a pulse) needs anti-gravitons and so AM.
+- **Station anchors stay on the full reaction at every pose.** Below the synchronous radius they push up; above it they pull down, but off the equator `a_hold` also has a poleward part that a pull toward the body cannot supply, and a graviton-only mode for the rare high equatorial anchor would save only the 0.5 % AM. One mode keeps the anchor ledger simple.
+- **The 1 W per N is a gameplay knob, not an energy balance.** The reaction's 0.5 mg of AM per MN·s carries about 0.5 GJ at this doc's 1 TJ per gram, about 500 W per N, so "the power annihilation would otherwise supply" would make AM-free pull 500× dearer than written. Graviton emission is defined as a cheaper channel that can only pull; the dampener has its own `DampWPerN`. tractor-beams.md's pumped mode (100 MW per MN, capped at 25 % of rating) is replaced by this pull mode at full rating. If pull at 1 MW per MN proves too cheap against reaction-mode tractors, raise `GravitonWPerN` toward the old pumped 100 W per N (see Changes to other docs, tractor-beams.md).
+- Graviton emitters hold no AM, so they have no containment signature and nothing to breach; they still count as gravity devices for the tunnel classification.
 
 ### Warp fuel: two drive kinds (replaces warp.md's `FuelPerLn`)
 
@@ -536,7 +592,7 @@ Recirculating:   m_em    = C / q_f                   q_f ∈ [FeedLo, FeedMax], 
 
 - `M` includes docked and hangared ships, cargo and the fuel itself. Fuel is consumed at T0, with no refund on abort (unchanged).
 - **Economy of scale.** `EmPerLn` falls with drive class.
-  - Wormhole cost grows with `r²`, but the mass of a ship that fits grows with `r³`. With one `EmPerLn` for every class, any ship over about 6,000 t that fits a heavy mouth would find a wormhole cheaper than its own warp. That breaks the decided "warp cheaper, wormholes costlier".
+  - Wormhole cost grows with `r²`, but the mass of a ship that fits grows with `r³`. With one `EmPerLn` for every class, any ship over about 6,000 t that fits a heavy mouth would find a manufactured wormhole cheaper than its own warp. That breaks decision D23: warp is the cheap way to go somewhere specific and relatively close; manufactured wormholes are the fastest, and pay for it.
   - `MassMin` stops a small ship from fitting an oversized drive for the cheaper rate: below it, the drive bills as if the ship had `MassMin`.
 
 **The two kinds:**
@@ -551,7 +607,7 @@ Recirculating:   m_em    = C / q_f                   q_f ∈ [FeedLo, FeedMax], 
 | Line | none: the chamber takes slurry and AM only at T0 | prime (when hot) plus the jump's charge during spool |
 | Runaway | never | yes (see Runaway burst) |
 | Mass burnt per kg of base charge (`EmPerLn · M · ℓ`) | 7.5 kg (1.5 × 1/0.20) | 2.04 kg (feed 0.50), 1.41 kg (feed 0.75), 2.52 kg (feed 0.40) |
-| Capex, C class (reference units) | 800 | 2,400 for the core, diluter, separator and agent loop. Options: inline assayer +480, auto-purge +240, eject mount +240 |
+| Capex, C class (reference units) | 800 | 2,400 for the core, diluter, separator, agent loop and the standard core-eject mount (decision D13). Options: inline assayer +480, auto-purge +240 |
 
 | Class | VCap | MassMin–MassCap | EmPerLn | Recirculating prime / line cap / agent loop | Capex slurry / recirculating | Tier |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -615,7 +671,7 @@ Recirculating:   m_em    = C / q_f                   q_f ∈ [FeedLo, FeedMax], 
 | Feed above `FeedMax` | n/a (dry EM is refused by the socket) | Interlock refuses at plot; override → runaway |
 | Agent or AM short | AM: plot refused | Plot refused |
 | Damage, Integrity < 0.5 | Drive disabled | Diluter breach: runaway if the true feed is above the limit and the line holds content, otherwise disabled |
-| Damage, Integrity 0 | Destroyed; no AM in the chamber, nothing reacts | Chamber rupture: runaway on the next tick if the true feed is above the limit, otherwise an ordinary breach of the chamber buffer |
+| Damage, Integrity 0 (recirculating: the chamber housing, rated ×8) | Destroyed; no AM in the chamber, nothing reacts | Chamber rupture: runaway on the next tick if the true feed is above the limit, otherwise an ordinary breach of the chamber buffer |
 
 `o = q_true / MixHi − 1` is the overshoot.
 
@@ -644,8 +700,8 @@ Recirculating:   m_em    = C / q_f                   q_f ∈ [FeedLo, FeedMax], 
 | --- | --- | --- | --- |
 | Off-spec mix | at the mix tick, `q_line > q_lim` | mix tick | onset + 180 (3 s) |
 | Diluter breach | the drive core, or an agent tank on its `Agent` sockets, crosses below `Integrity` 0.5 while the line holds content and `q_feed > q_lim` | damage tick | onset + 180 |
-| Chamber rupture | the drive core reaches `Integrity` 0 while the line holds content and `q_feed > q_lim` | damage tick | **next tick**, no counterplay |
-| Override ("pure dump") | owner command, accepted only when the feed tanks hold stock with nominal purity above `q_lim` (otherwise there is nothing to dump), and never in `Warp` or `Throat` placement or while held by an explicit lock (docking collar, landing clamp: warp.md). Arms for 600 ticks (10 s) with a public signature, then bypasses the diluter and fills the line to `LineCapKg` from the feed tanks | arm end | arm end + 1 |
+| Chamber rupture | the **chamber housing** (rated ×8, decision D13) reaches `Integrity` 0 while the line holds content and `q_feed > q_lim` | damage tick | **next tick**, no counterplay |
+| Override ("pure dump", decision D12: kept) | owner command, accepted only when the feed tanks hold stock with nominal purity above `q_lim` (otherwise there is nothing to dump), and never in `Warp` or `Throat` placement or while held by an explicit lock (docking collar, landing clamp: warp.md). Arms for 600 ticks (10 s) with a public signature, then bypasses the diluter and fills the line to `LineCapKg` from the feed tanks | arm end | arm end + 1 |
 
 All bursts are subject to the lock-in rule below.
 
@@ -655,17 +711,19 @@ All bursts are subject to the lock-in rule below.
   - The pressure to raise `q_mix` is the loop: a full 74 kg C-class charge at feed 0.50 needs 83 kg of agent at `q_mix` 0.32, against an 80 kg loop. Raised to 0.40, any stock understated by more than about 5 % runs away.
   - An **inline assayer** doses by true purity and removes this trigger entirely. Breaches still apply.
 - **Damage-to-breach rule (deterministic):**
-  - Every damage brush that overlaps a component's housing lowers its `Integrity` by `min(1, 4 · V_overlap / V_housing)`. That covers hull hits, breach brushes, pulse-shear brushes and the burst's own near-field brush.
+  - Every damage brush that overlaps a component's housing lowers its `Integrity` by `min(1, 4 · V_overlap / V_housing) / Rating`, where `Rating` is the housing's data rating (1 for ordinary cores). That covers hull hits, breach brushes, pulse-shear brushes and the burst's own near-field brush.
+  - **The reaction chamber is very highly rated (decision D13).** A recirculating drive has two housings: the **core** (diluter, separator, valves; `Rating` 1) and the **reaction chamber** with its buffer trap (`Rating` 8, `ChamberRating` in data). A hit that would take an ordinary core to 0 takes the chamber down by an eighth, so a no-warning chamber rupture needs sustained, focused fire; almost every runaway under fire starts as a diluter breach with its 3 s alarm, which the core eject answers.
   - It uses q16 arithmetic, with `V_overlap` counted in coarse 0.5 m occupancy cells against the housing's cell count.
-  - It runs in damage-application order in tick step 3. Thresholds are checked after each brush: 0.5 means a diluter breach, 0.25 means the purge valve is lost, and 0 means a chamber rupture.
+  - It runs in damage-application order in tick step 3. Thresholds are checked after each brush: core 0.5 means a diluter breach, core 0.25 means the purge valve is lost, and chamber 0 means a chamber rupture. The eject mount has its own housing (`Rating` 4), so losing the core's valves never loses the eject.
   - There is no randomness. The same rule drives traps, anchors and every other function core.
 - **Timing and the warp lock-in:**
   - An off-spec onset is always at spool start + 60, so its burst falls at spool start + 240. That is before `T0 − 30` (spool start + 270). The burst cancels the warp before the lock-in, and `WarpCancel` goes out as usual.
   - **Any burst that would fall at or after `T0 − 30`** (a breach onset in the last 210 ticks before T0, or a chamber rupture in the last 31) is deferred. The lock-in holds: the drive engages and the charge goes into the bubble.
-    - The burst is rescheduled to `T_exit + 1 + 180`, with yield = the prime only. `T_exit` is the tick the ship actually leaves `Warp` or `Throat` placement: T1, or an abort or interdiction exit.
-    - A deferred chamber rupture also gets the 180 ticks, because the crew couldn't act during warp; with the purge valve gone, eject is its only counter.
-    - The alarm stays up. During warp nothing resolves, because the ship is intangible. Purge and eject are refused in `Warp` and `Throat` placement and become available at `T_exit + 1`, so a purge started then (120 ticks) always beats the burst.
-  - Damage cannot happen during Cruise, because the ship is intangible.
+    - The burst is rescheduled to `T_exit + 1 + 180`, with yield = the prime only. `T_exit` is the last tick of `Warp` or `Throat` placement: `TDrop − 1` (warp.md: the 2 s real-space segment from `TDrop` to T1 is a simulated, tangible body), `TDrop' − 1` after a cancel, or the throat exit. A recirculating drive that is breached or ruptured is a hard cancel in cruise (warp.md cancel table: `Integrity` < 0.5, or a runaway), so in practice the ship drops early at `TDrop'` with no brake.
+    - A deferred chamber rupture also gets the 180 ticks; with the purge valve gone, eject is its only counter.
+    - The alarm stays up. In cruise nothing resolves, because the burst has no real space to resolve in. **The crew act freely in cruise (D17):** they can command a purge or an eject at any time, and the command takes effect on the first real-space tick (`T_exit + 1`), before the burst (warp.md "Runaway and core ejection mid-warp": an ejected core separates on that tick, unbraked). A purge started then (120 ticks) always beats the burst.
+    - **A runaway that starts in cruise** (only sabotage or interior damage can start one, since the override is refused in `Warp` placement) is a hard cancel (warp.md), and its burst is deferred exactly like a lock-in burst: to `T_exit + 1 + 180`, with yield the prime only (nothing refills the line in cruise). **Not** warp.md's "held to `max(burst tick, TDrop')`, resolving on the first real-space tick": a hard cancel's drop comes 180 ticks after onset, so the burst would fall on the very tick the ejected core separates, 0 m from the ship, and eject (D13's main counterplay) would never work mid-warp. The 180 real-space ticks give a commanded eject 60 m (C) or 120 m (B, A) of separation and a purge time to finish.
+  - **External** damage cannot happen in cruise (the hull is intangible), but interior damage can: crew fights and sabotage inside the grid bubble (D17) hit the drive's housings by the ordinary rule. The real-space segment (`TDrop` to T1) is tangible, so hits and collisions there count, and any burst due then resolves normally.
 
 **Warning and counterplay:**
 - **Alarm:** at onset the crew get `DriveAlarm` (cause, burst tick, line content).
@@ -676,7 +734,11 @@ All bursts are subject to the lock-in rule below.
   - Content in the line is lost. The chamber buffer's AM is dumped through the micro-annihilator, as with a charge's fail-safe.
   - If it completes before the burst tick, there is no burst. The drive is "purged": it needs re-priming, plus repair if it is damaged.
 - **Auto-purge (option):** the purge starts at onset by itself, so it always beats the 180-tick countdown while the valve is intact. Pirates' drives usually lack it, or have it locked to another faction's key.
-- **Core eject (option, `EjectMount`):** in 30 ticks the core detaches as its own body (the existing detach rule) at +20 m/s, and bursts on schedule about 50 m away. The near-field brush then misses the ship; the pulse still kicks it.
+- **Core eject (standard on every recirculating drive; decision D13, the main counterplay):** in 30 ticks the **entire core** (diluter, chamber with its buffer trap, the line and its valves) detaches as its own body (the existing detach rule) at +20 m/s, and bursts on schedule about 50 m away. The near-field brush then misses the ship for lines up to about 125 kg (r_n ≤ 50 m: every C-class charge); the pulse still kicks it. B and A classes eject at +40 m/s (`EjectDvMs` per class), putting about 100 m between ship and burst.
+  - It works whatever the core's `Integrity` (its mount has its own rated housing), off-key on salvaged drives, and mid-warp: commanded in cruise (D17), the core separates on the first real-space tick `T_exit + 1`, before any burst held to that tick.
+  - The ship loses the drive: an ejected core is gone unless recovered after the burst (it isn't, if it bursts). A drive whose core was ejected without bursting (the purge finished in flight) can be recovered and re-mounted.
+  - An **auto-eject** owner flag (default off) ejects at onset when the purge can't win (valve lost, or auto-purge absent).
+  - **Wiring (D17):** eject is an `Eject` control input wired to whatever consoles the designer chose, plus a mechanical pull handle on the cradle that needs no power or wire (ship-design's "Ejectable core assembly"), so cutting the bridge's wires can delay an eject but never prevent one by an engineer in the drive room.
 - **Cold running:** keep the line empty between jumps, at the cost of 30 s of priming before each spool. Default: Cold when docked, Hot in flight (an owner setting). Priming is refused while held by an explicit lock (docking collar, landing clamp), so a docked drive is always Cold.
 - **What doesn't help:** aborting the spool, or jettisoning the agent tank.
 
@@ -689,7 +751,7 @@ All bursts are subject to the lock-in rule below.
 5. **Griefing bound:**
    - The far field uses the casing cap and the kick budget, and its warp field counts toward the 4-per-group-per-SOI limit, so it reaches no further than a 100 kg charge.
    - The near-field brush is the runaway's extra: up to 77 m for a full A-class line, about what the same reaction's AM would do breaching in a trap (450 kg of content carries 2.25 kg of AM, a 105 m breach brush).
-   - Counters: chamber signatures (2 km), stations refusing docking to primed drives, the collar lock (no priming or override while docked), and the override's 10 s public arm. To use it as a weapon a ship must close to within its near-field radius while armed and visible: a kamikaze, which open question 8 asks about.
+   - Counters: chamber signatures (2 km), stations refusing docking to primed drives, the collar lock (no priming or override while docked), and the override's 10 s public arm. To use it as a weapon a ship must close to within its near-field radius while armed and visible: a kamikaze. **Decision D12: the override stays** (scuttle or kamikaze), with every safeguard here kept: owner only, feed above `q_lim`, never docked, locked, in `Warp` or `Throat` placement, the 10 s public arm, the casing cap on the far field and the line cap on the near field.
 
 ### Wormholes and catchers
 
@@ -715,9 +777,14 @@ All bursts are subject to the lock-in rule below.
   - `X` is always the **original** plan's X: a second collapse and re-establish costs another 0.25 X, not 0.25 of the first re-establish, so repeated collapses never get cheaper.
   - The re-establish blend passes the same `MinPurity` gate on true content as the original charge (the spare may be different stock), and with a Dilatant mix the `MaxRadius ≥ r` check uses the boosted radius, since the quarter dose keeps the same fractions and effects.
 - **Stability reserve and feeds:** the reserve is energy, not EM. Feeding it, by the generator or by stabilisers, costs bus power only (see Stabilisers). The mass-throughput drain (decision C) is therefore paid back in power, and so in AM only through cores: about 2.5 mg of AM per GJ refilled. A 78,000 t capital crossing drains 2.6 GJ, which costs 6.5 mg of AM to refill. Throughput matters for the band a wormhole sits in, not for the economy.
-- **The "cheaper" invariant is restated**, which changes wormholes.md:
+- **Travel economics (decision D23)** replace the blanket "warp cheaper, wormholes costlier". The ordering is by what each option is for:
+  - **natural wormholes are the cheapest:** a crossing costs no EM or AM at all, only the trip to the mouth, any owner's fees and the band's risks. Their limit is where they go (other star systems, seeded ends), not price;
+  - **warp is the cheap way somewhere specific and relatively close by:** any destination in the system, priced by `ln(1 + D/1e6 m)`, slower with distance (minutes per AU);
+  - **manufactured wormholes are the fastest** (an instant pair, or a short tunnel, to anywhere a generator can reach) and the dearest per ship.
+  - The invariant this doc tests is the warp-against-manufactured half; the natural half needs no test, because a natural crossing burns nothing. Natural wormholes stay cheapest only while owners' fees stay below a ship's warp cost to the same place, which is a fee knob for wormholes.md, not a rule here.
+- **The manufactured-wormhole invariant is restated**, which changes wormholes.md:
   - **Old:** "costs more than warping one `MassCap` ship". That depends on which drive is meant.
-  - **New, per generator class:** the cheapest wormhole the class can open costs more than warping the largest ship that fits through it. "Largest" means the largest at reference density `ρ_ref = 50 kg/m³` over the bounding sphere, capped at `MassCap` of the drive class that carries it. The warp side uses the **recirculating** kind on fuel grade, the cheapest to run. Slurry ships pay more, so for them the invariant holds with more margin.
+  - **New, per generator class:** the cheapest manufactured wormhole the class can open costs more than warping the largest ship that fits through it, so speed is what a manufactured wormhole sells. "Largest" means the largest at reference density `ρ_ref = 50 kg/m³` over the bounding sphere, capped at `MassCap` of the drive class that carries it. The warp side uses the **recirculating** kind on fuel grade, the cheapest to run. Slurry ships pay more, so for them the invariant holds with more margin.
   - Reference prices are as in Warp fuel. The AM column adds `AmPerEm × 0.1/g` = 0.5 per kg of content to both sides.
   - **Prices are tunnel class** (wormholes.md revision 3), the cheapest wormhole a generator can open, so the table below is unchanged. Instant pairs pass with 2.5× the margin, and no additive lowers X below the baseline (their `m_X` is 1 or more), so neither can break it.
   - Checks (per ℓ):
@@ -729,8 +796,8 @@ All bursts are subject to the lock-in rule below.
     | Capital | 100 m | ρ 72 m, ≈ 78,000 t (A) | 14.1 / 19.9 | 30 / 35 | 2.1× / 1.8× |
 
   - **AM price pushes the heavy and capital ratios toward 1** (the light ratio rises, because its wormhole carries more AM than its ship). **Heavy binds:** its ratio reaches 1 at about 0.7 per gram of AM at these EM prices; capital at about 1.85. The test logs both, and the economy must keep AM below the heavy figure.
-  - Ships denser than `ρ_ref` can still beat it, by their density ratio. The test logs that break-even (open question 6).
-  - **Fleet break-even:** r = 150 m pays for itself at about 11 C-class or 22 B-class ships of 5,000 t on EM alone (about 9 and 19 including AM at 0.1 per gram), which keeps wormholes the fleet option.
+  - Ships denser than `ρ_ref` can still beat it, by their density ratio. The test logs that break-even; it is accepted as a tuning edge (decision D23 settles the ordering, not every density).
+  - **Fleet break-even:** r = 150 m pays for itself at about 11 C-class or 22 B-class ships of 5,000 t on EM alone (about 9 and 19 including AM at 0.1 per gram). A big fleet moving together therefore gets the fastest option at warp's price: speed for one ship is a premium, for a fleet it is logistics. That fits D23, which ranks per-trip cost for a ship, not for a fleet.
 - **Fees** (wormholes Q14) could be paid in throat-grade EM. That is a natural currency now, but it is still the user's call.
 
 ### Wormhole additives (decision H)
@@ -808,28 +875,49 @@ Wormholes.md defines the `Stabiliser` component, its Feed and Drain modes, range
 
 The bomb rules for wormholes now live under Anti-graviton charges, "Wormhole disruption: stability drain". In short: every pulse (charge, runaway, chain) drains `BombK · Y · (1 − d/R_s)²` from each mouth within `R_s = 5R`, or `BombK · Y` (the point-blank value) inside a tunnel, rung down over 5 s; a powered gravity damper covering a mouth blocks the drain there; a zero collapses the wormhole early.
 
-### Gravity plating and inertial dampening
+### Gravity plating and the inertial dampener (decision D9)
 
-- **Plating** is a per-room function core that consumes field-grade EM:
-  `rate = 2e-4 g content / (m² · h) · (|g_plate| + |a_damped|) / 9.81`
+Two separate devices: **plating gives gravity; the inertial dampener keeps everything inside its bubble moving with the ship.** A room can have either, both or neither.
+
+- **Plating** is a per-room function core that consumes field-grade EM for its floor gravity only:
+  `rate = 2e-4 g content / (m² · h) · g_top / 9.81`, where `g_top = max(0, g_set − dot(g_rest, n̂))` is the top-up it actually supplies along the floor-down axis (frames-and-zones: a 1 g plate on a 1 g landed ship supplies and bills nothing; in free fall `g_top = g_set`)
   - The plated area A is about the room's air volume ÷ 2.5 m.
-  - A 200 m² ship at 1 g, at rest, uses about 0.04 g/h (about 1 g a day). A 5,000 m² capital ship uses about 24 g a day.
-- **Dampening:** a plated room cancels the grid's proper acceleration up to the core's rating `a_max` (data, 2–8 g). The excess **leaks through:**
-  `interior g = g_plate + clamp_excess(a_proper − a_max)`
-  - Hard burns and rams above the rating throw people about.
-  - Velocity snaps from warp, flush and pulses are still excluded by the existing proper-acceleration history reset.
-  - Plating does not cancel tidal stretch; that is the compensator's job.
-  - On an anchored station the proper acceleration is the constant `a_hold` (see Station anchor), so unplated rooms feel it as floor gravity.
-- **Proposed answer to the gravity-plating question** (frames Q1, README Q3). It remains open question 5 until the user confirms:
-  - plated, powered and fed rooms are calm;
-  - unplated, unpowered or unfed rooms get the existing real-effects branch (real gravity − proper acceleration + fictitious);
-  - early ships have no plating and use mag boots.
+  - A 200 m² ship at 1 g uses about 0.04 g/h (about 1 g a day). A 5,000 m² capital ship uses about 24 g a day.
+  - Plating cancels nothing: on its own, a plated room under a 3 g burn has 1 g of floor plus the 3 g of the burn.
+- **Inertial dampener** (`fc.inertial_dampener` S/M/L, a function core): it projects an internal bubble over the rooms it covers (its radius on its own grid, or an assigned room set) and applies to everything inside (crew, loose bodies, cargo, docked small craft in a covered hangar) the same proper acceleration as the hull, so they keep the ship's speed.
+  - **Consumption (graviton emission: EM and energy, no AM):**
+    ```
+    a_d    = min(|a_man|, a_max)                    the acceleration actually cancelled
+    a_man  = −(a_proper − a_rest) − α×r − ω×(ω×r) − 2ω×v   frames-and-zones' manoeuvre term, ship-level for billing
+    ċ_EM   = EmPerNsDamp · m_in · a_d               EmPerNsDamp = 1e-11 kg/(N·s), content at q ≥ 0.60
+    P_bus  = DampWPerN · m_in · a_d                 DampWPerN = 1 W per N, at class 1 (life)
+    m_in   = the mass inside the bubble: characters, loose bodies, cargo stacks and covered docked craft
+    ```
+    The hull itself is not billed: thrust already moves it. **Rest acceleration is never billed** (`a_rest`: gravity on a landed ship, `a_hold` on an anchored one), so landing or anchoring is not a manoeuvre. A 300 t ship with 30 t inside its bubble pulling 3 g cancels 0.88 MN: about 32 g of content an hour and 0.88 MW, only while it manoeuvres. Cruising, landed, anchored, docked or coasting costs nothing beyond 10 kW of standby.
+  - **Rating:** `a_max` per core (data: S 3 g, M 6 g, L 10 g) and `MassMax` inside (S 50 t, M 500 t, L 5,000 t). Above either, the excess **leaks through**:
+    `g_interior = g_floor + a_man · max(0, 1 − a_d / |a_man|)` (frames-and-zones' form), with `a_d` scaled by `min(1, MassMax / m_in)` when overfull and lowered by the core's `Limit` input.
+    Hard burns and rams above the rating throw people and cargo about.
+  - **Full-rating bills:** S (50 t at 3 g) 1.5 MN, 53 g/h and 1.5 MW; M (500 t at 6 g) 29 MN, 1.1 kg/h and 29 MW; L (5,000 t at 10 g) 490 MN, 17.6 kg/h and 490 MW. A full L only runs on cores, and its draw sits at class 1 above flight, so on a shortfall class 2 loads (bus-driven thrust, sensors) are curtailed first, which lowers `a_proper` and with it the dampener's demand; trap-fed AM thrusters are not on the bus, so under AM thrust a short bus starves the dampener instead and the excess leaks through (both are self-limiting, never a lock-up). Owners can cap a dampener below its rating to keep its draw in budget.
+  - **Ratings don't stack.** Each room takes one dampener, the covering core with the highest `a_max` (then the lowest component id), as ship-design and frames-and-zones rule; its bodies are billed to that core, re-assigned on the same events as `m_in`. Overlapping cores split the mass (each core's `MassMax` covers its own assignees) but never add their `a_max`, so four S cores are not a 12 g dampener. A crew member's own body counts once, wherever the rooms overlap.
+  - **Docked craft with their own dampener:** a covered docked ship's mass is billed to the host's dampener and its own dampener idles (one bubble per body, the host's wins), so docking never double-bills.
+  - **Starved** (EM, power or both): `a_d` ramps to 0 over 0.5 s and the covered rooms get the existing real-effects branch.
+  - Velocity snaps from warp, flush and pulses are still excluded by the existing proper-acceleration history reset; a pulse kicks everything by the same Δv anyway.
+  - **Cost per tick:** the force pass adds `m_in · a_d` to the grid's ledger accumulator (about 2 ns per dampener); the 10 Hz ledger debits EM and energy. `m_in` is updated on events (cargo change, a character changing room, docking), never per tick.
+- Neither cancels tidal stretch; that is the compensator's job.
+- On an anchored grid the proper acceleration is the constant `a_hold` (see Station anchor). It is rest acceleration, not a manoeuvre: an unplated room feels it as floor gravity (like a building), plating tops it up to its setting, and a dampener idles at standby. (The round 5 draft had the dampener cancel `a_hold` all the time; frames-and-zones' `a_rest` rule replaces that.)
+- **Interior gravity is decided** (D9; answers frames Q1 and README Q3):
+  - plated rooms have floor gravity while plating is powered and fed;
+  - dampened rooms move with the ship up to the dampener's rating; the excess leaks through;
+  - unplated, undamped, unpowered or unfed rooms get the existing real-effects branch (real gravity − proper acceleration + fictitious);
+  - early ships have neither and use mag boots.
 
 ### Tractors, compensators, dampers, emitters, anchors
 
 | Device | MinPurity | EM content consumed | Power | Notes |
 | --- | --- | --- | --- | --- |
-| Tractor beam | 0.60 | 0.1 g per MN·s delivered | 1 MW per km of range | Force pass, as wormholes.md decided. 1 MN for 60 s = 6 g. 100× the anchor's rate per N·s (beam losses), so tractoring an anchored station costs the tractor far more than the anchor |
+| Tractor beam, **pull** (graviton emission, no AM; decision D28) | 0.60 | 0.1 g per MN·s delivered | 1 MW per km of range, plus `GravitonWPerN` (1 W per N) of delivered force | Force pass, as wormholes.md decided. **Attracts only**: the force on the target points at the emitter (and the reaction pulls the emitter toward it). 1 MN for 60 s = 6 g and 1 MW. 100× the anchor's rate per N·s (beam losses), so tractoring an anchored station costs the tractor far more than the anchor. This is how a grid tows an asteroid or keeps it from drifting off (anchors can't); a rigid fixed-offset hold that also stops it closing needs push, so AM |
+| Tractor beam, **push / hold** (anti-graviton reaction) | 0.60 | 0.1 g per MN·s delivered, plus `AmPerEm` of AM | 1 MW per km of range | Repels, or holds a fixed offset by mixing pull and push. **Needs AM:** a tractor with no AM in its traps can only pull (D28). Replaces any reduced-power push mode |
+| Inertial dampener (D9) | 0.60 | `1e-11` kg per N·s cancelled (`m_in · a_d`) | `1 W per N` cancelled, class 1; 10 kW standby | Graviton emission, no AM. See Gravity plating and the inertial dampener |
 | Interdiction emitter (warp) | n/a | none | `10 MW · (R/10 km)²` (unchanged) | Stays power-only, as README and wormholes.md decided. Interdiction disrupts warp bubbles; it is not counted as gravity manipulation |
 | Tidal compensator | 0.60 | 1e-12 kg per (kg · m/s² · s) of tidal acceleration cancelled | 5 MW | 5,000 t at 30 km from μ = 2e13: about 2.7 kg/h. Sets `f_comp`; starved means 0, ramping down over 1 s |
 | Gravity damper (station) | 0.60 | Per pulse, 1 × the share of the pulse's yield that lands inside its radius | 2 MW upkeep | Protects every body and mouth inside its radius (≤ 5 km) from anti-graviton pulses and runaway far fields, wherever the source was: kicks, warp fields and **stability drains** at a covered mouth. Partial if it runs short. It never affects wormhole flushes, collapse flows or black-hole shocks, which clients predict. Inside a tunnel it is a projector and is struck |
@@ -845,7 +933,7 @@ Wormholes.md (Tunnels, Combat) strikes any device that projects gravitons or ant
 
 | Device (this doc) | Class | Struck in a tunnel? | Notes |
 | --- | --- | --- | --- |
-| Gravity plating, inertial dampening | Internal | Never | Decided (F) |
+| Gravity plating; inertial dampener | Internal | Never | Decided (F); the dampener's bubble stays inside its own hull |
 | Tidal compensator | Internal | Never | Cancels stress inside the hull |
 | Stasis case | Internal | Never | |
 | Mag boots | None | Never | |
@@ -859,6 +947,7 @@ Wormholes.md (Tunnels, Combat) strikes any device that projects gravitons or ant
 | Warp interdiction emitter | External | While emitting | Power-only, but it projects a field |
 | Warp drive (either kind) | None | Never | It cannot spool in a tunnel. A Hot line is internal. A drive override is internal too, but its burst is a pulse (below) |
 | Station anchor | n/a | n/a | Nothing anchors in a tunnel |
+| `CollapseInducer` | External | While inducing | Only ever used at a black hole's horizon |
 | AM thrusters, AM traps and cells, annihilation cores, warheads, the lance | None | Never | Not gravitational. The lance is a beam and stops at the wall; a warhead is an AM breach and drains no stability (unless it chains EM in its room into a pulse) |
 
 - **Who the strike hurts:** a strike is a damage brush on the projecting component (wormholes.md: that component and the grid it is mounted on, nothing else). The shared component damage rule applies, so a strike on a tractor mounted beside a trap or a drive core can breach either. The build tool's Rad view gains a "tunnel" overlay that shows which housings sit within a projector's brush.
@@ -875,7 +964,8 @@ Wall touches and storms (wormholes.md, Tunnels) are ordinary damage brushes plus
 
 ### Station anchor
 
-**What it is (decision).** A station anchor holds a grid of class Station at a fixed pose in a body's rotating `BodySurface` frame, at any altitude. It may sit inside the atmosphere, below the floor of any stable orbit, or above the rotating band; it stays in `BodySurface` whatever the altitude. It does this by running the anti-graviton reaction against the difference between gravity and the acceleration the pose needs.
+**What it is (decision; scope widened by D25).** A station anchor holds **any grid** at a fixed pose in a body's rotating `BodySurface` frame, at any altitude. Stations are the normal user, so this section says "station", but a ship, a platform or a construction rig can carry an anchor too. It needs a body with a `BodySurface` frame (planets, moons, remnants) or a Lagrange frame (below): **anchors never attach to asteroids or other minor bodies** (D25); tractors hold those. It may sit inside the atmosphere, below the floor of any stable orbit, or above the rotating band; it stays in `BodySurface` whatever the altitude. It does this by running the anti-graviton reaction against the difference between gravity and the acceleration the pose needs.
+- **Lagrange targets** (the earlier round 5 answer that stations may sit where no orbit is possible): frames-and-zones' "Lagrange frames and anchors" extends the same anchor to a pose in a `FrameKind.Lagrange` frame of a railed pair. Everything below applies with `a_hold` = the acceleration of the fixed point in that frame minus two-body gravity there; on an eccentric pair billing uses the orbit average while overload and the drop footprint use the worst phase (frames' rule). An anchor never engages on a grid touching or tractored to an asteroid.
 - A station can sit over its ground base forever, at an altitude reached by a vertical climb (about 1.35 km/s ideal to 100 km on a 1 g, 1000 km planet) instead of the 3 km/s of an orbit.
 - There is no orbital phasing, and no drag inside a co-rotating atmosphere, because the station co-rotates with the air.
 
@@ -915,12 +1005,22 @@ m      = the station's billed mass: hull + docked and hangared ships + cargo
 - **Surface gravity (README Q1) changes all of this.** At 0.27 g (μ = 2.65e12) the synchronous radius is 3,153 km (altitude 2,153 km), and holding at 100 km costs about a quarter of the 1 g figure.
 
 **Engaging, capacity and overload:**
-- Anchor cores are station-only function cores: S 2e7 N (10 t), M 2e8 N (60 t), L 2e9 N (400 t). Their control draw is 0.1, 0.5 and 2 MW, at containment class with a 10 s buffer. Several cores sum their `HoldMaxN`, each scaled by its `Integrity`.
-- **Founding:** an anchor engages only on a Station grid at rest in `BodySurface` (|v| < 0.5 m/s, |ω| < 0.01 rad/s, measured through the frame maths if the grid is still in `BodyInertial` above the band) and not in contact with terrain. Spin-up takes 600 ticks, during which the grid's own thrusters hold it. At engage the grid transfers to `BodySurface` if it isn't there already.
+- Anchor cores are function cores that **any grid** can mount (D25): S 2e7 N (10 t), M 2e8 N (60 t), L 2e9 N (400 t). Their own mass is the practical limit on small grids. Their control draw is 0.1, 0.5 and 2 MW, at containment class with a 10 s buffer. Several cores sum their `HoldMaxN`, each scaled by its `Integrity`.
+- **Activation (D25): get there first.** An anchor engages only when the grid has **reached the required position and, mostly, the required velocity**:
+  - **position:** the grid's centre of mass is within `EngagePosTolM` (data, 5 m) of the pose the owner set (or anywhere, if none was set), the pose is valid (footprint check below) and the grid is not in contact with terrain;
+  - **velocity:** its velocity in `BodySurface` (measured through the frame maths if the grid is still in `BodyInertial` above the band) is below `EngageMaxVelMs` (data, 5 m/s) and |ω| below 0.05 rad/s. The anchor absorbs the residual during spin-up and pays for it as an impulse, `EmPerNs · m · |v_residual|`, so arriving "mostly" at rest is cheap and arriving exactly at rest is free. Above the limit engagement is refused: the pilot must fly the match first (a co-rotating hover at 100 km means cancelling about 2.7 km/s of orbital speed).
+  - Spin-up takes 600 ticks, during which the grid's own thrusters hold it against gravity. At engage the grid transfers to `BodySurface` if it isn't there already.
   - Stations are normally founded by a hovering construction ship that drops an anchor seed, and they grow by construction.
   - A grid resting on the ground should be a landed base (`Frozen`), not anchored.
 - **Drop footprint (anti-bombardment):** the release trajectory is fixed by the pose, so at engage (and whenever a core is added) the server solves it once: impact point, or orbit, or escape. For an impact it takes the energy at the anchor's maximum rated mass (`Σ HoldMaxN / |a_hold|`) and a footprint radius `100 m · (E / 1 TJ)^(1/3)` (a 10,000 t station released at 100 km carries about 8.8 TJ, 2 kt, and a 210 m footprint). Engaging is refused if the footprint meets another party's Station exclusion zone or surface claim without that party's permission. The footprint is public, and the build tool shows it to anyone founding a base under it.
-- **While anchored:** the grid's thrusters and warp drive are locked. It moves only by releasing.
+- **While anchored:** the grid's thrusters and warp drive are locked; the anchor moves it.
+- **Crawl (D25): anchored grids can move, slowly, over days.** The anchor has crawl inputs: a target pose (position, and optionally heading) and a speed setting up to `CrawlMaxMs` (data, 0.05 m/s along the surface and 0.02 m/s in altitude: about 4.3 km and 1.7 km a day).
+  - The server plans the crawl as straight segments of at most 1 h in `BodySurface`. Each segment's `a_hold` is evaluated at its far end (the larger of its two ends for billing), so the rate stays constant per segment and settles lazily as now; a segment boundary is a scheduled event. Starting and stopping cost `EmPerNs · m · Δv` (negligible at these speeds).
+  - Each segment's swept bounds must clear terrain (the analytic height plus the `EditStore` bound, as for catcher solid tests) and other anchored grids at plan time, since an unattended crawl has no contacts to stop it; a terrain edit or a new anchor in the way stops the crawl at the segment boundary.
+  - The drop footprint is re-solved per segment, and a crawl whose path would carry the footprint into another party's exclusion zone or claim without permission is refused at plan time (and stops at the last valid segment if a zone appears later).
+  - While crawling, the grid is a **kinematic** Jolt compound moved along the segment (contacts push others, never it), and its bubble re-snaps its origin by whole 32 m steps when the grid has crawled that far: a rare rebase, not a refit. Unattended (no physics anchor within 3 km), a crawling grid needs no body at all: its pose is the segment's linear function of the tick, evaluated by the pose cache on demand, and it stays `Frozen` for physics; segment ends are scheduled events. Only an attended crawl costs a kinematic body update per tick. (The round 5 draft had every crawling grid unfrozen; with crawls lasting days, a server full of crawling outposts would have paid a body each for nothing.)
+  - Crawls longer than the reserve can pay are refused; warnings use the highest segment rate on the path.
+  - Crawling never changes the frame: to leave the body, release (below) and fly.
 - **Overload:** if `m · |a_hold| > Σ HoldMaxN`, an `Overload` alarm starts a 30 s grace (`OverloadGraceTicks` 1800). The grid must undock ships, jettison cargo or repair cores, or it fails.
   - The station's docking clamps refuse any docking that would overload it, through the existing permission hook.
 
@@ -942,6 +1042,19 @@ m      = the station's billed mass: hull + docked and hangared ships + cargo
   - **In a bubble:** the station body turns dynamic, with `MassMoments`. Above `1.3 × RotatingTop`, the bubble converts at F + 1 to a FreeFall bubble in `BodyInertial`, with `OriginRails` from the station's state. All members transfer through the frame maths, within the merge transfer budget (≤ 128 bodies a tick, proxies for the rest). Below that height it stays a Surface bubble and may now rebase.
   - **Unattended (`Frozen`):** it becomes `Rails` in `BodyInertial`, with Kepler elements from `(r, ω × r)`. A scheduled wake event (computed like kill-sphere events) makes it a physics anchor when its trajectory reaches `TerrainMax + 2 km`, or at once if it is already below. Its impact is then simulated, never skipped, through the existing impact damage rules (terrain crater capped at 30 m, as for breaches).
 - Docked ships fall with the compound and can undock and fly. Offline crew ride along.
+
+**A dropped station (D25): a serious, very uncommon disaster.**
+- **Why uncommon:** the reserve warnings from 24 h out, the refusal of owner starvation, containment-class control power with its buffer, the 30 s overload grace and the 60 s release countdown all stand between a station and a drop. Nothing here makes drops routine.
+- **Thrusters unlock at `AnchorFailing`.** Stations should carry thrusters in case they need to fly (D25). From the failing warning the grid's thrusters and drive unlock, so a station with enough thrust can hold itself, fly to a safe orbit or set itself down. The build tool shows a station's **thrust-to-weight at its anchor pose** and the `Drop` view's outcome with and without thrust; under 1.0 it can only slow its fall.
+- **Escape pods.** Stations should carry escape pods (D25). The build tool warns when pod berths are fewer than crew berths, and a grid anchored over an atmosphere with an `Impact` footprint is refused engagement without pod berths for its crew berths (`RequirePodsForImpactFootprint`, data, default true). Pods launch from `AnchorFailing` onward; they are ordinary small grids with chutes or retro thrusters (ship-hulls.md).
+- **Falling through an atmosphere: mostly burns up.** Stations have no heat shield. From the release tick a falling grid takes re-entry heating and dynamic pressure like any grid. Re-entry heating is "later" in review.md; dropped stations need it, so this doc proposes the Sutton-Graves stagnation heating planets.md already uses for scoop lips (`qdot ∝ sqrt(ρ / r_nose) · v³`, with `r_nose` from the hull's windward occupancy) plus `½ρv²` against the hull material's limit:
+  - above the hull's `EntryLimit` (data in ship materials: heat flux and dynamic pressure), heat and pressure damage brushes erode its windward face; structural cells that lose their connection **detach** as their own bodies by the existing detach rule;
+  - debris below `BurnUpMassKg` (data, 5 t) in the heating zone is **removed as burnt up** (a visual trail, no impact), the rest keeps falling and keeps eroding;
+  - what reaches the ground hits **hard** through the existing impact damage rules, as several fragments rather than one body. Terrain craters stay capped as for breaches.
+  - Low, slow releases (below about 50 km on a 1 g world, where the fall is short and the speed under 1 km/s) burn little and mostly hit the ground; high releases into a thick atmosphere mostly burn up. On airless bodies nothing burns: the whole station hits.
+  - The drop footprint stays **conservative**: it assumes nothing burns, so burn-up never weakens the anti-bombardment check.
+- **Blame:** the owner is attributed for impact damage on others (fines and faction standing read the same attribution hook as dose), unless the drop was caused by another party's attack, in which case the attacker is.
+- **Cost:** entry heating is about 1 µs per falling grid per tick (a few faces' fluxes, at 10 Hz for the damage brushes); fragmentation is a detach event per split; burnt-up debris is removed. A drop is one event-heavy minute, once in a long while.
 
 **Frames placement** (the change to frames-and-zones.md):
 - **Anchored grid:** `Placement.Frame = BodySurface` at any altitude, `GridFlags.Anchored`, and a constant `FramePose.Local` (pose cache cost nil).
@@ -965,7 +1078,7 @@ m      = the station's billed mass: hull + docked and hangared ships + cargo
 - **Hover physics:** inside the bubble, free bodies feel the full `g − ω²r` (8 m/s² at 100 km). An approaching ship has to cancel its orbital speed (about 2.7 km/s at 100 km, against 320 m/s of co-rotation) and then hover or dock. Loose crates and EVA crew fall away toward the planet: EVA near a low anchored station needs a jetpack or a tether.
 - **Docked ships** merge into the static compound (the existing docking rule), and their mass is billed.
 - **Warp arrivals:** the band rule gives `BodySurface`, the velocity rule gives `U = 0` (`u_tgt = 0`), and the arrival ring is the hemisphere facing the approach. A warp arrival therefore needs no braking, only hovering, which chemical engines can do inside the AM thrust limit.
-  - Exits must still clear `WarpFloor`. A station anchored below the floor (12 km on an airless body, or inside an atmosphere) is reached by flying down from the floor.
+  - **No exit floor (D16):** a ship may warp straight to a station anchored inside an atmosphere. The 2 s real-space leg ends braked at the ring point (warp.md), but an exit in low atmosphere sends a pressure wave that can kill wildlife and people below, with fines and blame on the arriving ship. Stations over populated ground therefore publish arrival lanes above their air or ask arrivals to drop high and fly down; a beaconed arrival's corridor shows its blast footprint (warp.md).
 - **AM thrust limit:** stations default to banning AM thrust inside `AmLimitRadius` (see Radiation), so docking traffic doesn't irradiate the station.
 
 ### Antimatter thrusters and the flight model (decision: conventional AM thrusters)
@@ -1026,7 +1139,7 @@ All AM weapons are radiation weapons first: armour is shielding mass, and the sh
   - **At the target:** hull ablation at 2e10 J/m³ (0.05 m³/s, a 0.25 m-radius bore advancing about 0.25 m/s), plus prompt dose from the impact point (`f_rad` 0.1). Rooms within 5 m of the bore behind 1 m of remaining hull take about 0.75 Gy/s.
   - **At the shooter:** 2 % muzzle loss annihilates in the housing, which makes 10 MW of gamma. The standard housing has 3,000 kg/m² (about 12 t); a crude one has 600 (about 2 t). A crew room 10 m away behind 500 kg/m² of bulkheads takes 1.3e-4 Gy/s with the standard housing (5 Gy after about 11 h of fire), or 0.05 Gy/s with the crude one (lethal after about 100 s of fire).
 - **Anti-graviton charges** stay as specified below. They are the anti-capital weapon (gradient damage); AM weapons are the anti-crew weapon.
-- **Drive runaways are not a weapon by design.** The override exists as a scuttle, bounded by the casing cap on its far field and by the near-field rules above (open question 8).
+- **Drive runaways are not a designed weapon, but the override is allowed** (decision D12): a scuttle or a visible 10 s kamikaze, bounded by the casing cap on its far field and by the near-field rules above.
 
 ## Anti-graviton charges (bombs)
 
@@ -1159,17 +1272,20 @@ Pirates use what they can get. Nothing here is special-cased: it is the same dat
   - **Spool sync** waits for the slowest member, including the 30 s priming of a Cold recirculating member.
   - **One member's runaway** sends its alarm to the leader. If it bursts before `T0 − 30` (an off-spec burst always does), its warp field cancels the whole fleet's spool, and its pulse hits a formation packed within 2 km. Fleets therefore prefer assayed fuel, auto-purge, or keeping their dodgy recirculating ships out of the formation.
   - A slurry member is heavier per jump but can never be that member.
-- **Dual-drive ships (two warp drive cores on one grid):**
-  - **Selector:** one `ActiveDrive`. Only the selected drive can plot, spool and engage. Two drives can never spool at once; the second is refused.
-  - **Switching** is allowed only while no drive is spooling, in cruise or committed. It takes 600 ticks (10 s) to re-route the bubble emitters. Plots made before a switch are discarded.
-  - **Cooldown is per ship:** after a jump, the jumping drive's `CooldownTicks` applies to the ship whichever drive is selected next. Otherwise a 10 s switch would bypass a 30 s cooldown and let a dual-drive ship chain hops.
-  - **Default** when the selector is unset: the ready drive with the lower component id.
-  - **Plots** use the selected drive's class (`VCap`, `MassCap`, `MassMin`, spool) and kind. Both drives' masses always count in `M`.
-  - **Auto-failover** (owner flag, default off): if the selected drive becomes disabled (`Integrity` < 0.5, fuel, agent or AM missing) while idle, the selector switches after the 10 s. It never switches mid-spool.
-  - **Damage:** each drive takes damage separately through its own housing (the shared component rule). An unselected recirculating drive that is Hot still holds its prime and can still run away.
-    - So the typical pirate fit is the salvaged recirculating drive kept Cold, with the slurry drive Hot as the escape drive.
-    - A runaway's near-field brush (≥ 10 m) usually wrecks the other drive too, if it is close.
-  - **Signatures:** `WarpDepart` carries the selected `DriveId`, kind included, so observers see that a ship jumped on slurry. A Hot unselected drive still shows its chamber signature.
+- **Multi-drive ships (several warp drive cores on one grid; decision D14, replaces the revision 2 selector):** their bubbles **support each other**. Every participating drive spools together and contributes to one bubble, whose quality is the average of theirs weighted by the power each provides.
+  - **Participation** (warp.md "Multiple drives" owns the bubble rules; this doc follows them): every drive on the root grid, and on docked ships whose collar carries power and control wiring, that is wired to the same Engage signal, powered, out of cooldown, `Integrity` ≥ 0.5, Hot or primable within the spool sync, and whose fuel plan passes. A drive the wiring leaves unpowered or unengaged (the owner's "Off") simply doesn't join and doesn't block. Rewiring or switching is allowed only while no drive is spooling, in cruise or committed; plots made before a change are discarded.
+  - **Provided power:** `P_i` = the bus power its wiring actually delivers (W), and `f_i = clamp(P_i / PRated_i, 0, 1)` with `PRated` per class in data (the old `BubbleW` ratios kept as its scale, D 1 : C 4 : B 12 : A 40; absolute watts are warp.md's to set). A drive with `f_i < 0.5` doesn't join. Weights `w_i = P_i / Σ P` (D14: "averaged by provided power"), with `P_i` capped at `PRated_i` (a drive draws at most its rating), so over-wiring power to one drive can't buy it more than its rated share.
+  - **Combined bubble** (warp.md's formulas):
+    - quality (`V0`, `K`, `VReal`, `TReal`) is the `w`-weighted average of the participants' values, and `VCap = Σ w_i · f_i · VCap_i`: a small drive helping a big one lowers its quality a little, a big one helping a small one raises it, an under-powered one drags the cap down;
+    - capacity sums: the plot needs `M ≤ Σ f_i · MassCap_i`, so two drives can carry a ship neither could alone;
+    - spool is the longest participant's. **Cooldown:** each drive keeps its own (warp.md), but the ship cannot spool again until the longest cooldown among its last warp's participants ends (this doc's revision 2 fix against cooldown chaining; see Round 5 review notes).
+  - **Fuel:** each participant pays its share of the jump by its own kind and class: `C_i = EmMul_i · EmPerLn_i · max(w_i · M, MassMin_i) · ℓ`, through its own mixer, line and AM. Mixed kinds are allowed; each mixes at its own mix tick.
+  - **Runaway:** any participant's runaway cancels the shared spool before `T0 − 30` (its warp field and the bubble both go). After the lock-in it defers like a single drive's, and in cruise it is a hard cancel of the whole warp (warp.md cancel table). A participant's weak or over-rich mix aborts the whole spool, charge rules as for one drive.
+  - **Damage:** each drive takes damage separately through its own housings. A drive disabled mid-spool before the lock-in aborts the spool (charges kept per the weak-bubble rule). After the lock-in, losing a drive (damage, power, eject) only removes its `f_i · MassCap_i` of support: the warp continues while the remaining support still carries `M`, otherwise it is a hard cancel (warp.md). An unpowered recirculating drive that is Hot still holds its prime and can still run away.
+    - So the typical pirate fit is the salvaged recirculating drive kept Cold and switched out, with the slurry drive Hot as the escape drive, or both wired in for a heavier hull than either carries.
+    - A runaway's near-field brush (≥ 10 m) usually wrecks the other drive too, if it is close; ejecting the core takes it out of the bubble.
+  - **Signatures:** `WarpDepart` carries the participating `DriveId`s with their kinds and weights, so observers see that a ship jumped partly on slurry. A Hot drive that didn't join still shows its chamber signature.
+  - **Fleets** are unchanged: fleet warp still takes the most conservative member profile, each member's profile being its own combined bubble.
 - **Salvage:** drives recovered from wrecks keep their `Integrity` and options, but faction-keyed options (auto-purge, inline assay) stop working off-key (see Warp fuel). Pirates' recirculating drives are therefore usually the dangerous kind.
 
 ## EM crystal stability
@@ -1195,14 +1311,14 @@ Pirates use what they can get. Nothing here is special-cased: it is the same dat
 | --- | --- | --- | --- | --- |
 | T0 (first hours) | Solar, batteries, fission | Chemical, jet, ion | None, or slurry D warp once fuelled | Planet ore → concentrator ×2 → crude → slurry blender. AM cells bought from the system's faction foundry |
 | T1 | Fusion | Chemical plus AM thermal | Slurry D/C warp, moons first | Crude/fuel from T1; crude stills (no licence); first `AmFactory` S on fission (about 0.9 g a day) |
-| T2 | Fusion plus small cores | Plasma | C/B warp; recirculating drives where a faction sells them | Asteroid belts (about 15× purity), T2 field grade; plating, tractors; `AmFactory` M; assayers; first station anchors (S/M) |
+| T2 | Fusion plus small cores | Plasma | C/B warp; recirculating drives where a faction sells them | Asteroid belts (about 15× purity), T2 field grade; plating, inertial dampeners, tractors (pull without AM, push with it); `AmFactory` M; assayers; first station anchors (S/M) |
 | T3 | Cores (GW) | Heavy plasma, heavy AM thermal | Light/heavy wormhole generators (tunnel class; instant as the premium option), catchers, gates; battleship stabiliser kits; recirculating B/A with auto-purge and inline assay | T3 throat grade; additive labs (crude labs earlier, for pirates); black hole H1 and H2; `AmFactory` L; AM torpedoes and lances; large anchored stations |
-| T4 | Capital cores | Heavy plasma | Capital generators, natural redirects, support-ship stabiliser projectors | Black hole H3, first seeds, T4 crystal, Seed lattice additive, remnant gold rushes |
+| T4 | Capital cores | Heavy plasma | Capital generators, natural redirects, support-ship stabiliser projectors | Black hole H3, first seeds, T4 crystal, Seed lattice additive; `CollapseInducer` (a coalition project); the rare remnant rush |
 
 **Rarity knobs** (`data/deposits/*.json`, `data/celestials/*.json`, `data/physics/exotic.json`):
 - lens density 5 per 10⁶ km²; planet q median 0.0006;
 - EM-asteroid fraction 2 % (30 % near a black hole); asteroid q median 0.01, 1 % ore fill;
-- black-hole slots 1 per system; life 60–180 days; rebirth 14 days; `MaxRemnants` 8;
+- black-hole slots 1 per system; life 5–20 years (D21); rebirth 14 days; `MaxRemnants` 8; `CollapseWork` 2,000 kg of throat content (10 kg of AM), `InduceRateKgPerH` 20, `CollapseRelax` 2 % an hour;
 - remnant R 20–60 km, surface q 0.08;
 - concentrator and drill throughput (the EM faucet);
 - `AmProductionJ` (2 TJ per gram) and installed power (the AM faucet); foundry output per system;
@@ -1210,7 +1326,7 @@ Pirates use what they can get. Nothing here is special-cased: it is the same dat
 - crude refinery spread (0.15–0.20) and the faction availability of recirculating drives and their options;
 - `QMax` (0.995), `DecayFloor` (0.96), and additive potencies, recipes and faction availability.
 
-Tune so that a server's first remnant is the moment when crystal stops being scarce, and so that AM stays below the price at which the heavy wormhole invariant breaks (about 0.7 per gram at reference EM prices; capital breaks at about 1.85).
+Tune so that planets and asteroids supply every grade below crystal for the whole game (D22), a remnant is a rare local rush rather than the moment the economy changes, and AM stays below the price at which the heavy manufactured-wormhole invariant breaks (about 0.7 per gram at reference EM prices; capital breaks at about 1.85). Travel prices keep D23's order: natural crossings cheapest, warp cheap for close specific trips, manufactured wormholes the fast premium.
 
 ## Data (all content in `data/`, formula families in code)
 
@@ -1226,17 +1342,23 @@ Tune so that a server's first remnant is the moment when crystal stops being sca
   "breach": { "radiusMPerCbrtG": 8, "radiusCap": 120, "craterCap": 30, "chainFraction": 0.25, "fRad": 0.5 },
   "radiation": { "kappaM2PerKg": 1.0e-4, "sigma0Annihilation": 400, "sigma0Flare": 200,
                  "doseRecoveryGyPerDay": 0.05, "thresholdsGy": [0.5, 2.0, 5.0], "lethalDelayS": 60,
-                 "designLimitGyS": 1.0e-4, "receiverFloorGyS": 1.0e-6, "amLimitRadiusM": 20000 },
-  "componentDamage": { "overlapGain": 4.0 },
+                 "designLimitGyS": 1.0e-4, "receiverFloorGyS": 1.0e-6, "amLimitRadiusM": 20000,
+                 "lifetimeBandsGy": [2.0, 5.0, 10.0], "antiradRecoveryGyPerDay": 0.5, "antiradHours": 6,
+                 "contamination": { "breachMinGy": 1.0, "activationGy": 50, "halfLifeDays": { "HullActivation": 3, "BreachFallout": 20 } } },
+  "componentDamage": { "overlapGain": 4.0, "chamberRating": 8, "ejectMountRating": 4 },
+  "graviton": { "wPerN": 1.0 },
+  "dampener": { "emPerNs": 1.0e-11, "wPerN": 1.0, "standbyW": 1.0e4, "rampS": 0.5 },
+  "multiDrive": { "pRatedScale": { "D": 1, "C": 4, "B": 12, "A": 40 }, "joinMinPowerFraction": 0.5, "shipCooldownIsMaxOfParticipants": true },
   "runaway": { "mixTicks": 60, "delayTicks": 180, "purgeTicks": 120, "purgeMinIntegrity": 0.25,
-               "breachIntegrity": 0.5, "ejectTicks": 30, "ejectDvMs": 20, "overrideArmTicks": 600,
+               "breachIntegrity": 0.5, "ejectTicks": 30, "ejectDvMs": { "D": 20, "C": 20, "B": 40, "A": 40 }, "ejectStandard": true, "overrideArmTicks": 600,
                "nearRadiusMPerCbrtKg": 10, "nearRadiusCap": 120, "pulseCapKg": 100,
                "lockInDeferral": true, "signatureRangeM": 50000, "hotWearPerTol": 0.05, "overRichWear": 0.10,
                "autoQMixFromSpread": true },
-  "anchor": { "emPerNs": 1.0e-12, "minPurity": 0.60, "zoneEnterM": 2000, "zoneLeaveM": 2600,
-              "spinUpTicks": 600, "engageMaxVelMs": 0.5, "engageMaxOmega": 0.01, "overloadGraceTicks": 1800,
+  "anchor": { "emPerNs": 1.0e-12, "minPurity": 0.60, "zoneEnterM": 2000, "zoneLeaveM": 2600, "anyGrid": true,
+              "spinUpTicks": 600, "engagePosTolM": 5, "engageMaxVelMs": 5, "engageMaxOmega": 0.05, "overloadGraceTicks": 1800,
               "controlBufferS": 10, "releaseCountdownTicks": 3600, "warnHours": [24, 6, 1, 0.1667, 0.0167],
-              "dropRadiusMPerCbrtTJ": 100 },
+              "dropRadiusMPerCbrtTJ": 100, "crawlMaxMs": 0.05, "crawlMaxVertMs": 0.02, "crawlSegmentS": 3600,
+              "requirePodsForImpactFootprint": true, "burnUpMassKg": 5000 },
   "market": { "slurryWeight": 0.8 },
   "kickBudget": { "capMs": 100, "refillMsPerS": 100 },
   "agPulse": { "rKmPerCbrtKg": 1.0, "vPerCbrtKg": 40, "vCap": 100, "warpMul": 20, "warpS": 20, "warpCapS": 120,
@@ -1280,7 +1402,8 @@ Tune so that a server's first remnant is the moment when crystal stops being sca
   "agentRecovery": 0.95, "loopAgentKg": 80, "primeKg": 1.0, "lineCapKg": 75, "primeTicks": 1800,
   "separatorW": 2.0e6, "costRef": 2400,
   "options": { "inlineAssay": { "cost": 480, "factionKeyed": true }, "autoPurge": { "cost": 240, "factionKeyed": true },
-               "ejectMount": { "cost": 240 }, "qualitySeparator": { "cost": 400, "agentRecovery": 0.98 } } }
+               "qualitySeparator": { "cost": 400, "agentRecovery": 0.98 } },
+  "coreEject": "standard", "pRatedScale": 4 }
 
 // data/em_additives/binder.json   (wormholes.md reads "effect" and "tradeOff"; this doc owns "item" and "recipe")
 { "id": "add.binder", "item": { "family": "additive", "densityKgM3": 2200, "refCostPerKg": 4.0, "metastable": null },
@@ -1303,10 +1426,19 @@ Tune so that a server's first remnant is the moment when crystal stops being sca
   "craft": { "lens": { "family": "em", "minPurity": 0.85, "contentKg": 5 } } }
 
 // data/components/function-cores/tractor_beam.json   (excerpt: the tunnel classification every gravity core carries)
-{ "id": "fc.tractor", "minPurity": 0.60, "gravitonProjection": "External" }
+{ "id": "fc.tractor", "minPurity": 0.60, "gravitonProjection": "External",
+  "modes": { "Pull": { "source": "Graviton", "amPerEm": 0 }, "Push": { "source": "AntiGraviton", "requiresAm": true } } }
 
-// data/components/function-cores/station_anchor_m.json
-{ "id": "fc.station_anchor.m", "stationOnly": true, "holdMaxN": 2.0e8, "massKg": 60000,
+// data/components/function-cores/inertial_dampener_m.json
+{ "id": "fc.inertial_dampener.m", "aMaxG": 6, "massMaxKg": 5.0e5, "radiusM": 40, "minPurity": 0.60,
+  "source": "Graviton", "powerClass": "Life", "gravitonProjection": "Internal", "sockets": ["Fuel", "Power"] }
+
+// data/components/function-cores/collapse_inducer.json
+{ "id": "fc.collapse_inducer", "tier": 4, "massKg": 2.0e6, "minPurity": 0.85, "rateKgPerH": 20, "powerW": 2.0e9,
+  "craft": { "lens": { "family": "em", "minPurity": 0.97, "contentKg": 5 } }, "gravitonProjection": "External", "signatureRangeM": 5.0e7 }
+
+// data/components/function-cores/station_anchor_m.json   (D25: any grid)
+{ "id": "fc.station_anchor.m", "stationOnly": false, "holdMaxN": 2.0e8, "massKg": 60000,
   "minPurity": 0.60, "controlW": 5.0e5, "powerClass": "Containment", "sockets": ["Fuel", "Antimatter", "Power"] }
 
 // data/components/function-cores/am_factory_m.json
@@ -1336,7 +1468,8 @@ Tune so that a server's first remnant is the moment when crystal stops being sca
 // data/celestials/blackhole.json
 { "mu": [1.0e13, 4.0e13], "killRadiusM": 2000, "disc": [2.0e5, 2.0e6], "jetHalfAngleDeg": 8, "jetLengthM": 1.0e9,
   "doseDiscGyS": 0.5, "doseJetGyS": 2.0, "doseRefM": 1.0e6,
-  "lifeDays": [60, 180], "rebirthDays": 14, "forecastDays": 7, "birthForecastDays": 7, "maxRemnants": 8,
+  "lifeDays": [1825, 7300], "rebirthDays": 14,
+  "induction": { "collapseWorkKg": 2000, "relaxPerHour": 0.02, "countdownHours": 24, "progressEventFraction": 0.25 }, "forecastDays": 7, "birthForecastDays": 7, "maxRemnants": 8,
   "shock": { "radiusM": 5.0e7, "dv": 100 },
   "tidalBubble": { "accelCap": 20, "minRadiusM": 50 }, "integratedOriginGradient": 1.0e-3,
   "remnant": { "radiusM": [2.0e4, 6.0e4], "gravityG": [0.15, 0.4], "reliefM": 2000, "yieldDensityKgM3": 3000,
@@ -1354,7 +1487,8 @@ Also needed:
 - `data/em_additives/*.json` for all seven families, and `data/recipes/add_*.json` if the recipes are split out;
 - `data/stabilisers/*.json` (kit and projector);
 - a `gravitonProjection` field on every function core listed under Graviton projection inside tunnels;
-- `data/factions/*.json` gains the additive families each faction makes and sells.
+- `data/factions/*.json` gains the additive families each faction makes and sells;
+- round 5: `fc.inertial_dampener` S/M/L, `fc.collapse_inducer`, tractor `modes`, `PRated` per drive class (warp.md sets the watts), the chamber and eject-mount housing ratings, `med.antirad` and the `MedBay` treatment items, contamination half-lives, `EntryLimit` in ship materials, and escape-pod components (ship-hulls.md).
 
 ## C# data structures (zero alloc, server authoritative)
 
@@ -1422,7 +1556,7 @@ public struct ShipLedger                        // per root grid, written by the
 
 // ---- Warp drives (data in warp.md's WarpDrive, extended) ----
 public enum DriveKind : byte { Slurry, Recirculating }
-[Flags] public enum DriveOptions : byte { None = 0, InlineAssay = 1, AutoPurge = 2, EjectMount = 4, QualitySeparator = 8 }
+[Flags] public enum DriveOptions : byte { None = 0, InlineAssay = 1, AutoPurge = 2, AutoEject = 4, QualitySeparator = 8 }   // core eject is standard (D13); AutoEject is the owner flag
 public enum LineState : byte { Cold, Priming, Primed, Charged, Runaway, Purging, Purged, Ejected, Destroyed }
 public enum RunawayCause : byte { None, OffSpec, DiluterBreach, ChamberRupture, Override }
 
@@ -1436,15 +1570,24 @@ public struct WarpFuelTruth { public long TrueContentMg; public ushort QLineTrue
 public struct DriveLine                         // per recirculating drive core, server; SoA in DriveTable
 {
     public int Component, Grid; public LineState State; public RunawayCause Cause; public DriveOptions Options;
-    public ushort Integrity;                    // q16, shared component damage rule
+    public ushort Integrity, ChamberIntegrity, EjectIntegrity;   // q16 per housing (core rating 1, chamber 8, eject mount 4)
     public long ContentMg, NominalMg, MassMg;   // line inventory: true content, nominal content, total incl. agent
     public long ChamberAmNg;                    // = AmPerEm · ContentMg; a trap (signature, hold power)
     public ushort QFeedTrue;                    // for the breach rule
     public long StateEndTick;                   // prime end, burst tick, purge end, arm end
     public bool Hot;                            // owner standby setting
-    public bool Deferred;                       // burst deferred past the lock-in to T_exit + 181
+    public bool Deferred;                       // burst deferred past the lock-in to T_exit + 181 (T_exit = TDrop − 1, or TDrop' − 1 after a cancel)
+    public bool PurgeQueued, EjectQueued;       // D17: commanded in cruise, executed on the first real-space tick
 }
-public struct DriveSelector { public int Grid; public int Active, Pending; public long SwitchEndTick, ShipCooldownEndTick; public bool AutoFailover; }
+public unsafe struct DriveGroup                 // D14: participating drives share one bubble (replaces DriveSelector)
+{
+    public int Grid; public byte Count; public fixed int Drive[8];   // drives wired to the Engage signal (root grid and collar-wired docked ships)
+    public fixed int WeightQ16[8], PowerFracQ16[8]; // w_i = P_i / Σ P and f_i = P_i / PRated_i (join needs f_i ≥ 0.5), fixed at spool start
+    public long SupportKg;                      // Σ f_i · MassCap_i over drives still holding; recomputed on drive events (warp.md)
+    public long ShipCooldownEndTick;            // max of the participants' cooldown ends (anti-chaining)
+}
+public struct DampenerState { public int Component, Grid; public long MassInKg; public int AMaxMms2; public long MassMaxKg; public byte Starved; }   // m_in updated on events
+public enum TractorMode : byte { Off, Pull, Push, Hold }   // Push and Hold need AM (D28)
 
 public struct KickBudget { public int UsedMmS; public long LastTick; }   // per root body; integer mm/s, refills 100 m/s per second
 
@@ -1466,7 +1609,9 @@ public static class PulseKick                   // shared by CollapseFlush, AG p
 // ---- Radiation ----
 public struct RadSource { public int Grid, Component; public float3 Local, ShadowAxis; public float ShadowCos, ShadowSigma, GammaW, CullRadius; } // GammaW: 1 s average; CullRadius: where dose falls below the receiver floor
 public sealed class InternalShieldTable { public float[] Atten; public int Sources, Rooms; }  // κ/(4πd²)·exp(−σ/σ0), baked with the hull
-public struct DoseState { public float Gy; public long Tick; }   // per character; recovery settled lazily
+public struct DoseState { public float Gy, LifetimeGy; public long Tick, AntiradEndTick; public byte Chronic; }   // per character; acute recovers lazily, lifetime never does (D24)
+public enum ContaminationKind : byte { HullActivation, BreachFallout }
+public struct Contamination { public int Grid; public ushort Room; public ChunkCoord Chunk; public ContaminationKind Kind; public float ActivityGyS; public long Tick; }   // decays A·2^(−Δt/T½), lazily; dropped below the receiver floor
 
 namespace BrutalGame.Frames;
 public enum CelestialKind : byte { Star, Planet, Moon, BlackHole, Remnant }
@@ -1475,6 +1620,7 @@ public struct BlackHole
     public int Celestial; public FrameId PreallocSurface; public byte Incarnation;
     public double Mu, KillRadius, InfallRadius, DiscInner, DiscOuter, JetHalfAngle, JetLength; public double3 SpinAxis;
     public long BirthForecastTick, BirthTick, ForecastTick, CollapseTick;   // CollapseTick server-only until the forecast
+    public long InducedWorkMg, InduceSettledTick, InduceFillTick;           // D21 deliberate collapse: relaxes lazily, fill is a scheduled event
     public ulong Seed; public RemnantParams Remnant;
 }
 public struct RemnantParams { public double Radius, SurfaceGravity, DayTicks; public ulong TerrainSeed; public float QSurface, QGain, QExponent; }
@@ -1482,7 +1628,7 @@ public struct MinorBody { public AsteroidRef Ref; public FrameId Frame; public K
 public readonly record struct AsteroidRef(ushort Belt, uint Cell, ushort Index);
 public struct AsteroidBelt { public int Parent; public double AMin, AMax, IncSpread, EccMax; public int Bands; public float Density, EmFraction; public ulong Seed; }
 
-public enum AnchorState : byte { SpinUp, Holding, Overload, Releasing, Released }
+public enum AnchorState : byte { SpinUp, Holding, Crawling, Overload, Releasing, Released }
 public enum DropKind : byte { Impact, Orbit, Escape }
 public struct DropFootprint { public DropKind Kind; public double3 ImpactPos; public long FallTicks; public double MaxEnergyJ; public float RadiusM; } // solved at engage and on core change
 public struct StationAnchor                     // SoA in AnchorTable (256 on a server)
@@ -1497,8 +1643,9 @@ public struct StationAnchor                     // SoA in AnchorTable (256 on a 
     public DropFootprint Drop;
     public AnchorState State; public byte WarnLevel;
     public long OverloadEndTick, ReleaseTick;
+    public double3 CrawlTarget; public long CrawlSegEndTick; public float CrawlSpeedMs;   // D25 crawl: one straight segment ≤ 1 h at a time
 }
-// BubbleAnchor gains Station (origin fixed at the station, never rebased); GridFlags gains Anchored.
+// BubbleAnchor gains Station (origin fixed at the station; re-snapped by whole 32 m steps only while crawling); GridFlags gains Anchored (any grid class).
 
 namespace BrutalGame.Terrain;
 public struct DepositLens { public double3 Dir; public float Depth; public float3 HalfAxes; public uint Rotation; public ushort QBase; public uint Seed; }
@@ -1521,6 +1668,9 @@ public sealed class DepositIndex { public DepositLens[] Lenses; /* hash: LOD-10 
 | `BlackHoleForecast`, `BlackHoleCountdown` | Every client in the system, persisted | about 24 B |
 | `BlackHoleCollapse` (tick, kick, new μ, remnant params and seed) | Every client in the system | about 64 B |
 | `BlackHoleBirthForecast`, `BlackHoleBirth` | Every client in the system, persisted | about 48 B each |
+| `BlackHoleInduction` (work fraction, contributing groups) | Every client in the system once past 25 %, on each 5 % step; persisted | about 32 B |
+| `AnchorCrawl` (target, segment end tick, speed) | Interest of the grid and of its footprint, on each segment | about 40 B |
+| `Contamination` (room or chunk, kind, activity) | Interest of the grid or chunk, on create and decon | about 24 B |
 
 - **Inventories, batches, ledgers, drive lines and anchors are server state.** Owners get deltas on change; there is no per-tick traffic.
 - **Nominal only:** clients receive nominal content and spread, never `NomErr` or true content, and never `WarpFuelTruth`. An off-spec outcome first reaches the crew at the mix tick, as a `DriveAlarm` or a spool abort.
@@ -1560,6 +1710,12 @@ public sealed class DepositIndex { public DepositLens[] Lenses; /* hash: LOD-10 
 | Black-hole collapse or birth | about 2 ms once per event (10k element re-derives); can be a job |
 | Anchor release | one transfer pass over the station's bubble (about 5 µs per body), once per event |
 | Client black-hole visuals (lensing, disc) | about 0.1–0.3 ms GPU while on screen |
+| Inertial dampener | about 2 ns per dampener in the force pass; `m_in` on events |
+| Multi-drive plot | one mixer evaluation per participating drive (about 1 µs each), at plot and spool start |
+| Anchor crawl | zero per tick unattended (`Frozen`, pose linear in the tick); one `MoveKinematic` per tick only while the crawling grid is in a bubble; segment boundaries are events |
+| Contamination | 0 until a record exists; then about 2 ns per (record, nearby occupant) in the 1 Hz dose pass |
+| Black-hole induction | 0 per tick: lazy relaxation, fill as a scheduled event |
+| Falling station entry heating | about 1 µs per falling grid per tick, during a drop only |
 
 Profiler rows: Resources, PowerNet, Batches, Mining yield, Deposits, Asteroids, BH hazards, BH origins, Pulses, Breaches, Drives, Anchors, Dose, Factories.
 
@@ -1576,15 +1732,17 @@ Profiler rows: Resources, PowerNet, Batches, Mining yield, Deposits, Asteroids, 
   - a mix tick at spool start + 60, where weak or over-rich mixes abort the spool and off-spec recirculating mixes start a runaway;
   - Cold recirculating drives must prime for 30 s before spool;
   - `SpoolTicks ≥ 270` is enforced at load;
-  - any runaway burst that would fall at or after `T0 − 30` is deferred to `T_exit + 1 + 180` (T1, or the abort or interdiction exit), with prime yield. The lock-in is unchanged.
+  - any runaway burst that would fall at or after `T0 − 30` is deferred to `T_exit + 1 + 180` (`T_exit + 1` = `TDrop`, or `TDrop'` after a cancel: the first real-space tick, not T1), with prime yield. The lock-in is unchanged. Purge and eject commanded in cruise execute at `TDrop` (D17).
+  - **Override mid-warp:** warp.md's "only an override or sabotage can start one mid-warp" should read "only sabotage or interior damage". This doc keeps the override refused in `Warp` placement: a full-line override armed in cruise would arrive at the destination already armed, skipping the 10 s public arm in real space that D12's kamikaze bound relies on.
 - **Explicit locks** (docking collar, landing clamp) also refuse priming and the drive override.
 - **Anti-graviton fields:** spool is refused inside an active anti-graviton warp field (charges and runaways), and cancelled by one only before `T0 − 30`.
   - These fields join interdiction detection. A station's interdiction ban does not stop them; dampers do.
 - **Fleet warp:** spool sync includes Cold priming; members' `DriveAlarm`s go to the leader; a member's runaway field cancels the fleet's spool before `T0 − 30`.
-- **Dual drives:** `DriveSelector` (one active drive; 10 s switch only when idle; optional auto-failover when idle; cooldown per ship). `WarpDepart`'s `DriveId` carries the kind.
+- **Multiple drives (D14):** `DriveGroup` replaces the selector and "only one spools", on warp.md's "Multiple drives" rules: participating drives spool together into one bubble, quality (`V0`, `K`, `VReal`, `TReal`) averaged by delivered power `P_i`, `VCap = Σ w_i f_i VCap_i`, support `Σ f_i · MassCap_i`, spool the longest participant's, each drive paying its share by its own kind. **For warp.md:** each drive keeps its own cooldown there, which reopens the revision 2 cooldown-chaining exploit (jump on drive A, unwire it, jump on drive B); this doc keeps a ship cooldown = the longest of the last warp's participants, and warp.md should adopt it. `WarpDepart` carries every participating `DriveId`, kind and weight.
+- **Core eject is standard** on recirculating drives (D13), so warp.md's drive data drops the eject-mount option.
 - **Targets:**
-  - anchored stations: the band rule gives `BodySurface` inside the anchored zone; `MatchTarget` gives `U = 0`; the arrival ring is the hemisphere facing the approach; `WarpFloor` still applies.
-  - `WarpFloor(BH) = 1.1 × DiscOuter`.
+  - anchored stations: the band rule gives `BodySurface` inside the anchored zone; `MatchTarget` gives `U = 0`; the arrival ring is the hemisphere facing the approach. No floor applies (D16): a low or in-atmosphere arrival at a low station is legal, with warp.md's pressure wave, fines and blame.
+  - black holes: `RouteShell(BH) = 1.1 × DiscOuter`, and warp exits inside it are refused (a hazard exclusion, not an atmosphere floor; warp.md doesn't cover black holes yet).
 - Charges can't be armed, and drive overrides can't start, in `Warp` placement.
 - Speed and cost table, plus `data/drives` per class and kind.
 
@@ -1592,7 +1750,7 @@ Profiler rows: Resources, PowerNet, Batches, Mining yield, Deposits, Asteroids, 
 - Answers Q4 (EM source). "EM" means kg of content from stock at or above `MinPurity`.
 - `MinPurity` per generator class (capital up to r = 400 m); crystal lens for capital generators and redirect catchers.
 - Every EM debit carries `AmPerEm` of AM: the quote, the generator's reservation, catcher establish and capture (and candidate eligibility), `Φ_gate`, and `X_redirect`. An owner's cancel refunds AM. A forced cancel returns both reservations to the generator's tanks.
-- The "cheaper" invariant is restated per generator class, against the largest ship that fits at `ρ_ref`, using the recirculating kind on fuel grade and including AM. The test logs the AM price at which each ratio reaches 1 (heavy binds at about 0.7 per gram).
+- **Travel economics (D23):** replace "warp cheaper, wormholes costlier" everywhere with "natural wormholes cheapest, manufactured wormholes fastest, warp the cheap way somewhere specific and relatively close". The manufactured-wormhole invariant is restated per generator class, against the largest ship that fits at `ρ_ref`, using the recirculating kind on fuel grade and including AM. The test logs the AM price at which each ratio reaches 1 (heavy binds at about 0.7 per gram). Owners' fees on natural pairs must stay below a ship's warp cost to the same place for "natural cheapest" to hold.
 - Power comes from `PowerNet`. The charge must be full by `TCommit − 31`, with 1.25× catch-up draw, or it cancels as disabled.
 - ~~Stall rule~~ (revision 2) is **replaced by the pulse drain** (revision 3; wormholes.md revision 3 already carries it): `BombK · Y · (1 − d/R_s)²` per mouth within `R_s = 5R`, `BombK · Y` inside a tunnel, rung down over 300 ticks, blocked at a mouth a powered damper covers; a zero collapses early at `Tz + 60`. Answers this doc's old open question 2.
 - **Made in wormholes.md by the revision 3 review** (cross-doc consistency): the pulse-drain row (tunnel value 1×, ring-down), the destabiliser row (capped at `FeedCapW`), the drain order (ring-downs as timed slopes), the stability examples (prepared survival, pinning), the power-through bullet, the re-establish's "original X", the in-tunnel charge line, the early collapse point for ring-downs, open question 19 and its test line.
@@ -1611,9 +1769,15 @@ Profiler rows: Resources, PowerNet, Batches, Mining yield, Deposits, Asteroids, 
   - `σ0` per spectrum (flares 200, annihilation 400 kg/m²);
   - `ShieldTable` is reused for every external source;
   - `RadiationShield` counts against annihilation too;
-  - "ships in warp or held in a throat are immune" applies to all dose. Runaway bursts are deferred out of `Throat` placement like out of warp.
+  - "ships in warp or held in a throat are immune" applies to all dose. Runaway bursts are deferred out of `Throat` placement like out of warp;
+  - dose is transient and lingering (D24): lifetime dose, chronic conditions and contamination records apply to flare and black-hole dose as well.
 - The warp interdiction emitter stays power-only (unchanged).
 - Q14: fees may be throat-grade EM.
+
+**tractor-beams.md** (added by the round 5 review; that doc carries its own consumption and modes)
+- **D28:** drop the Pumped mode (`PumpedFrac` 0.25, `PumpMWPerMN` 100) and the `pumped` field of `TractorState`. Without AM a beam runs **Pull** on graviton emission at full rating (`s = −1` only; a flip to push is refused with no AM in the emitter's traps); Push and Hold need the reaction. Bus power in pull mode is `BaseMW + 1 MW per km of R + GravitonWPerN · F_emit`; heat in pull mode is tractor-beams.md's to set (proposed: the old pumped heat rule with 1 W per N).
+- Hold mode's spring-damper both pulls and pushes, so a Hold lock without AM degrades to a pull-only tether (it can stop a target leaving, never stop it closing). The warp-blocking tackle works on either.
+- The worked rates table gains a pull row (M towing a 300 t ship at 0.5 m/s²: 54 g/h of content, no AM, 2.15 MW).
 
 **planets.md**
 - `ExoticOre` and the remnant materials are **derived, never stored and never placeable**. Snapshots store generator material, and Add brushes place only `Placeable` materials.
@@ -1624,23 +1788,28 @@ Profiler rows: Resources, PowerNet, Batches, Mining yield, Deposits, Asteroids, 
 - Minor-body generator (3D SDF) for asteroids.
 - `EditStore` keyed by body or `AsteroidRef`.
 - `DayTicks` and surface gravity set every anchor's synchronous radius and cost (see the worked numbers).
+- Re-entry heating for falling grids (Sutton-Graves, as for scoop lips) and fragmentation, so dropped stations mostly burn up (D25). Contamination records per terrain chunk for AM breach craters (D24); contaminated rock carries an item flag.
+- The planet deposits are the main EM supply (D22).
 
 **ship-hulls.md**
 - **New function cores:**
-  - warp drives per class and kind: slurry; recirculating with diluter, separator and agent loop; options inline assayer, auto-purge, eject mount and quality separator;
+  - warp drives per class and kind: slurry; recirculating with diluter, separator, agent loop, a separately rated reaction chamber (×8) and a standard core-eject mount (rated ×4); options inline assayer, auto-purge and quality separator;
   - `AntimatterTrap`, AM cell, `CellRack`, `AnnihilationCore`;
   - fusion, fission, solar, capacitor, battery;
   - AM thermal, plasma, chemical, ion and jet thrusters, each AM device with a shadow shield (directional σ, real mass);
-  - `GravityPlating` (per room, `a_max`), `TractorBeam`, `TidalCompensator`, `GravityDamper`, `StasisCase`;
+  - `GravityPlating` (per room, floor gravity only), `InertialDampener` S/M/L (`a_max`, `MassMax`, covered rooms; D9), `TractorBeam` (pull without AM, push and hold with AM; D28), `TidalCompensator`, `GravityDamper`, `StasisCase`;
+  - `CollapseInducer` (T4, D21), `MedBay` (T3 station core, D24), escape pods (D25);
   - concentrator, recrystallisers T1–T4, crude still T1c, crude recrystalliser T2c (ship-mountable), slurry blender, assayer (station and portable);
-  - station-only cores: `StationAnchor` S/M/L and `AmFactory` S/M/L;
+  - station-only cores: `AmFactory` S/M/L. `StationAnchor` S/M/L is mountable on any grid (D25);
   - `MagneticScoop` (EM dust only), `HorizonHarvester`, `AgCharge` casings, AM warheads, `AmLance`;
   - `Stabiliser` (battleship kit, support projector), `AdditiveLab` (station) and `AdditiveLab.Crude` (ship-mountable).
 - Every function core carries `gravitonProjection` per mode; the build tool's Rad view gains a tunnel overlay showing housings within a projector's strike brush.
   - `FlareCollector` is removed.
 - `SocketType.Antimatter`, `SocketType.Agent` (the closed agent loop) and `SocketType.Additive` (wormhole generators, two). `Fuel` sockets carry dry EM or slurry; a slurry drive's sockets accept only slurry.
-- **Grid class `Station`** (orbital, anchored or surface base): it gates station-only cores. While anchored, its thrusters and warp drive are locked.
-- **Shared component damage rule:** `Integrity −= min(1, 4 · V_overlap / V_housing)` per damage brush, in damage order. Thresholds per core (drives 0.5 / 0.25 / 0; traps 0; anchors scale `HoldMaxN`).
+- **Grid class `Station`** (orbital, anchored or surface base): it gates station-only cores. **Any** anchored grid has its thrusters and warp drive locked while anchored (the anchor's crawl inputs move it) and unlocked from `AnchorFailing`. The build tool shows a station's thrust-to-weight at its anchor pose, warns when escape-pod berths are fewer than crew berths, and refuses anchoring over an atmosphere with an `Impact` footprint without them (D25).
+- **Shared component damage rule:** `Integrity −= min(1, 4 · V_overlap / V_housing) / Rating` per damage brush, in damage order, with `Rating` per housing (1 by default; recirculating chamber 8; eject mount 4). Thresholds per core (drive core 0.5 / 0.25, chamber 0; traps 0; anchors scale `HoldMaxN`).
+- `EntryLimit` (heat flux, dynamic pressure) in ship materials for falling grids (D25).
+- Contamination records per room (D24), fed by the `InternalShield` march.
 - Breach damage brush on every grid in reach, and the same-room chain rule (next tick). Runaway near-field brush. Jettison and core eject through the existing detach rule.
 - **`InternalShield` bake** per (AM source, room), next to `ShieldTable`. The build tool's Rad view uses it; the build tool also shows anchor drop footprints.
 - `TidalLimit` and `ShearLimit` in ship materials.
@@ -1651,7 +1820,7 @@ Profiler rows: Resources, PowerNet, Batches, Mining yield, Deposits, Asteroids, 
 - `CelestialKind`, `BlackHole`, `Remnant`, `MinorBody` (non-rotating, rails, no SOI) and preallocated remnant surface frames up to `MaxRemnants`.
 - `BubbleAnchor.MinorBody` (origin rails fixed to the asteroid).
 - **Station anchors:**
-  - `GridFlags.Anchored`: a grid parented to `BodySurface` at any altitude, with a constant local pose, skipped by membership checks, static in Jolt, `Frozen` when unattended;
+  - `GridFlags.Anchored` (any grid class, D25; never over a minor body): a grid parented to `BodySurface` at any altitude (or to a Lagrange frame, frames' extension), with a constant local pose (piecewise linear while crawling), skipped by membership checks, static in Jolt (kinematic while crawling in a bubble), `Frozen` when unattended, crawling or not;
   - **`BubbleAnchor.Station`:** a static bubble in `BodySurface`, origin fixed at the station (32 m snapped), never rebased or refit. It uses Surface-bubble gravity, centrifugal and Coriolis, allowed above `RotatingTop` inside an anchored zone. Merges go into it (two station bubbles share the older origin); clusters that split off inside the zone stay in `BodySurface`;
   - **enter/leave table**, new row "Anchored zone": enter within `r_station + 2 km`, leave beyond `+ 2.6 km`, capped by the 4 km hard radius; entry by predicted closest approach (R7). Inside, the band rule returns `BodySurface` whatever the altitude, for bubble members only; unsimulated entities in the zone go to `Rails` in `BodyInertial` and are never frozen there unless docked or landed. Leaving above `1.3 × RotatingTop` transfers to `BodyInertial`;
   - **release:** the station turns dynamic with inertial velocity `ω × r`. Above the band the bubble converts to FreeFall in `BodyInertial` (merge transfer budget, ≤ 128 a tick). An unattended station goes to `Rails` with an impact-wake event at `TerrainMax + 2 km`;
@@ -1664,7 +1833,8 @@ Profiler rows: Resources, PowerNet, Batches, Mining yield, Deposits, Asteroids, 
   - tidal bound in `MaxAccel`.
 - `Gravity` gains the interior model `μ·r/R³` below the surface for deep-dig bodies.
 - Shared `PulseKick` (simulated bodies by scene, rails by elements, pose-cache refresh) with the per-body integer kick budget.
-- Interior gravity: plating plus dampening up to `a_max`, with leak-through (proposed answer to Q1). On anchored grids the proper acceleration is the constant `a_hold`.
+- Interior gravity (decided, D9; answers Q1): plating tops floor gravity up to its setting; a separate inertial dampener cancels the manoeuvre acceleration `a_man` (frames' term, rest acceleration excluded) for everything in its bubble up to `a_max` and `MassMax`, with leak-through. On anchored grids the rest acceleration is the constant `a_hold`, felt as floor gravity and never billed to a dampener. Frames' "(2–8 g, `F_cap`)" mention should read exotic-matter's 3/6/10 g S/M/L, which ship-design's catalog plans already evaluate to.
+- **Lagrange anchors:** frames-and-zones' "Lagrange frames and anchors" extends the anchor to `FrameKind.Lagrange` targets (orbit-averaged billing, orbit-maximum overload, worst-phase footprint); this doc's Station anchor section now points to it.
 - Tick order:
   - step 3: flush → black-hole collapse or birth → anti-graviton pulses and runaway bursts (starting their stability ring-downs, which continue in wormholes.md's step 2c) → AM breaches → anchor failures → wormholes.md's zero test. Cascades go to the next tick; release transfers run in the next tick's step 3;
   - step 5: thrust accumulators, compensator `f_comp`, integrated origins;
@@ -1673,10 +1843,11 @@ Profiler rows: Resources, PowerNet, Batches, Mining yield, Deposits, Asteroids, 
 **README.md**
 - Q13 is already struck. Strike wormholes Q4 (decided here).
 - Q2 (planet rotation) already describes the station anchor; point it at this doc's Station anchor section.
-- Q3 gets the proposed answer (pending the user).
+- Q3 is answered by D9: plating for gravity plus a separate inertial dampener (EM and energy, rated).
+- Wherever README says "warp cheaper, wormholes costlier", use D23's order: natural cheapest, manufactured fastest, warp for close specific trips.
 - Q9 (huge grids) now also covers anchored stations over about 1.4 km in radius.
 - The documents table: exotic-matter.md is no longer "(Pending.)". Add drive kinds, runaways, industrial AM, radiation, pirates, anchors, additives and stabilisers to its description.
-- Add the open questions below. Old questions 2 (bombs against wormholes) and 3 (perishable crystal) are answered by the revision 3 decisions.
+- Add the open questions below. Old questions 2 (bombs against wormholes) and 3 (perishable crystal) are answered by the revision 3 decisions; 4–13 by round 5 (D9, D12–D14, D20–D25).
 
 ## Milestones
 
@@ -1686,22 +1857,22 @@ Profiler rows: Resources, PowerNet, Batches, Mining yield, Deposits, Asteroids, 
 | M5 | `ItemStack` (with nominal error), `EmMath`, traps, tanks, `PowerNet`, ledger, function-core data, the shared component damage rule | Ledger ≤ 3 µs per grid; breach brush and chain tested |
 | M6 | Thrusters (chemical, AM thermal, plasma, jet) with mass-flow accounting | Debits match the integrated ṁ within 0.1 % over 10 min |
 | M7 | Slurry warp (EM + agent + AM), concentrator, T1/T2, slurry blender, bought AM cells, `AmFactory` S | Mixer deterministic; a jump debits exactly the plan |
-| D1 (after M7) | Recirculating drives: line states, diluter and agent loop, mix tick, runaway triggers, purge, eject, auto-purge, lock-in deferral; crude refineries and assay; dual-drive selector | Every row of the trigger matrix reproduced; purge started at onset always prevents the burst; lock-in never broken; slurry drives never burst; default `q_mix` never runs away on unassayed feed |
-| R1 (with M8 rooms) | `RadiationDose` shared with flares, `InternalShield` bake, shadow shields, crew dose, station AM-thrust limit | Room dose within 1 % of the analytic point-source case; Rad view matches the 1 Hz pass |
+| D1 (after M7) | Recirculating drives: line states, diluter and agent loop, mix tick, runaway triggers, purge, eject, auto-purge, lock-in deferral; crude refineries and assay; multi-drive group (D14); chamber rating and standard core eject (D13) | Every row of the trigger matrix reproduced; purge started at onset always prevents the burst; lock-in never broken; slurry drives never burst; default `q_mix` never runs away on unassayed feed |
+| R1 (with M8 rooms) | `RadiationDose` shared with flares, `InternalShield` bake, shadow shields, crew dose (acute and lifetime), anti-radiation medicine, contamination records, station AM-thrust limit | Room dose within 1 % of the analytic point-source case; Rad view matches the 1 Hz pass |
 | A1 (after M7) | Asteroid belts, minor bodies, anti-graviton charges and dampers | Lookup ≤ 5 µs; kick budget holds; pulse drains match the law in kJ on server and client; a damper over a mouth blocks its drain |
-| S1 (after M8) | Station anchor: `GridFlags.Anchored`, `BubbleAnchor.Station`, anchored zone, consumption, overload, reserve warnings, drop footprint, release | Debit within 0.1 % of `EmPerNs · m · |a_hold|`; zero at the equatorial synchronous radius; release continuous in inertial state; a 100 km release lands at the predicted tick ± 1 s and point; an unattended anchored station costs 0 per tick |
+| S1 (after M8) | Station anchor: `GridFlags.Anchored` on any grid, position-and-velocity activation, `BubbleAnchor.Station`, anchored zone, consumption, overload, reserve warnings, drop footprint, release, crawl, thruster unlock, escape-pod rule; re-entry burn-up and fragmentation for falling grids | Debit within 0.1 % of `EmPerNs · m · |a_hold|`; zero at the equatorial synchronous radius; release continuous in inertial state; a 100 km release lands at the predicted tick ± 1 s and point; an unattended anchored station costs 0 per tick |
 | W1/W2 | Grades, AM quote and debits, pulse drain (with wormholes' milestones) | Invariant tests pass, including AM, at tunnel prices |
 | W3 (with wormholes' stability milestone) | Stabiliser power and crafting, re-establish debits, `gravitonProjection` data, tunnel hazards for EM and AM hardware | A struck charge detonates on the next tick; plating and compensators are never struck; re-establish debits exactly 0.25 X, its AM and 0.25 of the additives |
 | X1 (after W3) | Additive items, labs (station and crude), potency, blend check, seed lattice decay | Gate holds on true content; effects match wormholes.md's factors; a failed gate spends nothing |
 | C1 | AM weapons (warheads, lance), `AmFactory` M/L | Warhead dose matches the breach formula; lance muzzle dose matches the housing σ |
 | B1 (after M8) | Black hole: celestial, hazards, tidal bubbles and integrated origins, torque and stress, compensator, H1–H3, T3/T4, crystal decay | A compensated harvester holds 20 km for 10 min; an uncompensated one breaks up; two bodies at rest at the origin drift < 1 m in 10 s |
-| B2 | Collapse and birth events, remnant, debris arc, rebirth | Event tick ≤ 2 ms (or a job); remnant terrain identical on clients; mouths unmoved |
+| B2 | Collapse and birth events, remnant, debris arc, rebirth; `CollapseInducer` and induction | Event tick ≤ 2 ms (or a job); remnant terrain identical on clients; mouths unmoved |
 
 ## Files
 
-- **`src/Resources/` (no Vulkan):** `Items.cs`, `ItemStack.cs`, `EmMath.cs` (blend, enrich, assay), `Recipes.cs` (Fixed, Enrich, Blend), `BatchRunner.cs`, `PowerNet.cs`, `ShipLedger.cs`, `AntimatterTraps.cs`, `AmFactories.cs`, `WarpFuelMixer.cs` (both kinds, truth), `DriveLines.cs` (line states, mix tick, purge, eject), `Runaway.cs` (triggers, deferral, burst), `DriveSelector.cs`, `Additives.cs` (items, potency, blend check), `StabiliserPower.cs` (feed and drain draws; the component itself is wormholes.md's `Stabilisers.cs`).
-- **`src/Frames/`:** `BlackHoles.cs`, `Remnants.cs`, `AsteroidBelts.cs`, `MinorBodies.cs`, `TidalZone.cs` (bubble cap, integrated origins, kill-sphere and impact-wake events), `StationAnchors.cs` (hold acceleration, rates, lazy settlement, warnings, drop footprint, anchored zone).
-- **`src/Physics/`:** `PulseKick.cs` (with `KickBudget`), `AgCharges.cs` (with stability drains), `GravitonProjection.cs` (classification lookups for tunnel retaliation), `TidalStress.cs` (stress plus gradient torque), `Breach.cs`, `ComponentDamage.cs` (shared Integrity rule), `AnchorRelease.cs`, `RadiationDose.cs` (shared with flares), `AmWeapons.cs`.
+- **`src/Resources/` (no Vulkan):** `Items.cs`, `ItemStack.cs`, `EmMath.cs` (blend, enrich, assay), `Recipes.cs` (Fixed, Enrich, Blend), `BatchRunner.cs`, `PowerNet.cs`, `ShipLedger.cs`, `AntimatterTraps.cs`, `AmFactories.cs`, `WarpFuelMixer.cs` (both kinds, truth), `DriveLines.cs` (line states, mix tick, purge, eject), `Runaway.cs` (triggers, deferral, burst), `DriveGroup.cs` (D14 combined bubble), `Dampeners.cs` (D9), `Medicine.cs` (D24), `Additives.cs` (items, potency, blend check), `StabiliserPower.cs` (feed and drain draws; the component itself is wormholes.md's `Stabilisers.cs`).
+- **`src/Frames/`:** `BlackHoles.cs`, `Remnants.cs`, `AsteroidBelts.cs`, `MinorBodies.cs`, `TidalZone.cs` (bubble cap, integrated origins, kill-sphere and impact-wake events), `StationAnchors.cs` (hold acceleration, rates, lazy settlement, warnings, drop footprint, anchored zone, activation, crawl), `CollapseInduction.cs` (D21).
+- **`src/Physics/`:** `PulseKick.cs` (with `KickBudget`), `AgCharges.cs` (with stability drains), `GravitonProjection.cs` (classification lookups for tunnel retaliation), `TidalStress.cs` (stress plus gradient torque), `Breach.cs`, `ComponentDamage.cs` (shared Integrity rule), `AnchorRelease.cs`, `RadiationDose.cs` (shared with flares; lifetime dose), `Contamination.cs` (D24), `EntryHeating.cs` (falling grids, D25), `AmWeapons.cs`.
 - **`src/Terrain/Voxels/`:** `Deposits.cs`, `MinorBodyGenerator.cs`, `RemnantMaterials.cs`. **`src/Terrain.Runtime/`:** `MiningYield.cs`.
 - **`src/Ships/`:** `InternalShieldBake.cs` (next to `ShieldBake.cs`). **`src/Ships/Functions/`:** one file per function core above.
 - **`src/Net/ResourceEvents.cs`.**
@@ -1755,11 +1926,14 @@ Profiler rows: Resources, PowerNet, Batches, Mining yield, Deposits, Asteroids, 
   - a purge started at onset with `Integrity ≥ 0.25` always prevents the burst;
   - eject moves the near-field brush off the ship;
   - an off-spec burst always lands before `T0 − 30`;
-  - a breach onset in the last 210 ticks, or a chamber rupture in the last 31, defers to `T_exit + 181` with prime yield, including when the warp is aborted or interdicted, and the warp still lands where announced;
+  - a breach onset in the last 210 ticks, or a chamber rupture in the last 31, defers to `T_exit + 181` with prime yield (`T_exit + 1` = the first real-space tick, `TDrop` or `TDrop'`), including when the warp is aborted, interdicted or hard-cancelled by the breach itself (warp.md), and the ship lands where its commit announced;
+  - D17: a purge or eject commanded in cruise executes on the first real-space tick and beats the burst; a runaway started in cruise by interior damage hard-cancels the warp and bursts with prime yield at `T_exit + 181`, after an eject commanded in cruise has separated by at least 60 m; the override is refused in cruise;
   - the override is refused with feed at or below `q_lim`, in `Warp` or `Throat` placement, and while locked;
   - the damage-to-breach rule gives identical `Integrity` on replay;
   - the burst's pulse yield is capped at 100 kg, and its warp field counts toward the 4-per-SOI limit;
-  - dual-drive: never two spools; no switch mid-spool; auto-failover only when idle; a switch after a jump doesn't shorten the ship's cooldown.
+  - multi-drive (D14): participants spool together; the combined `V0`, `K` equal the delivered-power-weighted averages and `VCap = Σ w_i f_i VCap_i`; a drive with `f_i < 0.5` doesn't join; `M ≤ Σ f_i · MassCap_i` is accepted and anything above is refused; after the lock-in, losing one drive continues the warp while the remaining support carries `M` and hard-cancels otherwise; each drive debits exactly its share by its own kind; one participant's runaway or bad mix aborts the shared spool before `T0 − 30`; no toggle mid-spool; the ship's cooldown is the longest participant's;
+  - chamber rating (D13): a brush that takes the core to 0 takes the chamber down by an eighth; a chamber rupture needs at least eight such hits;
+  - core eject: works at any core `Integrity` (own housing), off-key, and mid-warp (commanded in cruise, separating at `T_exit + 1`); the near-field brush misses the ship for every C-class line and, at the B/A eject speed, every A-class line.
 - **Wormholes:**
   - per generator class, the cheapest wormhole costs more than warping the largest reference ship that fits (recirculating kind, with AM);
   - fleet, dense-ship and AM-price break-evens are logged (heavy about 0.7, capital about 1.85 per gram);
@@ -1788,6 +1962,8 @@ Profiler rows: Resources, PowerNet, Batches, Mining yield, Deposits, Asteroids, 
   - external dose uses the `ShieldTable` direction;
   - the off-cone point-source figures match the formula (0.27 Gy/s at 100 m for a light plasma drive at full);
   - crew thresholds and lazy recovery match per-tick evaluation;
+  - lifetime dose only grows; medicine raises acute recovery while it acts and never lowers the lifetime dose; chronic bands apply at their thresholds and the `MedBay` treatment drops one band;
+  - a breach creates contamination records only in rooms its pulse reaches above 1 Gy; activity decays lazily to the same value as per-tick evaluation and is dropped below the receiver floor;
   - the station AM-thrust limit clamps non-permitted ships only, inside `AmLimitRadius`.
 - **Station anchor:**
   - the debit equals `EmPerNs · m · |a_hold|` within 0.1 % over a day, lazily settled or not;
@@ -1803,7 +1979,19 @@ Profiler rows: Resources, PowerNet, Batches, Mining yield, Deposits, Asteroids, 
   - an entity crossing the anchored zone keeps its inertial state to 1 ulp;
   - a ship left hovering in the zone with no anchor goes to rails and falls;
   - an unattended anchored station costs 0 per tick and still falls and impacts when released;
-  - `PulseKick` never moves an anchored grid and debits its anchor; rams and tractors debit it too.
+  - `PulseKick` never moves an anchored grid and debits its anchor; rams and tractors debit it too;
+  - any grid class can anchor; engagement is refused beyond `EngagePosTolM` or `EngageMaxVelMs`, and a residual below the limit is debited as an impulse; anchoring over an asteroid is refused;
+  - a crawl moves at most `CrawlMaxMs`, its debit equals the per-segment rates, it stops at a segment whose footprint would cross a non-consenting zone, and an unattended crawling grid stays `Frozen` (no body) yet arrives at the same tick and pose as an attended one;
+  - thrusters unlock at `AnchorFailing`; engagement with an `Impact` footprint over an atmosphere is refused without pod berths for the crew berths;
+  - a station released high into a thick atmosphere sheds most of its mass as burnt-up debris, and a low release over an airless body arrives whole; the footprint check never credits burn-up.
+- **Inertial dampener and plating:**
+  - plating's debit depends on the supplied top-up `g_top` only (zero for a 1 g plate on a 1 g landed ship);
+  - the dampener's debit equals `EmPerNsDamp · m_in · a_d` and its draw `DampWPerN · m_in · a_d` within 0.1 % over a burn, and nothing but standby when coasting, landed or anchored (rest acceleration is not billed);
+  - overlapping dampeners: a room takes the highest `a_max`; four S cores over one room still leak above 3 g; a docked ship's own dampener idles while its host's covers it;
+  - above `a_max` or `MassMax` the excess leaks through exactly; starved, `a_d` ramps to 0 over 0.5 s;
+  - the dampener never draws AM and is never struck in a tunnel.
+- **Tractors:** with no AM in its traps a tractor's force on the target always points at the emitter; push and hold are refused; with AM they work and debit `AmPerEm`.
+- **Deliberate collapse:** induced work relaxes lazily exactly as per-tick evaluation; the fill schedules `CollapseTick = fill + 24 h` (never later than the natural tick); progress events go out from 25 %; attribution splits by delivered work.
 - **Pulses:**
   - Δv is identical across masses;
   - interiors log no spike;
@@ -1850,28 +2038,12 @@ Profiler rows: Resources, PowerNet, Batches, Mining yield, Deposits, Asteroids, 
 
 ## Open questions for the user
 
-1. **Black-hole timing, placement and lifetime:**
-   - A 60–180 day life on a dedicated server, and 20 play-hours in single player?
-   - Does game time advance while a server is empty?
-   - In the single-system v1, should the black hole sit in the outer system with the Dark Gate near its first incarnation (proposed), or only in other systems once those exist?
+Numbers are kept so in-text references stay valid. Questions 2–13 are answered and removed: 2 and 3 by revision 3 (decisions A and H); 4 and 13 (AM energy and production scale) by D20; 5 (plating) by D9; 6 (warp economy of scale) by D23; 7 (remnant abundance) by D22; 8 (deliberate runaway) by D12; 9 (runaway severity) by D13; 10 (radiation persistence) by D24; 11 (anchor scope) by D25; 12 (multiple drives) by D14.
+
+1. **Black-hole placement** (life is answered by D21: very long, with deliberate collapse; time does not advance on an empty server):
+   - In the single-system v1, should the black hole sit in the outer system with the Dark Gate near its first incarnation (proposed), or only in other star systems reached by natural wormholes?
    - Should later incarnations get their own natural gate?
-   - After `MaxRemnants` (8) collapses, should the slot go dormant (proposed), or should rebirth continue with old remnants kept?
-2. ~~Bombs against wormholes~~: answered by revision 3, decision A (pulses drain stability and can collapse a wormhole early; see Wormhole disruption). The balance of the drain law is wormholes.md open question 19.
-3. ~~Perishable crystal~~: answered by revision 3, decision H (crystal decays outside stasis, only down to a floor; see EM crystal stability).
-4. **Antimatter energy scale:** 1 TJ per gram usable means grams per manoeuvre. A breach is mainly a radiation event with a local blast (a 10 g cell opens about 17 m of hull). Is that right, or should AM be scarcer and gentler?
-5. **Plating as a consumable:** do you accept that plating stops when unfed, which answers README Q3 as "calm when plated and fed, real effects otherwise"?
-6. **Warp economy of scale:** bigger drive classes burn less EM per kg (with a minimum billed mass), so that a single heavy ship warps more cheaply than the cheapest wormhole that fits it, which keeps "warp cheaper, wormholes costlier". Accept this, or let capital ships treat wormholes as their cheaper option?
-7. **Remnant abundance:** a remnant's surface is Ore-grade (0.08) and its core reaches Throat, with crystal geodes. Its first rush makes Crude and Fuel abundant in that system, while planets and asteroids remain the early and mid game. Is that the intended weight?
-8. **Deliberate runaway ("pure dump" override):** should owners be able to override the interlock as a scuttle or kamikaze? The proposal is yes: owner only, only with feed above the safe limit, never while docked or in warp, a 10 s arm with a public signature, far field capped like a 100 kg casing, a near-field brush up to 77 m for a full A-class line, and stations able to refuse hot drives. The alternative is no override: runaways only by accident and damage.
-9. **Runaway counterplay:** is a 3 s countdown with purge (2 s) and eject the right severity? Or should a breach under fire be harsher, for example an off-spec mix with no warning at all?
-10. **Radiation persistence:** v1 has no lingering contamination (activated hulls, irradiated terrain, plumes that persist). Is transient dose enough?
-11. **Anchor scope:**
-    - Stations only (proposed), or any grid?
-    - Binary failure (proposed), or partial anchoring as a slowed descent?
-    - Should anchored stations be able to crawl to a new pose, and should anchors work over asteroids, which have no rotating frame?
-    - Released low stations are kilotonne-class kinetic impacts (2 kt for 10,000 t at 100 km). Is the proposed protection enough (a public drop footprint checked against other parties' zones at engage, a 60 s public release countdown, no owner starvation), or should impact damage be capped?
-12. **Dual drives:** are two drives per ship the limit (proposed: no hard cap, but only one spools and the cooldown is per ship)? Should failover ever happen automatically mid-spool?
-13. **AM production rate:** 2 TJ per gram means about 0.9 g a day from an early 20 MW fission plant and about one C-class 300 t AU jump per two days from a 200 MW plant. Is AM meant to be this tight, or should early players make it faster?
+   - After `MaxRemnants` (8) collapses, should the slot go dormant (proposed), or should rebirth continue with old remnants kept? (With lives of years and costly forced collapses, this may never be reached.)
 14. **Decay floor and cap values:** the floor is 0.96 (T3's cap, so decayed crystal is throat grade and one T4 pass regrows it) and `QMax` is 0.995. Is that the floor you meant, or should it sit lower (for example the Throat band's bottom, 0.85) so neglect costs more?
 15. **What purity buys inside the Crystal band:** in v1 only margin (time and shocks before leaving the band) and price. Should a crafted lens or a seed's grade also scale with purity (for example a better lens raising a generator's `MaxRadius` a little), making the top of the band a quality tier?
 16. **Additive scope:**
@@ -1881,6 +2053,8 @@ Profiler rows: Resources, PowerNet, Batches, Mining yield, Deposits, Asteroids, 
 17. **Stabiliser cost:** power only (proposed, same as wormholes.md open question 18), crafted with throat-grade lenses and a crystal lens for support projectors. Or should feeding also burn field-grade EM plus AM like other gravity devices, making a long hold cost fuel rather than only installed power?
 18. **Bombs in tunnels:** an armed charge in a tunnel is struck at once and detonates a tick later, draining its point-blank value (`BombK · Y`, rung down over 5 s) at the bomber's own position. A 10 kg yield collapses an unfed r = 100 m tunnel; a prepared one needs 22.5 kg. Owners cannot refuse entry, so the bore is where a bomb is surest to land. Is a suicide bomb in the bore an acceptable tactic (proposed: yes, the bomber rides its own pulse and collapse), or should arming be refused in a tunnel frame entirely, or should owners get an admission filter?
 19. **Dampers for fleets:** gravity dampers are station cores, so a fleet in the field powers through with feed and overcharge only, and dampers protect station gates completely against outside drains. Should a heavy ship-mountable damper exist (for example battleship-only, 1 km radius), or is "stations block bombs, fleets out-feed them" the intended split?
+20. **Plating on gravitons (new, round 5):** D28 makes graviton emission (EM and power, no AM) a pull-only mode, and D9 puts the dampener on it. Plating only ever pulls toward the floor, so it could run AM-free too (proposed: yes, `AmPerEm` 0 for plating). Keep plating on the full reaction instead?
+21. **Deliberate collapse cost (new, round 5):** `CollapseWork` 2,000 kg of throat content plus 10 kg of AM (about 100 inducer-hours, a coalition's AM stockpile), a 24 h public countdown after the budget fills, and the inducers' owners attributed for the damage. Is that the scale you want, or should forcing a collapse be cheaper (a faction project) or dearer (practically a server event)?
 
 All costs are estimates. Nothing was built or run, and no repo files were changed.
 
@@ -2145,3 +2319,49 @@ A skeptical pass over decisions A–C, F and H, checked against wormholes-r3 (th
 **Left for wormholes.md (not edited, its own structures):** the `Stability` struct needs a per-wormhole ring-down pool (end tick, slope, source `s`), and `CollapseCause.Pulse` should be chosen by the largest active ring-down at `Tz` (the collapse-point rule was edited; the enum is unchanged).
 
 **Not changed:** `BombK`, `EsK`, the feed cap, overcharge, the strike cap (1 %/s), the decay floor and cap, additive recipes and potencies, and every number not named above. All costs are estimates; nothing was built or run, and no repo files were changed.
+
+## Revision (round 5) notes
+
+Applies the user's round 5 answers D9, D12, D13, D14, D20, D21, D22, D23, D24, D25 and D28 (decisions-r5.md). They win over any older text in this doc, including the historical notes above.
+
+- **D9, inertial dampener:** plating and dampening are split. Plating now bills only `|g_plate|` and gives floor gravity. The new `InertialDampener` S/M/L core keeps everything inside its bubble (crew, loose bodies, cargo, covered docked craft) moving with the ship, on graviton emission: `EmPerNsDamp` 1e-11 kg/(N·s) of field-grade content plus 1 W per N of bus power, billed on `m_in · a_d` only while accelerating, rated by `a_max` (3/6/10 g) and `MassMax` (50/500/5,000 t), with leak-through above either and a 0.5 s ramp-down when starved. Interior gravity (README Q3, frames Q1) is now decided. Updated: recommendation, bands, devices table, tunnel table, data, structs, ship-hulls and frames changes, tests.
+- **D12, override:** the "pure dump" override is kept as a scuttle or kamikaze, with every safeguard (owner only, feed above `q_lim`, never docked, locked or in `Warp`/`Throat`, 10 s public arm, casing cap, line cap).
+- **D13, runaway severity:** the shared damage rule gains a per-housing `Rating`. A recirculating drive has a core housing (rating 1: diluter breach 0.5, valve 0.25), a reaction chamber rated ×8 (rupture at 0) and an eject mount rated ×4. **Core eject is standard** on every recirculating drive (no longer a +240 option; capex unchanged at 2,400), ejects the entire core, works at any core Integrity and off-key, at 20 m/s (D, C) or 40 m/s (B, A) so the near-field brush misses the ship for every line; an auto-eject owner flag is added. `DriveOptions.EjectMount` became `AutoEject`.
+- **D14, multiple drives:** the revision 2 selector ("only one spools") is replaced by `DriveGroup`: participating drives spool together into one bubble, quality averaged by `BubbleW · Integrity`, capacity `Σ MassCap` (the round 5 review aligned these with warp.md: delivered power, `Σ f_i · MassCap_i`), each drive paying its own share by its own kind, any participant's runaway or bad mix aborting the shared spool before `T0 − 30`.
+- **D20:** AM energy and production scale unchanged; old open questions 4 and 13 removed.
+- **D21, black-hole lifetime:** natural life 5–20 years (was 60–180 days). New **Deliberate collapse** section: the T4 `CollapseInducer` (crystal lens, works from the harvesting band) pours throat-grade EM and AM into a `CollapseWork` budget (2,000 kg content, 10 kg AM, 20 kg/h per inducer, relaxing 2 %/h when unfed); a full budget schedules the collapse 24 h later with public progress events from 25 %; contributors are attributed for the damage. Data, structs, networking, milestone B2 and tests added.
+- **D22, EM supply:** the remnant-flood framing is removed. All existing EM is recycled ancient EM in planets and asteroids, which are the main supply for the whole game; remnants are rare, late, local rushes. Recommendation, planet deposits, asteroids, remnant economy, progression row T4 and tuning target rewritten; old open question 7 removed.
+- **D23, travel economics:** "warp cheaper, wormholes costlier" is replaced everywhere in this doc by natural cheapest (no EM or AM per crossing), warp the cheap way somewhere specific and close, manufactured fastest and dearest. The per-class invariant is kept as the manufactured-versus-warp half; the fleet break-even is reframed; the warp.md, wormholes.md and README change lists carry the restatement; old open question 6 removed.
+- **D24, radiation:** transient plus lingering. Characters gain a lifetime dose with three chronic bands cured only by an expensive `MedBay` treatment; `med.antirad` treats acute exposure (suppresses sickness, faster recovery) without touching lifetime dose. Contamination records (hull activation 3-day half-life, breach fallout 20-day) per room and per terrain chunk, lazily decaying, with decon and contaminated rock stacks. Old open question 10 removed.
+- **D25, anchors:** any grid can mount an anchor (`stationOnly` false); activation needs the set position (5 m) and mostly the velocity (≤ 5 m/s residual, paid as an impulse); anchored grids crawl over days (0.05 m/s along, 0.02 m/s vertical, 1 h segments, footprint re-checked, kinematic while crawling); no anchoring over asteroids (tractors hold those); a dropped station is a rare disaster with thrusters unlocking at `AnchorFailing`, an escape-pod rule for impact footprints over atmospheres, re-entry burn-up and fragmentation (proposed Sutton-Graves heating, `BurnUpMassKg` 5 t) and hard ground impact; footprint stays conservative. Old open question 11 removed.
+- **D28, tractors:** without AM a tractor emits gravitons only and can **only pull**; push and hold need the AM reaction. A new "Graviton emission" mode (EM and power, `AmPerEm` 0) is defined under The anti-graviton reaction.
+- **Open questions:** 2–13 removed as answered (numbers kept so references stay valid); question 1 trimmed to placement only; new questions 20 (plating on gravitons) and 21 (deliberate collapse cost).
+- **Not changed here (owned elsewhere):** D17 wiring, D18 warp beacon and real-space tail, D15/D16 warp path and exit rules (warp.md); D26/D27 tractor consent and sieges; D10/D11 flight and hull editing (ship-hulls.md, ship-design-and-construction.md).
+
+## Round 5 review notes
+
+A skeptical pass over the round 5 edits (D9, D12, D13, D14, D20–D25, D28), checked against decisions-r5.md and the round 5 copies of warp.md, frames-and-zones.md, ship-design-and-construction.md and ship-hulls.md, plus the repo's tractor-beams.md. Fixes are made in place above; where the text above and the "Revision (round 5) notes" differ, these notes and the text win.
+
+**Decisions, checked:**
+- **D9:** present (plating for gravity, a separate rated dampener on EM and energy, leak-through above the rating). Aligned with frames-and-zones: the dampener cancels the manoeuvre term `a_man` and never bills rest acceleration, so the old "a dampener cancels `a_hold` all the time" is gone; plating bills only the top-up it supplies. Added full-rating bills (an L core at 10 g on 5,000 t is 490 MW, cores only) and how it behaves on a bus shortfall.
+- **D12, D13:** present. Chamber ×8, eject mount ×4, eject standard and wired (plus ship-design's mechanical pull handle, so cut wires can't stop an engineer). Eject distances re-checked: 20 m/s × 2.5 s = 50 m against `r_n` ≤ 43 m for a 75 kg C line; 40 m/s gives 100 m against 77 m for 450 kg.
+- **D14:** present but it disagreed with warp.md's "Multiple drives" (owner of the bubble): weight by `BubbleW · Integrity` instead of delivered power, `Σ MassCap` instead of `Σ f_i · MassCap_i`, "after the lock-in the bubble holds" instead of the support row, Off/On toggles instead of wiring. Now follows warp.md; `P_i` is capped at its rating.
+- **D20–D24:** present. D21's lifetime is 5–20 years, the inducer's AM figure re-checked (10 kg ≈ 116 days of an L factory, 11.6 of the foundry); a leftover "once a quarter" collapse cost line fixed. D22 and D23 leave no blanket "warp cheaper" text. D24's model is sound; contaminated stacks now feed one aggregate record per room.
+- **D25:** present. Added the Lagrange target (frames-and-zones' extension) and the asteroid-contact engage refusal; unattended crawls are now `Frozen` with a pose linear in the tick, and crawl segments must clear terrain at plan time.
+- **D28:** present. Anchors stay on the full reaction at every pose (a pull can't supply the poleward part); "holds an asteroid" now says tow, with a rigid hold needing AM.
+
+**Contradictions and exploits fixed:**
+- **D16 leftovers:** "Exits must still clear `WarpFloor`" for anchored stations and "`WarpFloor` still applies" in the warp.md change list contradicted "no forced floor". Removed; low exits are legal with warp.md's pressure wave and fines. The black hole keeps an exit exclusion (renamed `RouteShell(BH)`), stated as a hazard rule, not an atmosphere floor.
+- **D17/D18 leftovers:** "the crew couldn't act during warp", "purge and eject are refused in warp", "damage cannot happen during Cruise" and `T_exit` = T1 predate the real-space segment and free crew. Now: purge and eject can be commanded in cruise and execute on the first real-space tick; interior damage can happen in cruise; `T_exit + 1` is `TDrop` (or `TDrop'`).
+- **Mid-warp eject never worked under warp.md's timing.** A breach in cruise hard-cancels, so `TDrop'` is 180 ticks after onset, the same tick as the burst; warp.md held the burst to that tick, and the core separated on it, 0 m from the ship. Bursts held through cruise now resolve at `T_exit + 181`, giving a commanded eject 60–120 m.
+- **Graviton power figure:** "the energy annihilation would otherwise supply" was off by about 500× against this doc's own 1 TJ per gram. `GravitonWPerN` is now a stated knob, with tractor-beams.md's old pumped figure as the fallback if pull proves too cheap.
+- **Dampener stacking:** four S cores over one room no longer make a 12 g dampener; a docked ship's own dampener idles under its host's.
+
+**Left for other docs (not edited here):**
+- **warp.md:** adopt a ship cooldown equal to the longest cooldown among the last warp's participants (per-drive cooldowns reopen revision 2's cooldown chaining); change "only an override or sabotage can start one mid-warp" to "only sabotage or interior damage" (the override stays refused in `Warp` placement, so a full line can't arrive pre-armed); replace "held to `max(burst tick, TDrop')`" with `T_exit + 181`; add the black-hole exit exclusion; set `PRated` watts per class.
+- **tractor-beams.md:** drop Pumped mode for D28 pull on graviton emission (new entry under Changes to other docs).
+- **frames-and-zones.md:** its "(2–8 g, `F_cap`)" dampener mention should read 3/6/10 g S/M/L.
+
+**Noted, not changed:** an ejected Hot core shot to rupture is an improvised mine. It is bounded by the prime (1–20 kg) and the casing cap, so it is no worse than a legal charge. With a chamber rating of 8, a no-warning rupture needs sustained, focused fire, which is the intent of D13.
+
+All costs are estimates. Nothing was built or run, and no repo files were changed.

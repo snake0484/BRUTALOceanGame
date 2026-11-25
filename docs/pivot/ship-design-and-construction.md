@@ -1,6 +1,6 @@
 # Ship design and construction
 
-Status: design only. Nothing built, no repo files changed. Written 2026-11-25 against README.md, ship-hulls.md, exotic-matter.md, frames-and-zones.md and review.md. **ship-hulls.md is the base**: blueprint = CSG brush list, `ContentHash` prefabs, `HullBrush`, 0.25 m SDF bricks, components = modelled housing + function. Where this doc changes it, the change and the reason are under "Changes to other docs". Review.md's rulings (C13 int64 1/1024 m positions, X2 rotation bits, X3 server-sent mass) still win. Every number is a knob in `data/`; every cost and timing is an estimate to measure.
+Status: design only. Nothing built, no repo files changed. Written 2026-11-25 against README.md, ship-hulls.md, exotic-matter.md, frames-and-zones.md and review.md. **ship-hulls.md is the base**: blueprint = CSG brush list, `ContentHash` prefabs, `HullBrush`, 0.25 m SDF bricks, components = modelled housing + function. Where this doc changes it, the change and the reason are under "Changes to other docs". Review.md's rulings (C13 int64 1/1024 m positions, X2 rotation bits, X3 server-sent mass) still win. Every number is a knob in `data/`; every cost and timing is an estimate to measure. **Round 5** (2026-11-25) applies user decisions D9, D10, D11, D12–D14, D17 and D25 (hull mesh editing, wiring, aero, dampener, ejectable cores, linked drives, station pods and thrusters); the changes are listed under "Revision (round 5) notes" at the end and win over older text here.
 
 ## Recommendation in one paragraph
 
@@ -19,6 +19,15 @@ Everything a player can design is a **plan**: a versioned, content-hashed docume
 - I-beams and pipes come as long segments you cut. Prefabs come complete.
 - Construction steps: welding, screwing, nailing, etc.
 
+Round 5 decisions (decisions-r5.md):
+- **D9:** plating gives gravity; a **separate inertial dampener** keeps everything inside its bubble at the ship's speed, using exotic matter and energy, up to a rating; beyond it occupants and cargo feel the excess. → "Inertial dampener family".
+- **D10:** both pure 6-DOF with flight assist **and** aerodynamic lift from wing parts in atmosphere. → "Aero: wings, control surfaces and the flight computer".
+- **D11:** full mesh editing of hulls (vertex / edge / face), still cuttable. → mesh brushes (ship-hulls.md, "Mesh brushes"), the Mesh editor tool, mesh pieces in construction.
+- **D12/D13:** a deliberate runaway override exists; the reaction chamber is very highly rated and the **entire core can be ejected**. → "Ejectable core assembly and override".
+- **D14:** several warp drives on one ship support each other's bubbles; quality is an average weighted by provided power. → "Linked warp drives".
+- **D17:** crew move freely mid-warp; engineers and many other things can cancel the warp; components have **wiring**, so what controls what is the ship's wiring setup. → "Wiring".
+- **D25 (hardware part):** anchors usable on any grid, with inputs for a slow crawl; stations have thrusters and escape pods. → "Escape pods, station thrusters and anchors".
+
 This answers ship-hulls.md open questions 4 (player-made components: function from parts, not from housing geometry) and 5 (survival building: plans + bought or made parts + construction steps; creative mode builds instantly), and README questions 6 and 8.
 
 ## 1. Design data model
@@ -31,8 +40,8 @@ This answers ship-hulls.md open questions 4 (player-made components: function fr
 | **Laminate** | A layered material: ordered layers of sheet materials with thicknesses. Yields an effective density, strength, shielding σ, cost | materials | Laminate panel | `lam.armour.ceramic_ti`, `lam.hull.std` |
 | **Part** | A parametric template instance: template + parameter values + material. Stock parts (beam, pipe, sheet, cable, fastener) and machined parts (chamber, valve, pump, mixer, emitter, nozzle...) | materials | Part panel (parameters only, no modelling) | `pipe.ti.dn40`, `chamber.c.0_5m3`, `valve.dn40` |
 | **Component** | Housing (brushes, ≤ 8 m, 1/16 m cells, as ship-hulls) + part graph (parts, connections = joints, internal routes) + function family | parts, laminates | Component designer | `drive.warp.c.recirc`, `thruster.chem.s` |
-| **Hull chunk** | A saved group of hull brushes (ship-hulls `HullChunkGroup` prefab). **Armour plates are hull chunks** whose brushes use a laminate | brushes, laminates | Hull and plate tools | `plate.armour.2x2`, `chunk.nose.cone4m` |
-| **Ship** | Hull brushes + component placements + routes between sockets + order constraints + keel | everything above | Ship designer | `ship.wren` |
+| **Hull chunk** | A saved group of hull brushes (ship-hulls `HullChunkGroup` prefab), primitive or mesh (round 5). **Armour plates are hull chunks** whose brushes use a laminate; **wings are hull chunks** of kind `Wing` | brushes, meshes, laminates | Hull (primitive and Mesh modes), plate and wing tools | `plate.armour.2x2`, `chunk.nose.cone4m`, `wing.delta.12m` |
+| **Ship** | Hull brushes + component placements + routes between sockets (pipes **and wiring**) + order constraints + keel + plan class (Ship, Station) | everything above | Ship designer | `ship.wren` |
 
 **Why armour plates are hull brushes, not components.** Damage (subtract brushes), radiation shielding (`ShieldTable`, `InternalShield`) and mass all already read the hull occupancy. A plate as a component would need its own damage, shielding and room rules. The 0.5 m minimum wall is not a problem: a laminate is a material whose density and σ represent the whole layup, exactly as ship-hulls' "structural composite" materials do. A 0.5 m brush of `lam.armour.ceramic_ti` *is* a plate. Plates differ from hull pieces only in how they are built: they are **bolted on** (removable, replaceable) instead of welded in. "Made from prefab components": a plate design may nest prefab plate pieces (tiles, edge strips, corner caps: hull-chunk plans referenced by `PlanRef`) next to its own laminate brushes, and may carry prefab components on it (hatches, sensor windows, hardpoints), placed like any component. Saved, it is a new plate prefab.
 
@@ -78,7 +87,10 @@ Evaluation, on commit only, never per frame:
 | `MixTicks` | Diluter stages | `60 + 10 · max(0, s − 4)` | 60 |
 | `FeedMax` | Interlock part on the feed path | interlock grade (0.85); **no interlock → 1.0** (Warning: any purer feed runs away) | 0.85 |
 | Purge | Purge valve DN d on the line | `PurgeTicks = 120 · (40/d)²`; no valve → no purge (Warning) | DN40 → 120 |
-| Options | Parts: inline assayer on feed path, auto-purge controller (faction-keyed part), eject rail on the housing mount, quality separator | presence | none |
+| Options | Parts: inline assayer on feed path, auto-purge controller (faction-keyed part), quality separator, auto-eject controller, override key switch (round 5) | presence | none |
+| Core eject (round 5, D13) | Eject cradle part (= exotic-matter's standard core-eject mount, its own housing at `Rating` 4) + a quick-disconnect on every route crossing the core boundary + an eject path to a blow-out panel (ship-hulls) | required for recirculating drives; optional for slurry. Missing quick-disconnect = Error ("core tethered") | cradle C, 6 quick-disconnects |
+| Chamber rating (round 5, D13) | Chamber wall vs its own operating pressure `pChamberMPa` | `SF_chamber ≥ 3.0` (Error below) is what certifies the chamber housing at exotic-matter's `chamberRating` (8: its integrity loss is divided by 8) | chamber wall re-sized to meet it (P1 test) |
+| Arrival beacon (round 5, D18) | Beacon antenna part (powered) wired by Data to the drive's `Beacon` output (warp.md "Arrival beacon") | required on every drive (warp.md: every drive class has one; Error if absent or unwired at certification). Only military-class drives (warp.md's data flag; for a designed drive it comes only from a faction-gated military emitter or controller part template, so a custom plan cannot claim it) expose a `BeaconSwitch` input; on any other drive the beacon goes silent only by cutting, destroying or unpowering it (a `Logged` tamper) | 1 beacon antenna |
 | Line safety SF | Every pipe and fitting on the EM line | `SF = min(P_rating) / P_op`, Barlow `P_rating = 2·σ_y·t / D_o`, `P_op` 20 MPa | Ti grade 2 (σ_y 275 MPa) DN40, 48.3 × 3.7 mm → 42 MPa → 2.1 |
 | `BreachIntegrity` | SF | `0.5 + 0.25 · clamp((1.5 − SF) / 0.5, 0, 1)`; SF < 1.0 is an Error. With the as-built quality term (section 4) the total is capped at 0.85 | 0.5 |
 | `SeparatorW`, mass, power | Part data | sums | 2 MW, 1.1 t |
@@ -89,7 +101,76 @@ Validation also enforces exotic-matter's loader rules on the derived numbers, st
 
 **Thruster family** (`fn.thruster.chem`), to show the pattern on a small component: chamber pressure `P_c` from the pump's rating, throat area `A_t` from the nozzle's throat diameter, `F = C_F(ε) · P_c · A_t` with `C_F` tabulated by expansion ratio ε in data, `v_e` from propellant data × `η(ε)`, gimbal from a gimbal part's range. The chamber's pressure rating vs `P_c` gives SF exactly as above.
 
-Families planned: warp (both kinds), chemical / AM-thermal / plasma / ion thrusters, tank, trap, reactor (fission, fusion, annihilation core), battery / capacitor, life support, plating, door / airlock, seat / cockpit, landing foot, refinery cores, fabricator. **Families without a meaningful part graph** (seat, door, sensor) accept a single "core" part whose stats are data, which is exactly ship-hulls' bought function core, so nothing is lost.
+Families planned: warp (both kinds), chemical / AM-thermal / plasma / ion thrusters, tank, trap, reactor (fission, fusion, annihilation core), battery / capacitor, life support, plating, **inertial dampener**, **wing and control surface**, **escape pod and pod bay**, **station anchor**, **console** (cockpit, engineering panel, local panel), door / airlock, seat / cockpit, landing foot, refinery cores, fabricator. **Families without a meaningful part graph** (seat, door, sensor) accept a single "core" part whose stats are data, which is exactly ship-hulls' bought function core, so nothing is lost.
+
+Every family now also declares its **wiring ports** (round 5, D17): power in (W), a data port (commands, status), and named **control inputs**, each with a dead-line behaviour (section "Wiring"). A component works only through the inputs its ship's wiring actually reaches.
+
+### Inertial dampener family (round 5, D9)
+
+Plating and dampening are now **two components**. Plating (`fn.plating`, per room) gives floor gravity and nothing else. The **inertial dampener** (`fn.dampener`) projects a bubble that keeps everything inside it (crew, cargo, loose items, docked craft in a covered bay) moving with the ship. Its runtime rules (consumption, rating, leak-through, starvation ramp) are exotic-matter.md's "Gravity plating and the inertial dampener"; this family only derives its numbers from parts.
+- **Parts and roles:** field coil segments `Coil` 2..32 (grade D/C/B/A, each rated in kg of covered mass), an EM feed cell (field grade, a small tank) `Feed` 1..1, a power conditioner `Conditioner` 1..1, a controller `Controller` 1..1.
+- **Stats (exotic-matter's names):** `a_max` from the lowest coil grade (data: D 2 g, C 3 g, B 6 g, A 10 g), `MassMax = Σ coil rating`, bubble radius `R_b` from the coil ring's span, and exotic-matter's constants `EmPerNsDamp` (1e-11 kg/(N·s)), `DampWPerN` (1 W per N) and 10 kW standby. The catalog S/M/L plans must evaluate to exotic-matter's `fc.inertial_dampener` S/M/L rows exactly (3/6/10 g, 50/500/5,000 t; a P1 test, as for the C drive).
+- **Runtime rule (exotic-matter's):** `a_d = min(|a_proper|, a_max)`, scaled by `min(1, MassMax / m_in)` when overfull, further limited by the power and EM actually delivered; interior acceleration `= g_plate + (a_proper − a_d)`: above the rating the **excess leaks through** and throws people about. `m_in` is the mass covered (characters, loose bodies, cargo, docked craft in covered bays; not hull, not mounted components), updated on events. Power `DampWPerN · m_in · a_d` and EM settle in the 10 Hz ledger; nothing new per tick beyond the existing proper-acceleration term.
+- **Coverage** (ship-hulls "Inertial dampener coverage"): rooms whose every air cell lies within `R_b`, plus designer-marked **bay volumes** inside `R_b` (open hangars, which are not rooms because they touch space).
+- **Overlap:** a room covered by two dampeners takes the stronger one; ratings do not add.
+- **Off, unpowered, unfed or unwired:** `a_d` ramps to 0 over 0.5 s and covered rooms fall to the real-effects branch (plating may still give floor gravity). Velocity snaps (warp, flush, pulses) stay excluded as before.
+- **Wiring:** control inputs `Enable` (FailOff) and `Limit` (data: the crew may lower `a_eff` to save power). Graviton projection: Internal (never struck in tunnels).
+
+### Aero: wings, control surfaces and the flight computer (round 5, D10)
+
+Both models run: **6-DOF thrust with flight assist everywhere**, plus **aerodynamic lift and drag in atmosphere**.
+- **Lift sources, from geometry or from part stats:**
+  - **Wing chunks** (ship-hulls `ChunkKind.Wing`): any size, modelled with primitives or the mesh editor. The bake measures ≤ 16 spanwise strips (area, chord, quarter-chord point, frame); the chunk's `AeroProfile` picks the airfoil table. Holes re-measure the touched strips.
+  - **Wing components** (`fn.aero.wing`, housing ≤ 8 m): catalog or player designs whose stats come from parts: a spar (root bending rating), a skin panel set (area, span), an airfoil preset. Treated as 1–2 strips. The skin set's area and span are validated against the housing's own projected planform (they cannot exceed it), so an 8 m housing cannot declare a 200 m² wing.
+- **Control surfaces** (`fn.aero.control`): hinge + actuator (rate °/s, max deflection, torque rating) + surface panel (chord fraction), mounted on a wing chunk's or wing component's trailing edge; they cover the strips their span overlaps and add `ΔCl(δ)`, `ΔCd(δ)` from the airfoil table. They need power and a Data or Control link from the flight computer; an unwired surface is locked neutral (Warning).
+- **Never in warp:** aero is skipped in `Warp` placement and while warp.md's brake holds in the real-space segment (the field cancels air drag there; the energy goes into warp.md's blast). After a hard cancel or a lost brake the ship is an ordinary body at up to 2 km/s, and the full aero and wing-root stress rules apply.
+- **Per tick, only for ships in atmosphere (ρ > 1e-4 kg/m³):** per strip, `v_rel = v + ω × r − wind` (planets.md weather), angle of attack α from the strip frame, `Cl(α) + ΔCl(δ)`, `Cd = Cd(α) + ΔCd + Cl² / (π e AR)`, lift and drag `½ ρ |v_rel|² S` along the usual axes at the quarter-chord, pitching moment `Cm`; stall and a compressibility factor above Mach 0.7 come from the tables. Body drag stays review.md's occupancy-area drag, minus the wing chunks' cells (no double count).
+- **Structure:** a wing's root joints are stress-graph edges (section 5); a lift overload beyond their rating splits the wing off by the ship-hulls rule.
+- **Flight computer:** one control-allocation step over all actuators (thrusters and surfaces, ≤ 64 actuator groups: thrusters are grouped by direction and bus, surfaces by hinge line), using a 6 × N effectiveness matrix rebuilt only on design, damage or wiring events, scaled by dynamic pressure each tick. Modes: **Space** (thrusters only, the existing 6-DOF assist), **Atmo** (surfaces first, thrusters fill what they cannot do, coordinated turns, stall protection), **Decoupled**. A winged ship without enough thrust on some axis relies on aero there.
+- **Cost:** ~40 ns per strip and ~0.3 µs for the allocation mat-vec per ship per tick; a 32-strip aircraft ≈ 1.6 µs; the cap (16 wing chunks × 16 strips + components) ≈ 11 µs; 0 outside atmosphere. frames-and-zones.md's "lift per wing part" is this per-strip force (a wing component is 1–2 strips).
+
+### Ejectable core assembly and override (round 5, D12/D13)
+
+- **The core** = reaction chamber + chamber buffer trap + diluter + the line between them and its valves (exotic-matter's "entire core"; emitter segments stay with the ship). It sits in an **eject cradle** (rail and ejection charges, rated mass; exotic-matter's eject mount, its own housing at `Rating` 4, so losing the core's valves never loses the eject). Every route crossing the cradle boundary (EM, agent, AM, coolant, power, data, control) must go through a **quick-disconnect** fitting. The cradle's design carries the eject path cutter to a blow-out panel (ship-hulls).
+- **Triggers:** an `Eject` control input wired from any consoles the designer chooses; a **mechanical pull handle** on the cradle that needs no power or wiring (always present, so an engineer in the drive room can always eject); and an optional **auto-eject controller** part wired to the drive alarm (its presence sets exotic-matter's `AutoEject` flag: fires at runaway onset when purge is unavailable). Timing and Δv stay exotic-matter's (30 ticks; +20 m/s for D and C, +40 m/s for B and A). Mid-warp, an eject command is accepted and the core separates on the first real-space tick (warp.md "Runaway and core ejection mid-warp").
+- **Clearing the ship:** the ejected core is a new body launched along the eject path; it ignores collision with its former ship until its AABB clears the hull's, so it cannot snag in its own channel. Its reach is the eject Δv × the time left to the burst (about 50 m at C), so an eject is not a torpedo; the override and casing caps in exotic-matter still bound a deliberate burst.
+- **After an eject:** the blow-out panel is gone (a Breach edge if the bay was pressurised, so designers give the core its own unpressurised bay; validation Warning otherwise), the cradle is empty and the ship cannot warp until a new core is installed (a `Mount` step) and the panel replaced.
+- **Chamber rating:** `SF_chamber ≥ 3` certifies the chamber housing at exotic-matter's `chamberRating` (8, dividing its integrity loss), so chamber ruptures need very heavy damage; breaches mostly come from the line and diluter, and eject is the main counter.
+- **Override (D12):** the interlock part gains an `Override` control input. Arming needs an **override key switch** part wired by Control to a console, plus owner authorisation, and keeps every exotic-matter safeguard (owner only, feed above `q_lim`, never docked, locked or in `Warp` / `Throat` placement, the 10 s public arm, casing and line caps). A design without the key switch cannot be overridden at all; "override-capable" is part of the sealed stats a docking scan shows, so stations can refuse such ships.
+
+### Linked warp drives (round 5, D14)
+
+The runtime rules are warp.md's "Multiple drives" (it owns the bubble) and exotic-matter's multi-drive section (fuel, runaway); this doc supplies only what the design and wiring decide.
+- **Who supports:** every drive on the root grid (and on docked ships whose collar carries their power and control wiring) that is On, ready, powered to `f_i ≥ 0.5` and **wired to the same `Engage` signal** as the plot. Their bubbles support each other: one combined bubble. A drive the plotting console's `Engage` cannot reach simply doesn't join; it never blocks the others.
+- **Group stats** (fixed at spool start; the designer previews them on design, damage and wiring events): `MassCap = Σ f_i · MassCap_i`; each quality stat is the average weighted by the power each drive's wiring actually delivers; spool = the longest member's; fuel shares by weight from each drive's own line. Cooldown and the exact weight definition are warp.md's.
+- **A member drops out mid-warp** (damage, eject, its bus or breaker failing, a cut power feed): support is recomputed event-driven; if it falls below the carried mass, warp.md's "support lost" hard cancel applies, otherwise the warp continues unchanged.
+- Replaces exotic-matter's one-active-drive selector.
+
+### Escape pods, station thrusters and anchors (round 5, D25)
+
+- **Escape pod** (`fn.escape_pod`): seats, life-support hours, heat shield rating (atmospheric entry), retro and parachute Δv, an always-on distress beacon. It sits in a **pod bay** component whose cutter opens a launch tube ending in an outer hatch (a door portal, so the bay stays sealed; ship-hulls clear-path rule); launch is the detach rule plus a bay impulse, and the pod leaves as a small grid through the normal frame transfer. Launch input: Control from consoles and a local handle in the pod (FailHold).
+- **Station plan class** (`PlanClass.Station`, the exotic-matter grid class: orbital, anchored or surface base) validation, matching exotic-matter's build-tool rules: escape pod seats < crew berths is a Warning; no thrust on some axis, or thrust-to-weight at the planned anchor pose under `stationMinAccelG` (data, 0.01 g), is a Warning. Warnings, not Errors, because a surface base is a Station too; the hard gate is exotic-matter's: anchoring over an atmosphere with an `Impact` footprint is refused without pod seats for the crew berths.
+- **Station anchor** components may be placed on any plan class; activation, crawl, failure and drops are exotic-matter.md's (never over a minor body: tractors hold asteroids). Wired ports:
+  - `Engage` (Data, FailHold): refused at runtime unless at the required position and mostly the required velocity.
+  - `Release` (Data, FailHold, `Logged`): still needs owner authorisation and exotic-matter's 60 s public countdown, so no wire state, cut or short can release an anchor.
+  - `CrawlTarget` + `CrawlSpeed` (Data, FailHold; the slow move over days, capped at exotic-matter's `CrawlMaxMs`): a dead line stops the crawl at the end of its current segment.
+  - `Failing` **output** (Control): the designer wires it to the flight computer and the pod alarm. The thruster unlock itself is exotic-matter's rule and needs no wire.
+  - **Control power, redundant by rule:** losing an anchor's containment-class power beyond its 10 s buffer drops the grid (exotic-matter), so wiring validation requires **two independent feeds** to every anchor core (no shared segment, breaker, hub or source; Error), and the crew cannot open a breaker feeding a holding anchor (exotic-matter's no-starvation rule). Cutting one feed raises a warning; it takes both, beyond the buffer, to drop a station, which keeps a dropped station the rare disaster D25 wants even under D17 wire cutting and D27 sieges.
+
+### Wiring (round 5, D17)
+
+Components have wiring, so **what can control or cancel what is the ship's wiring setup**, and cutting wires is gameplay.
+- **Three media:** **Power** (cable by gauge: ampacity; voltage classes LV 48 V, HV 1 kV, MV 10 kV), **Data** (a bus: any authorised console on a connected bus can address any component on it), **Control** (hard-wired discrete pairs: loops, e-stops, arm and eject lines; work without the data bus).
+- **Parts** (catalog presets of open templates): cable stock by gauge and medium, connectors (crimp / solder joints), junction box, data hub (port count), breaker (rating, trip), relay (Control-switched power), switch and e-stop button, key switch, console (cockpit, engineering panel, a component's local panel), transmitter (beacons, transponder).
+- **Wire runs are routes** (`Medium` Power, Data or Control) laid by the router like pipes, along hull inner surfaces in trays or **concealed** through hull brushes. The compiler splits each run into **segments** of ≤ 4 m between nodes (ports, junctions, penetrations); each segment is an element with an id and a capsule for damage tests.
+- **Control inputs** declared by each family have a **dead-line behaviour**: `FailSafe` (a dead line asserts the input; e.g. the warp drive's `Hold` loop: open circuit = cancel), `FailHold` (no change), `FailOff` (dead = off). `Logged` inputs (beacon, transponder) record who cut them.
+- **What controls what is derived, never declared:** console C can command input X of component K when C is powered and a path of intact segments, closed relays and switches and hubs joins C's output to X on the same medium; for Data, C's seat authorisation also filters. The designer's **schematic view** and "what controls this?" query show it.
+- **Warp cancel (D17 example; warp.md's drive ports Power in, Control in `Engage` / `Abort`, Nav data in, `Beacon` out):** warp.md's `Abort` (a soft cancel) is raised by the drive's `Hold`, a FailSafe Control loop (every e-stop, engineering kill switch and loop breaker in series opens it, and so does cutting it), by a Data `Cancel` from any authorised console on the bus, and by the drive's local panel. Opening the drive's breaker or losing its feed is warp.md's power cancel (hard, no brake). Mid-warp, an engineer can always shut the drive down at the drive. The designer chooses how many other places can.
+- **Power networks:** a bus is a connected set of power segments from generators and batteries through breakers, so exotic-matter's per-ship `PowerNet` becomes one per bus. Cable under-rated for its breaker or load is an Error.
+- **Faults from damage** (deterministic, event-driven, applied in tick step 3 with other damage): a damage brush overlapping a segment's capsule by at least the cable diameter **cuts** it (open); a lesser overlap **damages** it. A damaged Power segment with no breaker between it and its source **shorts**: an arc damage brush at the segment on the next tick (one hop per tick, like traps) and a brown-out on that bus until something isolates it; with a breaker, the breaker trips and everything downstream loses power. A damaged Data segment degrades its links to 1 Hz status; a damaged Control segment counts as open. Poor crimps (q < 0.4) stay resistance faults.
+- **Cutting and repair in game:** a wire cutter opens an exposed segment in 1 s; a concealed one needs the hull cut first (ship-hulls cutting torch). Repair is a splice step (crimp, 6 s, 0.5 m of cable) or a segment replacement step.
+- **Designer help:** "Standard harness" auto-wires every component to the nearest bus and hub, the bridge consoles, and standard e-stop loops (bridge, engineering, drive room) from data templates; per-input Warnings for unreachable required inputs ("warp drive: no cancel path from the bridge").
+- **Runtime cost:** one CSR graph per ship. **Immediate** effects need no search: each segment carries a mask of the ≤ 64 FailSafe loops (series circuits, so any open member opens the loop) and critical feeds (drive power, anchor feeds) it lies on. A cut, trip or open switch on a loop member opens that loop in O(1) on the same tick (a warp `Hold` cut cancels at once); on a critical-feed member it runs one bounded search from that consumer back to its sources the same tick (a redundant path keeps it fed). The full reachability pass (from consoles and sources, ≤ 16k segments, ~20–100 µs) that refreshes the cached (console, component, input) bindings is **coalesced** to at most one per ship per 10 Hz ledger step, and capped at 0.5 ms per tick across all ships (round robin), so a battle full of cut cables or a short spreading one hop per tick cannot cost 100 µs per ship per tick. **0 per tick** for an undamaged ship.
 
 ### Validation rules
 
@@ -100,6 +181,9 @@ Families planned: warp (both kinds), chemical / AM-thermal / plasma / ion thrust
 | Connectivity | Every port connection has matching medium and size (DN, voltage); routes connect two compatible sockets; no dangling required ports | Error, Warning for optional ports |
 | Function | Family roles, paths, loops; formulas within envelope; family-specific rules (SF, spool vs mix ticks) | Error or Warning per rule |
 | Buildability | Assembly graph acyclic; every hull piece reachable from the keel; every stock length ≤ the longest stock bar (else a splice joint is added, Warning); each component either fits through its room's portals or gets a pre-close order edge (section 4) | Error |
+| Mesh (round 5) | ship-hulls "Mesh brushes" table: closed, manifold, oriented, no self-intersection, no degenerates, mesh limits; thin features | Error; Warning for thin features |
+| Wiring (round 5) | Cable ampacity ≥ breaker rating and load; hub port counts; FailSafe loops closed; required control inputs reachable from at least one console; every warp drive has a wired, powered beacon antenna; two independent feeds to every anchor core; every component powered by some bus; bus power budget | Error for ratings, closed loops, the beacon and anchor feeds; Warning for reachability and budget |
+| Systems (round 5) | Core eject path and pod launch tubes clear; quick-disconnects on every core-crossing route; chamber SF ≥ 3; station class pods and thrust (section 1); control surfaces wired | Error; Warning for station pods and thrust and for unwired surfaces |
 | Economy | Cost quote for each sourcing mode; NRE and per-build stamp per redefined level | Info |
 | Access | Every part template's `access` (tier, faction key): designing with it is always allowed; buying or producing it needs the access (section 2) | Warning in the designer, Error at build or production |
 
@@ -109,7 +193,8 @@ Families planned: warp (both kinds), chemical / AM-thermal / plasma / ion thrust
 | --- | --- |
 | Bundle | ≤ 1 MB packed; every section's `rawLen` ≤ 8 MB and ≤ 32 × `packedLen`, checked before inflating |
 | Distinct sub-plans in a bundle | ≤ 256; nesting depth ≤ 6 (ship > component > part, hull chunk > hull chunk ≤ 3) |
-| Ship | ship-hulls limits (≤ 8192 brushes, ≤ 1 km), ≤ 1024 component placements, ≤ 4096 routes, ≤ 65,536 waypoints, ≤ 1024 order edges |
+| Ship | ship-hulls limits (≤ 8192 brushes, ≤ 1 km, mesh limits), ≤ 1024 component placements, ≤ 4096 routes (pipes and wires), ≤ 65,536 waypoints, ≤ 1024 order edges, ≤ 16,384 wire segments, ≤ 64 consoles |
+| Mesh validation (server) | only for `MeshHash`es not already validated (the cache keeps the canonical bytes and compares them on a hit, as the plan store does, so a crafted xxHash64 collision cannot pass an invalid mesh); bounded by the mesh limits (≈ 0.5 s CPU worst case per ship) **and** a per-player budget of 128k new subdivided triangles per 10 s (≈ 65 ms), so a 1M-triangle ship of all-new meshes imports over about 80 s instead of costing 0.5 s at once |
 | Component | ≤ 8 m housing, ≤ 256 parts, ≤ 1024 connections, ≤ 256 routes, ≤ 4096 waypoints |
 | Part | ≤ 8 parameters, each inside its template range |
 | Laminate | ≤ 16 layers |
@@ -172,6 +257,9 @@ public interface IPlanHost
 | Tool | Level | Behaviour |
 | --- | --- | --- |
 | Hull modelling | Ship, hull chunk, housing | As ship-hulls.md: primitives, face drag, Add/Subtract/Paint, hollow, cut room, bevel, mirror, group, save group as hull-chunk prefab. Ghost raymarch while dragging, bake on commit |
+| Mesh editor (round 5) | Ship, hull chunk, housing | ship-hulls "Mesh brushes": vertex / edge / face / loop / panel selection; extrude, inset, loop cut, bevel, bridge, merge, dissolve, knife, fill, crease; live mirror; 0–2 subdivision levels; convert primitive or group to mesh; panel painting. Cage drawn as polygons while editing, bake on commit, baked-vs-cage overlay with lost-detail outlines; validation on commit |
+| Wing tool (round 5) | Ship, hull chunk | Mark a chunk as `Wing`, pick an airfoil; shows measured strips, span, area, aspect ratio, lift curve at a chosen speed and altitude, centre of lift vs CoM; places control surfaces along the trailing edge |
+| Wiring (round 5) | Component, ship | Routing with Power / Data / Control media; "Standard harness" auto-wire; **schematic view** (auto-laid-out 2D diagram of buses, hubs, loops and consoles); "what controls this?" and "what does this cut?" queries highlighting paths and the components a segment feeds |
 | Plate designer | Ship, hull chunk | Draw a 2D outline on a hull face (projected along the face normal), pick a laminate and thickness (≥ 0.5 m wall rule, finer layups via laminate density), auto bolt pattern (spacing from data). Emits a Prism brush flagged `Armour` in an armour chunk group. Or drop a catalog plate prefab, which conforms by the same projection |
 | Laminate panel | Laminate | Ordered layers (material, thickness mm); live effective density, strength, σ per m, cost |
 | Part panel | Part | Template + parameter sliders within ranges + material; live mass, rating, cost; "catalog" badge when values match a catalog preset |
@@ -202,7 +290,7 @@ Sections: u32 tag, u32 rawLen, u32 packedLen, u8 codec (0 raw, 1 zlib), payload
 ```
 
 - **xxHash64**: implement it in `src/Plans` (about 60 lines) instead of adding `System.IO.Hashing`; BRUTAL has none and ship-hulls needs it too.
-- **Sizes:** a component of 40 parts, 60 connections, 10 routes and 100 housing brushes is about 4 KB raw, about 1.5 KB packed. A 2,000-brush ship is about 25 KB (ship-hulls) plus routes and placements, about 30 KB. A bundle with ten custom components adds about 15 KB.
+- **Sizes:** a component of 40 parts, 60 connections, 10 routes and 100 housing brushes is about 4 KB raw, about 1.5 KB packed. A 2,000-brush ship is about 25 KB (ship-hulls) plus routes and placements, about 30 KB. A bundle with ten custom components adds about 15 KB. Round 5: mesh brushes add about 8 KB packed per 1,000 control vertices (a fully mesh-modelled 100 m hull with 20k vertices ≈ 160 KB packed, inside the 1 MB bundle limit); a standard harness adds about 300 routes, ≈ 10 KB.
 - **Network:** the server keeps one BODY per hash (deduplicated across all players, bytes compared on insert). Clients fetch by hash on a cache miss, as ship-hulls already does for blueprints. A sealed component's full BODY is served only to licensees; everyone else fetching that hash gets its sealed view (housing, cutters, sockets, stats), which is all rendering and physics need.
 
 ### Plans in game, sharing, and IP
@@ -287,6 +375,8 @@ Catalog components of the Wren, wholesale: cockpit + 2 seats 120, chemical thrus
 
 Catalog drive: `(1,910 + 4·75 min) · 0.85 · 1.20` = **2,255** wholesale, **2,435** retail (×1.08; exotic-matter's capex reference is 2,400, +1.5 %).
 
+Round 5: the catalog C plan now also carries the eject cradle, six quick-disconnects, the beacon, a local panel and its wiring (D13, D17, D18), and its chamber wall is re-sized for SF ≥ 3. The tables below are the pre-round-5 numbers; the P1 test re-runs them with those parts, and the cost ordering and invariants must still hold (exotic-matter's 240 eject-mount option is folded into the base price).
+
 **Drive alone**, first unit / average over 5 / over 20, and the ratio to the catalog retail drive. Units include the 6 % stamp per redefined level:
 
 | Route | Unit | Once (NRE, tooling, licences) | N = 1 | N = 5 | N = 20 | Limit |
@@ -367,6 +457,8 @@ Steps are **coarse**: one step covers one element and all its joints, so a small
 - **frame members** analytically from the brush shape: polyhedral edges for Box, Wedge, Prism and Convex; rings and longerons for Cylinder, Capsule, Cone and Sphere; ribs every `ribSpacing` (1 m) across faces wider than 2 m. Members whose midpoint lies inside a Subtract brush are dropped. Profile from the material's spec (`data/materials`: `frameProfile`, `skinSheet`).
 - **skin area and seams** from a `BrushYield` table the bake already has the data for: per brush, the surface cells it won (× 0.0625 m²) and the boundary faces it shares with each other brush (seam length to that neighbour). One extra counter array in `HullBrickJob`; deterministic on the server.
 - **curved skin** (Cylinder, Capsule, Cone, Sphere faces) needs formed plates: a roller step (formed on site with a plate roller) or bought pre-formed stock.
+- **Mesh brushes (round 5):** an Add mesh brush is split into one piece per **panel** (ship-hulls `FacePanel`, ≤ 25 m² each), piece id = (brush id, panel). Frame members follow the panel's crease edges and boundary edges, plus ribs every `ribSpacing` from plane slices of the subdivided surface; members inside Subtract or Inset brushes are dropped as before. A panel whose subdivided normals spread more than 10° needs formed plates (curved skin rule). `BrushYield` counts surface cells and seams per (brush, panel) by the winning triangle's panel. **Partial bake:** until every panel of a mesh brush is skinned, only its band cells (within the 2-cell band, where the nearest triangle and so its panel are known) whose nearest triangle lies on a skinned panel bake as solid; deep cells beyond the band and cells nearest an unskinned panel bake as air. A half-skinned mesh hull is therefore a 0.5 m shell of its skinned panels, and turns solid once its last panel is skinned (the server owns the resulting mass, as for every partial ship). The as-built state span is per (brush, panel) for mesh brushes, and the partial-ship brick cache key hashes those panel states too.
+- **Wiring (round 5):** wire runs are ordinary `Route` steps (place cable in trays or conduits, crimp or solder every joint); concealed runs need their `Penetrate` steps. Breakers, hubs, switches and consoles are `Mount` steps.
 
 **Dependencies (all edges are AND; one runtime predicate):**
 1. `Frame(p)` is available only if the keel is placed and some neighbour of p is framed and connected to the keel (**support predicate**, checked over the piece adjacency list, so building can grow from any side). The compiler guarantees a spanning tree exists.
@@ -377,6 +469,7 @@ Steps are **coarse**: one step covers one element and all its joints, so a small
 6. `Route(every route of a line) → Test(line pressure) → Load(that line's tanks)`. Pressure test before fuel is forced.
 7. `Skin(all pieces of a room) + Mount(its doors) → Test(room leak)`.
 8. `Test(lines of a drive) + Mount(drive) → Test(drive proving)`; certification of a custom drive needs this test to pass once.
+   - **Wiring and eject (round 5):** `Route(every wire run of a circuit) → Test(circuit)` (continuity and insulation, one action) `→` the power-on of every component that circuit feeds; `Test(circuit of the drive's Hold loop, beacon and eject line) → Test(drive proving)`. `Mount(eject cradle) + Skin(blow-out panel piece) → Test(eject dry run)` (fires the quick-disconnects only).
 9. **Designer order edges** (`OrderEdge` in the plan): "install the reactor before plate 12", for anything the rules cannot infer.
 
 **Sequence shown:** a topological order with priority (support distance from the keel, then structure before outfitting), and a critical path for a given crew size (list scheduling). Players may do any available step in any order.
@@ -460,7 +553,7 @@ jitter: ±0.04 from hash(shipId, jointId)
 - **Framed pieces** are beam instances (render) plus one box sub-shape per beam in the exterior compound (≤ 24 per piece, construction only), and their beam mass as point moments. They contribute nothing to the SDF bake, rooms or shielding. When the piece is skinned, its beams' sub-shapes go and the bake takes over (hull material density already includes frames, as ship-hulls says).
 - **Framed pieces take damage too.** Because they are not in the SDF, damage brushes would otherwise pass through them and an unskinned frame cage would be invulnerable armour. Any damage brush whose volume meets a beam's box destroys that beam: the piece's `Frame` step is marked undone for that member (a `Destroyed` deviation), its mass and sub-shape go, and the support predicate is re-checked (a piece no longer connected to the keel splits off by the ship-hulls rule).
 - **What a partial ship cannot do:** components mount only on skinned pieces (dependency 3), a drive needs its tests (so no warp on an untested line), rooms are not sealed, and stations treat an `InProgress` ship as a construction site, not a ship (no docking-class privileges, no Certified build). A partial ship is never a way around a plan's validation: every intermediate state is a subset of a valid plan.
-- **Functions work when their prerequisites are done:** a component needs its mount, its required routes and its tests. A drive with an untested line refuses to prime.
+- **Functions work when their prerequisites are done:** a component needs its mount, its required routes and its tests. A drive with an untested line refuses to prime. Round 5: "required routes" includes its wiring; a component whose power or required control inputs are not yet wired is mounted but dead, and a drive whose `Hold` loop is not closed cannot spool (FailSafe).
 - Rooms are sealed only when all their pieces are skinned and doors mounted; until then they are space for life support.
 
 ### Modification
@@ -491,11 +584,14 @@ AsBuilt per ship
 - **Deviations:** a substitution is allowed when the substitute has the same template and ports and is at or above spec (e.g. a schedule 80 pipe for schedule 40, a T2 valve for T1). It is recorded, its mass and ratings are used, and the plan is not changed. Below-spec substitution is refused.
 - **Bake input:** the hull bake takes the plan's brushes plus a per-brush state span from the as-built (`Planned`, `Framed`, `Skinned`). `Planned` and `Framed` Add brushes are skipped; Subtract and interior brushes always apply. Each completed `Skin` step re-bakes 1–8 bricks, the same cost as one ship-hulls edit. **Cache key:** ship-hulls caches bricks by `(ContentHash, BrickKey)`, which would serve the finished plan's brick to a half-built ship. Partial ships key their bricks by `(PlanHash, BrickKey, hash of the piece states of the brushes binned to that brick)`; Factory and Complete ships share the plain plan key.
 - **Mass:** `MassMoments` of the bake + framed beams + mounted components (their designs' `MassMoments`, deviations applied) + routes (length × kg/m per segment) + fluids. Fixed point, server authoritative; the server sends the totals with the as-built (review X3).
+- **Wiring state (round 5):** per segment 1 byte (`Intact`, `Damaged`, `Cut`, `Tripped`) plus per switch / relay / breaker 1 byte, only for non-factory ships or once something has changed (factory ships share the plan's all-intact default). Bindings (console × component input) are derived on load and on change, never saved.
+- **Aero (round 5):** wing strips live with the bake (ship-hulls); the flight computer's effectiveness matrix is derived on design, damage and wiring events.
 - **Stress graph** (for tractor-beams.md): nodes are pieces, plates and component mounts; edges join pieces that share joints, with ratings summed from those joints' strength formulas: tensile N, shear N, bending N·m. Built from the assembly graph plus `JointQ` on load and on each step event (only the touched edges). A failed edge detaches through ship-hulls' split rule. Factory ships use the plan's nominal ratings at factory quality, shared per plan hash, with no per-ship memory.
 - **Network:**
   - stream-in: plan hash (blueprint fetch on cache miss) + as-built blob (16 B for factory ships);
   - `StepClaimed {ship, seq, step, worker}` 16 B; `StepDone {ship, seq, step, n, q[n]}` 12 B + 1 B per joint;
   - `PlanRevised {ship, newHash}` 20 B, then the diff steps are compiled on each peer from the two cached plans.
+  - round 5: `WireState {ship, seq, segment, state, actor}` 16 B (actor only for `Logged` inputs); `SwitchSet {ship, seq, element, value}` 12 B; `CoreEjected {ship, seq, cradle, newBody}` 16 B.
 - **Saves:** the same as-built bytes; plans by hash in the plan store.
 
 ## 6. Performance
@@ -507,7 +603,7 @@ AsBuilt per ship
 | Part place / connect / parameter | function evaluation 2–50 µs, cost quote ~20 µs | on commit, on a job |
 | Validation (full ship) | ≤ 5 ms on a job | on save; incremental per dirty class otherwise |
 | Assembly compile (2k-brush ship) | 5–10 ms on a job; cut list FFD ≤ 1 ms for 4k pieces | on save, on viewer open, server once per plan hash |
-| Server import validation | ~70 ms CPU across workers, no meshing (+ ≤ 26 ms per custom housing); worst case bounded by the plan limits | rate-limited, 1 per player per 10 s, low-priority workers: 64 players at the cap is under 1 core |
+| Server import validation | ~70 ms CPU across workers, no meshing (+ ≤ 26 ms per custom housing; + ≤ 65 ms of new-mesh validation under the per-player triangle budget); worst case bounded by the plan limits | rate-limited, 1 per player per 10 s, low-priority workers: 64 players at the cap is under 1 core (64 × ~135 ms / 10 s ≈ 0.86) |
 | Idle or finished ship | **0 per tick** | always |
 | Active construction | claim presence check at 2 Hz for claimed steps only, ~50 ns each; completions are heap events | while claimed |
 | Drones | scheduled events only | per step |
@@ -515,6 +611,11 @@ AsBuilt per ship
 | Hologram | the plan baked at **LOD 1** (about a quarter of L0's triangles and memory; review P6), cached per plan hash; drawn as one instanced pass with a per-brick mask of not-yet-built bricks, only for sites within 200 m. Only the available steps' pieces are translucent-filled; the rest of the plan is edges only (a depth-tested outline), so a capital-ship hologram does not cost full-screen translucent overdraw. Exit check: ≤ 0.1 ms GPU for a 2k-brush site filling the screen | per frame, sites near the camera |
 | Framed-beam damage | damage brush AABB against the piece's ≤ 24 beam boxes, only for `InProgress` ships | per damage event |
 | Memory | plan bake cache shared by hash; as-built arrays only for non-factory ships | |
+| Mesh edit (round 5) | 4–30 brick re-bakes for a vertex move on a large mesh; topology ops re-prepare the mesh (1–3 ms) first; validation on commit ≤ 30 ms per mesh on a job | on commit, never while dragging |
+| Wiring reachability (round 5) | O(1) loop / feed bitset test per changed segment; full BFS over ≤ 16k segments (~20–100 µs) coalesced to ≤ 1 per ship per 10 Hz step, ≤ 0.5 ms per tick across all ships | per wire, switch or relay event |
+| Wire damage (round 5) | damage brush AABB against segment capsules via per-section segment bins (`WireNet.SectionSegs`) | per damage event |
+| Aero (round 5) | ~40 ns per strip + ~0.3 µs allocation per ship; ≈ 11 µs at the 256-strip cap | per tick, ships in atmosphere only, never in warp |
+| Dampener (round 5) | ~2 ns per dampener in the force pass (exotic-matter); `m_in` on events; power and EM in the 10 Hz ledger | per tick, covered rooms only |
 
 Rules: no allocation in the claim check or event pop (`NativeList`, preallocated heaps); compile and evaluation scratch from pooled buffers; nothing in construction runs on the 60 Hz path except popping due events.
 
@@ -555,8 +656,37 @@ public struct PortRef { public uint Element; public byte Port; }   // part insta
 public enum JointKind : byte { Weld, Bolt, Screw, Rivet, Nail, Flange, Clamp, Crimp, Solder, Bond, Seal }
 public struct Connection { public uint Id; public PortRef A, B; public JointKind Joint; public DefId Spec; public ushort Size; }  // Size: weld cm or fastener count
 
-public enum Medium : byte { None, Em, Slurry, Agent, Antimatter, Propellant, Coolant, Gas, Power, Data }
-public struct Route { public uint Id; public DefId Spec; public Medium Medium; public PortRef From, To; public ushort FirstWaypoint, WaypointCount; public byte Flags; } // Bent, Bundle
+public enum Medium : byte { None, Em, Slurry, Agent, Antimatter, Propellant, Coolant, Gas, Power, Data, Control }   // Control: round 5
+public struct Route { public uint Id; public DefId Spec; public Medium Medium; public PortRef From, To; public ushort FirstWaypoint, WaypointCount; public byte Flags; } // Bent, Bundle, Concealed (round 5)
+
+// ---- Wiring (round 5, D17) ----
+public enum DeadLine : byte { FailSafe, FailHold, FailOff }
+[Flags] public enum InputFlags : byte { None = 0, Required = 1, Logged = 2, MilitaryOnly = 4 }
+public struct ControlInputDef { public ushort Signal; public Medium Medium; public DeadLine Dead; public InputFlags Flags; }   // declared per family in data
+public enum WireState : byte { Intact, Damaged, Cut, Tripped }
+public struct WireSegment                                          // compiled from routes, ≤ 4 m each
+{
+    public uint Id, Route; public Medium Medium; public WireState State; public ushort Gauge;
+    public int NodeA, NodeB; public int Ax, Ay, Az, Bx, By, Bz;   // capsule ends, 1/1024 m ship-local; radius from Gauge
+}
+public sealed class WireNet                                        // one per ship, server truth, derived on load and on change
+{
+    public NativeList<WireSegment> Segments; public NativeList<int> NodeStart, NodeEdges;   // CSR
+    public NativeList<byte> SwitchState;                           // switches, relays, breakers
+    public NativeList<ulong> Bindings;                             // bitset (console, component input) reachable
+    public NativeList<ushort> BusOfNode;                           // power bus id per node (PowerNet per bus)
+    public NativeList<int> SectionSegStart, SectionSegs;          // CSR: segments per 16 m collision section (damage tests)
+    public NativeList<ulong> SegLoopMask;                          // per segment: which of ≤ 64 FailSafe loops / critical feeds it lies on (same-tick cut test)
+}
+
+// ---- Round 5 family stats ----
+public struct DampenerStats { public ushort AMaxGQ8; public long MassMaxKg; public int RadiusMm; public int StandbyW; }   // EmPerNsDamp, DampWPerN: exotic-matter constants
+public struct AeroStrip { public int AreaCm2, ChordMm; public int Qx, Qy, Qz; public uint Frame; public ushort Profile; public byte SurfaceMask; }   // quarter-chord point, smallest-three frame
+public struct ControlSurfaceStats { public ushort MaxDeflectionQ8, RateDegPerSQ8; public ushort ChordFractionQ16; public int TorqueNm; }
+public struct CoreEjectStats { public long CradleMassCapKg; public ushort EjectTicks, EjectDvCmS; public byte QuickDisconnects; public bool AutoEject, OverrideKey; }
+// D14 runtime group: exotic-matter's DriveGroup (members = drives on the plot's Engage signal, weights fixed at spool start); the designer only previews it
+public struct EscapePodStats { public byte Seats; public ushort LifeSupportH; public ushort HeatShieldMWm2; public int DvCmS; }
+public enum PlanClass : byte { Ship, Station }
 public struct Waypoint { public int X, Y, Z; }                     // 1/1024 m
 
 public enum ElementKind : byte { Brush, Part, Connection, Route, Placement, Test }
@@ -577,6 +707,7 @@ public sealed class ShipPlan
     public ShipBlueprint Hull;                                     // brushes, chunks (incl. armour groups), placements, MaterialTable
     public NativeList<Route> Routes; public NativeList<Waypoint> Waypoints;
     public NativeList<OrderEdge> Order; public uint KeelBrushId;
+    public PlanClass Class;                                        // round 5: Station adds the pod and thruster rules
 }
 
 // ---- Function families ----
@@ -648,8 +779,12 @@ public struct PieceStack { public ItemId Item; public ushort ConditionQ16; publi
 
 namespace BrutalGame.Designer;
 
-public enum OpKind : byte { InsertBrush, RemoveBrush, ModifyBrush, PlacePart, RemovePart, MovePart, SetParams, Connect, Disconnect, SetJoint, AddRoute, RemoveRoute, EditRoute, PlaceComponent, RemoveComponent, AddOrderEdge, SetMeta }
-public unsafe struct PlanOp { public OpKind Kind; public byte Size; public ElementRef Target; public fixed byte Before[42], After[42]; }   // 96 B (12 + 2·42), invertible; payload fits a 36 B brush or a 28 B part
+public enum OpKind : byte { InsertBrush, RemoveBrush, ModifyBrush, PlacePart, RemovePart, MovePart, SetParams, Connect, Disconnect, SetJoint, AddRoute, RemoveRoute, EditRoute, PlaceComponent, RemoveComponent, AddOrderEdge, SetMeta,
+                            MeshVertices, MeshTopology, MeshAttributes, SetChunkKind }   // round 5
+public unsafe struct PlanOp { public OpKind Kind; public byte Size; public ElementRef Target; public fixed byte Before[42], After[42]; }   // 96 B (12 + 2·42), invertible; payload fits a 34 B brush or a 28 B part
+// Round 5: mesh ops do not fit 42 B. They are variable-length records in the same byte log: {Kind, mesh index, before blob, after blob},
+// MeshVertices = (first, count, old and new positions); MeshTopology = whole old and new face/corner/crease/panel arrays of that mesh (≤ ~90 KB each);
+// MeshAttributes = crease or panel bits. The log keeps the last 64 MB and drops the oldest undo steps beyond it.
 public sealed class UndoStack { public NativeList<byte> Log; public int Cursor; }
 [Flags] public enum Dirty : byte { Geometry = 1, Function = 2, Buildability = 4, Cost = 8 }
 public sealed class DesignSession
@@ -682,12 +817,41 @@ public sealed class DesignSession
 // data/functions/warp_recirc.json
 { "id": "fn.warp.recirc", "evaluator": "WarpRecirc", "stats": "WarpDriveStats",
   "roles": { "Chamber": [1,1], "Emitter": [4,32], "Diluter": [1,1], "Separator": [1,1], "Reservoir": [1,1], "Pump": [1,4],
-             "Interlock": [0,1], "PurgeValve": [0,1], "Trap": [1,1], "InlineAssay": [0,1], "AutoPurge": [0,1], "EjectRail": [0,1] },
+             "Interlock": [0,1], "PurgeValve": [0,1], "Trap": [1,1], "InlineAssay": [0,1], "AutoPurge": [0,1],
+             "EjectCradle": [1,1], "QuickDisconnect": [1,16], "AutoEject": [0,1], "OverrideKey": [0,1], "Beacon": [1,1], "LocalPanel": [1,1] },   // round 5
+  "inputs": [ { "signal": "Hold", "medium": "Control", "dead": "FailSafe", "flags": ["Required"] },
+              { "signal": "Cancel", "medium": "Data", "dead": "FailHold" }, { "signal": "Engage", "medium": "Data", "dead": "FailHold" },
+              { "signal": "Plan", "medium": "Data", "dead": "FailHold" },
+              { "signal": "Purge", "medium": "Data", "dead": "FailHold" }, { "signal": "Eject", "medium": "Control", "dead": "FailHold" },
+              { "signal": "Override", "medium": "Control", "dead": "FailOff" },
+              { "signal": "BeaconSwitch", "medium": "Control", "dead": "FailHold", "flags": ["MilitaryOnly"] } ],
+  "outputs": [ { "signal": "Beacon", "medium": "Data", "flags": ["Required", "Logged"] }, { "signal": "Alarm", "medium": "Control" } ],   // warp.md's Beacon out; a cut is a Logged tamper
+  "chamberRule": { "minSf": 3.0, "pChamberMPa": "data", "housingRating": "componentDamage.chamberRating" },   // 8, exotic-matter
   "paths": [ { "medium": "Em", "via": ["Socket:Fuel", "Interlock?", "Diluter", "Chamber"] } ],
   "loops": [ { "medium": "Agent", "via": ["Reservoir", "Pump", "Diluter", "Chamber", "Separator"] } ],
   "coeff": { "rhoLine": 150, "rhoAgent": 1400, "tolBase": 0.02, "tolPerStage": 0.0075, "tolCap": 0.08,
              "mixBase": 60, "mixPerExtraStage": 10, "purgeRefDn": 40, "pOpMPa": 20.0, "breachBase": 0.5, "breachSfGain": 0.25 },
   "envelope": { "lineCapKg": [1, 600], "loopAgentKg": [5, 600] } }
+
+// data/functions/dampener.json   (round 5, D9)
+{ "id": "fn.dampener", "evaluator": "Dampener", "stats": "DampenerStats",
+  "roles": { "Coil": [2,32], "Feed": [1,1], "Conditioner": [1,1], "Controller": [1,1] },
+  "inputs": [ { "signal": "Enable", "medium": "Control", "dead": "FailOff", "flags": ["Required"] }, { "signal": "Limit", "medium": "Data", "dead": "FailHold" } ],
+  "coeff": { "aMaxG": { "D": 2, "C": 3, "B": 6, "A": 10 }, "constants": "exotic-matter dampener (emPerNs 1e-11, wPerN 1.0, standbyW 1e4, rampS 0.5)" },
+  "catalogMustEqual": "fc.inertial_dampener.s|m|l", "gravitonProjection": "Internal" }
+
+// data/functions/aero_control.json   (round 5, D10)
+{ "id": "fn.aero.control", "evaluator": "ControlSurface", "stats": "ControlSurfaceStats",
+  "roles": { "Hinge": [1,4], "Actuator": [1,4], "Panel": [1,1] },
+  "inputs": [ { "signal": "Deflect", "medium": "Data", "dead": "FailHold" } ], "envelope": { "maxDeflectionDeg": [5, 40] } }
+
+// data/wiring/harness_standard.json   (round 5, D17)
+{ "id": "harness.standard", "buses": "nearestPerDeck", "consoles": ["Cockpit", "Engineering"],
+  "estopLoops": [ { "drive": "Hold", "stations": ["Cockpit", "Engineering", "DriveRoom"] } ],
+  "dataHub": "part.hub.16", "breakerPerConsumer": true }
+
+// data/plan_classes.json   (round 5, D25)
+{ "Station": { "podSeatsPerBerth": 1.0, "thrustAllAxes": "Warning", "stationMinAccelG": 0.01, "anchorFeeds": 2 } }   // hard pod gate: exotic-matter RequirePodsForImpactFootprint
 
 // data/economy/pricing.json
 { "wage": 4.0, "catalogScale": 0.85, "vendorMargin": 0.20, "retail": { "stock": 1.10, "part": 1.40, "component": 1.08 },
@@ -713,7 +877,7 @@ Also: `data/plans/catalog/*.bplan` (every catalog part preset, component and shi
 **ship-hulls.md**
 - `ComponentPlan` (in `Plans`) becomes the source of truth for a component: `Family` + part graph replace `FunctionCore`. `ComponentDesign` stays in `Ships` as the derived view the bake and runtime read (housing, cutters, sockets, `MassMoments`, portal, stats blob), compiled from the plan, so `Ships` never references `Plans`. A "bought function core" is a catalog component plan, sealed. Answers its open question 4.
 - `ShipBlueprint.Materials` becomes a table of `PlanRef` (catalog material or laminate plan); `HullBrush.Material` still indexes it.
-- `HullChunkGroup` gains a kind (`Hull`, `Armour`); armour plates are armour chunk groups of laminate brushes, bolted on.
+- `HullChunkGroup` gains a kind (`Hull`, `Armour`, and in round 5 `Wing`); armour plates are armour chunk groups of laminate brushes, bolted on.
 - **Build mode edits plans, not the live ship.** The live ship changes only through construction steps, or instantly in creative mode. The reason: plans must be the required guide, and modifications need a diff between two plan revisions. The server still validates every edit, now at plan save and import.
 - Undo is the Designer op log (generalises brush diffs).
 - `HullBrickJob` also writes a `BrushYield` table (surface cells and shared boundary faces per brush) for the assembly compiler, and accepts a per-brush `PieceState` span (a `Ships` type) from the as-built. Partial ships key cached bricks by piece states too (section 5).
@@ -740,6 +904,13 @@ Also: `data/plans/catalog/*.bplan` (every catalog part preset, component and shi
 **tractor-beams.md (pending)**
 - Consumes `StressEdge` ratings (nominal per plan, as-built per ship) and detaches through ship-hulls' split rule.
 
+**Round 5 changes to other docs**
+- **ship-hulls.md:** mesh brushes (`BrushShape.Mesh`, `HullMesh`, `MeshTable`, `BrushFlags.Inset`), mesh validation, editor, limits and costs; `ChunkKind` with `Wing`; eject path and pod tube cutters; `SocketType.Control`. (Done in its round 5 copy.)
+- **exotic-matter.md:** (its round 5 copy already has the dampener core, standard core eject with the ×4 eject mount, the ×8 chamber, `DriveGroup` and anchors on any grid; this doc's families must evaluate to those numbers.) Still to add there: the eject mount is this doc's eject cradle with quick-disconnects and a mechanical handle that needs no power or wiring; `AutoEject` is set by an auto-eject controller part; the override additionally needs an override key switch part wired to a console; `SF_chamber ≥ 3` is the design rule that earns `chamberRating` 8; `PowerNet` is per bus, buses come from the wiring; anchor cores need two independent power feeds; mid-warp eject follows warp.md (accepted in warp, separates on the first real-space tick), replacing its "eject refused in `Warp` placement".
+- **warp.md:** (its round 5 copy already has wired drive ports, the cancel table, the beacon and "Multiple drives".) Mapping only: its `Abort` is raised by this doc's `Hold` FailSafe loop, a Data `Cancel` or the local panel; its power cancel is a breaker trip or lost feed on the drive's bus; its Beacon out is this doc's `Beacon` output to a powered antenna part, military classes adding a `BeaconSwitch` input.
+- **review.md / README.md:** flight model is both (D10): system 6 (atmosphere) gains wing strips and control surfaces; the M6 flight computer gains control allocation and Atmo mode. Interior gravity (D9): plating and dampener are separate components.
+- **Stations (exotic-matter anchors, frames-and-zones):** anchors may sit on any grid; anchor `Engage` / `Release` / `CrawlTarget` / `CrawlSpeed` inputs and a `Failing` output are wired (D25), with two independent power feeds per anchor core; station plans are warned without escape pods or thrust (exotic-matter's impact-footprint pod rule is the hard gate).
+
 ## 10. Milestones
 
 | When | Scope | Exit check |
@@ -748,13 +919,20 @@ Also: `data/plans/catalog/*.bplan` (every catalog part preset, component and shi
 | **M5b** (after M6, which brings thrust and the flight computer) | Construction v1: assembly compile (keel, frame, skin, mount, route, test, load), support predicate, access rule, `BrushYield`, cut list, `PieceStack` stock and cutting, weld and bolt joints with quality, claims, hologram guide, as-built (Factory and InProgress) in bake and mass, show hangar purchase, catalog plan licences, pricing modes Catalog and SelfAssemble | Solo-build the catalog Wren from plans in ≤ 75 min with T1 tools; compile ≤ 10 ms for a 2k-brush plan; idle and finished ships 0 per tick in the profiler; a half-built Wren with the cockpit and thrusters flies |
 | **P1** (with exotic-matter D1, after M7) | Parts and component designer: part templates, laminates, part graph, ports, routing A*, function families (chemical thruster, tank, trap, warp slurry and recirculating), validation function class, NRE and certification, job shop and production orders, fabricators (SelfProduce), plan market and licences, untrusted import | Catalog C recirculating plan evaluates exactly to exotic-matter's C row; a custom drive with SF 1.1 breaches at Integrity 0.70 under the shared damage rule; the Wren worked numbers reproduce within 1 %; the cost ordering A < B < C < D' < D < E holds at N = 1, 5, 20 and the limit for every catalog ship and drive, and self-produce ends within 3 % of catalog; the strip, buyback and yard-build arbitrage invariants hold over the whole catalog; a fuzzed import corpus (truncated, inflated, colliding-hash, over-limit, unknown-id, modded-data bundles) is refused within the plan limits' time bound; evaluation ≤ 50 µs |
 | **M8** (with rooms) | Plates as armour chunk groups, seal joints and Leak edges from quality, inspection and rework, modification diffs (strip, drain, salvage), co-op claims with MaxCrew, T1 rigs, T2 bays with drones, jigs, Certified build flag, stress edges handed to tractor beams | A room with a 0.3 q seam leaks at the predicted area; a refit from A to B does only the delta and returns salvage as specified; two players halve a 200-step build within 15 %; a damage brush through an unskinned frame removes the beams it meets; a refit that moves one plate charges NRE on that plate only; tedium playtest: the Wren from plans needs ≤ 15 min of player input with a T1 rig (the rest is timers and drones) |
+| **M5c** (round 5, after M5) | Mesh brushes: `HullMesh`, canonical bytes and `MeshHash`, integer Catmull-Clark, mesh SDF (sign rows, band, inset), validation, Mesh editor (select, transform, extrude, inset, loop cut, bevel, bridge, merge, dissolve, knife, fill, crease, mirror, subdivision, convert), panels | A fully mesh-modelled 20 m hull with a hollowed interior, a primitive door cut and a damage hole bakes with sharp creases; mesh bake ≤ 3× a primitive brick in the profiler; the same mesh hashes and validates identically on client and server; a fuzzed corpus of open, non-manifold, self-intersecting and over-limit meshes is refused within the limits' time bound |
+| **M5b+** (round 5, with M5b) | Wiring v1: Power / Data / Control routes, segments, consoles, breakers, standard harness, schematic view, reachability bindings, circuit test step, warp `Hold` loop | A Wren built from plans: cutting its drive-room e-stop loop cancels a spool; "what controls this?" matches the bindings; reachability ≤ 100 µs for 16k segments |
+| **M6+** (round 5, with M6 and planets' atmosphere) | Aero: wing chunks and strips, wing components, control surfaces, control allocation, Atmo mode | A winged 15 m craft glides and stalls as its tables predict; a hole in one wing rolls it; aero ≤ 2 µs per aircraft per tick |
+| **M8+** (round 5, with M8) | Dampener family separate from plating; wire damage, shorts and breaker trips; splice repair; cutting torch on hulls | A 10 g ram over an S dampener (3 g) throws crew with 7 g; the catalog S/M/L dampener plans evaluate to exotic-matter's rows; a damage brush across a cable cuts what the schematic predicts; an unbreakered short spreads one hop per tick |
+| **D1+** (round 5, with exotic-matter D1) | Eject cradle, quick-disconnects, mechanical handle, auto-eject, override key switch, linked drive groups, beacon part | Every runaway in the trigger matrix is survivable by eject started at onset; two drives on one `Engage` signal carry the sum of their mass caps at the power-weighted quality, and one off that signal stays out; a drive without the key switch cannot be overridden |
+| **Stations** (round 5) | Station plan class rules, escape pods and pod bays, anchor inputs (crawl, release, failing output), redundant anchor feeds | A station plan without pods or thrusters is warned, and its anchor refuses engagement over an atmosphere with an impact footprint; cutting one anchor feed never drops the station; a pod launched from an anchored station clears the tube and lands on its heat shield |
 | **C2** (later) | Sealed prefab sales, reverse engineering by strip, multi-user design sessions, plate nesting, pipe bending | |
 
 ## 11. Files
 
-- **`src/Plans/`:** `PlanFormat.cs` (header, sections, canonical BODY, bundle), `XxHash64.cs`, `PlanStore.cs`, `Catalog.cs` (data loader, `DefId`), `Laminates.cs`, `Parts.cs` (templates, presets, derived props), `ComponentPlan.cs`, `ShipPlan.cs`, `PartGraph.cs` (CSR, role assignment, path/loop BFS), `Families/WarpDrive.cs`, `Families/Thruster.cs`, `Families/Tank.cs`, `Families/Core.cs` (single-core families), `Validation.cs`, `Pricing.cs` (modes, NRE, quotes), `Certification.cs`, `Licences.cs`, `AssemblyCompiler.cs` (pieces, members, dependencies, access rule), `CutList.cs`, `StressGraph.cs`, `AsBuilt.cs`, `PlanDiff.cs`, `ImportGuard.cs` (limits, inflate bounds, canonical re-encode, byte-compare dedup).
+- **`src/Plans/`:** `PlanFormat.cs` (header, sections, canonical BODY, bundle), `XxHash64.cs`, `PlanStore.cs`, `Catalog.cs` (data loader, `DefId`), `Laminates.cs`, `Parts.cs` (templates, presets, derived props), `ComponentPlan.cs`, `ShipPlan.cs`, `PartGraph.cs` (CSR, role assignment, path/loop BFS), `Families/WarpDrive.cs`, `Families/Thruster.cs`, `Families/Tank.cs`, `Families/Core.cs` (single-core families), round 5: `Families/Dampener.cs`, `Families/Aero.cs` (wing component, control surface), `Families/EscapePod.cs`, `Families/Anchor.cs`, `Wiring/WireCompile.cs` (routes → segments, nodes, buses), `Wiring/Reachability.cs` (bindings, FailSafe loops), `Wiring/WireFaults.cs` (cut, damage, short, trip), `DriveGroups.cs` (D14), `PlanClasses.cs`; `Validation.cs`, `Pricing.cs` (modes, NRE, quotes), `Certification.cs`, `Licences.cs`, `AssemblyCompiler.cs` (pieces, members, dependencies, access rule), `CutList.cs`, `StressGraph.cs`, `AsBuilt.cs`, `PlanDiff.cs`, `ImportGuard.cs` (limits, inflate bounds, canonical re-encode, byte-compare dedup).
 - **`src/Geometry/`** (Jolt-free, moved from `Physics`): `TriangleBvh.cs`.
-- **`src/Designer/`:** `DesignSession.cs`, `PlanOps.cs`, `UndoStack.cs`, `Selection.cs`, `Tools/HullTool.cs`, `Tools/PlateTool.cs`, `Tools/PartPlacer.cs` (port snapping), `Tools/Router.cs` (A*), `Tools/CrossSection.cs`, `IPlanHost.cs`.
+- **`src/Designer/`:** `DesignSession.cs`, `PlanOps.cs`, `UndoStack.cs`, `Selection.cs`, `Tools/HullTool.cs`, `Tools/PlateTool.cs`, `Tools/PartPlacer.cs` (port snapping), `Tools/Router.cs` (A*), `Tools/CrossSection.cs`, `IPlanHost.cs`; round 5: `Tools/MeshTool.cs` (ship-hulls), `Tools/WingTool.cs`, `Tools/Harness.cs` (standard harness), `Tools/Schematic.cs` (layout of the wiring diagram).
+- **Round 5, elsewhere:** `src/Designer.Ui/` gains `MeshPanel`, `WingPanel`, `SchematicPanel`; `src/Sim/` gains `Flight/AeroStrips.cs` and `Flight/ControlAllocation.cs`, `Systems/Dampeners.cs`, `Systems/CoreEject.cs`; `src/Game/ConstructionTool.cs` gains the wire cutter, splice and cutting torch; `tests/Plans.Tests` gains wiring reachability and fault cases, drive-group aggregation, station class rules; `tests/Ships.Tests` gains mesh canonical hash, integer subdivision determinism, mesh SDF sign vs a brute-force winding number, and the invalid-mesh corpus.
 - **`src/Designer.Ui/`:** `DesignViewport.cs`, `Gizmos.cs`, panels: `HullPanel`, `PlatePanel`, `LaminatePanel`, `PartPanel`, `ComponentPanel`, `StatsPanel`, `CostPanel`, `ValidationPanel`, `AssemblyPanel`, `DiffPanel`, `LibraryPanel`.
 - **`src/Designer.App/`:** `Program.cs`, `DesignerApp.cs`, `FilePlanHost.cs`.
 - **`src/Ships.Rendering/`:** `HullRenderer.cs`, `PartInstancer.cs`, `GhostRaymarch.cs`, `HologramPass.cs`; `shaders/hologram.*`, `shaders/part_instance.*`.
@@ -769,6 +947,8 @@ Also: `data/plans/catalog/*.bplan` (every catalog part preset, component and shi
 2. **Fleet amortisation.** As written, the per-build design stamp means a custom design never beats the catalog per unit without own production, however many you build (your rule taken literally), and a self-produced custom drive reaches catalog parity at about 20 units. Should big fleets be rewarded instead (`designStamp` 0: a like-for-like custom ship then beats premade after about 10 units)?
 3. **Standalone distribution.** Is Designer.App a free separate download (anyone can design without owning the game) or bundled with the game? A free app needs the catalog data shipped with it, which is fine under "bytes are not secret".
 4. **Construction length.** About 70 min solo with T1 tools for a 15 m ship, 140 min with T0 hand tools, minutes with a T3 jig. Is that the right order of magnitude for an early ship?
+5. **(Round 5) Dampener overlap.** Proposed: a room covered by two dampeners takes the stronger one (ratings do not add), so big ships need one dampener per zone. Should overlapping dampeners add up instead, like linked warp drives?
+6. **(Round 5) Wiring depth.** Proposed: power, data and control as three media, with the standard harness doing it in one click for players who don't care. Is a separate Control medium (hard-wired loops that work without the data bus) worth the extra concept, or should cancel and eject lines be plain data lines?
 
 ## Review notes
 
@@ -804,3 +984,32 @@ Tedium: a risk table with concrete mitigations was added (work orders, one-actio
 Performance: estimates were plausible and per-tick cost stays event-driven. Added: the partial-ship bake cache key (otherwise a half-built ship is served the finished plan's bricks), hologram at LOD 1 with edge-only drawing beyond the available steps and a 0.1 ms GPU exit check, framed-beam damage cost, housing bake cost in imports and a server-load bound for 64 players. Nothing here is measured yet; every number stays a profiler-row exit check.
 
 Still open for the user: questions 1–4 above, with question 2 rewritten around the new default.
+
+## Revision (round 5) notes
+
+User decisions round 5 (decisions-r5.md) applied in place; they win over earlier text here.
+
+- **Header and decisions:** round 5 status line; D9, D10, D11, D12/D13, D14, D17 and D25 listed with where each is implemented.
+- **D11, mesh editing:** hull chunks may hold mesh brushes (ship-hulls "Mesh brushes"); new Mesh editor tool row; mesh validation class; mesh limits; bundle sizes; variable-length mesh ops (`MeshVertices`, `MeshTopology`, `MeshAttributes`) in the undo log; construction splits a mesh brush into panel pieces with crease / boundary frame members, formed plates for curved panels, and a partial bake that keeps only skinned panels; M5c milestone.
+- **D17, wiring:** new "Wiring" section: Power / Data / Control media, wiring parts, wire runs as routes compiled to ≤ 4 m segments, control inputs with FailSafe / FailHold / FailOff dead-line behaviour and `Logged` inputs, derived (console, input) bindings, the warp `Hold` cancel loop, per-bus power networks, damage faults (cut, damaged, short with one-hop arc damage, breaker trip), wire cutter and splice repair, standard harness and schematic view. Families declare wiring ports. Circuit test step and dependencies; partial ships need their wiring; `WireNet`, `WireSegment`, `ControlInputDef` structs; `WireState` / `SwitchSet` events; reachability and wire-damage cost rows (0 per tick); M5b+ and M8+ milestones; open question 6.
+- **D9, dampener:** new `fn.dampener` family separate from plating: coils, EM feed, conditioner, controller; stats evaluate to exotic-matter's `a_max` / `MassMax` dampener (round 5 review); excess leaks through; no stacking (open question 5); `Enable` / `Limit` inputs; data file and stats struct.
+- **D10, aero:** wing chunks (geometry-derived strips) and wing components (part-derived stats), control surfaces, per-strip lift / drag / moment with stall and compressibility tables, wing root stress edges, flight computer control allocation with Space / Atmo / Decoupled modes; Wing tool; M6+ milestone.
+- **D12/D13, core:** warp family gains required `EjectCradle`, quick-disconnects, mechanical handle, optional auto-eject, chamber `SF ≥ 3` earning exotic-matter's ×8 chamber rating, override key switch on the interlock; eject dry-run test; catalog C plan cost note (tables to be re-run in P1).
+- **D14, linked drives:** drives on the plot's `Engage` signal support each other (round 5 review: was wired `Sync` ports); mass caps add, quality is power-weighted; members dropping out recompute and may cancel; replaces the one-active-drive selector.
+- **D18 hardware (via D17):** beacon antenna required on every drive, a `BeaconSwitch` only on military classes (round 5 review), cut is logged.
+- **D25, stations:** `PlanClass.Station` rules (pods and thrust as Warnings, round 5 review); escape pod and pod bay families; anchor components on any plan with wired `Engage`, `Release`, `CrawlTarget`, `CrawlSpeed` inputs and a `Failing` output.
+- **Changes to other docs:** a round 5 block for ship-hulls, exotic-matter, warp, review / README and stations.
+
+## Round 5 review notes
+
+Skeptical lead review, 2026-11-25, against decisions-r5.md and the round 5 copies of ship-hulls.md, exotic-matter.md, warp.md and frames-and-zones.md. Decisions were not re-litigated; every fix below is made in place above.
+
+- **D9 dampener contradicted exotic-matter:** class caps 2/4/6/8 g, a force cap and 2,000 W per t·g (≈ 0.2 W/N), against exotic-matter's `fc.inertial_dampener` (`a_max` 3/6/10 g, `MassMax` 50/500/5,000 t, 1 W/N, 10 kW standby, 0.5 s ramp). The family now derives exotic-matter's stats from parts, the catalog S/M/L plans must evaluate to its rows (P1 test), and its runtime rule is used verbatim. Coverage adds bay volumes, so covered docked craft (exotic-matter) exist. M8+ exit check re-based on the S rating.
+- **D10 aero:** wing components could declare any area (now bounded by the housing planform); aero was not excluded in warp, where warp.md's brake cancels drag; allocation "≤ 64 actuators" now means groups; worst-case cost stated (≈ 11 µs at 256 strips).
+- **D12/D13 core:** `k_chamber` 4 contradicted exotic-matter's chamber rating 8, now one number (SF ≥ 3 earns it); cradle = exotic-matter's ×4 eject mount; eject Δv is 20 m/s (D, C) and 40 m/s (B, A), not 20 for all; mid-warp eject follows warp.md; the override keeps every exotic-matter safeguard, listed; ejected core ignores its ship's collision until clear; eject reach (≈ 50 m) is not a torpedo.
+- **D14 contradicted warp.md:** drives joined by wired `Sync` ports, and "unlinked drives cannot spool at the same time" went against "bubbles support each other". Now warp.md's rule: drives on the plot's `Engage` signal, powered to `f ≥ 0.5`, join; weights from delivered power; support lost mid-warp is warp.md's hard cancel. The `DriveGroup` struct defers to exotic-matter's. **Open across other docs (not fixed here):** warp.md (weight = delivered watts, per-drive cooldown) and exotic-matter.md (`P_i = BubbleW · Integrity`, per-ship cooldown, eject refused in `Warp` placement) disagree; warp.md should win for the bubble and mid-warp eject.
+- **D17 wiring:** drive ports mapped to warp.md's (`Engage`, `Abort` = `Hold` loop or Data `Cancel` or local panel, Nav `Plan`, `Beacon` out; power loss is warp.md's hard cancel). **Perf:** a full reachability BFS per wire event was up to 100 µs per ship per tick in battle (and during a one-hop-per-tick short); loops now open in O(1) via a per-segment mask, critical feeds get one bounded search, and the full pass is coalesced to ≤ 10 Hz per ship and 0.5 ms per tick overall. `WireNet` gains section bins and the mask.
+- **D18 beacon:** "required on civil plans, kill switch with military access" contradicted warp.md (every drive has a beacon; only military classes have a switch). Fixed, and the military flag comes only from a faction-gated part template, so a custom plan cannot self-certify as military.
+- **D25 stations:** pods ≥ 1.1 × berths and thrust on every axis as Errors contradicted exotic-matter's Warnings and would refuse surface bases (also Station class); now Warnings, with exotic-matter's impact-footprint pod rule as the hard gate. Anchor inputs renamed to exotic-matter's crawl model (`CrawlTarget`, `CrawlSpeed`); `Failover` was an output, now `Failing`. **Exploit closed:** exotic-matter drops a station 10 s after its anchor loses control power, so under D17 one cut cable could drop a station (and defeat D27 capture); anchor cores now need two independent feeds (Error), `Release` keeps owner authorisation and the 60 s countdown whatever the wiring does.
+- **D11 construction:** the partial-bake rule used "nearest triangle" for deep cells that have none (distance is band-only); now band cells of skinned panels only, solid once all panels are skinned; the as-built span and partial cache key are per (brush, panel). **Exploit/perf:** mesh validation cache byte-compared, and a per-player new-triangle budget keeps 64 importing players under one core (was 3.2 cores at the 0.5 s worst case).
+- **Small:** `PlanOp` payload names the 34 B brush (was 36 B); the "Changes to other docs" round 5 block now lists only what exotic-matter and warp still lack.
