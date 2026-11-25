@@ -188,7 +188,7 @@ public sealed class ShipHull                        // runtime, one per ship bod
 **Still cuttable, "and whatnot".** Because the booleans are in the SDF, a mesh hull loses nothing the primitive hull had:
 - **Interiors:** Hollow on a mesh brush emits an `Interior | Inset` Subtract brush pointing at the same mesh, `Bevel` = wall thickness (0.5–2 m): the mesh's SDF eroded by the wall, an exact offset inside the band. Cut room, cut corridor and any primitive or mesh Subtract still work over it.
 - **Damage holes, breaches, leaks, splits, repair patches:** unchanged; the damage layer subtracts from whatever the brush list made.
-- **In-world cutting:** a cutting torch (boarding, salvage, rescue) writes Subtract brushes into the damage layer along the cut path (a swept capsule per 0.5 m of cut, coalesced by the existing rule). A closed cut loop through a wall makes a hole; a cut across a whole section is a split. Same caps (4096 per ship, 64 per brick).
+- **In-world cutting:** a cutting torch (boarding, salvage, rescue) writes Subtract brushes into the damage layer along the cut path (a swept capsule per 0.5 m of cut, coalesced by the existing rule). A closed cut loop through a wall makes a hole; a cut across a whole section is a split. Same caps (4096 per ship, 64 per brick). Station grids are cut the same way: boarding a station to reach its `CommandCore` is the D27 capture path (ship-design-and-construction.md, rings-and-asteroids.md "Sieges (D27)"). Cutting into another party's grid without consent is a hostile act and writes an `IncidentRecord` (rings-and-asteroids.md).
 - **Mass, CoM, inertia, rooms, LOD, collision:** read the bake, so they need no mesh-specific code.
 - **Dents:** still not modelled (open question 3), but a mesh brush is the natural place for them later: a dent could displace control vertices in a per-ship damage copy of the mesh.
 
@@ -233,7 +233,8 @@ public sealed class ShipHull                        // runtime, one per ship bod
 - **Wings (D10).** A hull chunk of `Kind = Wing` is a lifting surface. Its planform is measured from the bake, not typed in: the chunk's occupancy is projected on its own chord plane and sliced into ≤ 16 spanwise **aero strips** (area, chord, quarter-chord point, local frame), stored next to `BrickState` (≈ 40 B per strip). `AeroProfile` picks a data airfoil (Cl(α), Cd(α), Cm, stall). A damage hole through a wing re-measures the strips of the touched bricks, so a holed wing loses lift on that side. Control surfaces are components hinged on a wing's trailing edge; flight physics are in ship-design-and-construction.md, "Aero".
 - **Core ejection channel (D12/D13).** A drive's ejectable core is mounted on an eject cradle whose design carries a **cutter for its eject path**: a swept box from the cradle to the hull surface, ending in a **blow-out panel** (an Add brush flagged `BlowOut`, blown off by a damage-layer subtract at eject; replacing it removes that damage brush). Evaluation order in a brick: hull brushes in list order, then component cutters, then `BlowOut` brushes, then the damage layer, so the cutter opens the channel and the panel still closes its mouth. Validation: the swept core volume is clear of other components' housings and of anything that survives the cutter except its own panel (another `BlowOut` brush); Error otherwise. The ejected core ignores collision with its former ship until it clears the hull AABB.
 - **Escape pod bays and station thrusters (D25).** A pod bay is a component whose cutter opens a launch tube to the hull surface (same clear-path rule) ending in an outer hatch (a door portal), so the bay stays a sealed room until launch; station thrusters are ordinary thruster placements.
-- **Inertial dampener coverage (D9).** A dampener's bubble covers the rooms (air components of the bake) whose **every** air cell lies inside its radius, plus designer-marked **bay volumes** (boxes) inside the radius for open hangars, which touch space and so are not rooms; bodies entering or leaving a bay box are grid-membership events. The covered list is recomputed with the rooms, on topology change only, and `m_in` on events (exotic-matter.md).
+- **Station command core (D27).** Every `PlanClass.Station` carries a `CommandCore` component (the ownership token; family, rating and panel in ship-design-and-construction.md). Its housing must sit inside a room (an air component of the bake), because capture is an `Override` held at the core with no defender contesting inside that room's `GridVolume`; Error otherwise. The room is reached like any other: doors, docking, or the cutting torch.
+- **Inertial dampener coverage (D9).** A dampener's bubble covers the rooms (air components of the bake) whose **every** air cell lies inside its radius, plus designer-marked **bay volumes** (boxes) inside the radius for open hangars, which touch space and so are not rooms; bodies entering or leaving a bay box are grid-membership events. The covered list is recomputed with the rooms, on topology change only, and `m_in` on events (exotic-matter.md). Covered rooms feel `g_floor + a_man·max(0, 1 − a_d/|a_man|)` (frames-and-zones.md; `a_d`, `a_max`, `MassMax` in exotic-matter.md): the dampener cancels manoeuvre-type acceleration (thrust, tractor forces, throat drag) up to `a_d` and leaks the excess; plating only adds floor gravity; uncovered rooms feel all of `a_man`. Hangar tractors acting on a visitor's craft in a bay need the visitor's landing request (D26 consent, tractor-beams.md).
 - **Wiring (D17).** Cables are routes (`Medium` Power, Data, Control) laid along hull inner surfaces in trays, or **concealed** inside a hull brush through penetrations (harder to cut, costs a penetration fitting each way). Their segments are tested against damage brushes like framed beams (capsule vs brush); see ship-design-and-construction.md, "Wiring".
 
 ### Collision (Jolt)
@@ -362,7 +363,7 @@ public sealed class ShipHull                        // runtime, one per ship bod
 
 ## Revision (round 5) notes
 
-User decisions round 5 (decisions-r5.md) applied in place; they win over earlier text.
+User decisions round 5 (decisions.md) applied in place; they win over earlier text.
 
 - **D11, full mesh editing, still cuttable.** New `BrushShape.Mesh` referencing a shared `HullMesh` in `ShipBlueprint.MeshTable`: closed n-gon control mesh in brush-local int32 1/1024 m, crease bits, face panels, 0–2 levels of integer Catmull-Clark. The CSG brush list stays the only truth; mesh brushes take Add / Subtract / Intersect / Paint and are converted to SDF at bake (exact ray-parity sign per brick row, narrow-band closest-triangle distance, triangle normals as Hermite data), so booleans, interiors, damage holes, mass, rooms, collision and LOD come from the bake unchanged. Rejected option (c) reworded: the modeller is now an authoring tool for one brush type, not the representation.
 - **Hollow on meshes** uses a new `BrushFlags.Inset` Subtract brush sharing the mesh, eroding its SDF by the wall thickness (0.5–2 m).
@@ -375,7 +376,7 @@ User decisions round 5 (decisions-r5.md) applied in place; they win over earlier
 
 ## Round 5 review notes
 
-Skeptical lead review, 2026-11-25, against decisions-r5.md and the round 5 copies of ship-design-and-construction.md, exotic-matter.md, warp.md and frames-and-zones.md. Decisions were not re-litigated; every fix below is made in place above.
+Skeptical lead review, 2026-11-25, against decisions.md (then decisions-r5.md) and the round 5 copies of ship-design-and-construction.md, exotic-matter.md, warp.md and frames-and-zones.md. Decisions were not re-litigated; every fix below is made in place above.
 
 - **D11 faithful:** full vertex / edge / face editing exists, and hulls stay cuttable (booleans, Hollow, damage, cutting torch) because the brush list stays the truth and meshes go through the SDF. Compact (mesh by hash, `MeshPatch`), deterministic and server-validated, as asked.
 - **Sign rays were wrong:** a parity ray started at the brick's −X face cannot know whether it starts inside. Rays now start outside the mesh AABB; their points are integer (fixed-point rotation, rounded to 1/1024 m) so the "exact Int128" claim holds for rotated brushes; uniform bricks take one ray (perf).
@@ -388,3 +389,12 @@ Skeptical lead review, 2026-11-25, against decisions-r5.md and the round 5 copie
 - **D10 wings:** the "chord plane" had no stored frame; `HullChunkGroup.WingFrame` added (set by the Wing tool).
 - **Leftovers:** `Param` comment names Mesh; splits keep mesh references by hash; open questions 4 and 5 marked answered by ship-design-and-construction.md; the direct-edit networking path is noted as creative mode under the plans model.
 - **D17 wiring:** concealed vs tray cables and capsule damage tests are consistent with ship-design-and-construction.md "Wiring"; nothing changed.
+
+## Consistency pass (r6) notes
+
+- **Doc names (item 16):** round 5 references to `decisions-r5.md` now point at decisions.md.
+- **Cutting torch (D27, items 12, 14):** station grids are cut the same way; boarding to the `CommandCore` is the capture path; a non-consented cut into another party's grid writes an `IncidentRecord`.
+- **Station command core (D27, item 12):** new hull feature: every `PlanClass.Station` carries a `CommandCore` whose housing must sit inside a room, since capture is contested per room `GridVolume` (Error otherwise). Family and panel stay in ship-design-and-construction.md.
+- **Dampener coverage (items 4, 5):** covered rooms use frames' `g_floor + a_man·max(0, 1 − a_d/|a_man|)` with exotic-matter's `a_d`, `a_max`, `MassMax`; the dampener, not plating, cancels thrust, tractor forces and throat drag; uncovered rooms feel all of it.
+- **Hangar bays (D26, item 11):** hangar tractors on a visitor's craft need the landing request.
+- D28 and D33 do not touch this doc; no other conflict-list item names it.

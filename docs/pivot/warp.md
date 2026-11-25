@@ -26,7 +26,7 @@ On the wire a warp is a few reliable events with zero per-tick traffic during cr
 | Committed | TCommit = TDrop − N … TDrop (N = 180, 3 s) | same; corridor announced; the route blends onto the drop track | TDrop |
 | Real space | TDrop = T1 − NR … T1 (NR = 120, 2 s) | **simulated body** in the bubble chosen at TDrop (rails if it has no anchor), braked by the drive field. Collides | T1 |
 | Arrived | T1 | normal; the brake field ends, `GridInertial` clears at T1 + 1 | n/a |
-| Cooldown | `CooldownTicks` (per drive) | normal | ready |
+| Cooldown | `CooldownTicks` per drive, plus a ship cooldown = latest participant end (`ShipWarpCooldownEnd`, see "Multiple drives") | normal | ready |
 
 **At engage (T0):**
 - **What goes along:** the root ship's grid frame subtree. That covers everything in the grid (characters, loose items), docked ships (child grids with fixed poses) and ships in hangars (nested grids).
@@ -36,7 +36,7 @@ On the wire a warp is a few reliable events with zero per-tick traffic during cr
 - **Only a root ship can warp,** meaning one whose grid's parent is not a grid. Docked and hangared ships travel with their host.
 - **Spool refuses to start, or is cancelled before T0 − 30 ticks,** while:
   - a **crew member** is parented to the grid but outside `GridVolume`. The pilot sees who and can choose to leave them behind. Non-crew never block: standing on someone's hull must not pin their ship in place.
-  - an **explicit lock** holds the ship: a landing clamp, a docking collar to a grid outside the carried subtree, or a tractor lock (Hold or Haul) with `F_avail ≥ m · WarpHoldAccel` (0.5 m/s², tractor-beams.md). Sweeps never block, and the ship's own tractor locks release on a spool request. Incidental contact does not block; the touching bodies simply stay behind.
+  - an **explicit lock** holds the ship: a landing clamp, a docking collar to a grid outside the carried subtree, or a tractor lock (Hold or Haul) with `F_avail ≥ m · WarpHoldAccel` (0.5 m/s², tractor-beams.md). A pull-only Hold tether from an emitter without antimatter (D28) still blocks under the same rule. Sweeps never block, and the ship's own tractor locks release on a spool request. A lock on another party's ship without its consent is a weapon use (D26): an `IncidentRecord` of kind `TractorLock` (rings-and-asteroids.md), so anti-escape locks are always hostile acts. Incidental contact does not block; the touching bodies simply stay behind.
   - Damage does **not** cancel spool by default (knob `SpoolDamageCancel`). Otherwise light fire alone would pin any ship; interdiction is the intended counter.
 - **The last 30 ticks are locked in.** After T0 − 30 nothing cancels, so a crew client holding the plan from spool start is never wrong under 0.5 s of latency.
 - **Departure from the bubble** uses the existing transfer: destroy the ship compound body (the shape refcount is kept). If the bubble empties, it goes back to the pool. Members that only this ship's crew anchored leave by the existing 3 km rule.
@@ -59,12 +59,12 @@ On the wire a warp is a few reliable events with zero per-tick traffic during cr
 - **Crew move freely and interact with anything aboard:** consoles, inventories, repairs, fights, sabotage. The interior is an ordinary grid bubble, so nothing here costs more than at rest.
 - **The drive is a wired component.** Its ports, all on the ship's wiring (power, data, control), are:
   - **Power in:** from the ship's buses through breakers;
-  - **Control in:** Engage, and Abort from any console or automation the designer wired to it, such as the helm, an engineering panel or a hull-breach sensor. In ship-design.md's wiring, Abort is raised by the drive's `Hold` loop (FailSafe: every e-stop in series opens it, and so does cutting it), by a Data `Cancel`, and by the drive's local panel, so an engineer at the drive can always stop it;
+  - **Control in:** Abort from any console or automation the designer wired to it, such as the helm, an engineering panel or a hull-breach sensor. `Engage` is a Data input (ship-design-and-construction.md), driven by the plotting console. In ship-design-and-construction.md's wiring, Abort is raised by the drive's `Hold` loop (FailSafe: every e-stop in series opens it, and so does cutting it), by a Data `Cancel`, and by the drive's local panel, so an engineer at the drive can always stop it;
   - **Nav data in:** the plan from the nav computer;
   - **Beacon out:** to the beacon antenna (D18, below).
   
-  What can stop a warp is therefore up to the ship's wiring. Cutting or splicing a wire is a gameplay action, done from inside or outside. Port and signal names are ship-design.md's; the cancel semantics are this doc's.
-- **The carried subtree is sealed in warp.** From T0 to T1 + 1 every opening in the hull collides as closed: portals, and also holes cut or blown in it mid-warp (D11 hulls can be cut). Nothing leaves the subtree in cruise. A cargo jettison or core eject commanded in cruise is queued and executes at `T_exit + 1`; anything that leaves from then on is unbraked, a projectile on the overrun path with the ship liable (see "Real-space segment"). Undocking and launches stay refused until T1 + 1 while the brake holds. With no brake (a hard cancel, or the brake lost), the field no longer holds the openings and they open at once, because nothing aboard is being decelerated relative to the ship.
+  What can stop a warp is therefore up to the ship's wiring. Cutting or splicing a wire is a gameplay action, done from inside or outside. Port and signal names are ship-design-and-construction.md's; the cancel semantics are this doc's.
+- **The carried subtree is sealed in warp.** From T0 to T1 + 1 every opening in the hull collides as closed: portals, and also holes cut or blown in it mid-warp (D11 hulls can be cut). Nothing leaves the subtree in cruise. A cargo jettison commanded in cruise is queued and executes at `T_exit + 1`; a core eject runs its 30-tick sequence in cruise and separates at `max(T_exit + 1, command + 30)`; anything that leaves from then on is unbraked, a projectile on the overrun path with the ship liable (see "Real-space segment"). Undocking and launches stay refused until T1 + 1 while the brake holds. With no brake (a hard cancel, or the brake lost), the field no longer holds the openings and they open at once, because nothing aboard is being decelerated relative to the ship.
 - **Cancel sources while cruising** (before TCommit):
 
 | Source | Kind | Brake in the real-space segment |
@@ -81,11 +81,11 @@ On the wire a warp is a few reliable events with zero per-tick traffic during cr
   - **With several drives,** power loss, damage or ejection on one drive only removes its share of support. It cancels the warp only through the support row. A runaway on any one of them cancels the whole warp.
   - **Cancels after TCommit** don't change the exit, because the ship is already arriving. Between TDrop and T1, killing the drive's power (or cutting its wire) removes the brake at once, and the ship carries on at whatever speed it had. That is the deliberate ramming lever. The overrun rule decides what such a ship can hit; anything it does hit is a hostile act logged against whoever cut the brake.
 - **Runaway and core ejection mid-warp** (D12, D13; rules in exotic-matter.md "Runaway burst"):
-  - A runaway active in `Warp` placement is a hard cancel (before TCommit; after it the ship is already arriving). Nothing resolves while the ship has no real space. **Every burst due between the lock-in (T0 − 30) and the first real-space tick is rescheduled to `max(burst tick, T_exit + 1 + 180)`**, with the prime-only yield, where `T_exit + 1` is TDrop (or TDrop' after a cancel). This is exotic-matter's lock-in deferral ("Timing and the warp lock-in"), applied to runaways that start in cruise too, so every mid-warp runaway gets the standard 3 s alarm in real space. (exotic-matter.md's "held to `max(burst tick, TDrop')`" for cruise-started runaways must change to match: with N = 180 it put the burst on the same tick the core separates, which made the eject useless.)
+  - A runaway active in `Warp` placement is a hard cancel (before TCommit; after it the ship is already arriving). Nothing resolves while the ship has no real space. **Every burst due between the lock-in (T0 − 30) and the first real-space tick is rescheduled to `T_exit + 181`**, with the prime-only yield, where `T_exit + 1` is TDrop (or TDrop' after a cancel, or the throat exit). Since onset ≤ T_exit, `max(burst tick, T_exit + 181)` always equals `T_exit + 181`; exotic-matter.md uses the same expression. Bursts due on or after `T_exit + 1` resolve as scheduled. This is exotic-matter's lock-in deferral ("Timing and the warp lock-in"), applied to runaways that start in cruise too, so every mid-warp runaway gets the standard 3 s alarm in real space.
   - **The alarm goes public on the first real-space tick:** `RunawaySignature` to everyone within 50 km, as at onset at rest. If onset was before commit, `WarpArrival` and the beacon also carry a runaway flag.
-  - **Core ejection is the counterplay and works mid-warp.** Purge and eject commanded in cruise are queued and execute at `T_exit + 1`. The eject's 30 ticks plus +20 m/s (+40 for B/A) give the same ~50 m (~100 m) separation as an eject at rest. The core leaves the carried subtree, so the field doesn't brake it: after a normal arrival or a soft cancel it runs on along the overrun path at up to 2 km/s relative while the ship brakes, and bursts there, which the overrun rule keeps ≥ 300 m clear of every hull. After a hard cancel ship and core share the unbraked path.
-  - **Bound on warp-delivered runaways:** the burst falls at T1 + 1 s at the earliest, with the ship near E, at least 300 m beyond the target's hull (ring standoff). The near-field brush (≤ 120 m) can't reach the target. Only the far-field pulse can, and the incident record holds the runaway ship liable.
-  - Off-spec runaways still resolve during spool (exotic-matter's `SpoolTicks ≥ MixTicks + RunawayDelay + 30`). The D12 override (scuttle or kamikaze) is refused in `Warp` placement, so a kamikaze arms its public 10 s override in real space after T1. Only sabotage or interior damage can start a runaway mid-warp.
+  - **Core ejection is the counterplay and works mid-warp.** Purge commanded in cruise is queued to `T_exit + 1`; its 120 ticks beat the burst. An eject commanded in cruise runs its 30-tick sequence inside the sealed subtree, and the core separates at `max(T_exit + 1, command + 30)`, unbraked. With +20 m/s (+40 for B/A) that gives 60 m (120 m for B/A) of separation at the burst. The core leaves the carried subtree, so the field doesn't brake it: after a normal arrival or a soft cancel it runs on along the overrun path at up to 2 km/s relative while the ship brakes, and bursts there, which the overrun rule keeps ≥ 300 m clear of every hull. After a hard cancel ship and core share the unbraked path.
+  - **Bound on warp-delivered runaways:** the burst falls at T1 + 1 s at the earliest, with the ship near E, at least 300 m beyond the target's hull (ring standoff). The near-field brush (≤ 120 m) can't reach the target. Only the far-field pulse can, and the `IncidentRecord` (kind `AmBlast`) holds the runaway ship liable.
+  - Off-spec runaways still resolve during spool (exotic-matter's `SpoolTicks ≥ MixTicks + RunawayDelay + 30`). The D12 override (scuttle or kamikaze) is refused in `Warp` and `Throat` placement, so a kamikaze arms its public 10 s override in real space after T1. Only sabotage or interior damage can start a runaway mid-warp.
 
 ### Route (smooth, server-computed, D15)
 
@@ -195,16 +195,25 @@ Default drive: `V0 = 5 km/s`, `K = 0.3 s⁻¹`, `VCap = 1e6 km/s`. The two ramps
 
 A ship may carry several warp drives. **Their bubbles support each other:** they spool together and form one bubble around the carried subtree, with a quality that is the power-weighted average of the drives.
 
-- **Who supports:** every drive on the root ship's grid, and on docked ships only when the docking collar carries its power and control wiring. Each must be powered, out of cooldown, have `Integrity` ≥ 0.5 and be wired to the same Engage signal. A drive in cooldown or with no feed simply doesn't join. It doesn't block the others.
+- **Who supports (the one joining rule; exotic-matter.md and ship-design-and-construction.md cite it):** a drive joins if all of these hold:
+  - it is on the root grid, or on a docked ship whose collar carries power and control wiring;
+  - it is reachable from the plotting console's `Engage` (a Data input, ship-design-and-construction.md). Abort comes from the `Hold` Control loop, a Data `Cancel` or the drive's local panel;
+  - `Integrity` ≥ 0.5;
+  - the drive itself is out of cooldown;
+  - it is Hot or primable within the spool, and its fuel plan passes (exotic-matter.md);
+  - `f_i ≥ 0.5` (below).
+  
+  A drive that fails any of these simply doesn't join. It doesn't block the others. The root ship's own `ShipWarpCooldownEnd` (below) is the only thing that blocks the whole ship.
 - **Per drive i, fixed at spool start:**
   - power fraction `f_i = clamp(P_i / PRated_i, 0, 1)`, where P_i is the power its wiring actually delivers. A drive with `f_i < 0.5` cannot form its part of the bubble and doesn't join;
-  - weight `w_i = min(P_i, PRated_i) = f_i · PRated_i` (watts provided, capped at the rating). Without the cap, overfeeding one high-`VCap` drive would buy it unbounded weight and drown out the others;
-  - at most 8 drives support one warp (`WarpDriveSet`): the 8 with the largest `w_i` join, and the rest don't (ship-design.md's `DriveGroup` must cap at 8 too).
+  - weight `w_i = min(P_i, PRated_i) = f_i · PRated_i` (watts provided, capped at the rating). Without the cap, overfeeding one high-`VCap` drive would buy it unbounded weight and drown out the others. Averages are written `Σw·X/Σw`; exotic-matter's normalised `P_i/ΣP` form was the same thing and is deleted;
+  - at most 8 drives support one warp (`WarpDriveSet`, the one struct; exotic-matter's `DriveGroup` is folded into it): the 8 with the largest `w_i` join, and the rest don't (ship-design-and-construction.md caps at 8 too).
 - **Effective drive:**
   - `X = Σ w_i·X_i / Σ w_i` for X in {`V0`, `K`, `FuelPerLn`, `VReal`, `TReal`};
   - `VCap = Σ w_i·f_i·VCap_i / Σ w_i`, so an under-powered drive drags the cap down;
   - `MassCap = Σ f_i·MassCap_i`: support **adds**, so two drives carry a heavier ship than either alone;
-  - `SpoolTicks = max(SpoolTicks_i)`: the bubbles must phase-lock. Each drive keeps its own cooldown;
+  - `SpoolTicks = max(SpoolTicks_i)`: the bubbles must phase-lock;
+  - **cooldown:** every participating drive starts its own `CooldownTicks`. The root ship also cannot spool again until `ShipWarpCooldownEnd`, the latest cooldown end among the last warp's participants (anti-chaining: a ship can't warp on drive A, then at once on drive B). It is stored per root grid, not in `WarpTable`;
   - fuel: each drive pays `w_i / Σ w_j` of the cost from its own feed. Exotic-matter feed and runaway rules apply per drive.
 - **The profile is fixed at spool start.** Losing a drive mid-warp never reshapes the route or the timing, because the closed form stays closed:
   - recompute the support `Σ f_i·MassCap_i` over the drives still holding, event-driven;
@@ -246,6 +255,7 @@ A ship may carry several warp drives. **Their bubbles support each other:** they
   - **Dispersion:** the position on the ring comes from a per-warp server seed, within ±60° of the approach or along the station's arrival lanes. There is no single camp point. The ring point is fixed at `TBeacon` and revealed by the beacon (30 s before the drop, near the exit only), or at commit for a silent warp. It is never revealed earlier.
 - **Exclusion zones (any grid, not only the named target):**
   - Each grid has an `ExclusionRadius`: stations 5 km by default, ships 2.5 km (beyond a bubble's 2 km soft radius).
+  - **Sieges (D27):** the exclusion push for non-permitted arrivals and a station's interdiction ban both hold during a declared siege (anti-telefrag: besiegers still drop 5 km out). A siege lifts only zone courtesies and tractor zeroing toward besiegers (rings-and-asteroids.md "Sieges (D27)").
   - An exit inside a grid's exclusion zone needs that grid's permission: owner, crew, party, or a station's permission hook. Stations are public by default unless restricted.
   - **Permission can be conditional.** A station's hook may grant arrivals only along its published lanes or above a drop altitude it sets (for example, a surface base asking for drops above its `QuietAltitude`). An arrival that breaks the condition is treated as non-permitted and pushed out like any other. This is the grid owner's policy, not a global exit floor (D16), and it stops "public" from meaning "may be warp-blasted at 250 m".
   - Without permission, the exit is pushed out radially to the exclusion radius at commit, silently.
@@ -291,11 +301,11 @@ drop state: Q = E − U·T_r − d_r·L_r,  V = U + v_r·d_r,  L_r = ½·v_r·T_
   - A 2,000 t ship at 2 km/s carries 4e12 J. Whatever it hits is wrecked, and its own bow takes the same impulse.
   - Contact impulses reach the interior (see `GridInertial`).
   - **What it can hit:** commit and drop clear everything the server can predict (see "Commit" and "At TDrop"). Only bodies that move into the announced corridor after commit, debris below `OccupancyMinRadius` (2 m), and weapons fire can be in the way.
-- **Liability** (written to the shared incident record that tractor beams (D26) and mining (D33) also use):
+- **Liability** (written to the shared `IncidentRecord` that tractor beams (D26) and mining (D33) also use; kinds `WarpCollision`, `WarpBrakeCut`, `WarpBlast`, `BeaconTamper`, defined in rings-and-asteroids.md):
   - Something that enters a **beaconed** corridor after the beacon: the intruder's liability. It was warned.
   - A **silent** arrival (military beacon off): ordinary rules. The arriving ship is liable for damage to non-hostile parties.
   - A **cut wire** (or any `Tampered` silence by its own side): the arriving ship is fined, and blamed for all damage its arrival causes (collision and blast). A beacon silenced by hostile fire falls back to the silent rule, with the hostile named in the record.
-  - A brake deliberately killed after TDrop: a hostile act by whoever cut it.
+  - A brake deliberately killed after TDrop: a hostile act by whoever cut it (`IncidentKind.WarpBrakeCut`, class Hostile).
 - **Bubbles:** the body is created at TDrop by the attach rule, which now tests the whole corridor capsule (see "At TDrop").
   - The brake counts toward the bubble's `MaxAccel` until T1. The predicted merge therefore treats the arrival as hot and joins any bubble it is closing on within the tick, which is the intended outcome for a ship decelerating into someone's zone.
   - After T1 `MaxAccel` falls back to the ship's thrust.
@@ -304,7 +314,7 @@ drop state: Q = E − U·T_r − d_r·L_r,  V = U + v_r·d_r,  L_r = ½·v_r·T_
 
 There is no exit floor. A warp may depart or drop anywhere that is clear of terrain, at any altitude and inside any atmosphere. The cost is the pressure wave.
 
-- **`ExitClearance`:** the corridor and the exit sphere must clear the coarse terrain tile maximum by ship radius + 100 m. The exit must also be above the sea surface: submerged exits are refused in v1. On a body with no voxel surface (gas-giants.md) its datum stands in for the sea surface. Hazard exclusions owned by other docs (the black hole's `RouteShell(BH)`) also refuse exits. Those are the only hard limits, and the client can check them. (The overrun path is not part of this: see the overrun rule.)
+- **`ExitClearance`:** the corridor and the exit sphere must clear the coarse terrain tile maximum by ship radius + 100 m. The exit must also be above the sea surface: submerged exits are refused in v1. On a body with no voxel surface (planets.md "Gas giants") its datum stands in for the sea surface. Hazard exclusions owned by other docs (the black hole's `RouteShell(BH)`) also refuse exits. Those are the only hard limits, and the client can check them. (The overrun path is not part of this: see the overrun rule.)
 - **Blast model (`WarpBlast`),** evaluated once at TDrop (and at T0 for an atmospheric departure):
   - **Drop:** `W = f_air · ½·m·v_r² + 2.5·p(h)·V_hull`, where m is the carried mass and V_hull the hull volume. The brake field sheds the ship's real-space kinetic energy into whatever surrounds it.
     - `f_air = ρ(h) / (ρ(h) + ρ_c)`, with `ρ_c = 0.01 kg/m³` (knob) and ρ and p from the body's `AtmosphereId` at the drop altitude.
@@ -343,7 +353,7 @@ There is no exit floor. A warp may depart or drop anywhere that is clear of terr
   - grids and placed structures, through the shared explosion damage rule;
   - clients (shock ring, sound, dust).
   
-  Every damage result is logged to the incident record against the pilot and owner, with cause `WarpBlast`. Fines are the jurisdiction's (the law design owns the schedule). Killing a player is a hostile act. Beacons don't reduce blast liability; they only give people time to shelter.
+  Every damage result is logged to the `IncidentRecord` against the pilot and owner, with `IncidentKind.WarpBlast`. Fines are the jurisdiction's (the law design owns the schedule). Killing a player is a hostile act. Beacons don't reduce blast liability; they only give people time to shelter.
 - **`QuietAltitude(body, ship)`:** the lowest exit altitude whose predicted ground ΔP stays under 0.07 bar. It is about 2.7 km for a 2,000 t ship over sea-level ground (Z ≈ 27.6), and 0 on airless bodies.
   - It is the **default** exit altitude for surface targets. The pilot may go lower, down to `ExitClearance`.
   - Aborts and interdictions that drop inside an atmosphere use the same model. An interdictor that forces a drop is liable for the blast it causes.
@@ -358,7 +368,7 @@ A warp transmits its arrival as a safety feature, so that others can clear the c
   - **Civilian drives** have no off switch. The beacon is silent only when the wire or the antenna is cut or destroyed, or the antenna is unpowered.
   - **Military drives** (a data flag on faction-restricted drive classes) have a Beacon switch, wired like any other control.
 - **State is fixed at T0:** `On`, `MilitaryOff` or `Tampered`.
-  - Any civilian silence is `Tampered`: a cut wire, a cut or unpowered antenna (opening its breaker is a cut by another name), or a destroyed one. The input is `Logged` (ship-design.md), so the incident record names who did it. The fine and the blame go to that party: the ship's own crew or owner, or a hostile whose fire destroyed it. In the second case the arrival is judged by the ordinary silent rules, and the ship isn't fined.
+  - Any civilian silence is `Tampered`: a cut wire, a cut or unpowered antenna (opening its breaker is a cut by another name), or a destroyed one. The input is `Logged` (ship-design-and-construction.md), so the `IncidentRecord` (kind `BeaconTamper`) names who did it. The fine and the blame go to that party: the ship's own crew or owner, or a hostile whose fire destroyed it. In the second case the arrival is judged by the ordinary silent rules, and the ship isn't fined.
   - If the wire is cut or repaired mid-warp, the state changes at that tick.
   - A beacon that has already gone out stays valid, and the corridor it gave is still binding for liability.
 - **What it sends (`WarpBeacon`):**
@@ -379,7 +389,7 @@ A warp transmits its arrival as a safety feature, so that others can clear the c
   - Nobody at the departure end receives it unless they are also within range of the exit.
 - **Clients** draw an inbound marker with the corridor, ETA countdown and blast footprint, and AI ships avoid beaconed corridors.
 - **Silent warps** (`MilitaryOff`, `Tampered`) send no beacon. Third parties then get only what they got before: the departure direction at T0, and the corridor at commit, 3 s before the drop.
-  - A `Tampered` ship is flagged in the incident record from T0 until the beacon is repaired, and a station's docking scan can read the flag.
+  - A `Tampered` ship is flagged in the `IncidentRecord` (`BeaconTamper`) from T0 until the beacon is repaired, and a station's docking scan can read the flag.
   - **Liability:** all damage the arrival causes is the ship's (see "Real-space segment"), plus a fine for an unbeaconed civilian arrival in a jurisdiction.
 
 **Anti-camping, re-checked with beacons:**
@@ -387,7 +397,7 @@ A warp transmits its arrival as a safety feature, so that others can clear the c
 - **What still holds:**
   - **The departure side learns only a direction,** so you can't follow someone from their dock to their destination.
   - **Ring dispersion (±60°) still prevents pre-positioning** before the beacon, so a camper has to cover a ring, not a point.
-  - **Exclusion zones** still keep non-consenting arrivals 5 km from stations and 2.5 km from ships. Stations can still forbid interdiction fields inside their exclusion zone.
+  - **Exclusion zones** still keep non-consenting arrivals 5 km from stations and 2.5 km from ships. Stations can still forbid interdiction fields inside their exclusion zone. Both hold during sieges (D27).
   - **Stations can police their lanes:** a station's hook can flag armed loitering inside its exclusion zone as hostile.
   - **Hitting an arrival is never free.** Something that enters a beaconed corridor is liable for the collision, and the arrival's kinetic energy usually wins.
   - **The privacy option exists at a price:** military ships switch the beacon off, and civilians can cut the wire and accept the fine and full blame. Either way the arrival is back to the old 3 s window.
@@ -409,7 +419,7 @@ A warp transmits its arrival as a safety feature, so that others can clear the c
 - **A target must be in the requester's known contacts** (radar or interest). An entity id the client was never sent cannot be targeted.
 
 **Server validation** (preview at plot, authoritative at spool start, exit re-resolved at commit):
-1. **Drives:** at least one supporting drive, every supporting drive charged and out of cooldown, fuel ≥ cost(D), and total mass ≤ the combined `MassCap`.
+1. **Drives:** the root ship past its `ShipWarpCooldownEnd`, at least one supporting drive (the joining rule in "Multiple drives"), fuel ≥ cost(D), and total mass ≤ the combined `MassCap`.
 2. **Departure:** clear of terrain (`ExitClearance`; any altitude, any atmosphere), no crew outside `GridVolume`, and no explicit lock.
 3. **Route:** a clear route found with ≤ 4 waypoints. Interdiction fields on the route give a warning, not a rejection.
 4. **Exit: only checks the client could reproduce.** These are terrain clearance and not submerged, the target being known, and a visible grid's exclusion zone without permission. An atmospheric drop is a warning (footprint and fine), never a rejection.
@@ -509,7 +519,7 @@ merge if gap < 500 m
     - Owned field: the interdictor's velocity plus 100 m/s along the path.
     - Static field: the drop rule plus 100 m/s along the path.
   - Attach: by the T1 rule, with predictive merge as the interdictor closes.
-- **Protected volumes:** stations can forbid field activation inside their exclusion zone (permission hook), so arrival rings can't be turned into traps.
+- **Protected volumes:** stations can forbid field activation inside their exclusion zone (permission hook), so arrival rings can't be turned into traps. The ban holds during sieges (D27).
 - **Cross-shard (interplanetary) warps** are not interdictable in v1.
 - **Player abort** uses the same code path.
 
@@ -567,8 +577,9 @@ merge if gap < 500 m
 **Dedicated sharding (after M8): warp is the hand-off point.**
 - **Shared clock:** all shards share one global `TickIndex`; rails depend on it.
 - **Ownership:**
+  - Shards cut by star system first, then by SOI subtree within a system (frames-and-zones.md). A warp never leaves its system, so its hand-offs stay within one.
   - A warp whose target frame belongs to another shard (another planet's SOI subtree) is handed over during the warp.
-  - Warps skip the interplanetary shard. The sublight SOI-crossing hand-off from zones.md stays.
+  - Warps skip the interplanetary shard. The sublight SOI-crossing hand-off from frames-and-zones.md stays.
 - **At T0:**
   - The departure shard sends the carried subtree (grid contents, characters, inventories, docked ships, `WarpTable` row) to the destination shard as a blob.
   - Crew clients get `ShardHandoff {address, token}` and connect in parallel.
@@ -581,7 +592,7 @@ merge if gap < 500 m
 ### Data structures (zero alloc)
 
 ```csharp
-public enum PlacementMode : byte { Simulated, Rails, Frozen, Warp }   // Placement also gains: public WarpId Warp;
+public enum PlacementMode : byte { Simulated, Rails, Frozen, Warp, Throat }   // (frames-and-zones) Placement also gains: public WarpId Warp;
 public enum WarpPhase : byte { Spool, Cruise, Committed, RealSpace }
 public enum WarpTargetKind : byte { BodyOrbit, Surface, Grid, Marker, FreePoint }
 public enum ArrivalVelocity : byte { MatchTarget, CircularOrbit, FrameRest }
@@ -596,7 +607,8 @@ public struct WarpDrive
     public double VReal, TReal;           // real-space segment: m/s, s (2 km/s, 2 s)
     public int SpoolTicks, CooldownTicks;
     public double MassCap, FuelPerLn;     // kg; fuel per kg per ln(1 + D/1e6 m)
-    public double PowerRated;             // W; f = min(P / PowerRated, 1), joins at f ≥ 0.5; weight = f · PowerRated
+    public double PRated;                 // W; f = clamp(P / PRated, 0, 1), joins at f ≥ 0.5; weight w = min(P, PRated).
+                                          // Per class in data/drives, D:C:B:A = 1:4:12:40 × PRatedBase (knob, proposed 2 MW)
     public double BeaconLead;             // s (30)
     public bool Military;                 // has a beacon switch
 }
@@ -605,8 +617,12 @@ public struct WarpDrive
 public struct WarpDriveSet
 {
     public int Count; public fixed int Part[8]; public fixed double Weight[8], Fraction[8];
-    public WarpDrive Effective;           // power-weighted; MassCap summed; SpoolTicks max
+    public WarpDrive Effective;           // Σw·X/Σw; VCap also × f; SpoolTicks max
+    public double SupportKg;              // Σ f_i · MassCap_i, recomputed when a drive drops out
 }
+
+/// Per root grid (on the grid record, not in WarpTable): anti-chaining ship cooldown (D14).
+public struct ShipWarpCooldown { public long ShipWarpCooldownEnd; }   // = max cooldown end of the last warp's participants
 
 /// Route knots besides the endpoints (D15). ≤ 4 waypoints, each fixed in its body's inertial frame.
 public struct WarpRoute
@@ -676,7 +692,9 @@ public bool TryPoseAt(FrameId from, FrameId to, long tick, out FramePose pose);
 | Interdiction | event-driven, ~2 µs per (warp, field) pair; 1 Hz for fields with moving owners |
 | Merge prediction (server) | ~15 ns per pair; 128 bubbles ≈ 15 µs per tick on average |
 
-### Changes to zones.md
+### Changes to frames-and-zones.md
+
+Merged into frames-and-zones.md (r6), which owns these rules; kept here for reference.
 
 - **`Placement`:** `PlacementMode.Warp` plus a `WarpId` field. **`FrameTree`:** `TryPoseAt`.
 - **Gravity and rails:** remove "quantum travel" from the thrusting Verlet bullet. Warp is closed form in `WarpTable`, and no gravity applies during warp.
@@ -726,7 +744,7 @@ public bool TryPoseAt(FrameId from, FrameId to, long tick, out FramePose pose);
 - **`src/Physics/`:**
   - `WarpArrivals.cs` (commit, exclusion push, overrun rule, corridor occupancy, reservations, arrival booking, TDrop attach rule);
   - `WarpBrake.cs` (real-space segment servo, brake loss);
-  - `WarpBlast.cs` (yield, overpressure, receivers, incident records);
+  - `WarpBlast.cs` (yield, overpressure, receivers, `IncidentRecord`s);
   - `ApproachPredictor.cs` (inside `BubbleManager`);
   - `Interdiction.cs`.
 - **`src/Ships/WarpDriveWiring.cs`:** drive ports (power, control, nav data, beacon), cancel sources, beacon state.
@@ -749,8 +767,8 @@ public bool TryPoseAt(FrameId from, FrameId to, long tick, out FramePose pose);
   - `ApproachPredictor`: 3 km/s head-on and crossing cases merge ≥ 1 s before contact.
   - Attach: a corridor inside a bubble's hard radius joins that bubble, never a new one.
   - Blast: yield is monotonic in ρ and m; the 2,000 t sea-level table reproduces; vacuum drops give W = 0.
-  - Beacon: never sent for `MilitaryOff` or `Tampered`; sent at `TDrop − 30 s` only to receivers within 200 km, the target's owner and traffic control, and (atmospheric drops) the planetary authority; an unpowered or cut antenna gives `Tampered` and the incident record names who did it; a mid-warp wire cut sets `Tampered` and the liability flag.
-  - Multiple drives: effective parameters match the weighted formulas; losing a drive below the support threshold hard-cancels; losing one above it changes nothing.
+  - Beacon: never sent for `MilitaryOff` or `Tampered`; sent at `TDrop − 30 s` only to receivers within 200 km, the target's owner and traffic control, and (atmospheric drops) the planetary authority; an unpowered or cut antenna gives `Tampered` and the `IncidentRecord` (`BeaconTamper`) names who did it; a mid-warp wire cut sets `Tampered` and the liability flag.
+  - Multiple drives: effective parameters match the weighted formulas; at most 8 join (largest w); a drive with f < 0.5, in cooldown, or failing its fuel plan doesn't join; chain A then B is refused until A's cooldown ends (`ShipWarpCooldownEnd`); losing a drive below the support threshold hard-cancels; losing one above it changes nothing.
   - Privacy: no `WarpPlotResult` reason ever depends on hull occupancy.
 
 ### Open questions for the user
@@ -833,7 +851,7 @@ User decisions D12–D18 and D23 (2026-11-25) applied. Where older text above (R
   - Departures and drops are allowed at any altitude and in any atmosphere, limited only by `ExitClearance` (terrain + ship radius + 100 m, not submerged).
   - The new `WarpBlast` model: yield `f_air(ρ)·½·m·v_r² + 2.5·p·V_hull`, overpressure from a Sadovsky fit with Sachs scaling at the receiver ×2, and data thresholds for glass, structures, wildlife and people.
   - Worked table for a 2,000 t ship. `QuietAltitude` (≈2.7 km for that ship) is the default exit altitude for surface targets.
-  - Damage goes to the shared incident record (blame, fines, hostile act if a player dies). An interdictor is liable for drops it forces.
+  - Damage goes to the shared `IncidentRecord` (blame, fines, hostile act if a player dies). An interdictor is liable for drops it forces.
 - **Arrival beacon (D18):**
   - Replaces the crew-only/3 s privacy model and `WarpInbound`.
   - Civilian drives always beacon, military drives can switch it off, and a cut wire or antenna gives `Tampered`, a fine and full blame.
@@ -846,8 +864,8 @@ User decisions D12–D18 and D23 (2026-11-25) applied. Where older text above (R
   - Every cancel before commit becomes a 3 s-announced drop on the original route. After TDrop only the brake can be lost: the deliberate-ram lever, bounded by the overrun rule and logged as a hostile act.
   - Portals, undocking and launches stay sealed until T1 + 1.
 - **Runaway and core ejection (D12, D13):**
-  - A mid-warp runaway (only by sabotage or interior damage; the override is refused in `Warp` placement) is a hard cancel. Its burst is held to `T_exit + 1 + 180` (round 5 review; was the first real-space tick).
-  - Core ejection works mid-warp: queued in cruise, the core separates on the first real-space tick, unbraked, and bursts about 3 s later, 50–100 m from the ship.
+  - A mid-warp runaway (only by sabotage or interior damage; the override is refused in `Warp` placement) is a hard cancel. Its burst is held to `T_exit + 181` (round 5 review; was the first real-space tick).
+  - Core ejection works mid-warp: queued in cruise, the core separates on the first real-space tick, unbraked, and bursts about 3 s later, 60–120 m from the ship (r6: separation at `max(T_exit + 1, command + 30)`).
 - **Multiple drives (D14):**
   - New section and `WarpDriveSet`. Drives join at power fraction ≥ 0.5.
   - Quality is the power-weighted average (VCap also scaled by fraction). `MassCap` sums, spool is the max of the drives, and fuel is split by weight.
@@ -857,20 +875,20 @@ User decisions D12–D18 and D23 (2026-11-25) applied. Where older text above (R
   - natural wormholes are cheapest where they go;
   - manufactured wormholes are fastest;
   - warp is the cheap way to a specific nearby place, in-system (a light year at `VCap` is ~110 days).
-- **Updated** to match all of the above: networking (`WarpBeacon`, `WarpBrakeLost`, `WarpBlast`, larger `WarpPlan` and `WarpArrival`, interest rows), data structures, per-tick costs, zones.md changes, milestones, files, tests and open questions (five old ones closed, four new ones).
+- **Updated** to match all of the above: networking (`WarpBeacon`, `WarpBrakeLost`, `WarpBlast`, larger `WarpPlan` and `WarpArrival`, interest rows), data structures, per-tick costs, frames-and-zones.md changes, milestones, files, tests and open questions (five old ones closed, four new ones).
 
 All new numbers are proposals and knobs. Nothing was built or run.
 
 ## Round 5 review notes
 
-Lead review, 2026-11-25, against decisions-r5 (D12–D18, D23 warp side). Checked each decision against the edited text, with the other pivot copies (r5-exotic-matter, r5-ship-design-and-construction, r5-frames-and-zones, r5-wormholes, tractor-r2, r5-planets). Fixes are already made in place above.
+Lead review, 2026-11-25, against decisions.md (D12–D18, D23 warp side). Checked each decision against the edited text, with the other pivot copies (r5-exotic-matter, r5-ship-design-and-construction, r5-frames-and-zones, r5-wormholes, tractor-r2, r5-planets). Fixes are already made in place above.
 
 **Decisions verified as faithful:** D14 (bubbles support each other, quality power-weighted, `MassCap` sums), D15 (automatic smooth route around bodies, no via points), D16 (no altitude floor, `WarpBlast` with fines and blame), D17 (free crew, wired drive, many cancel sources), D18 (beacon with a military switch or a cut wire, last 2 s in real space as a colliding body), D23 (natural cheapest, manufactured fastest, warp for close specific trips).
 
 **Fixed:**
-- **Runaway timing contradicted exotic-matter and broke D13.** The burst was held to `max(burst tick, TDrop')` while the ejected core separated on that same tick. With N = 180 a cruise-started runaway's burst fell exactly on TDrop', so the eject gave 0 m of separation. Now every burst due in `Warp` placement resolves at `max(burst tick, T_exit + 1 + 180)` (exotic-matter's lock-in deferral), and queued purge or eject runs at `T_exit + 1`. The eject gets its normal ~50/100 m, and the purge its 120 ticks. `RunawaySignature` goes public on the first real-space tick. A bound was added: a warp-delivered burst falls at T1 + 1 s or later, ≥ 300 m off the target's hull, beyond the ≤ 120 m near field. **exotic-matter.md line "A runaway that starts in cruise … held to `max(burst tick, TDrop')`" must be changed to match.**
+- **Runaway timing contradicted exotic-matter and broke D13.** The burst was held to `max(burst tick, TDrop')` while the ejected core separated on that same tick. With N = 180 a cruise-started runaway's burst fell exactly on TDrop', so the eject gave 0 m of separation. Now every burst due in `Warp` placement resolves at `max(burst tick, T_exit + 1 + 180)` (exotic-matter's lock-in deferral), and queued purge or eject runs at `T_exit + 1`. The eject gets its normal ~50/100 m (r6: 60/120 m), and the purge its 120 ticks. `RunawaySignature` goes public on the first real-space tick. A bound was added: a warp-delivered burst falls at T1 + 1 s or later, ≥ 300 m off the target's hull, beyond the ≤ 120 m near field. **exotic-matter.md line "A runaway that starts in cruise … held to `max(burst tick, TDrop')`" must be changed to match.** (resolved: applied in exotic-matter.md)
 - **D12 override mid-warp.** The cancel table and runaway text said an override could start a runaway mid-warp. Exotic-matter refuses the override in `Warp` placement, keeping the 10 s public arm in real space. Aligned.
-- **Multiple drives (D14) exploit:** weight was the raw delivered watts, so overfeeding one high-`VCap` drive bought it unbounded weight. Now `w_i = f_i · PRated_i`, capped at the rating. Also capped at 8 supporting drives (`WarpDriveSet`); ship-design's `DriveGroup` (FixedList64<int>, ~15) must cap at 8 too.
+- **Multiple drives (D14) exploit:** weight was the raw delivered watts, so overfeeding one high-`VCap` drive bought it unbounded weight. Now `w_i = f_i · PRated_i`, capped at the rating. Also capped at 8 supporting drives (`WarpDriveSet`); ship-design's `DriveGroup` (FixedList64<int>, ~15) must cap at 8 too. (resolved r6: one struct, `WarpDriveSet`, capped at 8 everywhere)
 - **Route waypoint bug (D15):** `c + n̂·1.15·RouteShell` used the shell's altitude as a radius, which put waypoints inside the planet. Now `1.15·(R + RouteShell)`. Hazard bodies (the black hole's 2,200 km sphere, exotic-matter) override `RouteShell` and refuse exits.
 - **Overrun rule ignored gravity** and doubled as a terrain floor. The straight 20 km line missed the ~490 m fall of an unbraked ship over 10 s at 1 g, and raising the exit to clear terrain was a hidden floor (D16). It is now a 10 s ballistic path tested against grids only. A ground impact is the pilot's risk, shown orange in the preview, and filed as a permanent impact edit (D32, planets.md huge tier).
 - **D23 interstellar claim:** "a light year takes ~110 days" implied that warp could cross systems. Systems are separate Solar roots (frames-and-zones.md), so there is no `Lca`, and cross-system plots are refused. The natural-wormhole tuning check was vacuous, so it was restated.
@@ -881,8 +899,21 @@ Lead review, 2026-11-25, against decisions-r5 (D12–D18, D23 warp side). Checke
 - **Numbers re-checked:** speed table, fuel ratio, blast table, footprint radii and the 2.15× mass scaling all reproduce. `QuietAltitude` corrected from 2.6 to ~2.7 km (Z ≈ 27.6). Standoff at 3 g corrected from 475 to ~470 m. Stale "T1" occupancy and bubble references in the old Review notes are now marked TDrop. The interdiction "Forced exit" heading was renamed so it doesn't read against D16.
 
 **Flagged for other docs (not edited here):**
-- exotic-matter.md: the cruise-started runaway hold (above).
-- wormholes.md: it still names `WarpFloor` in its Occupancy core and floor sections, and its own round-5 note says `MouthFloor`. Pick one name. Warp no longer has a `WarpFloor`.
-- ship-design-and-construction.md: linked drives are said to group by the same `Engage` signal in one place and by `Sync` ports in another, and the JSON has `Spool`, not `Engage`. Pick one. Also the 8-drive cap.
+- exotic-matter.md: the cruise-started runaway hold (above). (resolved)
+- wormholes.md: it still names `WarpFloor` in its Occupancy core and floor sections, and its own round-5 note says `MouthFloor`. Pick one name. Warp no longer has a `WarpFloor`. (resolved r6: wormholes use `MouthFloor`)
+- ship-design-and-construction.md: linked drives are said to group by the same `Engage` signal in one place and by `Sync` ports in another, and the JSON has `Spool`, not `Engage`. Pick one. Also the 8-drive cap. (resolved r6: `Engage` is a Data input; 8-drive cap)
 
 **Perf of new items:** the ballistic overrun path is 32 capsules per commit (µs, one-shot). Runaway deferral, beacon tamper logging and fleet beacon filtering are event-driven. Nothing new runs per tick. All costs are still estimates, and nothing was built or run.
+
+## Consistency pass (r6) notes
+
+Applied from the r6 conflict list and decisions D26–D28, D33. Edits in place:
+- **Linked drives (D14):** one joining rule (root grid or wired collar, reachable from the Data `Engage`, `Integrity` ≥ 0.5, drive out of cooldown, Hot or primable within spool, fuel plan passes, `f_i` ≥ 0.5); weights `w_i = min(P_i, PRated_i)` with `Σw·X/Σw` averages; cap of 8; per-drive cooldown plus a per-root-grid `ShipWarpCooldownEnd` (anti-chaining) in the state table, the bullet, validation and data structures; `WarpDriveSet` gains `SupportKg` and absorbs exotic's `DriveGroup`; `PowerRated` renamed `PRated` with the D:C:B:A = 1:4:12:40 class note and a `PRatedBase` knob; new test "chain A then B is refused until A's cooldown ends".
+- **Ports:** `Engage` is ship-design-and-construction's Data input; Abort comes from the `Hold` Control loop, Data `Cancel` or the local panel.
+- **Runaway and eject:** bursts due before the first real-space tick resolve at `T_exit + 181` (TDrop, TDrop' or throat exit); the eject's 30-tick sequence runs in cruise and the core separates at `max(T_exit + 1, command + 30)`, giving 60 m (120 m for B/A); purge queued to `T_exit + 1`; the D12 override is refused in `Warp` and `Throat` placement. Revision note numbers updated to 60–120 m.
+- **Enums:** `PlacementMode` adds `Throat` (frames-and-zones owns it).
+- **Shared `IncidentRecord`/`IncidentKind`** (rings-and-asteroids.md) replaces "incident record" and the `WarpBlast` cause; tamper, brake cut, collision and blast use `BeaconTamper`, `WarpBrakeCut`, `WarpCollision`, `WarpBlast`; runaway liability is `AmBlast`.
+- **D26/D28:** a Hold or Haul lock on another party's ship without consent is a `TractorLock` weapon use, so anti-escape locks are always hostile; a pull-only Hold tether without AM still blocks spool under the `m·0.5 m/s²` rule.
+- **D27:** the exclusion push for non-permitted arrivals and a station's interdiction ban both hold during sieges (exclusion zones, anti-camping, interdiction).
+- **D33:** already cited in Liability; no change.
+- **Names:** "Changes to zones.md" is now marked as merged into frames-and-zones.md; `gas-giants.md` → planets.md "Gas giants"; `ship-design.md` → ship-design-and-construction.md; `zones.md` → frames-and-zones.md; `decisions-r5` → decisions.md. Round 5 "Flagged for other docs" items marked resolved.

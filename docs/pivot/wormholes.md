@@ -70,7 +70,7 @@ As with warp, the wire carries a few reliable events and no per-tick wormhole tr
 | --- | --- | --- |
 | `Lca` | Same definition (lowest common ancestor, raised to a non-rotating, non-grid frame) | The path is evaluated once, at `TOpen` poses. There is no per-tick path evaluation |
 | Target kinds and exit selection | Body orbit, surface point, grid ring, marker, free point. Band rule for the attach frame. Arrival ring, dispersion seed, `MatchTarget` | The far end is a **mouth**, a lasting entity, not a one-off arrival. It can also be a **catcher**, or a **catch slot** that a managed catcher assigns |
-| Validity | Plot results depend only on facts the client can know. Hidden hulls are resolved silently at commit | Validity is the **suppression field**, applied to **both** ends over `[TCommit, TEnd]` (`TEnd`, the latest possible despawn, see Lifecycle), not `WarpFloor` alone. A tunnel's interior has no suppression |
+| Validity | Plot results depend only on facts the client can know. Hidden hulls are resolved silently at commit | Validity is the **suppression field**, applied to **both** ends over `[TCommit, TEnd]` (`TEnd`, the latest possible despawn, see Lifecycle), not warp's `RouteShell`. A tunnel's interior has no suppression |
 | Exclusion and permission | Same `ExclusionRadius`, permission hook and silent radial push at commit | Exclusion is a hard occupancy term. **No catcher mode waives it** |
 | Commit | `TCommit = TOpen − 180`, run in `(TOpen, Id)` order, `ExitReservation`, occupancy slide | Commit **spends resources irrevocably**, decides **catcher capture**, places B in its booked catch slot, fixes the flow, creates both shells (and a tunnel's frame) and fills the stability reserve. Confirmed catch-slot bookings hold their lane in the controller's own slot ring from charge start, not in the global reservation pool |
 | Attach | Warp's T1 attach rule, applied **per crossing** | Arrival bubbles for queued traffic are created at `TOpen` |
@@ -525,7 +525,7 @@ exit at A:    p_a = (−x_t, y_t, −z_t)            v_a = (−v_t.x, v_t.y, −
   a_i = κ_i · (u(p, t) − v_i)        κ_i = c_t · A_⊥,i / m_i,   c_t = 100 kg/(m²·s),   κ ≤ 1 s⁻¹
   ```
   - `A_⊥ = π ρ_⊥²`, from the hull bake's cross-section radius (the one used for mouth sizing). `κ` is cached per body and refreshed on mass change.
-  - It is a surface force, applied in the force pass to awake bodies as `m · a_i` without activation. Interiors feel it as proper acceleration, so plating absorbs it and unplated rooms feel the drag.
+  - It is a surface force, applied in the force pass to awake bodies as `m · a_i` without activation. Interiors feel it as proper acceleration: the inertial dampener cancels it up to its rating (frames' `a_man`; exotic-matter's `a_d`) and leaks the excess; plating does not (it only adds floor gravity); undamped rooms feel it.
   - Examples: a C-class ship of 360 t with ρ 12 m has `κ` = 0.126 s⁻¹ (it matches the current in about 8 s). A 78,000 t capital ship with ρ 72 m has 0.021 s⁻¹ (about 48 s).
 - **Ride or fight it:** the terminal axial speed under thrust `a` is `u + a/κ` with the current, and `a/κ − |Φ|·U_t` against it.
   - When `a/κ < |Φ|·U_t + 10 m/s`, the ship cannot make headway against the current. **One-way emerges per ship**, physically, with no rule.
@@ -606,7 +606,7 @@ storms     cell active  ⇔  hash(TSeed, cell, ⌊t / 60⌋) < max(0, 1.9 · (u 
   - **Strike:** on the tick the projection starts, then every 60 ticks while it lasts, a discharge from the nearest wall point to the projecting component. Damage is `RetK · (1 + n)`, with `n` the strikes so far on that component's **owner group** in this tunnel, so it escalates and a swarm of cheap projectors escalates fastest. The projecting component is disabled for 10 s, so a tractor lock breaks at once. Each strike drains `0.005 · EsMax`, within the drain cap (see Stability).
   - **Who takes the damage:** the projecting component and the grid it is mounted on, nothing else. The arc is drawn but hits no one in between, so a cheap projector parked beside an enemy is not a lightning rod. A projector clamped or docked onto a grid of another owner group is struck alone (its own body), never the foreign host, so planting a tractor limpet on an enemy hull cannot turn the wormhole on them.
   - **An armed charge is struck at once.** The strike breaches its trap, so it detonates on the next tick by exotic-matter.md's cascade rule. Inside the tunnel the pulse kicks and shears occupants as usual and drains `BombK · Y` (the point-blank value, rung down over 5 s) at its `s`. If that empties the reserve, the collapse starts there.
-  - Server-side and deterministic; announced as `TunnelDischarge`.
+  - Server-side and deterministic; announced as `TunnelDischarge`. This doc owns tunnel retaliation: tractor-beams.md raises no separate event and calls this strike path (an emitter or target in a tunnel frame triggers it).
 - Pushing or ramming an enemy into the wall is legal: it is kinetic.
 - Nothing can warp, open a wormhole, project a catch point or anchor inside a tunnel.
 
@@ -652,7 +652,7 @@ It is a planning construct, invisible to third parties. Nothing travels along it
 - A polyline in `Lca` from A to B, with every pose taken at **`TOpen`**.
   - Rails chains are exact through `FrameTree.TryPoseAt` at plan time, because `TOpen` is fixed at charge start.
   - Simulated targets and hosts are extrapolated, then re-evaluated authoritatively at commit.
-- **Only bodies' cores block a segment.** A core is `R + WarpFloor + r`. With single-tick poses this is an exact segment-versus-sphere test, ~10 ns per body after warp's orbit-sphere prune.
+- **Only bodies' cores block a segment.** A core is `R + MouthFloor + r` (a black hole's is `InfallRadius + r`). With single-tick poses this is an exact segment-versus-sphere test, ~10 ns per body after warp's orbit-sphere prune.
 - **Automatic detour:**
   - For each blocking body, one via point is inserted at the tangent of `1.05 × core`, in the plane of the segment and the body centre.
   - At most 2 vias. More than that is rejected as "path blocked".
@@ -743,15 +743,15 @@ Fee      throat-grade EM content in grams (int; Q14), set by the managed control
 - Terms come in two classes:
   - **Natural** terms are the *deadly* ones. Gates scale them down, and Interdict waives them.
   - **Occupancy** terms are the *invalid* ones. No catcher waives them.
-- **The floor is a wormhole rule.** `WarpFloor(body)` below keeps warp.md's formula (`max(AtmosphereTop, TerrainMax + 2 km, 0.01·R)`) as a constant of the body, even though round 5 (D16) removed it as a forced limit on warp exits. If warp.md drops the name, wormholes keep the same value as `MouthFloor`; nothing here changes.
+- **The floor is a wormhole rule.** `MouthFloor(body) = max(AtmosphereTop, TerrainMax + 2 km, 0.01·R)`, a constant of the body. It is the same base formula as warp.md's routing clearance `RouteShell(body)`, but without warp's hazard overrides (warp's `RouteShell(BH)` = 1.1×DiscOuter is warp's exit exclusion, not a mouth rule; the black-hole core is below). Round 5 (D16) removed any forced floor on warp exits; this floor binds mouths only. `WarpFloor` no longer exists.
 
 | Source | Class | Term (d = distance to source, r = mouth radius) | Hard when |
 | --- | --- | --- | --- |
-| Body core and terrain | Occupancy | Inside `R + WarpFloor + r`. For catchers, the exact solid test on the disc, shell and lane (analytic height plus the `EditStore` bound, ~1 µs) | Inside |
+| Body core and terrain | Occupancy | Inside `R + MouthFloor + r`. For catchers, the exact solid test on the disc, shell and lane (analytic height plus the `EditStore` bound, ~1 µs) | Inside |
 | Body tidal | Natural | `s_tidal = 4μr / (A_max · d³)`, with `A_max = 3e-3 m/s²` (knob). Summed over all bodies pruned by distance, not by patched conics, so SOI boundaries leave no gap | ≥ 1. On a 1000 km, 1 g body: r = 25 m is never hard above the surface (floor and atmosphere govern); r = 100 m is hard below 94 km; r = 150 m below 252 km; r = 400 m below 736 km |
 | Atmosphere | Natural | Inside `R + AtmosphereTop` | Always (part of the floor) |
 | Star | Natural | `s_tidal`, plus a corona `R_corona = 3 R★` (also a heat zone) | Inside the corona, or tidal ≥ 1 |
-| Black hole (owned by exotic-matter.md) | Occupancy core; Natural disc and jets | Core `InfallRadius + r` (64 km + r) **replaces** `R + WarpFloor + r`; Natural hard terms inside the disc slab and the jet cones, plus `s_tidal` as for any body. A forecast birth (`BlackHoleBirthForecast`) counts as a core from its forecast tick, and a pending collapse (forced or natural, D21) changes nothing, because `InfallRadius` already keeps mouths out of the remnant's volume | Inside the core; disc, jets or tidal ≥ 1 unless waived |
+| Black hole (owned by exotic-matter.md) | Occupancy core; Natural disc and jets | Core `InfallRadius + r` (64 km + r) **replaces** `R + MouthFloor + r`; Natural hard terms inside the disc slab and the jet cones, plus `s_tidal` as for any body. A forecast birth (`BlackHoleBirthForecast`) counts as a core from its forecast tick, and a pending collapse (forced or natural, D21) changes nothing, because `InfallRadius` already keeps mouths out of the remnant's volume | Inside the core; disc, jets or tidal ≥ 1 unless waived |
 | Grid (hull) | Occupancy | Geometric: `d < ρ_g + r + Depth + 100 m`. Without permission, warp's `ExclusionRadius`. Soft `(ρ_g/d)²`. The host is exempt for its own mounted mouth, which must still clear its hull by 2 m. A wormhole frame is exempt for its own natural mouth, but must clear that mouth's shell, disc cylinder and a `LaneMin` exit lane | Geometric always. Exclusion unless permitted |
 | Warp drive | Occupancy | A spool past its lock-in (from T0 − 30), or a committed warp exit `E` until T1 + 2 s | Within `5 km + r` |
 | Mouth | Occupancy | Committed, open or collapsing player mouths, each until its `TEnd`. Natural mouths over their scheduled Forming, Open and collapse windows (to the cycle's `TEnd`) that overlap the evaluated window (see Privacy). Confirmed catch slots, through their controller's slot ring. Soft `(4 r_m / d)²` | Within `max(4 r_m + r + 1 km, R_f,m + R_f)`, so no two flow fields ever overlap |
@@ -990,7 +990,7 @@ A fresh forgery usually outlasts a charge unless its key is stale. That is the i
 
 - **Generation:**
   - 2–6 pairs per system, from a **server-only `NaturalSeed`**. The universe seed is on clients for terrain, so it can't be used.
-  - **Destinations (round 5, former open question 5):** natural pairs lead to **other star systems**. Each system is its own `Solar` root (on dedicated servers, its own shard; a listen server hosts them all), so a natural pair's mouths may sit under different roots; crossing is already a portal-map transfer, never a tree edge, so `Relative` stays unchanged. The frame-tree and sharding detail belongs to frames-and-zones.md (one `Solar` root per system, systems linked only by wormholes).
+  - **Destinations (round 5, former open question 5):** natural pairs may lead to **other star systems**, and only natural pairs do (no cross-system warp, no cross-system manufactured plan; the Dark Gate's far end may be in its own system or another). Each system is its own `Solar` root (dedicated servers shard by system first, then by SOI subtree within it; a listen server hosts them all), so a natural pair's mouths may sit under different roots; crossing is already a portal-map transfer, never a tree edge, so `Relative` stays unchanged. The frame-tree and sharding detail belongs to frames-and-zones.md (one `Solar` root per system, systems linked only by wormholes).
     - "2–6 pairs per system" counts the pairs with an end in that system. The partner end is generated with its own system's validity rules, from the same server-only seed.
     - **Manufactured wormholes stay inside one system.** A plan's path is a polyline in `Lca`, and two `Solar` roots have none, so a plan whose ends lie under different roots is refused ("no common frame"). This also keeps `ℓ = ln(1 + L / 1e6 m)` from pricing an interstellar throat at about twice a 1 AU one. Cross-system travel is natural pairs only, which fits D23 (natural is the cheapest; manufactured is the fastest within reach).
     - The ejection path of a cross-system pair is two legs, one per system (see Tunnels, Ram ejection).
@@ -1212,8 +1212,8 @@ A fresh forgery usually outlasts a charge unless its key is stale. That is the i
 ### Data structures (zero alloc)
 
 ```csharp
-public enum FrameKind : byte { Solar, BodyInertial, BodySurface, Grid, Mouth, Tunnel }
-public enum PlacementMode : byte { Simulated, Rails, Frozen, Warp, Throat }
+public enum FrameKind : byte { Solar, BodyInertial, BodySurface, Lagrange, Grid, Mouth, Tunnel }   // (frames-and-zones)
+public enum PlacementMode : byte { Simulated, Rails, Frozen, Warp, Throat }                        // (frames-and-zones)
 public enum WormholePhase : byte { Charge, Committed, Open, Collapsing, Scar }   // a free row = none; Scar = early collapse inside its re-establish window
 public enum WormholeOrigin : byte { Player, Natural }
 public enum CatcherMode : byte { Gate, Interdict }
@@ -1349,7 +1349,7 @@ public enum WormholeClass : byte { Instant, Tunnel }
 public enum StabilityBand : byte { Overcharged, Stable, Unstable, Critical, Zero }
 public enum CollapseCause : byte { Planned, Throughput, Pulse, Destabiliser, Retaliation, Ejection }
 public enum StabiliserMode : byte { Off, Feed, Drain }
-// zones.md: FrameKind gains Tunnel (above); BubbleAnchor gains Tunnel: { Surface, FreeFall, Grid, Tunnel }
+// frames-and-zones.md owns: FrameKind gains Tunnel (above); BubbleAnchor { Surface, FreeFall, Grid, Station, Tunnel } (frames-and-zones)
 
 /// Stability, SoA beside WormholeTable (same index). Integers in kJ, so clients integrate exactly.
 public sealed class StabilityTable
@@ -1463,7 +1463,7 @@ public struct AdditiveMix { public ushort A0, A1; public float F0, F1; }   // it
   - **3 (also):** retaliation strikes, on the tick a projection starts (detected in step 8b of the previous tick) and every 60 ticks while it lasts, in `(Tunnel, EntityId)` order.
   - **9:** at 1 Hz, staggered: feeder membership, storm hits and tidal damage.
 
-### Changes to warp.md and zones.md
+### Changes to warp.md and frames-and-zones.md
 
 - **FrameTree:**
   - Add `FrameKind.Mouth`, with frames that are fixed or on rails, and one parent change allowed at detach.
@@ -1653,11 +1653,11 @@ public struct AdditiveMix { public ushort A0, A1; public float F0, F1; }   // it
 
 - **A captured wormhole opens straight onto the captured destination.** The view through the mouth is always true; there is no faking. Open question 1 of revision 2 is settled this way.
 - **Interdiction never forces travel.** It only moves the far end. Getting a victim through takes a physical method:
-  - **Tractor beams:** a component that applies force between two hulls, through the normal per-body force pass, limited by range and by the target's mass and thrust. A tractor lock already blocks warp spool, so it is both anti-escape and pull-in. The lock breaks when the victim crosses (see the crossing rules above), so the tractoring ship stays behind unless it follows.
-    - **Consent (round 5, D26):** a tractor lock on a ship that did not request it is a **weapon** use: a hostile act, with the same standing, fines and faction consequences as firing on it. Pulling an interdicted victim toward a mouth is therefore always an attack. A managed gate or station may tractor a ship to a dock or into its mouth's entry lane only when the ship's crew has **requested** it (a consent flag on a docking or tow request; catch slots place wormhole ends, not ships, so a `SlotRequest` carries none). Otherwise ships manoeuvre themselves.
+  - **Tractor beams:** a component that applies force between two hulls, through the normal per-body force pass. Force limits, ranges, modes and billing are tractor-beams.md's (the owner). A tractor lock already blocks warp spool, so it is both anti-escape and pull-in. The lock breaks when the victim crosses (see the crossing rules above), so the tractoring ship stays behind unless it follows.
+    - **Consent (round 5, D26; owned by tractor-beams.md "Consent (D26)", which adopts this text):** a tractor lock on a ship that did not request it is a **weapon** use: a hostile act, with the same standing, fines and faction consequences as firing on it. It writes an `IncidentRecord` of kind `TractorLock` (rings-and-asteroids.md) on acquire, even with no damage. Pulling an interdicted victim toward a mouth is therefore always an attack. A managed gate or station may tractor a ship to a dock or into its mouth's entry lane only when the ship's crew has **requested** it (a consent flag on a docking or tow request; catch slots place wormhole ends, not ships, so a `SlotRequest` carries none). Otherwise ships manoeuvre themselves.
       - **Scope:** consent names one emitter owner group and lapses on release, on docking, on the ship crossing a mouth, or after 120 s without a lock. A third party locking a consenting ship is still a weapon use, and a ship cannot grant consent to stage a fake attack (the server judges by the flag, not by claims).
       - Inside a tunnel the wall strikes any active tractor, requested or not (see Tunnels, retaliation), so consent never lets a gate tow a ship through a bore.
-    - Without antimatter a tractor can only **pull** (gravitons only); pushing needs anti-gravitons, so AM (round 5, D28). Pull-in is the interdiction use either way.
+    - Without antimatter a tractor can only **pull** (gravitons only); pushing needs anti-gravitons, so AM (round 5, D28). Without AM, Hold is a pull-only tether: it limits range and reels in but cannot stop a target closing; it still blocks warp spool. Pull-in is the interdiction use either way.
   - **Flow:** a captured wormhole with an inflow pulls nearby ships toward the mouth; a ship with enough thrust can escape.
   - Ordinary physics: rams, pushes, debris.
 
@@ -1969,7 +1969,7 @@ All costs are estimates. Nothing was built or run, and no repo files were change
 
 ## Revision (round 5) notes
 
-Applied the user's round-5 decisions D19, D23, D21 and D26 (decisions-r5.md wins over any earlier text here).
+Applied the user's round-5 decisions D19, D23, D21 and D26 (decisions.md wins over any earlier text here).
 
 - **D19, proposals accepted:** "Open questions for the user" is now "Decided in round 5 (formerly open questions)". All 26 items are decided statements with their numbers kept. Questions with no explicit proposal take the design as written: Q10 path-pull reach, Q13 frame defence (no power against redirects; frames may carry stabilisers), Q15 natural size, Q16 copy ageing kept, Q19 energy-fight scale, Q20 no capture on re-establish, Q22 `LtK` 2 km, Q23 instant 2.5×/1.5×, Q24 collapse severity, Q26 `2 · TunnelLead`. Q14 fees use exotic-matter.md's suggestion (throat-grade EM). Q5 records the earlier round-5 decision that natural pairs lead to other star systems, with a pointer added under Natural wormholes, Generation.
 - Inline "(proposed; open question N)" references in Stability, Re-establish, Tunnels (rams, retaliation) and Signatures now read "decided, round 5". The Signatures line now names frames and stabilisers as well as generators (Q11).
@@ -1983,7 +1983,7 @@ Applied the user's round-5 decisions D19, D23, D21 and D26 (decisions-r5.md wins
 
 ## Round 5 review notes
 
-Skeptical lead review of the round-5 edits against decisions-r5.md (D19, D23, D21, D26, plus D15, D16, D18 and D28 where this doc touches warp or tractors). Fixes are folded in above; this lists them.
+Skeptical lead review of the round-5 edits against decisions.md (D19, D23, D21, D26, plus D15, D16, D18 and D28 where this doc touches warp or tractors). Fixes are folded in above; this lists them.
 
 - **D19 verified:** all 26 former questions read as decided rules, and each matches the proposal or the body text (checked leash, friendly fire, copy ageing, outflow push, stabiliser exemption, frame rules). Fixed: Q3 claimed the stability additive "covers" path stiffening, but it only enlarges the reserve and never affects capture; Q6 said "until the last mouth despawns", now "while any mouth is mounted (until it despawns or detaches)", matching warp's validation step; the Signatures line listed only catchers, generators and frames as copy loaders, now stabilisers too (Q11).
 - **Q5 consequences (new rules, flag for the user):** natural pairs across systems broke two things. (1) A plan path is a polyline in `Lca`, which two `Solar` roots do not have, and `ℓ = ln(1 + L/1e6)` would price an interstellar throat at about twice a 1 AU one. Manufactured plans are now refused across roots; only natural pairs link systems. (2) Ram and collapse ejections map tunnel arc onto that path; a cross-system pair now uses two seeded legs (0.05–1 AU, one per system, from `pairSeed`, so the record does not grow), and an ejection never lands in interstellar space. Cost: one polyline as before. "2–6 pairs per system" now counts pairs with an end in the system; the shard-per-system wording is limited to dedicated servers.
@@ -1991,5 +1991,14 @@ Skeptical lead review of the round-5 edits against decisions-r5.md (D19, D23, D2
 - **Q14 fees:** `Fee` is `int`; it is now defined as throat-grade EM content in grams (an int of mg, the unit of `ContentMg`, would cap at 2.1 kg).
 - **D21:** the earlier note said this doc never references black holes, but exotic-matter.md already overrides the body-core term (`InfallRadius + r`) and adds disc and jet terms. That row is now in the suppression table, and a forecast birth counts as a core, which matters more now that collapses (and so rebirths) can be forced. A pending collapse needs no new term. Cost: one extra sphere per system in the pruned source list.
 - **D26:** the consent text let a gate tractor a ship "to its catch slot" via a `SlotRequest`; catch slots place wormhole ends, not ships, so consent now rides a docking or tow request. Consent is scoped to one emitter owner group and lapses on release, docking, crossing or after 120 s, so a third party can't ride it and a ship can't stage a fake attack. The rule that tunnel walls strike requested tractors too is kept (retaliation is physics, not law).
-- **D16/D18 consistency:** "matches warp's 3 s exit announcement" is gone (warp now beacons its arrival; wormholes stay private until commit, on purpose). The warp table's Exit cell no longer cites `WarpFloor` (no forced floor; low-atmosphere exits mean pressure waves and fines), and its risks add beacon ambush and the real-space last leg. The suppression floor stays a mouth rule, keeping warp's formula (as `MouthFloor` if warp.md drops the name). D28: tractor push needs AM.
-- **Other docs, not fixed here:** r5-warp.md has not yet had D15/D16/D18 applied (still has the 3 s exit announcement and the exit-floor question); tractor-beams.md still says wormholes.md has no tunnel retaliation rule; exotic-matter.md's "single-system v1" Dark Gate text and its open question 6 ("keeps warp cheaper, wormholes costlier") predate D23 and Q5. No perf-relevant additions beyond the notes above. Nothing was built or run, and no repo files were changed.
+- **D16/D18 consistency:** "matches warp's 3 s exit announcement" is gone (warp now beacons its arrival; wormholes stay private until commit, on purpose). The warp table's Exit cell no longer cites `WarpFloor` (no forced floor; low-atmosphere exits mean pressure waves and fines), and its risks add beacon ambush and the real-space last leg. The suppression floor stays a mouth rule, keeping warp's formula (as `MouthFloor` if warp.md drops the name; applied in r6: `MouthFloor` everywhere, warp's name is `RouteShell`). D28: tractor push needs AM.
+- **Other docs, not fixed here (resolved in r6: warp.md has D15/D16/D18; tractor-beams.md cites this doc's retaliation; exotic-matter.md's Dark Gate text now follows the multi-system ruling):** warp.md (then r5-warp.md) had not yet had D15/D16/D18 applied (still has the 3 s exit announcement and the exit-floor question); tractor-beams.md still says wormholes.md has no tunnel retaliation rule; exotic-matter.md's "single-system v1" Dark Gate text and its open question 6 ("keeps warp cheaper, wormholes costlier") predate D23 and Q5. No perf-relevant additions beyond the notes above. Nothing was built or run, and no repo files were changed.
+
+## Consistency pass (r6) notes
+
+- Floor naming (item 3): `WarpFloor` is gone. The validity row cites warp's `RouteShell`; the floor bullet defines `MouthFloor(body) = max(AtmosphereTop, TerrainMax + 2 km, 0.01·R)` with no hazard overrides; segment, occupancy and black-hole rows use `R + MouthFloor + r` (black hole: `InfallRadius + r`).
+- Throat drag (item 5): the inertial dampener cancels it up to its rating and leaks the excess; plating only adds floor gravity; undamped rooms feel it.
+- Enums (item 6): `FrameKind` adds `Lagrange`, `BubbleAnchor` adds `Station`, both quoted as "(frames-and-zones)"; `PlacementMode` already canonical.
+- Tractors (items 10, 11, D26, D28): force limits point at tractor-beams.md; consent text kept verbatim with tractor-beams.md as owner and an `IncidentRecord` `TractorLock` on acquire; retaliation states this doc owns the strike path and tractor-beams calls it; without AM, Hold is a pull-only tether that still blocks spool.
+- Systems (item 15): natural pairs may cross systems and only they do; no cross-system warp; Dark Gate far end in this or another system; sharding by system then SOI subtree.
+- Stale refs (item 16): zones.md -> frames-and-zones.md; decisions-r5.md -> decisions.md; the round-5 "Other docs, not fixed here" note and the `MouthFloor` proposal marked resolved/applied. D27 and D33 do not touch this doc.

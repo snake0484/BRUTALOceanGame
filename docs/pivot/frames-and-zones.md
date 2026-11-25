@@ -20,7 +20,13 @@ Split the user's "solar > planetary > ship grid" idea into two layers. **Frames*
 ```csharp
 public readonly record struct FrameId(ushort Value);          // 0..SystemCount-1 = the Solar roots, one per star system
 public readonly record struct SystemId(ushort Value);         // == the FrameId of that system's Solar root
-public enum FrameKind : byte { Solar, BodyInertial, BodySurface, Lagrange, Grid, Mouth, Tunnel }   // Mouth, Tunnel: wormholes.md
+// Shared enums: this doc owns them; other docs quote them as "(frames-and-zones)".
+public enum FrameKind : byte { Solar, BodyInertial, BodySurface, Lagrange, Grid, Mouth, Tunnel, Lane, Field }   // Mouth, Tunnel: wormholes.md; Lane (virtual, ring + lane + tick), Field (belt field on rails): rings-and-asteroids.md
+public enum PlacementMode : byte { Simulated, Rails, Frozen, Warp, Throat }                       // Warp: warp.md; Throat: wormholes.md
+public enum CelestialKind : byte { Star, Planet, Moon, GasGiant, BlackHole, Remnant }              // GasGiant: planets.md; BlackHole, Remnant: exotic-matter.md
+// Asteroids are not a CelestialKind: they are exotic-matter's MinorBody entries / rings-and-asteroids' lane and field frames.
+// Proposed, not yet adopted here: FrameKind.Lane, FrameKind.Field and BubbleAnchor.Source (rings-and-asteroids.md), which supersede
+// exotic-matter's BubbleAnchor.MinorBody. Adopting them is this doc's call; until then they are rings-and-asteroids' proposals.
 
 /// Pose of a frame relative to its parent, refreshed once per tick (rails, spin) or after the physics step (grids).
 public struct FramePose
@@ -69,12 +75,13 @@ public struct CelestialBody
     public KeplerOrbit Orbit;
 }
 
-/// Where any entity is. Bubble/Body are invalid when the entity is on rails or frozen.
+/// Where any entity is. Bubble/Body are invalid when the entity is on rails, frozen, in warp or in a throat.
 public struct Placement
 {
     public FrameId Frame; public double3 Position; public doubleQuat Rotation;
     public double3 Velocity; public float3 AngularVelocity;
-    public BubbleId Bubble; public BodyHandle Body; public KeplerOrbit Rails; public PlacementMode Mode; // Simulated, Rails, Frozen
+    public BubbleId Bubble; public BodyHandle Body; public KeplerOrbit Rails; public PlacementMode Mode; // Simulated, Rails, Frozen, Warp, Throat
+    public WarpId Warp;            // valid in Warp placement (warp.md's WarpTable entry)
 }
 ```
 
@@ -82,7 +89,7 @@ public struct Placement
 - **Several Solar roots (user decision).** Natural wormholes lead to other star systems, so the frame structure is a forest: one tree per system, all in one `FrameTree` (the 4096 preallocated frames are shared; a system costs about 2 frames per body, so 8 systems of ~40 bodies take ~640).
   - Systems have no pose relative to each other. `TryRelative` across systems returns false; nothing renders, senses or simulates across a system boundary except through a wormhole mouth's portal map (wormholes.md: clients near a mouth get the far side streamed and drawn through the disc, never through a tree edge). Each root carries a galactic position used only for the star backdrop and naming.
   - Wormhole tunnels (`FrameKind.Tunnel`, wormholes.md) are further roots beside the Solar roots; they belong to no system and `TryRelative` refuses them too.
-  - The only way between systems is a wormhole transit (wormholes.md): a reliable frame-change event from a mouth frame in one tree to a mouth frame in the other, through the mouths' own transform. There is no cross-system warp (warp is for relatively close destinations).
+  - The only way between systems is a wormhole transit (wormholes.md): a reliable frame-change event from a mouth frame in one tree to a mouth frame in the other, through the mouths' own transform. There is no cross-system warp (warp is for relatively close destinations; there is no common ancestor, so plots are refused). Manufactured wormholes stay within one system: only natural pairs link systems, and a cross-system ram or collapse ejection lands on one leg (exotic-matter, wormholes.md).
   - Celestial rails are evaluated only for systems that hold a bubble or a player's interest. Other systems cost nothing: rails are closed form in the tick, so a system is exact whenever it is next looked at.
 - **Why double3 and not int64 fixed point:** positions are always stored relative to the parent frame. Inside a 1000 km planet's SOI (around 5e7 m) the double ulp is about 1e-8 m. Even heliocentric at 40 AU it is about 1 mm, and only ships in transit live there. Rotation, Kepler and transform maths all need double anyway. Rejected: int64 fixed point in the sim (uniform precision isn't needed with hierarchical frames, and it makes every rotation and orbit awkward). int64 is used **on the wire** at 1/1024 m.
 - **Time:** one global `TickIndex` for every system. Orbit phase and spin angle come from `tick % PeriodTicks`, so they never lose precision, even after years of server uptime.
@@ -96,7 +103,8 @@ public struct Placement
 - **Celestial bodies:** pure Kepler rails, about 100 ns each including the Newton solve. 64 bodies cost about 6 µs a tick.
 - **Ships with no bubble:**
   - Coasting: `KeplerOrbit` costs nothing per tick; position is evaluated on demand.
-  - Thrusting (AI haulers, quantum travel): a double Verlet integrator, about 30 ns each.
+  - Thrusting (AI haulers): a double Verlet integrator, about 30 ns each.
+  - In warp: closed form in warp.md's `WarpTable`; no gravity applies during warp.
   - On leaving a bubble, state vector to elements (about 200 ns); on entering, elements to state.
 - **Planets rotate.** Everything below the rotating band uses the **rotating surface frame**: terrain is static in Jolt, a landed ship sleeps, and the atmosphere co-rotates.
   - Fictitious forces are applied to awake bodies: centrifugal `−ω×(ω×r)` (0.085 m/s² at the equator for a 6 h day on a 1000 km planet) and Coriolis `−2ω×v` (0.17 m/s² at 300 m/s).
@@ -128,11 +136,12 @@ origin = r_P + |d| · (Xi · x̂ + Eta · ŷ)          Xi, Eta from the mass rat
   - In a bubble the grid becomes a **kinematic** compound (`MoveKinematic`, one per tick) while crawling, so walkers ride along and dynamic bodies are pushed, never it; static again when stopped. A kinematic body passes through static terrain, so a crawl also stops at the first terrain contact.
   - The Station bubble, which never rebases at rest, rebases by a 32 m multiple once a crawl has carried the grid more than 512 m from the origin (about 3 game hours at 0.05 m/s).
 - **Release and drops.** Release or failure is as exotic-matter's: the grid returns to physics with its inertial velocity (plus the crawl velocity, at most 0.05 m/s). A dropped station is meant to be a rare disaster: it mostly burns up in the atmosphere (exotic-matter's entry heating) or hits the ground hard through the impact rules. Thrusters and warp drive are locked while anchored and **unlock at `AnchorFailing`** (before the release tick), so a station with enough thrust can hold itself or fly; escape pods are small grids launched through the normal transfer from the station's frame. A Lagrange-anchored grid released goes to ordinary rails about the dominant body.
+- **Sieges and capture (D27, owned by exotic-matter's anchor and a future factions/law doc).** Factions prefer capture to destruction; the frame side changes only as follows. `Release` needs owner authorisation and its 60 s countdown; tractor or ram overload above the anchor's hold limit first drains the reserve and raises a public `AnchorOverload` alarm with a grace window before failure, so a drop goes through the normal release path above. Capture at the station's `CommandCore` transfers anchor `Release` and crawl authority with ownership; the pose, frame and Station bubble are untouched (no transfer, no rebase). Tractor delivery onto another party's grid without consent is a weapon use (D26, tractor-beams.md), and an emitter without antimatter only pulls (D28); neither changes frames.
 
 ### Physics scenes (bubbles)
 
 ```csharp
-public enum BubbleAnchor : byte { Surface, FreeFall, Grid, Station, Tunnel }   // Station: an anchored grid's static bubble (BodySurface or Lagrange); Tunnel: wormholes.md
+public enum BubbleAnchor : byte { Surface, FreeFall, Grid, Station, Tunnel, Source }   // Station: an anchored grid's static bubble (BodySurface or Lagrange); Tunnel: wormholes.md; Source: a ring-lane or field bubble, rings-and-asteroids.md
 
 public sealed class PhysicsBubble
 {
@@ -156,13 +165,14 @@ public sealed class PhysicsBubble
   - Lives in ship-local coordinates. Interior meshes and both faces of the hull are **static** there forever, however the ship moves.
   - **Interior gravity is two separate devices (user decision D9): plating and the inertial dampener.**
     - **Plating** adds floor gravity and cancels nothing (exotic-matter). `g_rest` is what the grid feels at rest in its frame (real gravity on a landed ship, `−a_hold` on an anchored one, 0 in free fall). A powered, fed plated room tops the floor up to its setting along the room's floor-down axis `n̂`: `g_floor = g_rest + n̂ · max(0, g_set − dot(g_rest, n̂))`, so a 1 g plate on a 1 g landed ship supplies (and bills) nothing instead of doubling gravity; unplated rooms have `g_floor = g_rest`. Recomputed on events (plating change, landing, anchoring), never per tick.
-    - **The inertial dampener** is its own device (ship-design's `fn.dampener`) with its own volume: the rooms inside its bubble radius (ship-hulls' coverage). It keeps everything inside moving with the ship, at the cost of energy, using exotic matter + power, up to its effective rating `a_damp` = ship-design's `a_eff = min(class cap, F_cap / m_in, delivered power and EM)`, lowered by its `Limit` input; a room covered by two dampeners takes the stronger. It cancels the **manoeuvre** part of the interior acceleration:
+    - **The inertial dampener** is its own device (ship-design's `fn.dampener`) with its own volume: the rooms inside its bubble radius (ship-hulls' coverage). It keeps everything inside moving with the ship, at the cost of energy, using exotic matter + power, up to its rating `a_d` (exotic-matter owns the runtime: `a_d = min(|a_man|, a_max) · min(1, MassMax / m_in)`, also limited by delivered power and EM and by the `Limit` input; catalogue S/M/L = 3/6/10 g, 50/500/5,000 t; ship-design derives `a_max` and `MassMax` from parts); a room covered by two dampeners takes the stronger. It cancels the **manoeuvre** part of the interior acceleration:
       `a_man(r, v) = −(a_proper − a_rest) − α×r − ω×(ω×r) − 2ω×v`, where `a_rest` is the proper acceleration at rest in the frame (so landing or anchoring never shows up as a manoeuvre).
-    - **Fictitious forces are applied only above the dampener rating:** `g_interior = g_floor + a_man · max(0, 1 − a_damp/|a_man|)`. Inside a powered, fed dampener below its rating the interior is calm; above it, occupants and cargo feel only the excess. Outside any dampener volume (or with it unpowered, unfed or destroyed) the full `a_man` applies, which is the old real-effects branch.
+    - **Fictitious forces are applied only above the dampener rating:** `g_interior = g_floor + a_man · max(0, 1 − a_d/|a_man|)`. Inside a powered, fed dampener below its rating the interior is calm; above it, occupants and cargo feel only the excess. Outside any dampener volume (or with it unpowered, unfed or destroyed) the full `a_man` applies, which is the old real-effects branch.
     - Scene gravity is `g_interior` at the bubble origin; per awake body, the delta of the `α×r`, `ω×(ω×r)` and `2ω×v` terms is added only for the leaking fraction (0 when fully damped, so a calm interior costs no per-body work).
     - **Frozen contents** (no bubble) stay frozen while the leak is under `WakeLeak` (0.5 m/s², knob). A larger leak wakes the dampener volume's contents (drawing a grid scene from the pool) so cargo shifts and crew stumble; that is rare by design.
-    - **Cost** is exotic-matter's: power and EM in proportion to the mass inside × the cancelled acceleration. The force pass adds `m_in · min(|a_man|, a_damp)` from the ship-level `a_man` to the grid's ledger accumulator (one multiply per dampener per tick, `m_in` updated on events), and the 10 Hz ledger debits it, so it is paid with or without a bubble. Rest acceleration is never billed: a landed or anchored ship's dampener idles at standby.
-    - Velocity snaps from warp, flush and pulses stay excluded by the proper-acceleration history reset. While warp.md's `GridInertial` flag is set (in warp, and unanchored rails ships) the interior is plating or zero-g with no manoeuvre term, so the dampener draws nothing; in warp's real-space last segment the brake acts on every body alike (not felt), but contact impulses are, and the dampener absorbs them up to its rating (D17, D18). Neither device cancels tidal stretch (that is the tidal compensator's job, wormholes.md).
+    - **Cost** is exotic-matter's: power and EM in proportion to the mass inside × the cancelled acceleration. The force pass adds `m_in · a_d` (with `a_d ≤ |a_man|`) from the ship-level `a_man` to the grid's ledger accumulator (one multiply per dampener per tick, `m_in` updated on events), and the 10 Hz ledger debits it, so it is paid with or without a bubble. Rest acceleration is never billed: a landed or anchored ship's dampener idles at standby.
+    - **`GridInertial` flag (warp.md):** set on a grid in warp from T0 to T1 + 1, on unanchored rails ships, and on grids held in `Throat` placement (wormholes.md). The interior is plating or zero-g with no manoeuvre or fictitious term. In warp's real-space segment it removes the brake field but keeps contact impulses. The proper-acceleration history is reset at T0, TDrop and T1 + 1. During warp, exterior portals collide as closed and exterior door proxies are dropped.
+    - Velocity snaps from warp, flush and pulses stay excluded by the proper-acceleration history reset. While warp.md's `GridInertial` flag is set (in warp, and unanchored rails ships) the interior is plating or zero-g with no manoeuvre term, so the dampener draws nothing; in warp's real-space last segment the brake acts on every body alike (not felt), but contact impulses are, and the dampener absorbs them up to its rating (D17, D18). Neither device cancels tidal stretch (that is exotic-matter's tidal compensator; wormholes and the black hole only use it). The same split holds for other manoeuvre-type accelerations (throat drag, tractor forces on the grid): the dampener cancels them up to `a_d` and the excess leaks; plating never cancels them, and undamped rooms feel all of it.
   - Coupling is one-way: the ship moves the interior; interior contents don't push the ship. Cargo mass is added to the hull compound on load and unload only.
 - **Size limits:** soft radius 2 km, hard 4 km (float ulp 0.24 mm and 0.49 mm). Jolt's own guidance is a few km in single precision.
   - **Huge structures (user decision):** anything larger is built as several linked grids, each with its own frame and bubble, joined by fixed links (as docking collars) and stitched across the seams with kinematic proxies. Double-precision Jolt stays off the table.
@@ -171,8 +181,8 @@ public sealed class PhysicsBubble
   - Parked ships with nobody nearby are `Frozen` in the surface frame.
   - Interiors without occupants or awake loose items have no bubble; their contents are frozen in grid coordinates.
 - **Merge and split:**
-  - Merge when two bubbles in the same frame come within 500 m of each other (smaller into larger, as an island transfer).
-  - Split when a contact- and proximity-connected group is more than 1500 m from the rest.
+  - Merge when the **predicted** gap between two bubbles in the same frame within the next 2 s is < 500 m (closest approach of the two clusters' current states; smaller into larger, as an island transfer). Hot pairs (closing fast or already near) are tested every tick, the rest at 10 Hz (warp.md, ~15 ns per pair).
+  - Split when a contact- and proximity-connected group's gap to the rest is > 1500 m, its predicted minimum gap is also > 1500 m, and at least 2 s have passed since the last merge (warp.md).
   - Space Engineers runs Havok worlds per cluster in the same way; this is the proven pattern.
 - **Rebase (origin shift inside a bubble):**
   - Surface: when the cluster centroid is more than 1024 m from the origin, shift by a multiple of 32 m (chunk origins stay exact) and re-set the scene gravity. Cost is about 1 µs per body via `SetPositionRotationAndVelocity`. At 1 km/s it happens once a second, about 0.3 ms with 300 terrain colliders.
@@ -195,12 +205,15 @@ public sealed class PhysicsBubble
 | Ship into hangar (nested grid) | ship centre inside hangar volume shrunk by 0.5 × its radius | centre outside hangar volume + 2 m | ship body moves from the exterior scene into the host's grid scene; its own grid re-parents |
 | Docking collar | lock engaged (gameplay event) | undock event | docked ships merge into one compound body; child grid gets a fixed pose under the parent grid |
 | Into a bubble (gets a Jolt body) | ≤ 2 km of a physics anchor | > 3 km from all anchors, contact-free | otherwise rails (coasting / thrusting) or frozen (parked) |
-| Bubble merge / split | gap < 500 m | group gap > 1500 m | evaluated at 10 Hz |
+| Bubble merge / split | predicted gap within 2 s < 500 m | group gap > 1500 m **and** predicted minimum gap > 1500 m **and** ≥ 2 s since the last merge | hot pairs every tick, others at 10 Hz (warp.md) |
+| Warp engage | T0, if validation passed: placement becomes `Warp`, the carried subtree goes along | n/a | leaves its bubble; membership checks skip `Warp` placements (warp.md) |
+| Warp drop | TDrop: attaches to the frame announced at commit and the bubble chosen at TDrop (corridor capsule rule), booked in the arrival budget | n/a | simulated and braked until T1; `GridInertial` until T1 + 1 (warp.md) |
 | Rebase | centroid > 1024 m (surface) / > 1 km or > 50 m/s (free fall) | n/a | at most once per second per bubble |
 
 - **Nesting limit:** depth 3 (station > carrier > fighter).
 - **Transfers wait for clean moments.** A body changes scene only when it is not touching anything staying behind. Otherwise its whole contact island moves together (a crate stack on a cargo lift). The transfer is forced at the band's outer edge.
-- **Timing:** membership is checked at 10 Hz, staggered across entities. Transfers queue and run at the start of the next tick, before forces.
+- **Timing:** membership is checked at 10 Hz, staggered across entities (skipping `Warp` and `Throat` placements). Transfers queue and run at the start of the next tick, before forces.
+- **Arrival budget (warp.md):** warp arrivals are pre-booked at commit in a per-tick arrival budget (≤ 64 bodies per tick; a full tick pushes TDrop and T1 back one tick before announcing) and are never deferred once announced. A merge may exceed the 32-transfer budget only for islands on the predicted contact (≤ 128). Wormhole ejections use the same budget (wormholes.md).
 
 **Transfer** (exact rigid-frame maths in double; Jolt bodies can't move between systems, so destroy and recreate with the same refcounted shape). For a child frame with origin `o`, rotation `R`, origin velocity `u` and angular velocity `ω` (all in the parent):
 
@@ -255,7 +268,8 @@ v_c = Rᵀ (v_p − u − ω × (p_p − o))
 | Same scene on the thread pool | ~50–100 µs (barrier wake-ups): reason for the split above |
 | `CharacterVirtual.ExtendedUpdate` | ~20–50 µs each; 64 players ≈ 2 ms CPU, spread over jobs |
 | Membership checks at 10 Hz, staggered | ~100 ns per entity; 5000 entities ≈ 50 µs per tick on average |
-| Transfer (destroy + create, shape reused) | ~5 µs per body; budget 32 per tick, overflow deferred |
+| Transfer (destroy + create, shape reused) | ~5 µs per body; budget 32 per tick, overflow deferred (warp arrivals pre-booked, ≤ 64 a tick, never deferred) |
+| Merge prediction | ~15 ns per pair; 128 bubbles ≈ 15 µs per tick on average (warp.md) |
 | Rebase | ~1 µs per body in the scene, ≤ once per second per bubble |
 | Rails ship (coasting / thrusting) | 0 / ~30 ns |
 
@@ -267,13 +281,14 @@ v_c = Rᵀ (v_p − u − ω × (p_p − o))
 **Tick order:**
 1. Clock (paused while no player is connected).
 2. Rails and pose cache (systems with interest only; Lagrange frames from their pairs' rails).
-3. Queued transfers and rebases.
+   2b. Warp routes (warp.md): evaluate, send due beacons, run due commits in `(TDrop, WarpId)` order, queue the drops due at TDrop.
+3. Queued transfers and rebases (including warp drops, with the drop-sphere test and any `WarpBlast`).
 4. Inputs.
 5. Forces.
 6. Big scenes on the pool, then small scenes as jobs.
 7. Characters per scene, in parallel.
 8. Write grid poses back from ship bodies.
-9. Membership checks (10 Hz) and net snapshot (30 Hz).
+9. Membership checks (10 Hz), merge prediction (hot pairs every tick) and net snapshot (30 Hz).
 
 ### Camera-relative rendering
 
@@ -312,7 +327,7 @@ v_c = Rᵀ (v_p − u − ω × (p_p − o))
   - Piloting: predict the ship in the client's exterior bubble.
   - Reconcile only owned entities: snap to server state, then replay inputs through our own flight or character integrator. Collisions are left to error smoothing.
   - Full Jolt rollback isn't available (`SaveState` / `RestoreState` are not exported). Custom per-body snapshots via `BodyInterface` are enough for owned entities.
-- **Dedicated sharding later** goes by frame subtree: each star system is the natural first cut (its only boundary is the wormhole transit event); inside a system, each planet SOI plus its grids is a shard, and interplanetary space is a shard. The hand-off is exactly the frame-change event above, at the SOI boundary with the same 4% hysteresis. Keep the transfer message serializable from day one.
+- **Dedicated sharding later** goes by frame subtree: each star system is the natural first cut (its only boundary is the wormhole transit event); inside a system, each planet SOI plus its grids is a shard, and interplanetary space is a shard. The hand-off is exactly the frame-change event above, at the SOI boundary with the same 4% hysteresis for sublight; warp is the cross-shard hand-off within a system (warp.md). One global `TickIndex` for all shards. Keep the transfer message serializable from day one.
 
 ### Files
 
@@ -362,20 +377,29 @@ All costs above are estimates. Nothing was built or run, and no files were chang
 User decisions 2026-11-25 (decisions.md round 5), applied in place above:
 - **Several Solar roots:** frames are a forest, one Solar root per star system, sharing one `FrameTree`; `SystemId`, `TryRelative` fails across systems; the only crossing is a wormhole transit event (new transition row); rails evaluated only for systems with interest; other systems send nothing on the wire; sharding cuts by system first.
 - **Game time stops while the server is empty:** `FixedClock` pauses with no player connected; everything time-based is keyed on ticks, so rails, weather, anchor reserves, lifetimes and fines all pause together; tick order step 1 notes it.
-- **D9 interior gravity:** plating (floor gravity) and a separate inertial dampener (own volume, EM + power, rating `a_damp`). Fictitious and manoeuvre forces reach the grid scene only above the dampener rating; landing/anchoring is not a manoeuvre (`a_rest`); `WakeLeak` wakes frozen contents; cost integrated per ship; characters' gravity rule updated.
+- **D9 interior gravity:** plating (floor gravity) and a separate inertial dampener (own volume, EM + power, rating `a_d`; was `a_damp`, renamed in the r6 consistency pass). Fictitious and manoeuvre forces reach the grid scene only above the dampener rating; landing/anchoring is not a manoeuvre (`a_rest`); `WakeLeak` wakes frozen contents; cost integrated per ship; characters' gravity rule updated.
 - **D10 flight model:** 6-DOF with flight assist everywhere plus wing lift in atmosphere; airspeed relative to the co-rotating air and the planet weather's wind; rails ships wake at the atmosphere top; cost row added.
-- **D25 anchors on any grid:** `BodySurface` or Lagrange targets, never asteroids (tractors); activation needs position within 50 m and velocity within 5 m/s, residual Δv paid in EM over spin-up; slow crawl over days (≤ 0.02 m/s, piecewise-linear pose, kinematic while crawling, rare Station-bubble rebase); thrusters unlock on release; escape pods; dropped stations are rare disasters.
+- **D25 anchors on any grid:** `BodySurface` or Lagrange targets, never asteroids (tractors); activation needs position within 50 m (superseded by review: 5 m) and velocity within 5 m/s, residual Δv paid in EM over spin-up; slow crawl over days (≤ 0.02 m/s, piecewise-linear pose, kinematic while crawling, rare Station-bubble rebase); thrusters unlock on release; escape pods; dropped stations are rare disasters.
 - **Lagrange-point frames:** new `FrameKind.Lagrange`, pose computed each tick from the two railed bodies, created lazily only while an anchor holds there; a Lagrange zone with two-body gravity is the single exception to patched conics; `BubbleAnchor.Station` added to the enum.
 - **Huge structures:** several linked grids/bubbles stitched by proxies; double-precision Jolt dropped.
 - **Open questions:** all three earlier ones removed as answered; three tuning knobs listed instead.
 
 ## Round 5 review notes
 
-Lead review, 2026-11-25, against decisions-r5 (D9, D10, D25, Lagrange frames, several Solar roots, time stops when empty). Fixes made in place above:
-- **D9 faithful, now consistent with its owners.** `a_damp` is ship-design's `a_eff` (class cap, `F_cap / m_in`, delivered power and EM, `Limit` input), per covered room, stronger dampener wins on overlap. Plating now *adds* floor gravity as exotic-matter says ("cancels nothing"), but tops up to its setting instead of stacking, so a plated landed ship is not at 2 g and pays nothing for gravity it already has. Billing is the force-pass accumulator plus the 10 Hz ledger (exotic-matter, ship-design), on `min(|a_man|, a_damp)`; rest acceleration is never billed. Warp's `GridInertial` interior and the real-space last segment (D17, D18: brake not felt, collisions felt and damped up to the rating) are spelled out; "compensator" is the tidal compensator (wormholes).
+Lead review, 2026-11-25, against decisions.md round 5 (D9, D10, D25, Lagrange frames, several Solar roots, time stops when empty). Fixes made in place above:
+- **D9 faithful, now consistent with its owners.** The rating is exotic-matter's `a_d = min(|a_man|, a_max) · min(1, MassMax / m_in)`, limited by delivered power and EM and the `Limit` input (r6: `a_damp`, `a_eff`, `F_cap` and "2–8 g" retired), per covered room, stronger dampener wins on overlap. Plating now *adds* floor gravity as exotic-matter says ("cancels nothing"), but tops up to its setting instead of stacking, so a plated landed ship is not at 2 g and pays nothing for gravity it already has. Billing is the force-pass accumulator plus the 10 Hz ledger (exotic-matter, ship-design), on `a_d`; rest acceleration is never billed. Warp's `GridInertial` interior and the real-space last segment (D17, D18: brake not felt, collisions felt and damped up to the rating) are spelled out; "compensator" is exotic-matter's tidal compensator (wormholes and the black hole use it).
 - **D25 aligned with exotic-matter, which owns anchors.** The engage tolerance was 50 m here and 5 m there: now 5 m / 5 m/s (`EngagePosTolM`, `EngageMaxVelMs`), thrusters hold the grid during spin-up. Crawl numbers now exotic's (0.05 m/s along, 0.02 m/s vertical, ≤ 1 h segments); the old "every 1 km" steps are gone. Thrusters and warp unlock at `AnchorFailing`, not at the release tick, so a failing station can still save itself. Tractoring an asteroid from an anchored grid stays legal (the user's "use tractor beams"), its reaction debited to the anchor.
 - **Exploits closed.** Eccentric-pair Lagrange anchors bill the orbit average but test overload on the orbit maximum and solve the drop footprint at the worst phase. One Lagrange frame per (pair, index), shared; the 64 pool grows instead of refusing, so griefers can't exhaust Lagrange points. A frozen crawling grid plans segments clear of terrain and grids, and a kinematic crawl stops at terrain contact (kinematic bodies pass through statics).
 - **Perf.** Unattended crawls stay `Frozen` (0 per tick) instead of exotic-matter's per-tick kinematic update; the cost row says one `MoveKinematic` only while in a bubble. Wind amortisation corrected to 0.05 µs a tick per ship (0.3 µs at 10 Hz), matching planets' 3 µs for 64 ships.
 - **Several Solar roots.** `FrameKind` gains wormholes' `Mouth` and `Tunnel`, `BubbleAnchor` gains `Tunnel`; tunnels are extra roots outside any system. "Nothing renders across a system boundary" now excepts the mouth's portal view, which wormholes streams. `FrameTree` capacity (4096) now counts grids and mouths and grows in the maintenance window.
 - **Time stops when empty, D10:** faithful; no change needed.
-- **For other docs (not edited here):** exotic-matter should (1) make unattended crawls `Frozen` with piecewise-linear poses, (2) add the Lagrange target to `StationAnchors`, (3) drop "a dampener there cancels `a_hold` all the time" (rest acceleration isn't a manoeuvre), (4) bill plating on the supplied top-up, (5) reconcile its `fc.inertial_dampener` (3/6/10 g, `MassMax`) with ship-design's `fn.dampener` (2–8 g, `F_cap`); ship-design owns the family. wormholes.md says "plating absorbs" throat drag (should be the dampener, up to its rating), and its `FrameKind`/`BubbleAnchor` enums lack `Lagrange`/`Station`.
+- **For other docs (not edited here) (resolved: exotic-matter now has the Frozen crawls, the Lagrange target, no `a_hold` billing, top-up plating and 3/6/10 g with `MassMax`; the plating/dampener and enum fixes in wormholes.md are in the r6 consistency pass):** exotic-matter should (1) make unattended crawls `Frozen` with piecewise-linear poses, (2) add the Lagrange target to `StationAnchors`, (3) drop "a dampener there cancels `a_hold` all the time" (rest acceleration isn't a manoeuvre), (4) bill plating on the supplied top-up, (5) reconcile its `fc.inertial_dampener` (3/6/10 g, `MassMax`) with ship-design's `fn.dampener` (2–8 g, `F_cap`); ship-design owns the family. wormholes.md says "plating absorbs" throat drag (should be the dampener, up to its rating), and its `FrameKind`/`BubbleAnchor` enums lack `Lagrange`/`Station`.
+
+## Consistency pass (r6) notes
+
+- **Shared enums owned here (item 6):** `FrameKind`, `PlacementMode {Simulated, Rails, Frozen, Warp, Throat}` and `CelestialKind {Star, Planet, Moon, GasGiant, BlackHole, Remnant}` declared in Frames; `Placement` comment lists all five modes and gains `WarpId Warp`. `BubbleAnchor` already canonical. Asteroids are not a `CelestialKind`.
+- **Dampener (items 4, 5):** `a_damp` / `a_eff` / `F_cap` retired for exotic-matter's `a_d = min(|a_man|, a_max) · min(1, MassMax/m_in)`, limited by power, EM and `Limit` (S/M/L 3/6/10 g, 50/500/5,000 t). Billing is `m_in · a_d`. The tidal compensator is exotic-matter's. Throat drag and tractor forces are cancelled by the dampener up to `a_d`, never by plating.
+- **warp.md zone changes merged (item 7):** predictive merge (gap within 2 s < 500 m, hot pairs every tick) and split (> 1500 m now and predicted, ≥ 2 s since merge); `GridInertial` bullet; Warp engage and Warp drop rows; arrival budget (≤ 64 a tick, never deferred; merge islands ≤ 128); tick step 2b and merge prediction; `WarpTable` in rails; merge-prediction cost row.
+- **Cross-system (item 15):** no cross-system warp, manufactured wormholes stay in one system, only natural pairs link systems; sharding by system, then SOI subtree, warp as in-system hand-off.
+- **D26-D28 (items 11, 12):** anchor section gains a Sieges and capture bullet: `Release` authorisation and countdown, `AnchorOverload` alarm and grace before failure, capture transfers anchor and crawl authority with no frame change; tractor consent and pull-only without AM noted as frame-neutral. D33 does not touch this doc.
+- **Stale notes (item 16):** "decisions-r5" now decisions.md round 5; the review's "for other docs" asks marked resolved; the 50 m engage note marked superseded (5 m).

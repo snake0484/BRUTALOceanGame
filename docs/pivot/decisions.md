@@ -1,6 +1,8 @@
 # User decisions, round 5 (2026-11-25)
 
-Answers to the consolidated open-question list. Do not re-litigate. Where these conflict with any doc, these win.
+Answers to the consolidated open-question list. Do not re-litigate. Where these conflict with any doc, these win (then review.md's rulings, then the owning doc).
+
+D26-D28 and D33 were applied across the docs in the r6 consistency pass. D34-D37 record the station and asteroid decisions given with rings-and-asteroids.md revision 4, so every user decision lives in one list.
 
 Already recorded earlier in this round: 1 g on 1000 km planets; realistic planet spacing (warp ~3.7 min/AU); natural wormholes lead to other star systems (several Solar roots); ~8 players listen server, 32-64 dedicated; huge structures as several linked grids / bubbles; bodies on rails with spheres of influence, stations may sit where no orbit is possible (e.g. Lagrange points) via station anchors; game time does NOT advance while a server is empty; go straight to the sphere (island retired).
 
@@ -35,8 +37,14 @@ Already recorded earlier in this round: 1 g on 1000 km planets; realistic planet
   - Anchors cannot attach to asteroids; use tractor beams for that.
   - A dropped station is a serious, very uncommon disaster: it mostly burns up in the atmosphere or hits the ground hard. Stations should have thrusters (in case they need to fly) and escape pods.
 - D26 Tractor beams are considered a WEAPON unless requested. E.g. you are expected to dock your own ship, but a station may tractor you in to dock if you ask for it (consent flag).
+  - Applied: a lock or sweep on another party's ship, grid or character without consent writes an `IncidentRecord` of kind `TractorLock`. Consent is a flag on a docking, tow or landing request, for one emitter owner group; it lapses on release, docking, a mouth crossing, or 120 s without a lock. Own and party bodies need none; unowned wrecks and asteroids are not ships. Anti-escape, pull-into-wormhole and combat locks are always hostile; consent never exempts a tunnel strike. Owner: tractor-beams.md (Multiplayer, Permissions).
 - D27 Station sieges: YES; factions would prefer to CAPTURE stations rather than destroy them (capture mechanics matter).
+  - Applied (interim until a factions/law doc): a declared siege is public; it lifts only tractor-delivery zeroing toward besiegers and zone courtesies, and keeps the asteroid ban inside `ProtectRadius`, shields, debris defence, warp's exclusion push, the interdiction ban and incident records. Destruction stays possible but hard (two anchor feeds, 60 s owner `Release`, `AnchorOverload` alarm with a grace window, `StationDrop` incident). Capture: an `Override` held at the station's `CommandCore` for `CaptureTicks` with no defender contesting transfers ownership, anchor authority, gate and catcher keys (`StationCapture`). Owners: rings-and-asteroids.md (Sieges), tractor-beams.md, exotic-matter.md (anchor), ship-design-and-construction.md (`CommandCore`).
 - D28 Tractors without antimatter can only emit gravitons, so they can only PULL (push needs anti-gravitons, i.e. AM). Replaces the "25 % pumped mode".
+  - Applied: drive kinds `Graviton` (no AM, Pull only, full rating, 1 W/N bus power), `Reaction` (AM, Pull or Push), `Overdrive` (AM). Without AM, Push, flips and Hold assist are refused and Hold is a pull-only tether. Station debris defence assigns AM-fed emitters only; docking assist without AM is a pull-only tether. Owner: tractor-beams.md.
+- D34 Station SHIELDS against explosions and debris or shrapnel impacts: a capacity and a recharge rate. A big enough hit, or sustained fire, gets through. Replaces "asteroid debris does no hull damage inside protected zones". (rings-and-asteroids.md revision 4, `StationShield`.)
+- D35 Debris that drifts into a protected zone stays REAL. Stations push it back out with tractor beams or mechanical arms, as far as their installed hardware allows; undefended outposts near mining have a real problem. (rings-and-asteroids.md revision 4, `StationDefence`; AM-fed emitters only under D28.)
+- D36 Shattering an asteroid so that it deliberately causes damage is a HOSTILE ACT. Damage traced to a shatter or a thrown rock is attributed to the event's owner and feeds reputation, faction standing, crime status and station response. (One shared server-only `IncidentRecord`, defined in rings-and-asteroids.md until a law doc exists, used by warp.md and tractor-beams.md too.)
 
 ## Terrain and planets
 - D29 Relief -8 km..+9 km and digging 2 km down: fine. Digging too deep brings extreme heat that damages components until it becomes impractical.
@@ -46,3 +54,5 @@ Already recorded earlier in this round: 1 g on 1000 km planets; realistic planet
 
 ## Asteroids
 - D33 Fragments from legal mining near a station: ALWAYS the MINER's liability.
+  - Applied: liability (who pays) is separate from class (intent). Debris of legal mining (made outside every `ProtectRadius`) that damages a station, its shield or anything inside its protected zone is the event actor's liability in every class, including debris redirected by station defence (`IncidentRecord.Liable`). Owner: rings-and-asteroids.md.
+- D37 A shatter at the threshold breaks the WHOLE BODY: a crack through it, a lot of dust (a local fog cloud that cuts visibility and sensors for a while), and large fragments flung in different directions. Below the threshold a hit makes a crater and cracks. (rings-and-asteroids.md revision 4, `DustCloud`.)
