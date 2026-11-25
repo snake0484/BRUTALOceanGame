@@ -1,0 +1,97 @@
+# Pivot: interplanetary space ship game
+
+Status: design, nothing built. Written 2026-11-25 from a design pass over the current code (island + ocean game on `voxel-water-3d`, last commit `3a31ae6`).
+
+The game becomes an interplanetary ship game in the vein of Star Citizen / Space Engineers. The island ocean game is retired; its terrain, renderer, job and physics foundations carry over.
+
+## Decided
+
+| Topic | Decision |
+| --- | --- |
+| Players | Single player works. Multiplayer 32-64 on dedicated servers, ~8 on a listen server. Server-authoritative; single player is an in-process listen server. |
+| Planets | ~1000 km radius, 1 g, rotating. Several star systems, linked by natural wormholes. Bodies on rails with spheres of influence; game time stops while a server is empty. Go straight to the sphere: the island is retired, not kept as a test world. Chunked voxel terrain stored as now (edits only, regenerated from seed), generated as a sphere. |
+| Physics zones | Required. Frame hierarchy solar > planetary > ship grids. Warp exit is where a ship picks its zone; zones merge when they get close. |
+| Travel | Two modes. **Warp:** cheaper, takes travel time. **Wormholes:** costlier (power + exotic matter), instant once open, the fleet option; natural (seeded, huge, noise signature; gate frames can be built round them) and player-made; two-way while open, but a flow can bias or block one direction; irrevocable once paid for; last a set time, then flush out both ways as they collapse. Catchers can be station gates or traffic control that assigns exit slots. Wormholes and catchers carry faction signatures that can be copied and spoofed. A captured wormhole opens visibly onto the captured destination; interdiction never forces travel, only tractor beams, flow or other physics do. Far ends open anywhere a suppression field (bodies, atmospheres, terrain, hulls, warp drives) allows. Interdiction costs power (wormholes: far more, plus exotic matter) and works through catchers: cheap anchors that bend planned paths to them, possibly somewhere deadly such as a solar flare's path. |
+| Ships | Hull chunks are 3D modelled; interiors are cut away from them. Components are prefab (bought) or player-made; a prefab is a saved player build. |
+| Water | Killed except shore wash. Keep analytic swell, GPU FFT detail, ocean shading and the GPU swash, all on a sea sphere. |
+| Jolt precision | `Brutal.Jolt` is single precision (`RVec3` binds as `float3`). World positions are `double3` per frame on our side; Jolt runs in local float bubbles. No double-precision Jolt build for now. |
+
+## Documents
+
+| Doc | What it holds |
+| --- | --- |
+| [inventory.md](inventory.md) | Keep / adapt / cut per file, what shore wash needs, float hazards, ordered cut list with measured time recovered. |
+| [frames-and-zones.md](frames-and-zones.md) | `FrameTree`, Kepler rails, patched conics, pooled Jolt scenes ("bubbles"), enter/leave rules, transfers, camera-relative rendering, networking. |
+| [warp.md](warp.md) | Warp drive: states, closed-form path, exit-point selection as zone selection (bubble picked at arrival), merge on predicted closest approach, interdiction fields, fleet warp, privacy-safe networking. |
+| [wormholes.md](wormholes.md) | Wormholes (revision 3: instant vs tunnel classes, stability reserve and energy fight, tunnel frame with current, eddies, wall discharge and ram ejection, retaliation, collapse flow, re-establish): plan, charge, commit, open, collapse flush; mouth pairs; flow; suppression field; catchers (gate, interdict, traffic control); signatures and spoofing; natural wormholes and frames; solar flares; seeing through the mouth. |
+| [exotic-matter.md](exotic-matter.md) | Exotic matter and antimatter: sources (black holes, deposits), refining, grades, warp fuel mix, anti-gravitons, plasma thrust, anti-graviton bombs, black holes collapsing to rocky planets. Revision 2 adds slurry vs recirculating drives, runaway bursts, antimatter production and radiation, pirate kit, station anchors. Revision 3: crystal decay floor (0.96), purity cap 0.995, seven wormhole additive families, stabilisers, bombs drain wormhole stability. |
+| [rings-and-asteroids.md](rings-and-asteroids.md) | Planetary rings (mesh, haze, asteroids; band density tied to colour, dust as fog) and asteroid fracture mining: laser heat, wedge, violent breakup, weapon shatter, EVA sampling and cave mining, tumbling and tractored rocks, permanent removal with replenishment events. (Revision 4 pending: station shields, debris deflection, hostile acts, whole-body shatter.) |
+| [tractor-beams.md](tractor-beams.md) | Tractor beams (push/pull cone, adjustable FOV, EM + power + optional AM) and the hull stress model that lets a wrong lock rip a part off and opposing beams tear a ship apart (Haul and Hold locks, 4 m node graph with mount and plane cuts, solved only for loaded ships). |
+| [ship-design-and-construction.md](ship-design-and-construction.md) | Ship designer app (standalone and in game, one core library), material > part > component > hull/armour > ship hierarchy, plans, cost per redefined level, buying vs building, cutting stock, construction steps (weld, bolt, rivet), assembly order. Projects: `src/Plans` (headless: validate, cost, order), `src/Designer`, `src/Designer.Ui`, `src/Designer.App`. |
+| [planets.md](planets.md) | Includes a Gas giants section (no surface, scooping, crush depth, storms, ring host). Cartesian voxels in the rotating planet frame, surface shell, one octree to LOD 12 then an impostor, streaming at flight speed, memory, sea sphere. |
+| [ship-hulls.md](ship-hulls.md) | Blueprint = CSG brush list, baked to 0.25 m SDF bricks, dual contouring, mass, rooms, collision, damage, LOD, build UX. |
+| [review.md](review.md) | Cross-check of the four designs: contradictions with rulings, risks, missing systems, milestones M0-M8. |
+
+The section docs were written independently. **Where they disagree, review.md's rulings win.** The ones that change a section:
+
+- **C1, C2:** in the rotating surface frame apply centrifugal and Coriolis to dynamic bodies, and set gravity per scene with a per-awake-body delta. Planets.md's "ignore fictitious forces" and "AddForce gravity on every body" are overruled (the latter wakes every body every tick).
+- **C5:** `OceanSurface.Sample(double3 planetLocal, long tick)` has one global definition (fixed ~64 km tangent tiles, blended), so server and clients agree on buoyancy. The camera-window grid is a GPU cache only.
+- **C7:** buoyancy reads `IShoreDepth` directly; a dedicated server has no camera window.
+- **C8:** indirect terrain draws do not exist today (one `DrawIndexed` per chunk). They must be built.
+- **C9:** one per-draw instance record (`relOrigin`, `scale`, `quat`) for terrain and hulls; translation alone is not enough.
+- **C11:** a separate `GridVolume` (air with all portals closed) decides who is in a ship grid; door faces are entry triggers.
+- **C12:** a client predicts its own ship by re-stepping a small local Jolt scene, not a second flight integrator.
+- **C13:** every persistent position (edits, entities, saves, wire) is int64 at 1/1024 m in its frame; double only at runtime.
+
+## Big risks
+
+- **Jolt native lacks `MeshShape`, `NarrowPhaseQuery_CastRay`, `PhysicsSystem_SaveState`.** Terrain collision today falls back to a compound of single triangles (`StaticMeshShape.cs`). Likely 150-300 KB per chunk; a dedicated server ring could hit 0.5-1 GB. Ask BRUTAL upstream to export these (separate proposal, no `BRUTAL/` edits). Measure in M3.
+- **Listen server cap is about 8 players.** 64 character updates, collision rings around every remote player and server-side hull bakes don't fit alongside rendering on the host. 32-64 means dedicated.
+- **Draw recording.** ~2.5k terrain leaves plus hull bricks at one draw each is 3+ ms. GPU cull + `DrawIndexedIndirectCount` comes before planet streaming is judged.
+- **Allocations on streaming paths** (`StaticMeshShape` index copies, per-chunk managed `TriangleBvh`, `ChunkJob.SetOps` growth). Fix with the planet milestone.
+
+## Missing systems (none exist today)
+
+Sim/client split (a `Sim` assembly with no Vulkan, plus a headless server), entity model, RakNet transport and replication, character controller (radial up, EVA), flight model (thrusters at mounts, flight assist), atmosphere drag, orbital HUD, save format, per-body lighting and eclipses, impostor-to-octree handoff, profiler rows for all of it.
+
+## Milestones
+
+Each ends with a measured exit check (details in review.md).
+
+| | Milestone | Exit check |
+| --- | --- | --- |
+| M0 | Tag `island-final`. Cut water down to the ocean core and shore wash shaders (inventory steps 1-6; the island itself is retired, no A/B on it), carve the `Sim` assembly, file the upstream Jolt asks. | Game starts on a flat placeholder; sim builds without Vulkan. Shore wash is proven on a planet beach in M2b. |
+| M1 | `FrameTree`, rails, double camera with translation-free view, per-draw instance record, GPU-culled indirect terrain draws, ocean time rebasing. | Surface of a smooth 1000 km sphere to 1e8 m with no jitter; terrain draw recording < 0.1 ms. |
+| M2 | `PlanetGenerator`, shell, horizon pruning, `EditStore`, impostors, focus-body switch. M2b: sea sphere, global `OceanSurface`, shore wash on a planet beach. | Leaves/s and main-thread ms at 30, 300, 3000 m/s; orbit to ground with no holes. |
+| M3 | `PhysicsRuntime` + `PhysicsScene`, surface bubble with 32 m rebases, `CharacterVirtual` with radial up. | Walk and dig 10 km from spawn; collision chunk memory measured. |
+| M4 | Two players on foot over RakNet, save/load. | Bytes/s per client and reconcile error logged. |
+| M5 | Minimal hull: box/wedge/cylinder brushes, add/subtract, mass, convex exterior, seat/thruster/tank/foot. | 15 m craft built in ~5 min; bake p50/p95 in profiler. |
+| M6 | Atmospheric flight and landing, client ship prediction. | Fly 50 km at 300 m/s and land on a slope with a passenger. |
+| M7 | Orbit, warp, the moon. | Two players reach the moon; orbit elements unchanged across frame transitions. |
+| M8 | Walking inside a moving ship: grid bubble, `GridVolume`, door proxies, plating gravity. Then rooms, damage, hull LOD. | |
+
+## Open questions
+
+Decisions so far are logged in [decisions.md](decisions.md) (round 5) and in the Decided table above. Remaining open questions live in each doc's own list.
+
+Collected from all sections, duplicates merged.
+
+1. ~~Surface gravity~~: decided, 1 g on 1000 km planets (low orbit 3.1 km/s).
+2. ~~Planet rotation~~: decided, planets rotate (fictitious forces from day one). Stations can use an exotic-matter **station anchor** to hold position over a planet where no orbit is possible: a grid fixed in the rotating surface frame at any altitude, burning EM at a rate that grows with how far it is held from a natural orbit; anchor failure drops it back to physics.
+3. ~~Interior gravity~~ (decided, decisions.md D9: plating plus a separate inertial dampener, EM + energy, up to a rating). Was: plating always on (calm interiors) or real inertial effects in unpowered or damaged ships?
+4. ~~Flight model~~ (decided, D10: both). Was: pure 6-DOF with flight assist, or aerodynamic lift from wing parts in atmosphere too?
+5. ~~Hosting~~: decided, ~8 on a listen server, 32-64 on dedicated.
+6. ~~Building economy~~ (decided, ship-design-and-construction.md). Was: free creative building, or survival (material cost by volume, weld time in place, or print at a shipyard)?
+7. ~~Hull detail~~ (decided, D11: full mesh editing, still cuttable). Was: 0.25 m cells with a 0.5 m minimum wall (finer detail in components)? Primitives + bevels enough, or lofted/spline hulls? CSG holes for damage, or dents too?
+8. **Player-made components:** modelled housing + bought/crafted function core, or function from geometry?
+9. ~~Huge grids~~: left to engineering. Plan: one grid stays within a 4 km bubble (ships are capped at 1 km by ship-hulls.md); bigger stations are several linked grids; battles spread wider than 4 km run as several bubbles joined by predictive merge. Revisit double-precision Jolt only if that proves wrong.
+10. ~~Orbits~~: decided, bodies on fixed rails with spheres of influence (patched conics). Stations may be placed where no orbit is possible, e.g. Lagrange points, held by a station anchor (exotic matter).
+11. ~~Terrain~~ (decided, D29, D32: relief and depth fine, deep heat, edits permanent). Was: relief -8 km .. +9 km and digging 2 km down OK? Edits permanent forever, or regrow after N days unvisited?
+12. ~~Water edge cases~~ (decided, D30, D31: shores and seabeds unminable, weather ported). Was: a hole dug below sea level at the shore floods instantly or stays dry? Weather ported to planets in the slice, or fixed wind per planet?
+13. ~~Exotic matter source~~: decided, see [exotic-matter.md](exotic-matter.md) (black holes; impure deposits in asteroids and planets; refined by recrystallisation; low grade is warp fuel with antimatter; EM + antimatter make anti-gravitons).
+14. ~~System scale~~: decided for now, realistic spacing; warp ~3.7 min per AU.
+15. ~~Other star systems~~: decided, natural wormholes lead to other systems (several `Solar` roots; a dedicated shard per system later).
+16. ~~Warp details~~ (decided, D15-D18). Was: do bodies block warp paths (plot via waypoints) or does the server route around them? Anything happening mid-warp? No exits inside an atmosphere or under 2 km above the highest terrain?
+17. ~~Wormhole details~~ (decided, D19: proposals accepted) (wormholes.md, open questions 2-16): outflow push, counterplay to catchers, mouths on moving ships, how close big mouths may open, friendly fire, flow from power asymmetry, what path-pull readings reveal, generator spoofing, natural redirect reach, frame defence, fee currency, natural size, copy ageing.
+18. ~~During the pivot~~: decided, go straight to the sphere. The island is not kept as a regression world; shore wash is proven on a planet beach (M2b) instead of on the island in M0.
+19. ~~Game time while a server is empty~~: decided, it does not advance. Black-hole lifetimes, anchors, wormhole timers and regrowth count in played (server-running) time.

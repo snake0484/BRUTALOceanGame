@@ -1,13 +1,17 @@
 # BRUTALGame
 
-Vehicle building and crafting game in C#, built directly on the BRUTAL framework (`BRUTAL/`, cloned from https://github.com/ahwootech/BRUTAL).
+Interplanetary space ship game in C# (in the vein of Star Citizen / Space Engineers), built directly on the BRUTAL framework (`BRUTAL/`, cloned from https://github.com/ahwootech/BRUTAL).
+
+**Pivot in progress (2026-11-25).** The project was an island ocean game. The design for the space game is in `docs/pivot/` (start at `docs/pivot/README.md`). Where it lists open questions, ask rather than assume. The island and water code is being cut down (`docs/pivot/inventory.md`); docs under `docs/` other than `docs/pivot/` describe the old island game.
+
 Core pillars, in priority order:
 
 1. **Performance** – every system is designed for frame budget first. No feature ships if it blows the budget.
-2. **Ocean water** – the best-looking oceans possible. Split simulation: CPU owns the physics-relevant water, GPU owns visual detail.
-3. **Voxel terrain** – fully editable, chunked, streamed.
-4. **Vehicle building** – players assemble land/sea/air vehicles from parts, simulated physically.
-5. **Crafting** – resource gathering from terrain feeds parts and vehicles.
+2. **Scale** – a solar system of ~1000 km planets and moons, seamless from orbit to ground. Double-precision frames; Jolt runs in local float bubbles.
+3. **Multiplayer** – server-authoritative from day one. Single player is an in-process listen server (~8 players); 32-64 players on dedicated servers.
+4. **Ship building** – hulls are 3D modelled (CSG brushes), interiors cut away; components are prefab or player-made (a prefab is a saved player build).
+5. **Voxel planets** – fully editable, chunked, streamed spheres.
+6. **Crafting** – resources from terrain feed parts and ships.
 
 ## Rules for Claude
 
@@ -23,121 +27,91 @@ Core pillars, in priority order:
 | --- | --- |
 | Rendering / compute | `Brutal.Vulkan`, `Brutal.Vulkan.Vma`, `Brutal.Slang` / `Brutal.ShaderC` |
 | Window / input | `Brutal.Glfw` |
-| Physics | `Brutal.Jolt` |
+| Physics | `Brutal.Jolt` (single precision: `RVec3` binds as `float3`) |
 | Threading | `Brutal.Concurrency` (`JobScheduler`, `IJob`) |
 | Memory | `Brutal.Memory`, `Brutal.Collections` (`NativeList`, `FreeList`) |
-| Maths | `Brutal.Numerics`, `Brutal.Maths` |
+| Maths | `Brutal.Numerics` (`double3`, `doubleQuat`, `double4x4`), `Brutal.Maths` |
 | Audio | `Brutal.Fmod` |
 | Debug UI / profiling | `Brutal.ImGui`, `Brutal.ImPlot`, `Brutal.RenderDoc` |
 | Assets | `Brutal.Gltf`, `Brutal.Ktx`, `Brutal.Texture`, `Brutal.MeshOptimizer` |
-| Networking (later) | `Brutal.RakNet` |
+| Networking | `Brutal.RakNet`, `Brutal.ZLib` |
 
 ## Performance rules
 
 - Zero allocations in per-frame / per-tick paths. Use unmanaged memory, `Span<T>`, `NativeList`, pooled buffers. No LINQ, no boxing, no closures, no `params` in hot paths.
-- Data-oriented layout: structs of arrays for bulk data (voxels, water cells, particles). Keep hot data contiguous and cache friendly.
+- Data-oriented layout: structs of arrays for bulk data (voxels, entities, frames, brushes). Keep hot data contiguous and cache friendly.
 - `unsafe` and pointers are fine where they measurably help.
 - Heavy work goes through the job system; main thread only coordinates. Jobs must not share mutable state without explicit ownership.
-- Fixed simulation tick (decoupled from render rate). Rendering interpolates.
-- GPU work is batched: indirect draws, persistent mapped buffers, minimal pipeline/descriptor changes. Async compute for water and terrain meshing where possible.
+- Fixed simulation tick (60 Hz, integer `TickIndex`), decoupled from render rate. Rendering interpolates, in double.
+- GPU work is batched: indirect draws, persistent mapped buffers, minimal pipeline/descriptor changes. (Terrain still draws one `DrawIndexed` per chunk; GPU cull + indirect count is milestone M1.)
 - Every major system exposes timings in an ImGui profiler panel. Any perf claim needs a measurement.
 - Consider cost of anything that runs on tick or update before adding it.
 
+## Frames, zones and precision (`docs/pivot/frames-and-zones.md`)
+
+- **Frames:** a double-precision `FrameTree`: Solar root > body inertial > body surface (rotating) > ship grids (nestable, depth ≤ 3). Every entity stores `double3` relative to its parent frame.
+- **Persistent positions** (edits, entities, saves, wire) are int64 at 1/1024 m in their frame. Double only at runtime, float only inside a bubble, chunk or draw.
+- **Orbits:** celestial bodies on Kepler rails from the integer tick (exact forever). Patched conics: only the dominant body pulls. Coasting ships with no bubble ride rails too.
+- **Physics bubbles:** one pooled Jolt `PhysicsSystem` per cluster of interacting things inside one frame, axes = frame axes, soft radius 2 km, hard 4 km. Shared job pools; asleep scenes are not stepped. Bubbles merge and split; surface bubbles rebase in 32 m steps.
+- **Rotating surface frames** apply centrifugal and Coriolis to awake dynamic bodies. Scene gravity is set per scene, plus a per-awake-body delta; never `AddForce` gravity on every body (it wakes them).
+- **Ship grids:** players inside a ship live in grid coordinates; who is in the grid is decided by `GridVolume` (air with portals closed) and grounded contact.
+- **Warp:** the warp exit point is where a ship picks its frame and bubble (`docs/pivot/warp.md`).
+- **Rendering is camera-relative:** view matrix has no translation; per-draw `relOrigin` computed in double, then cast.
+
+## Planets (`docs/pivot/planets.md`)
+
+- Cartesian voxels axis-aligned in the rotating planet frame: 1 m voxels, 32³ chunks, the existing octree, Surface Nets, skirts, 12 B packed vertex. Only the SDF changes (local height − radial altitude).
+- Voxels only in a shell around the surface; one octree to LOD 12, then a baked cube-sphere impostor.
+- The untouched surface is a pure function of seed + position: no edits, no storage. Nothing stored but edits (op replay, as now); busy chunks compact to snapshots.
+- Detail ladder by distance: point of light > disc > impostor with atmosphere and rough outline > function terrain (each LOD evaluates only the noise octaves it can show) > edits, applied only close up (op radius ≥ 2 voxels at that LOD, within the edit radius).
+- Radial gravity, per-position up. Atmosphere: exponential density per body for drag.
+
 ## Water
 
-Water is split by responsibility. **CPU = truth that gameplay and physics can query. GPU = everything that only needs to look good.**
+Cut to the ocean only (`docs/pivot/inventory.md`). Kept: analytic swell, GPU FFT cascades, ocean shading, and **shore wash** (GPU swash sheets, edge foam, surf foam), on a sea sphere per planet.
 
-### Drivers: wind and terrain
-
-All water motion is physically driven by **wind** and **terrain**. No hand-authored wave or flow directions.
-
-- **Wind field**: a CPU wind simulation (global weather + local terrain influence) on a coarse grid. Speed, direction, gustiness. Terrain shelters, channels and deflects wind. Sampled by water, particles, vehicles (sails, aircraft) and audio.
-  - **Weather** (`docs/weather.md`, `src/Weather/`, implemented v1): localized, analytic pressure systems (storms, lows, highs) from seed + time, baked into a 32 km snapshot map around the camera every 5 s. Gameplay queries `WeatherMap.Sample`. Drives the swell wind and the sky; terrain influence still to come.
-  - **Rain** (`docs/rain.md`, `RainRenderer`, `rain_*.glsl`, implemented v1): GPU streaks carried by the wind, splash crowns and rings on the water, hidden under any solid (`RainCover`). Heavy rain costs 0.05 ms.
-- **Bathymetry**: water depth from the voxel terrain, cached as a coarse depth grid per region and rebuilt when terrain chunks change.
-
-### Layers (full design: `docs/water-architecture.md`)
-
-The queryable surface is built from three layers, composed by a single `OceanSurface` facade (implemented over A, B and the breaker faces; C still to blend in). Gameplay never queries a layer directly.
-
-- **A, open swell** (`OceanSwell`, implemented): global analytic waves. Near land it is the incident field for B and C.
-- **B, coastal modulation maps**: per-region maps from bathymetry that scale and rotate swell components (sheltering, shoaling, refraction). Analytic and deterministic. The GPU low band applies the same maps. Two levels: a 1 km near field of 4 m cells solved inside a 4 km far field of 16 m cells, so islands' lees carry on past the near field (`docs/water-architecture.md` "Far field").
-- **C, active local sim**: the voxel-water shallow-water solver, run near the player and near obstacles, with open edges driven by A + B. It handles reflection, run-up, flow around islands and breaking. Moving bodies inject displacement into it (two-way coupling). Outside C, bodies only feel buoyancy. Use it nearshore only: shallow water equations get deep-water wave speed wrong.
-- Voxel terrain and static Jolt shapes supply bathymetry and the solid mask to B and C. Terrain edits rebuild B and wake C.
-- **Voxel water** (`docs/voxel-water.md`): every voxel carries a water fill. Voxels decide *where* water is: sea fill at generation, edits, and later the flow sim. The swell and FFT decide *how* the open-sea surface moves. The ocean surface is drawn only over columns whose top sea voxel holds water. C is the voxel flow sim.
-  - **Crater lake** (`docs/voxel-water.md` "Lakes", implemented v1): the main island's summit lake is generated voxel water, loaded at rest and asleep, meshed within 352 m of the camera and drawn past that as a flat plane at its level (`SubmitPlanes`).
-  - **Swell on voxel water** (`docs/voxel-water.md` "Swell on voxel water", implemented v1, swell sampling 0.07 ms a tick near the shore): the sea's held cells and its run-up layers stand at the swell within 128 m of the camera, so free voxel water connected to the sea rises and falls with it; crests never spill onto dry ground (the ocean draws that swash). Water above sea level (the lake) never gets it; its waves are its own wind's.
-  - **River and flows** (`docs/voxel-water.md` "Flows", `WaterFlows`, `RiverPath`, implemented, unit-tested and run in game: 0.8–1.3 ms a step at the 32 m sim radius): a permanent river carved from the crater lake to the sea, fed by a spring in the lake. Running water has an identity: a flow with reaches per chunk column. Reaches near the camera run in the 3D sim; the rest are routed (storage draining downstream at uniform flow) and their loaded blocks frozen, with edge fluxes booked between them, so a partly loaded river keeps flowing.
-  - **Wind on voxel water** (`docs/voxel-water.md` "Wind on voxel water", `voxel_water_wind.glsl`, `wind_sea.glsl`, `WindSeaBands`): its own wind sea, ten octave FFT bands of slope (16 m to 1.6 cm) spread about the local wind, weighted per vertex by the fetch-limited JONSWAP spectrum of the wind the water feels (terrain shelter, slowing over land) and its fetch, both at the water's own level, with gusts and whitecaps on the steepest crests; unresolved slope becomes roughness.
-- **Much later:** flooding enclosed vehicle volumes (e.g. a submarine hull breach). Interior water lives in the vehicle frame; inflow is driven by the outside head from `OceanSurface`; flooding changes mass, centre of mass and buoyancy.
-
-### CPU side
-
-- **Ocean waves**: wind-generated swell from a physical spectrum (JONSWAP / Pierson–Moskowitz) parameterised by local wind speed, direction, fetch and duration. Only the large, physics-relevant wavelengths. Wind changes blend the spectrum over time, never snap.
-  - Depth-aware dispersion `ω² = g·k·tanh(k·h)`: waves slow, shorten and steepen in shallow water.
-  - Terrain effects: shoaling (height grows near shore), refraction (crests bend to follow depth contours), sheltering behind land, and breaking when steepness/depth limit is exceeded (breaking events feed GPU foam).
-  - Exposes `SampleHeight(x, z, t)`, `SampleNormal`, `SampleVelocity` for buoyancy, vehicles, AI, audio.
-  - Deterministic from seed + time + wind/terrain state, so it is cheap to evaluate anywhere and network-friendly.
-- **Currents**: wind-driven surface currents and tidal flow, steered by terrain. Advect floating objects, foam and voxel water.
-- **Voxel water flow**: physics-based, not a simple fill-level automaton. Shallow-water equations (virtual pipe / height-field model) for surface flow with momentum, plus volume-conserving cell transfer for 3D cases (caves, waterfalls, filling enclosed spaces).
-  - Forces: gravity down terrain slope, hydrostatic pressure, wind stress on the surface, bed friction by terrain material, inflow from currents/rivers.
-  - Mass is conserved exactly; velocities are stored per cell so water carries momentum (overshoot, sloshing, waves running up beaches).
-  - Only active cells are simulated; settled regions sleep. Chunked, jobified, double-buffered, CFL-limited substeps.
-  - The ocean acts as an infinite reservoir at sea level: voxel water connected to the ocean equalises to it rather than being simulated cell by cell.
-  - Terrain edits wake neighbouring water chunks.
-- **Buoyancy**: vehicles sample the CPU ocean and voxel water at hull sample points (submerged volume, drag, lift). Forces applied through Jolt.
-
-### GPU side
-
-- High-frequency FFT cascades layered on top of the CPU swell (only frequencies above the CPU cutoff, so the visual surface never disagrees with physics).
-- Foam: Jacobian / wave-folding foam, whitecaps, persistent foam textures that advect and decay, shoreline foam from terrain depth, vehicle wakes and splash injection.
-- Shading: physically based, subsurface scattering, reflections (SSR + probe fallback), refraction, depth-based absorption, caustics, underwater fog and god rays.
-  - **Water fog** (`docs/water-fog.md`, `WaterFogVolume`, `water_fog.glsl`, implemented v1, unmeasured): every water voxel carries a colour and fog density (`WaterBlock.Colour`, carried with the water by the pipe model); a toroidal 3D texture around the camera is marched by the water surfaces (into the water) and, under water, by the terrain, stopping at the bed or once the fog has nearly all the light (the hard limit). The far field keeps the closed-form sea fog.
-  - **Screen-space reflections** (`docs/water-ssr.md`, `ScreenReflections`, `water_ssr.glsl`, implemented v1, 12 steps of 8 px: +0.036 ms at the lake, was +0.063 at 24 of 4): the frame is split into an opaque pass and a water pass; the terrain's colour and depth are copied between them and every water surface (`shadeWater`) marches its reflected ray through that depth (steps by the ray's screen length × how much of the reflection shows), the sky where it misses. A Hi-Z pyramid was tried and measured slower.
-- Spray/mist particles in compute.
-- Surface rendering: projected grid or clipmap LOD around the camera, seamless with voxel water meshes near shore.
-
-### CPU ↔ GPU contract
-
-- Both sides share spectrum parameters, wind field, depth grid, seed and time. GPU high-frequency detail also follows local wind and depth. The GPU low band must match CPU output exactly; GPU only adds detail.
-- CPU uploads interaction data (wake sources, splashes, voxel water surface) once per tick into persistent buffers.
+- `OceanSurface.Sample(double3 planetLocal, long tick)` has one global definition (fixed tangent tiles), so server and clients agree on buoyancy.
+- Shore wash reads a depth window built from the planet generator plus edits (`IShoreDepth`), not from voxel water.
+- Gone: coastal maps (layer B), breakers, bores, spray, voxel water and its flow sim, river, lakes, wind sea, water fog, SSR, rain.
 - The GPU never feeds back into gameplay. No GPU readbacks in the frame loop.
 
-## Voxel terrain
+## Ships (`docs/pivot/ship-hulls.md`)
 
-- Chunked world (e.g. 32³ voxels), streamed around the player, generated by jobs.
-- Density/material per voxel for smooth terrain (surface nets / dual contouring / marching cubes; pick one and keep it consistent). Material IDs drive resources for crafting.
-- LOD for distant chunks with seam stitching.
-- Meshing on jobs (or GPU compute), uploads batched. Collision meshes built for Jolt per chunk, rebuilt only on edit.
-- Edits are local: only dirty chunks remesh. Edits notify water.
-- Voxel storage compressed (palette / RLE) for memory; uncompressed only while active.
+- A ship is a blueprint: an ordered list of quantized CSG brushes (add, subtract, paint) plus component placements. Only this is saved, sent, edited or damaged.
+- Every peer bakes it: 0.25 m SDF bricks > dual contouring mesh, coarse occupancy (rooms, connectivity), mass moments, convex exterior collision.
+- The server is authoritative for mass, rooms, splits and collision.
+- Components (thrusters, seats, tanks, doors…) attach to the hull; player-made ones are a modelled housing plus a function core. Prefabs are saved blueprints keyed by content hash.
+- Each ship is a Jolt compound body; damage adds subtract brushes; disconnected pieces split into new bodies.
 
-## Vehicles
+## Networking
 
-- Built from parts placed on a grid (structure, engines, wheels, propellers, floats, control parts).
-- Each vehicle is a Jolt compound body; mass, inertia and centre of mass derived from parts.
-- Parts are data-driven definitions (stats, mesh, attach points, buoyancy volume).
-- Damage and detachment split compounds into new bodies.
+- Server-authoritative 60 Hz sim, 30 Hz snapshots. The wire speaks frames, never bubbles.
+- Planets, orbits, terrain and swell are deterministic from seed + tick: zero bandwidth.
+- Clients predict only what they own, in its local frame (on foot: grid or surface coordinates; piloting: re-step a small local Jolt scene).
+- Keep a `Sim` assembly with no Vulkan reference, so a headless server can run it.
 
 ## Crafting
 
 - Data-driven recipes and items (no hard-coded content in code).
 - Resources come from terrain voxel materials and world objects.
-- Vehicle parts are crafted items.
+- Ship parts and components are crafted items.
 
-## Code layout (proposed)
+## Code layout (target)
 
 ```
 BRUTAL/            upstream framework, do not modify
 src/
-  Game/            entry point, game loop, tick scheduling
-  Engine/          our engine layer: renderer, assets, input, jobs glue
-  Water/           CPU ocean, voxel water flow, GPU water renderer
-  Terrain/         voxel storage, generation, meshing, streaming
-  Vehicles/        parts, builder, physics integration
+  Game/            client shell, entry point, game loop
+  Sim/             headless simulation: entities, tick scheduling (no Vulkan)
+  Frames/          FrameTree, Kepler rails, gravity, frame maths (no Jolt)
+  Physics/         PhysicsRuntime, PhysicsScene, bubbles, transfers
+  Engine/          renderer, assets, input, jobs glue
+  Terrain/         voxel storage, planet generation, meshing, streaming
+  Water/           ocean swell, FFT, shore wash
+  Ships/           blueprints, brushes, bake, mass, rooms, components
+  Net/             transport, replication, interest management
   Crafting/        items, recipes, inventory
-  Weather/         pressure systems, weather snapshot map
   Debug/           ImGui panels, profiling
-shaders/           Slang shaders
-data/              part, item, recipe definitions
+shaders/           shaders
+data/              component, item, recipe, material definitions
 ```
