@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>BrutalGame.Ships</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Ahwoo.BRUTAL.Concurrency" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Terrain\Terrain.csproj" />
+  </ItemGroup>
+</Project>

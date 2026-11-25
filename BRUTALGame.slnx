@@ -1,10 +1,15 @@
 ﻿<Solution>
   <Folder Name="/src/">
     <Project Path="src/Debug/Debug.csproj" />
+    <Project Path="src/Designer/Designer.csproj" />
+    <Project Path="src/Designer.App/Designer.App.csproj" />
+    <Project Path="src/Designer.Ui/Designer.Ui.csproj" />
     <Project Path="src/Engine/Engine.csproj" />
     <Project Path="src/Frames/Frames.csproj" />
     <Project Path="src/Game/Game.csproj" />
     <Project Path="src/Physics/Physics.csproj" />
+    <Project Path="src/Plans/Plans.csproj" />
+    <Project Path="src/Ships/Ships.csproj" />
     <Project Path="src/Sim/Sim.csproj" />
     <Project Path="src/Terrain/Terrain.csproj" />
     <Project Path="src/Terrain.Runtime/Terrain.Runtime.csproj" />
@@ -13,8 +18,10 @@
     <Project Path="src/Weather/Weather.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Designer.Tests/Designer.Tests.csproj" />
     <Project Path="tests/Frames.Tests/Frames.Tests.csproj" />
     <Project Path="tests/Physics.Tests/Physics.Tests.csproj" />
+    <Project Path="tests/Plans.Tests/Plans.Tests.csproj" />
     <Project Path="tests/Sim.Tests/Sim.Tests.csproj" />
     <Project Path="tests/Terrain.Tests/Terrain.Tests.csproj" />
     <Project Path="tests/Water.Tests/Water.Tests.csproj" />

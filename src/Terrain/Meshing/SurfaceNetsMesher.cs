@@ -38,8 +38,11 @@ public sealed class SurfaceNetsMesher
 
     public int LastSkirtTriangles { get; private set; }
 
+    public void Mesh(VoxelChunk chunk, ChunkMesh output, bool skirts = true) => Mesh(chunk, output, skirts, chunk.Coord.VoxelScale);
+
+    /// <summary>Meshes at an explicit cell size in metres (hull bricks use 0.25 m); terrain passes its chunk's voxel size.</summary>
     [SkipLocalsInit]
-    public unsafe void Mesh(VoxelChunk chunk, ChunkMesh output, bool skirts = true)
+    public unsafe void Mesh(VoxelChunk chunk, ChunkMesh output, bool skirts, float cellScale)
     {
         output.Clear();
         LastSkirtTriangles = 0;
@@ -55,7 +58,7 @@ public sealed class SurfaceNetsMesher
         var indices = output.Indices;
         var vertexCount = 0;
         var indexCount = 0;
-        var scale = chunk.Coord.VoxelScale;
+        var scale = cellScale;
 
         if (_vertexBorder.Length < vertices.Length)
             _vertexBorder = new byte[vertices.Length];

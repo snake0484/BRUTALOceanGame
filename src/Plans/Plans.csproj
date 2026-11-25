@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>BrutalGame.Plans</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Ahwoo.BRUTAL.ZLib" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Ships\Ships.csproj" />
+  </ItemGroup>
+</Project>
