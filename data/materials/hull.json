@@ -1,0 +1,9 @@
+{
+  "materials": [
+    { "id": "mat.hull.alloy", "name": "Structural alloy", "densityKgM3": 800, "colour": "8C949E" },
+    { "id": "mat.hull.titanium", "name": "Titanium composite", "densityKgM3": 1100, "colour": "B9B4A8" },
+    { "id": "mat.hull.armour", "name": "Armour laminate", "densityKgM3": 2400, "colour": "5A6150" },
+    { "id": "mat.hull.glass", "name": "Glazing", "densityKgM3": 600, "colour": "6FA6C8" },
+    { "id": "mat.hull.paint.red", "name": "Red livery", "densityKgM3": 800, "colour": "A8362E" }
+  ]
+}

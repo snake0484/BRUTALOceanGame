@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>BrutalGame.Designer.App</RootNamespace>
+    <AssemblyName>BRUTALDesigner</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Ahwoo.BRUTAL.NativeFileDialog" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\shaders\**\*" LinkBase="shaders" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\data\**\*" LinkBase="data" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Designer.Ui\Designer.Ui.csproj" />
+  </ItemGroup>
+</Project>
