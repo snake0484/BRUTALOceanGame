@@ -23,9 +23,10 @@ The island's other water layers (layer B coastal maps, breakers and lips, voxel 
 ## Depth cap
 
 - Every swell component is scaled by min(1, `DepthCapGamma` 0.55 × h / Hs): 0 on land and in pits cut off from the sea, so the open swell cannot run through a beach.
-- **CPU:** `OceanSwell.Cap` reads `IShoreDepth` (`TerrainShoreDepth`: the analytic terrain surface plus a snapshot of the brush edits as spheres), the same at every LOD and with no camera, so a server answers the same as a client (review ruling C7).
-- **GPU:** `oceanAt` applies the same cap from the depth map (`BathymetryTexture`). The two sources agree to the depth map's 2 m cells and the streamed terrain's quantisation.
-- Tests (`OceanSurfaceTests`): `DeepWater_IsTheSwell`, `ShallowWater_IsCappedByDepth`, `Land_IsFlatAtSeaLevel`, `Sampling_IsAllocationFree`.
+- **CPU:** `OceanSwell.Cap` reads `IShoreDepth` (`TerrainShoreDepth`: the analytic terrain surface plus the sim's accepted brush edits as spheres), the same at every LOD and with no camera, so a server answers the same as a client (review ruling C7).
+- **GPU:** `oceanAt` applies the same cap from the depth map (`BathymetryTexture`, filled by `ShoreDepthMap`). Inside its 1 km window the two agree to the streamed terrain's quantisation (`Depth_AgreesWithBathymetryGrid`: 0.02 m); outside it the GPU has no cap yet (deferred to M2b).
+- **Pits:** shores and seabeds are unminable (D30, `ShoreGuard`): a dig whose footprint comes within 16 m of ground generated below sea level + 2 m is refused by the sim. So every pit dug below sea level is cut off from the sea, and both sides leave it dry: the GPU marks it `Pit` (sea flag closed as generated, beyond the 8 m shore reach), the CPU returns `Pit` for a column generated as land and dug more than a voxel below sea level (`InlandPit_IsDryOnCpuAndGpu`).
+- Tests (`OceanSurfaceTests`): `DeepWater_IsTheSwell`, `ShallowWater_IsCappedByDepth`, `Land_IsFlatAtSeaLevel`, `Sampling_IsAllocationFree`; (`TerrainShoreDepthTests`): dig/place rules, op order, agreement with the grid, pits, allocation-free sampling with 1000 edits, and the cap's cost.
 
 ## GPU FFT detail (`OceanFft`)
 

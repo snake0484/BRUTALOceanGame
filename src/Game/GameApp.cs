@@ -7,6 +7,7 @@ using BrutalGame.Engine.Rendering;
 using BrutalGame.Engine.Scene;
 using BrutalGame.Engine.Time;
 using BrutalGame.Sim;
+using BrutalGame.Terrain;
 using BrutalGame.Terrain.Runtime;
 using BrutalGame.Terrain.Runtime.Rendering;
 using BrutalGame.Water.Ocean;
@@ -30,7 +31,7 @@ public sealed class GameApp : IDisposable
     private readonly Renderer _renderer;
     private readonly ImGuiLayer _imgui;
     private readonly ProfilerPanel _profiler;
-    private readonly SimWorld _sim = new(seed: 1, WorkerBudget.Tick);
+    private readonly SimWorld _sim;
     private readonly OceanSwell _swell;
     private readonly OceanPanel _oceanPanel;
     private readonly WeatherSystem _weather;
@@ -64,6 +65,9 @@ public sealed class GameApp : IDisposable
     /// <param name="camera">Optional start pose: x, y, z, yaw degrees, pitch degrees.</param>
     public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool flyTest = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f)
     {
+        var weatherField = new WeatherField(new WeatherClimate());
+        _sim = new SimWorld(seed: 1, WorkerBudget.Tick, new TerrainParams(), weatherField) { DriveWind = weather, WeatherTimeOffset = weatherOffset * 60.0 };
+
         if (camera is not null)
         {
             _camera.Position = new System.Numerics.Vector3(camera[0], camera[1], camera[2]);
@@ -93,20 +97,20 @@ public sealed class GameApp : IDisposable
             SwellPeriod = swell?[1] ?? 13f,
             SwellDirection = (swell?[2] ?? 0f) * MathF.PI / 180f,
         };
-        _weather = new WeatherSystem(new WeatherClimate(), weatherOffset * 60.0, CameraXZ);
-        _swell.SetWind(weather ? _weather.WithWind(wind) : wind);
+        _weather = new WeatherSystem(weatherField, _sim.WeatherTime, CameraXZ);
+        _sim.SetSwell(wind);
         _oceanFft = new OceanFft(_renderer) { DebugView = foamDebug };
         _oceanPanel = new OceanPanel(_sim.Ocean, _oceanFft);
         _weatherPanel = new WeatherPanel(_weather.Map) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset };
         _terrainRenderer = new TerrainRenderer(_renderer);
-        _terrain = new TerrainWorld(_terrainRenderer, _sim.Physics);
+        _terrain = new TerrainWorld(_terrainRenderer, _sim.Physics, _sim.Terrain);
 
         // Without --cam, 55 m off the west beach, 28 m up, looking at it.
         if (camera is null)
             _camera.Position = new System.Numerics.Vector3(Coastline.WestX(_terrain.Params, 0f) - 55f, 28f, 0f);
 
-        _brush = new TerrainBrush(_terrain, _sim.Physics, _camera);
-        _editTest = editTest ? new EditTest(_terrain, _sim.Physics, _brush, _camera) : null;
+        _brush = new TerrainBrush(_sim, _camera);
+        _editTest = editTest ? new EditTest(_sim, _terrain, _brush, _camera) : null;
         _terrainPanel = new TerrainPanel(_terrain, _terrainRenderer, _sim.Physics);
         _bathymetry = new BathymetryTexture(_renderer);
         _ocean = new OceanRenderer(_renderer, _oceanFft, _bathymetry.View, _bathymetry.Sampler);
@@ -184,8 +188,8 @@ public sealed class GameApp : IDisposable
             _brush.Update(_window, (float)frameSeconds, _imgui.WantCaptureMouse);
             _editTest?.Update(_sim.Clock.SimTime);
             _terrainPanel.BrushRadius = _brush.Radius;
+            SyncEdits();
             _terrain.Update(_camera.Position);
-            _sim.SnapshotTerrain(_terrain.Params, _terrain.Ops);
             _sections.Terrain = Lap(ref mark);
             UpdateWeather();
             UpdateBench();
@@ -262,10 +266,10 @@ public sealed class GameApp : IDisposable
         }
     }
 
-    /// <summary>Weather at the camera into the swell wind and the sky; the clear colour follows the fogged horizon.</summary>
+    /// <summary>Weather at the camera into the sky; the clear colour follows the fogged horizon.</summary>
     private void UpdateWeather()
     {
-        _weather.Update(CameraXZ, _swell, _ocean, _clearSky, _weatherPanel.DriveOcean, _weatherPanel.DriveSky);
+        _weather.Update(CameraXZ, _ocean, _clearSky, _weatherPanel.DriveSky);
         var horizon = _ocean.SkyHorizon;
         _renderer.ClearColor = new float4(horizon.X, horizon.Y, horizon.Z, 1f);
     }
@@ -285,11 +289,14 @@ public sealed class GameApp : IDisposable
 
     private void RunTicks(double frameSeconds)
     {
+        _sim.DriveWind = _weatherPanel.DriveOcean;
+        _sim.WeatherTimeOffset = _weatherPanel.TimeOffset;
+
         var ticks = _sim.Advance(frameSeconds);
         for (var i = 0; i < ticks; i++)
         {
             var tickStart = Stopwatch.GetTimestamp();
-            _weather.Tick(_sim.Clock.SimTime + _weatherPanel.TimeOffset, CameraXZ);
+            _weather.Tick(_sim.WeatherTime, CameraXZ);
             _weatherPanel.TickMs.Record((float)Stopwatch.GetElapsedTime(tickStart).TotalMilliseconds);
 
             _sim.Tick();
@@ -301,6 +308,15 @@ public sealed class GameApp : IDisposable
         _stats.TicksThisFrame = ticks;
         _stats.TickIndex = clock.TickIndex;
         _stats.SimTime = clock.SimTime;
+    }
+
+    /// <summary>The client's terrain replays the edits the sim accepted (they only ever append).</summary>
+    private void SyncEdits()
+    {
+        var edits = _sim.Edits;
+
+        for (var i = _terrain.EditCount; i < edits.Length; i++)
+            _terrain.ApplyBrush(edits[i]);
     }
 
     private SceneLighting SceneLightingFromOcean() => new()

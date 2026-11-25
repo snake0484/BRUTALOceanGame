@@ -4,35 +4,50 @@ using BrutalGame.Water.Ocean;
 namespace BrutalGame.Sim;
 
 /// <summary>
-/// Water depth from the analytic terrain surface plus a snapshot of the brush edits (spheres cut into or added onto the
-/// column top), for the surface's depth cap. Unlike the streamed bathymetry it is the same at every LOD and needs no
-/// camera, so the CPU never reads the camera window (docs/pivot/review.md C7).
+/// Water depth from the analytic terrain surface plus the sim's brush edits (spheres cut into or added onto the column
+/// top), for the surface's depth cap. Unlike the streamed bathymetry it is the same at every LOD and needs no camera, so
+/// the CPU never reads the camera window (docs/pivot/review.md C7).
+/// <para>
+/// Pits: ground dug below sea level in a column that was land as generated is dry (<see cref="Pit"/>), the GPU's rule
+/// (ShoreDepthMap). Exact because shores and seabeds are unminable (<see cref="ShoreGuard"/>): every such pit is cut off
+/// from the sea by undug land. Like the GPU's sea-level voxel, a pit within a voxel of sea level still reads its depth.
+/// </para>
 /// </summary>
 internal sealed class TerrainShoreDepth : IShoreDepth
 {
+    /// <summary>Depth of a dry pit, ShoreDepthMap.Pit's value.</summary>
+    public const float Pit = -1000f;
+
+    private readonly TerrainParams _params;
     private BrushOp[] _ops = new BrushOp[64];
     private int _opCount;
-    private TerrainParams _params;
 
-    /// <summary>Main thread, between ticks; samples read this snapshot.</summary>
-    public void Snapshot(in TerrainParams p, IReadOnlyList<BrushOp> ops)
+    public TerrainShoreDepth(in TerrainParams terrain) => _params = terrain;
+
+    public ReadOnlySpan<BrushOp> Ops => _ops.AsSpan(0, _opCount);
+
+    /// <summary>Main thread, in the tick; samples between ticks see every op added so far.</summary>
+    public void Add(in BrushOp op)
     {
-        _params = p;
-        _opCount = ops.Count;
+        if (_opCount == _ops.Length)
+            Array.Resize(ref _ops, _ops.Length * 2);
 
-        if (_ops.Length < _opCount)
-            Array.Resize(ref _ops, Math.Max(_opCount, _ops.Length * 2));
-
-        for (var i = 0; i < _opCount; i++)
-            _ops[i] = ops[i];
+        _ops[_opCount++] = op;
     }
 
-    public float Depth(float x, float z) => _params.SeaLevel - Top(x, z);
-
-    private float Top(float x, float z)
+    public float Depth(float x, float z)
     {
-        var top = TerrainGenerator.SurfaceHeight(x, z, _params);
+        var generated = TerrainGenerator.SurfaceHeight(x, z, _params);
+        var top = Top(x, z, generated);
 
+        if (generated >= _params.SeaLevel && top < _params.SeaLevel - ChunkConstants.VoxelSize)
+            return Pit;
+
+        return _params.SeaLevel - top;
+    }
+
+    private float Top(float x, float z, float top)
+    {
         for (var i = 0; i < _opCount; i++)
         {
             ref readonly var op = ref _ops[i];

@@ -5,7 +5,7 @@ namespace BrutalGame.Water.Ocean;
 /// <summary>
 /// The queryable ocean surface (CLAUDE.md, Water layers): the swell, depth-limited by min(1, 0.55 h / Hs) from the
 /// world's analytic depth. The GPU applies the same cap from its 1 km bathymetry map, so the two agree only inside that
-/// window and away from pits cut off from the sea; the GPU's FFT detail and shore wash are not queryable. Buoyancy and other gameplay queries go through here rather than the swell. Read-only between ticks
+/// window (dry pits included); the GPU's FFT detail and shore wash are not queryable. Buoyancy and other gameplay queries go through here rather than the swell. Read-only between ticks
 /// (the swell's SetTime runs on the main thread in the tick), so safe to call from jobs then; allocation-free.
 /// </summary>
 public sealed class OceanSurface(OceanSwell swell, IShoreDepth? shore = null)

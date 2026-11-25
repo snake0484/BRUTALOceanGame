@@ -17,22 +17,6 @@ public sealed unsafe class BathymetryTexture : IDisposable
 {
     private const int Texels = BathymetryGrid.Resolution * BathymetryGrid.Resolution;
 
-    /// <summary>
-    /// Depth marking pits cut off from the sea (ground below sea level, no sea water); the ocean never draws there
-    /// (the shader discards below -500). Dry ground instead stores its signed depth, sea level − ground (negative).
-    /// </summary>
-    public const float Pit = -1000f;
-
-    /// <summary>Lowest signed depth stored for dry ground; anything higher above the sea never meets the surface.</summary>
-    private const float MinLandDepth = -20f;
-
-    /// <summary>
-    /// Cells (2 m) a below-sea-level column may lie from open sea, through other below-sea-level columns, and still count
-    /// as sea. The sea flag reads the sea-level voxel layer, which is mostly solid where the ground sits just under the
-    /// surface, so the shoreline band reads "dry"; without this it was discarded as a pit and left a hole at the beach.
-    /// </summary>
-    private const int ShoreReach = 4;
-
     /// <summary>Upload rectangles per record: at most the grid's changed regions.</summary>
     private const int MaxUploads = 32;
 
@@ -40,9 +24,7 @@ public sealed unsafe class BathymetryTexture : IDisposable
     private const VkPipelineStageFlags ShaderStages =
         VkPipelineStageFlags.VertexShaderBit | VkPipelineStageFlags.FragmentShaderBit | VkPipelineStageFlags.ComputeShaderBit;
 
-    private readonly byte[] _reach = new byte[Texels];
-    private readonly byte[] _reachScratch = new byte[Texels];
-    private readonly int[] _queue = new int[Texels];
+    private readonly ShoreDepthMap _depths = new();
 
     private readonly Device _device;
     private readonly VmaAllocator _allocator;
@@ -145,7 +127,7 @@ public sealed unsafe class BathymetryTexture : IDisposable
 
         var shift = _initialised && !full ? grid.Shift : default;
         var start = Stopwatch.GetTimestamp();
-        UpdateShoreReach(grid);
+        _depths.Update(grid, !_initialised);
         LastReachMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
 
         // The strips a shift brings in are cleared on the GPU (RecordShift); regions the grid rebuilt there are uploaded over them.
@@ -285,126 +267,12 @@ public sealed unsafe class BathymetryTexture : IDisposable
     };
 
     /// <summary>
-    /// Writes <paramref name="region"/> into this frame's staging at <paramref name="offset"/> halves: signed depth, sea
-    /// level - ground (negative on dry land; Pit where the ocean must not draw). The shader fades the surface by its height
-    /// over the ground, so the water's edge is wherever the moving surface meets the beach.
+    /// Writes <paramref name="region"/> into this frame's staging at <paramref name="offset"/> halves: signed depth
+    /// (<see cref="ShoreDepthMap"/>). The shader fades the surface by its height over the ground, so the water's edge is
+    /// wherever the moving surface meets the beach.
     /// </summary>
-    private void FillRows(BathymetryGrid grid, Region region, int offset)
-    {
-        const int n = BathymetryGrid.Resolution;
-        var depths = (Half*)_staging.Mapped + offset;
-        var tops = grid.Tops;
-        var beds = grid.Beds;
-        var sea = grid.Sea;
-        var seaLods = grid.SeaLods;
-
-        for (var z = region.Z0; z < region.Z1; z++)
-        {
-            for (var x = region.X0; x < region.X1; x++)
-            {
-                var i = x + z * n;
-                var ground = BathymetryGrid.Ground(tops[i], beds[i], sea[i]);
-                float depth;
-
-                if (float.IsNaN(ground))
-                    depth = BathymetryGrid.UnknownDepth;
-                else if (sea[i] == BathymetryGrid.SeaState.Dry && ground < BathymetryGrid.SeaLevel - SeaVoxel(seaLods[i]) && _reach[i] == 0)
-                    depth = Pit;
-                else
-                    depth = MathF.Max(MinLandDepth, BathymetryGrid.SeaLevel - ground);
-
-                depths[i] = (Half)depth;
-            }
-        }
-    }
-
-    /// <summary>
-    /// Height of the voxel layer the sea flag was read from (2^lod m). Ground inside it can't hold a sea voxel, so a
-    /// column only counts as a cut-off pit when its ground lies deeper than that.
-    /// </summary>
-    private static float SeaVoxel(byte lod) => lod == byte.MaxValue ? 1f : 1 << Math.Min((int)lod, 8);
-
-    /// <summary>
-    /// Open-sea cells (1) and the below-sea-level dry cells within <see cref="ShoreReach"/> steps of them (2..), found
-    /// breadth-first from the sea's edge. The first upload floods the whole grid; after that the reach moves with the
-    /// grid's data and is recomputed only around the regions that changed.
-    /// </summary>
-    private void UpdateShoreReach(BathymetryGrid grid)
-    {
-        if (!_initialised)
-        {
-            Flood(grid, Region.All, Region.All);
-            return;
-        }
-
-        if (grid.Shift != default)
-            BathymetryGrid.ShiftCells(_reach, grid.Shift.X, grid.Shift.Z, (byte)0);
-
-        // A cell's reach depends only on cells within ShoreReach steps, so flooding the region grown by twice that and
-        // keeping the result grown by once that is exact.
-        foreach (var region in grid.ChangedRegions)
-            Flood(grid, region.Expand(ShoreReach), region.Expand(2 * ShoreReach));
-    }
-
-    /// <summary>Breadth-first reach within <paramref name="area"/>; the result is kept inside <paramref name="keep"/>.</summary>
-    private void Flood(BathymetryGrid grid, Region keep, Region area)
-    {
-        const int n = BathymetryGrid.Resolution;
-        var tops = grid.Tops;
-        var beds = grid.Beds;
-        var sea = grid.Sea;
-        var head = 0;
-        var tail = 0;
-
-        for (var z = area.Z0; z < area.Z1; z++)
-        {
-            var row = z * n;
-            _reachScratch.AsSpan(row + area.X0, area.X1 - area.X0).Clear();
-
-            for (var x = area.X0; x < area.X1; x++)
-            {
-                if (sea[row + x] == BathymetryGrid.SeaState.Dry)
-                    continue;
-
-                _reachScratch[row + x] = 1;
-                _queue[tail++] = row + x;
-            }
-        }
-
-        while (head < tail)
-        {
-            var i = _queue[head++];
-            var steps = _reachScratch[i];
-            if (steps > ShoreReach)
-                continue;
-
-            var x = i % n;
-            var z = i / n;
-            for (var k = 0; k < 4; k++)
-            {
-                var (nx, nz) = k switch
-                {
-                    0 => (x - 1, z),
-                    1 => (x + 1, z),
-                    2 => (x, z - 1),
-                    _ => (x, z + 1),
-                };
-
-                if (nx < area.X0 || nx >= area.X1 || nz < area.Z0 || nz >= area.Z1)
-                    continue;
-
-                var j = nx + nz * n;
-                if (_reachScratch[j] != 0 || sea[j] != BathymetryGrid.SeaState.Dry || !(BathymetryGrid.Ground(tops[j], beds[j], sea[j]) < BathymetryGrid.SeaLevel))
-                    continue;
-
-                _reachScratch[j] = (byte)(steps + 1);
-                _queue[tail++] = j;
-            }
-        }
-
-        for (var z = keep.Z0; z < keep.Z1; z++)
-            _reachScratch.AsSpan(z * n + keep.X0, keep.X1 - keep.X0).CopyTo(_reach.AsSpan(z * n + keep.X0));
-    }
+    private void FillRows(BathymetryGrid grid, Region region, int offset) =>
+        _depths.Fill(grid, region, new Span<Half>((Half*)_staging.Mapped + offset, Texels));
 
     public void Dispose()
     {

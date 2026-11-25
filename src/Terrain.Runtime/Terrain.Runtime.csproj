@@ -10,4 +10,7 @@
     <ProjectReference Include="..\Terrain\Terrain.csproj" />
     <ProjectReference Include="..\Physics\Physics.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Sim.Tests" />
+  </ItemGroup>
 </Project>

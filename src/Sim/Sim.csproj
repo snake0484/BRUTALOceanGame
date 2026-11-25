@@ -6,5 +6,9 @@
     <ProjectReference Include="..\Physics\Physics.csproj" />
     <ProjectReference Include="..\Terrain\Terrain.csproj" />
     <ProjectReference Include="..\Water\Water.csproj" />
+    <ProjectReference Include="..\Weather\Weather.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Sim.Tests" />
   </ItemGroup>
 </Project>

@@ -31,7 +31,7 @@ public sealed class TerrainWorld : IDisposable
     public int CollisionRadius = 4;
 
     public readonly BathymetryGrid Bathymetry = new();
-    public TerrainParams Params = new();
+    public readonly TerrainParams Params;
 
     private readonly TerrainRenderer _renderer;
     private readonly PhysicsWorld _physics;
@@ -103,8 +103,9 @@ public sealed class TerrainWorld : IDisposable
         }
     }
 
-    public TerrainWorld(TerrainRenderer renderer, PhysicsWorld physics)
+    public TerrainWorld(TerrainRenderer renderer, PhysicsWorld physics, in TerrainParams terrain)
     {
+        Params = terrain;
         _renderer = renderer;
         _physics = physics;
         _scheduler = new JobScheduler((uint)WorkerBudget.Streaming, "Terrain", ThreadPriority.BelowNormal);
@@ -124,9 +125,6 @@ public sealed class TerrainWorld : IDisposable
     public int DirtyChunks => _dirty.Count;
 
     public int EditCount => _ops.Count;
-
-    /// <summary>Every brush op so far, in order. Read-only for other systems.</summary>
-    public IReadOnlyList<BrushOp> Ops => _ops;
 
     /// <summary>Wall time of the last completed batch, and how many chunks it held.</summary>
     public float LastBatchMs { get; private set; }
@@ -148,7 +146,8 @@ public sealed class TerrainWorld : IDisposable
     public (float Select, float Uploads, float Stream, float Bathymetry) LastUpdate { get; private set; }
 
     /// <summary>
-    /// Records a brush edit and schedules every loaded leaf it touches (any LOD, apron included) for regeneration.
+    /// Records a brush edit the sim accepted and schedules every loaded leaf it touches (any LOD, apron included) for
+    /// regeneration.
     /// </summary>
     public void ApplyBrush(in BrushOp op)
     {

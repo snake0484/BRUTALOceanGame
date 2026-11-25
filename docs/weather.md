@@ -56,15 +56,15 @@ Localized weather: storms in one place, sun and calm in another. It is cheap bec
 - **Layout:** cells are AoS (`WeatherSample`, 7 floats). Each sample reads all fields at 4 nodes, so they sit together.
 - **Threading:** Tick on the main thread. Sample is read-only between ticks, like the swell.
 
-## Game coupling (`src/Game/WeatherSystem.cs`)
+## Game coupling (`src/Game/WeatherSystem.cs`, `src/Sim/SwellWind.cs`)
 
-- **Ticks:** `GameApp.Tick` calls `WeatherSystem.Tick(sim time + debug offset, camera)`. The cost is recorded into the Weather panel.
-- **Per frame:** `WeatherSystem.Update` samples the map at the camera.
-  - **Ocean wind:**
+- **Ticks:** `GameApp.Tick` calls `WeatherSystem.Tick(SimWorld.WeatherTime, camera)` (sim time + debug offset). The cost is recorded into the Weather panel.
+- **Ocean wind (sim):** `SimWorld.Tick` samples it every `WindInterval` ticks (1 s), from the analytic `WeatherField` (the map is camera-centred) about a fixed reference point, the world origin. So the swell depends on the tick alone, never the camera or frame timing, and a headless host reproduces it.
     - The swell takes the **sea wind**: the mean wind speed over a 3 × 3 grid of samples 2 km apart, along the mean wind's direction. The waves at a point were raised over the water around it, and the averaging also hides a storm's calm eye.
     - A new `SwellParams` wind is queued only when the sea wind has moved by more than 1 m/s or 10°.
     - `OceanSwell` then crossfades over its 30 s `BlendSeconds`, and queues the latest change while blending. So a sea builds as a storm arrives, and at most one spectrum rebuild starts per 30 s.
     - Fetch, depth, groundswell and the other swell parameters are left as they are.
+- **Per frame:** `WeatherSystem.Update` samples the map at the camera.
   - **Sky:** sun intensity, zenith and horizon colours, and fog density are set on `OceanRenderer`. Terrain and voxel water read them from there, and the clear colour follows the horizon.
     - Overcast (smoothstep of cloud over 0.25–0.95) greys the sky and blocks up to 85% of direct sun.
     - Rain and storm cores darken the sky further and multiply fog by up to 10.5×. Fog's 1/e distance is then about 0.8 km, against 8 km clear.

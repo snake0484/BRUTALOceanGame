@@ -2,15 +2,16 @@ using System.Numerics;
 using Brutal.GlfwApi;
 using BrutalGame.Engine.Scene;
 using BrutalGame.Physics;
+using BrutalGame.Sim;
 using BrutalGame.Terrain;
-using BrutalGame.Terrain.Runtime;
 
 namespace BrutalGame;
 
 /// <summary>
-/// Mouse terrain editing: LMB digs, Ctrl+LMB places, [ and ] change radius. Rays hit terrain collision.
+/// Mouse terrain editing: LMB digs, Ctrl+LMB places, [ and ] change radius. Rays hit terrain collision. Edits go to the
+/// sim as commands; digs into the shore or seabed are refused there (ShoreGuard).
 /// </summary>
-public sealed class TerrainBrush(TerrainWorld world, PhysicsWorld physics, FlyCamera camera)
+public sealed class TerrainBrush(SimWorld sim, FlyCamera camera)
 {
     private const float MaxDistance = 600f;
     private const float Interval = 0.08f;
@@ -29,13 +30,13 @@ public sealed class TerrainBrush(TerrainWorld world, PhysicsWorld physics, FlyCa
         else if (window.GetKey(GlfwKey.RightBracket) == GlfwKeyAction.Press)
             Radius = MathF.Min(16f, Radius + 4f * dt);
 
-        LastHit = physics.CastRay(camera.Position, CursorRay(window), MaxDistance);
+        LastHit = sim.Physics.CastRay(camera.Position, CursorRay(window), MaxDistance);
 
         if (uiWantsMouse || window.GetMouseButton(GlfwMouseButton.Left) != GlfwButtonAction.Press || _cooldown > 0f || !LastHit.Hit)
             return;
 
         var place = window.GetKey(GlfwKey.LeftControl) == GlfwKeyAction.Press;
-        world.ApplyBrush(new BrushOp(LastHit.Point, Radius, place ? BrushMode.Place : BrushMode.Dig, PlaceMaterial));
+        sim.QueueEdit(new BrushOp(LastHit.Point, Radius, place ? BrushMode.Place : BrushMode.Dig, PlaceMaterial));
         _cooldown = Interval;
     }
 

@@ -10,6 +10,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Sim\Sim.csproj" />
+    <ProjectReference Include="..\..\src\Terrain.Runtime\Terrain.Runtime.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
