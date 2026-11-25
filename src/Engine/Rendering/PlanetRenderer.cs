@@ -14,10 +14,16 @@ namespace BrutalGame.Engine.Rendering;
 /// each placed by an instance record (review C9). Precise from metres above a 1000 km sphere out to 1e8 m: the record
 /// carries centre − camera in float only as a direction; altitude and h (2R + h) come from double. Main thread only.
 /// Per frame inside the opaque pass: <see cref="Begin"/>, then <see cref="DrawSphere"/> and <see cref="DrawMarker"/>.
+/// The marker probe reads back where the GPU put the marker: each rasterised marker fragment writes its estimate of the
+/// disc's centre (planet.frag), and <see cref="Begin"/> reads the slot's previous frame once its fence has signalled.
 /// </summary>
 public sealed unsafe class PlanetRenderer : IDisposable
 {
+    public const int ProbeSlots = 256;
+
     private const int UniformAlignment = 256;
+    private const int ProbeHeaderBytes = 16;
+    private const int ProbeRegionBytes = (ProbeHeaderBytes + ProbeSlots * 16 + UniformAlignment - 1) / UniformAlignment * UniformAlignment;
     private const int SphereVertices = 3;
     private const int MarkerVertices = 6;
     private const int MaxCellDecade = 4;
@@ -26,6 +32,8 @@ public sealed unsafe class PlanetRenderer : IDisposable
     private readonly PipelineCache _pipelines;
     private readonly InstanceBuffer _instances;
     private readonly GpuBuffer _uniforms;
+    private readonly GpuBuffer _probe;
+    private readonly int[] _probeTags = new int[Renderer.FramesInFlight];
     private readonly VkDescriptorSetLayout _setLayout;
     private readonly VkDescriptorPool _pool;
     private readonly VkDescriptorSet[] _sets = new VkDescriptorSet[Renderer.FramesInFlight];
@@ -55,10 +63,16 @@ public sealed unsafe class PlanetRenderer : IDisposable
     public PlanetRenderer(Renderer renderer, InstanceBuffer instances)
     {
         var context = renderer.Context;
+
+        if (!context.FragmentStoresAndAtomics)
+            throw new InvalidOperationException("GPU lacks fragmentStoresAndAtomics, needed by the orbit test's marker probe.");
+
         _device = context.Device;
         _pipelines = context.Pipelines;
         _instances = instances;
         _uniforms = new GpuBuffer(context, UniformStride * Renderer.FramesInFlight, VkBufferUsageFlags.UniformBufferBit, true);
+        _probe = new GpuBuffer(context, ProbeRegionBytes * Renderer.FramesInFlight, VkBufferUsageFlags.StorageBufferBit, false, hostRead: true);
+        Array.Fill(_probeTags, -1);
         _setLayout = CreateSetLayout();
         _pool = CreatePool();
         CreateSets();
@@ -73,12 +87,18 @@ public sealed unsafe class PlanetRenderer : IDisposable
 
     private static int UniformStride => (sizeof(FrameUniforms) + UniformAlignment - 1) / UniformAlignment * UniformAlignment;
 
+    /// <summary>The marker as the GPU drew it in the frame tagged <see cref="MarkerProbe.Tag"/>, read at the last <see cref="Begin"/>; Tag −1 when none.</summary>
+    public MarkerProbe Probe { get; private set; }
+
     /// <summary>
-    /// Inside the opaque pass: writes the camera and the star direction (toward the star, camera frame axes) and binds the
-    /// pipeline. <paramref name="aspect"/> must be the one the view-projection was built with.
+    /// Inside the opaque pass: reads back the marker probe of this slot's last frame, writes the camera and the star
+    /// direction (toward the star, camera frame axes) and binds the pipeline. <paramref name="aspect"/> must be the one
+    /// the view-projection was built with; <paramref name="probeTag"/> names this frame's marker in <see cref="Probe"/>.
     /// </summary>
-    public void Begin(CommandBuffer commands, int frameIndex, VkExtent2D extent, FlyCamera camera, float aspect, Vector3 sun, float sunIntensity)
+    public void Begin(CommandBuffer commands, int frameIndex, VkExtent2D extent, FlyCamera camera, float aspect, Vector3 sun, float sunIntensity, int probeTag)
     {
+        ReadProbe(frameIndex);
+        _probeTags[frameIndex] = probeTag;
         _camera = camera.Position;
 
         var f = 1f / MathF.Tan(camera.FovY * 0.5f);
@@ -133,11 +153,56 @@ public sealed unsafe class PlanetRenderer : IDisposable
         Draw(commands, new BodyConstants { Shape = new Vector4(0f, 0f, 1f, 0f), Colour = new Vector4(colour, 1f) }, MarkerVertices, record);
     }
 
+    /// <summary>After the pass that drew the planets: makes the marker probe's fragment writes visible to the host.</summary>
+    public static void EndPass(CommandBuffer commands) =>
+        commands.PipelineBarrier(
+            VkPipelineStageFlags.FragmentShaderBit,
+            VkPipelineStageFlags.HostBit,
+            VkDependencyFlags.None,
+            [new VkMemoryBarrier { SrcAccessMask = VkAccessFlags.ShaderWriteBit, DstAccessMask = VkAccessFlags.HostReadBit }],
+            [],
+            []
+        );
+
     private void Draw(CommandBuffer commands, in BodyConstants constants, int vertices, int record)
     {
         var copy = constants;
         commands.PushConstants(_layout, VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit, 0, new ReadOnlySpan<byte>(&copy, sizeof(BodyConstants)));
         commands.Draw(vertices, 1, 0, record);
+    }
+
+    // The slot's frame has finished (BeginFrame waited on its fence); the reset is a host write, visible at submit.
+    private void ReadProbe(int frameIndex)
+    {
+        var region = (byte*)_probe.Mapped + frameIndex * ProbeRegionBytes;
+        var fragments = (int)Math.Min(*(uint*)region, ProbeSlots);
+        var samples = (Vector4*)(region + ProbeHeaderBytes);
+        var probe = new MarkerProbe { Tag = _probeTags[frameIndex], Fragments = fragments };
+        *(uint*)region = 0;
+        _probeTags[frameIndex] = -1;
+
+        if (fragments == 0)
+        {
+            Probe = probe with { Tag = -1 };
+            return;
+        }
+
+        var centre = Vector2.Zero;
+        var coverage = Vector2.Zero;
+
+        for (var i = 0; i < fragments; i++)
+        {
+            centre += new Vector2(samples[i].X, samples[i].Y);
+            coverage += new Vector2(samples[i].Z, samples[i].W);
+        }
+
+        probe.Centre = centre / fragments;
+        probe.Coverage = coverage / fragments;
+
+        for (var i = 0; i < fragments; i++)
+            probe.Spread = MathF.Max(probe.Spread, Vector2.Distance(new Vector2(samples[i].X, samples[i].Y), probe.Centre));
+
+        Probe = probe;
     }
 
     private static Vector3 Wrap(double3 v, double period) =>
@@ -149,23 +214,31 @@ public sealed unsafe class PlanetRenderer : IDisposable
 
     private VkDescriptorSetLayout CreateSetLayout()
     {
-        var binding = new VkDescriptorSetLayoutBinding
+        var bindings = stackalloc VkDescriptorSetLayoutBinding[]
         {
-            Binding = 0,
-            DescriptorType = VkDescriptorType.UniformBuffer,
-            DescriptorCount = 1,
-            StageFlags = VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit,
+            new()
+            {
+                Binding = 0,
+                DescriptorType = VkDescriptorType.UniformBuffer,
+                DescriptorCount = 1,
+                StageFlags = VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit,
+            },
+            new() { Binding = 1, DescriptorType = VkDescriptorType.StorageBuffer, DescriptorCount = 1, StageFlags = VkShaderStageFlags.FragmentBit },
         };
 
-        return _device.CreateDescriptorSetLayout(new VkDescriptorSetLayoutCreateInfo { BindingCount = 1, Bindings = &binding }, null);
+        return _device.CreateDescriptorSetLayout(new VkDescriptorSetLayoutCreateInfo { BindingCount = 2, Bindings = bindings }, null);
     }
 
     private VkDescriptorPool CreatePool()
     {
-        var size = new VkDescriptorPoolSize { Type = VkDescriptorType.UniformBuffer, DescriptorCount = Renderer.FramesInFlight };
+        var sizes = stackalloc VkDescriptorPoolSize[]
+        {
+            new() { Type = VkDescriptorType.UniformBuffer, DescriptorCount = Renderer.FramesInFlight },
+            new() { Type = VkDescriptorType.StorageBuffer, DescriptorCount = Renderer.FramesInFlight },
+        };
 
         return _device.CreateDescriptorPool(
-            new VkDescriptorPoolCreateInfo { MaxSets = Renderer.FramesInFlight, PoolSizeCount = 1, PoolSizes = &size },
+            new VkDescriptorPoolCreateInfo { MaxSets = Renderer.FramesInFlight, PoolSizeCount = 2, PoolSizes = sizes },
             null
         );
     }
@@ -195,6 +268,12 @@ public sealed unsafe class PlanetRenderer : IDisposable
                 Offset = (ByteSize64)(i * UniformStride),
                 Range = (ByteSize64)sizeof(FrameUniforms),
             };
+            var probe = new VkDescriptorBufferInfo
+            {
+                Buffer = _probe.Handle,
+                Offset = (ByteSize64)(i * ProbeRegionBytes),
+                Range = (ByteSize64)ProbeRegionBytes,
+            };
 
             _device.UpdateDescriptorSets(
                 [
@@ -205,6 +284,14 @@ public sealed unsafe class PlanetRenderer : IDisposable
                         DescriptorCount = 1,
                         DescriptorType = VkDescriptorType.UniformBuffer,
                         BufferInfo = &info,
+                    },
+                    new VkWriteDescriptorSet
+                    {
+                        DstSet = _sets[i],
+                        DstBinding = 1,
+                        DescriptorCount = 1,
+                        DescriptorType = VkDescriptorType.StorageBuffer,
+                        BufferInfo = &probe,
                     },
                 ],
                 []
@@ -288,6 +375,26 @@ public sealed unsafe class PlanetRenderer : IDisposable
         _device.DestroyPipelineLayout(_layout, null);
         _device.DestroyDescriptorPool(_pool, null);
         _device.DestroyDescriptorSetLayout(_setLayout, null);
+        _probe.Dispose();
         _uniforms.Dispose();
     }
+}
+
+/// <summary>Where the GPU drew the --orbit-test marker in one frame (<see cref="PlanetRenderer.Probe"/>), in render-target pixels.</summary>
+public struct MarkerProbe
+{
+    /// <summary>The frame's tag as passed to <see cref="PlanetRenderer.Begin"/>; −1 for no probe.</summary>
+    public int Tag;
+
+    /// <summary>Rasterised marker fragments (at most <see cref="PlanetRenderer.ProbeSlots"/> recorded).</summary>
+    public int Fragments;
+
+    /// <summary>Mean of the fragments' estimates of the disc's centre: where the GPU's vertex path put it.</summary>
+    public Vector2 Centre;
+
+    /// <summary>Largest distance of one fragment's estimate from <see cref="Centre"/>.</summary>
+    public float Spread;
+
+    /// <summary>Centroid of the rasterised pixels' centres: what is on screen, quantised by the pixel grid.</summary>
+    public Vector2 Coverage;
 }

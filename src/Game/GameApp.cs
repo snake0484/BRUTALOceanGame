@@ -73,7 +73,7 @@ public sealed class GameApp : IDisposable
     private readonly int _uiStats;
 
     /// <param name="camera">Optional start pose: x, y, z, yaw degrees, pitch degrees.</param>
-    /// <param name="orbitTest">--orbit-test [inertial]: the test planet as a smooth sphere, flown from 2 m to 1e8 m with the camera in its surface or inertial frame; the island is not drawn.</param>
+    /// <param name="orbitTest">--orbit-test [inertial]: the test planet as a smooth sphere with the island's terrain on it, flown from 2 m to 1e8 m with the camera in its surface or inertial frame; no ocean.</param>
     public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool flyTest = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null)
     {
         var weatherField = new WeatherField(new WeatherClimate());
@@ -208,7 +208,7 @@ public sealed class GameApp : IDisposable
                 _camera.Update(_window, frameSeconds, _imgui.WantCaptureMouse, _imgui.WantCaptureKeyboard);
 
             _flyTest?.Fly(_sim.Clock.SimTime, WorldReady);
-            _orbitTest?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady, _renderer.OutputExtent.Height, _sim.RenderTime);
+            _orbitTest?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady, OutputAspect, RenderViewport, _sim.RenderTime);
 
             var terrainStart = Stopwatch.GetTimestamp();
             mark = terrainStart;
@@ -234,7 +234,10 @@ public sealed class GameApp : IDisposable
                 var gpu = _renderer.GpuTimer;
                 var pipe = _renderer.PipelineStats;
                 var viewProj = _camera.ViewProjection(aspect);
-                var islandCamera = _camera.Position - _island.Origin;
+                var terrain = TerrainView(out var terrainCamera, out var terrainAxes);
+
+                // The ocean takes no axes, so it is drawn only with the camera in the island's frame; not in the orbit test.
+                var ocean = terrain && _orbitTest is null && _camera.Frame == _island.Frame;
 
                 mark = Stopwatch.GetTimestamp();
                 _instances.BeginFrame(_renderer.FrameIndex);
@@ -249,34 +252,35 @@ public sealed class GameApp : IDisposable
                 _oceanFft.Record(commands, _renderer.FrameIndex, _swell, renderTime, (float)frameSeconds);
                 gpu.End(commands, _fftScope);
 
-                // The orbit test draws only the planet: the island placeholder sits 1e6 m away and is retired in M2.
-                var island = _orbitTest is null && IslandInView;
-
-                if (island)
+                if (ocean)
                 {
                     _ocean.ShoreWash = _oceanPanel.ShoreWash;
-                    _ocean.Prepare(_renderer.FrameIndex, _swell, renderTime, viewProj, islandCamera, _bathymetry.Rect);
+                    _ocean.Prepare(_renderer.FrameIndex, _swell, renderTime, viewProj, terrainCamera, _bathymetry.Rect);
                     _sections.Prepare = Lap(ref mark);
                     gpu.Begin(commands, _oceanComputeScope);
                     _ocean.RecordCompute(commands, _renderer.FrameIndex, (float)frameSeconds, _sim.Clock.TickIndex);
                     gpu.End(commands, _oceanComputeScope);
+                }
 
+                if (terrain)
+                {
                     gpu.Begin(commands, _terrainCullScope);
-                    _terrainRenderer.Cull(commands, _renderer.FrameIndex, viewProj, islandCamera, IslandFrame.Axes);
+                    _terrainRenderer.Cull(commands, _renderer.FrameIndex, viewProj, terrainCamera, terrainAxes);
                     gpu.End(commands, _terrainCullScope);
                 }
 
                 _renderer.BeginOpaquePass(commands);
 
-                if (island)
+                if (terrain)
                 {
                     gpu.Begin(commands, _terrainScope);
                     pipe.Begin(commands, _terrainStats);
-                    _terrainRenderer.Draw(commands, _renderer.FrameIndex, extent, viewProj, islandCamera, TerrainLightingFromOcean());
+                    _terrainRenderer.Draw(commands, _renderer.FrameIndex, extent, viewProj, terrainCamera, _orbitTest is null ? TerrainLightingFromOcean() : OrbitTerrainLighting());
                     pipe.End(commands, _terrainStats);
                     gpu.End(commands, _terrainScope);
                 }
-                else
+
+                if (_planets is not null)
                 {
                     gpu.Begin(commands, _planetScope);
                     DrawPlanet(commands, extent, aspect);
@@ -284,9 +288,13 @@ public sealed class GameApp : IDisposable
                 }
 
                 _renderer.EndOpaquePass(commands);
+
+                if (_planets is not null)
+                    PlanetRenderer.EndPass(commands);
+
                 _renderer.BeginWaterPass(commands);
 
-                if (island)
+                if (ocean)
                 {
                     gpu.Begin(commands, _oceanScope);
                     pipe.Begin(commands, _oceanStats);
@@ -326,10 +334,11 @@ public sealed class GameApp : IDisposable
         _renderer.ClearColor = new float4(horizon.X, horizon.Y, horizon.Z, 1f);
     }
 
-    /// <summary>--orbit-test: the planet sphere and the marker, lit by the star through the frame tree.</summary>
+    /// <summary>--orbit-test: the planet sphere and the marker, lit by the star through the frame tree. The marker probe of this slot's last frame goes to the test.</summary>
     private void DrawPlanet(Brutal.VulkanApi.CommandBuffer commands, Brutal.VulkanApi.VkExtent2D extent, float aspect)
     {
-        _planets!.Begin(commands, _renderer.FrameIndex, extent, _camera, aspect, _orbitTest!.SunDirection, OrbitSunIntensity);
+        _planets!.Begin(commands, _renderer.FrameIndex, extent, _camera, aspect, _orbitTest!.SunDirection, OrbitSunIntensity, _orbitTest.ProbeTag);
+        _orbitTest.ResolveProbe(_planets.Probe);
         _planets.DrawSphere(commands, _orbitTest.PlanetCentre, _orbitTest.PlanetRadius, _orbitTest.PlanetAxes);
         _planets.DrawMarker(commands, _orbitTest.Marker, _orbitTest.MarkerRadius, MarkerColour);
     }
@@ -339,19 +348,50 @@ public sealed class GameApp : IDisposable
         if (_orbitTest is null)
             return;
 
-        var output = _renderer.OutputExtent;
-        var aspect = output.Width / (float)output.Height;
-        var viewport = new System.Numerics.Vector2(output.Width, output.Height);
-        _orbitTest.Record(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, aspect, viewport, _stats.Frame.Last, _sections.Work, _renderer.GpuTimer.Ring(_planetScope).Last);
+        _orbitTest.Record(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, OutputAspect, RenderViewport, _stats.Frame.Last, _sections.Work, _renderer.GpuTimer.Ring(_planetScope).Last, _terrainRenderer.DrawnLastFrame);
     }
+
+    /// <summary>The aspect the view-projection is built with.</summary>
+    private float OutputAspect => _renderer.OutputExtent.Width / (float)_renderer.OutputExtent.Height;
+
+    /// <summary>The render target's size (render scale applied): the pixels the scene is drawn in.</summary>
+    private System.Numerics.Vector2 RenderViewport => new(_renderer.Extent.Width, _renderer.Extent.Height);
 
     private bool WorldReady => _terrain.LoadedChunks > 0 && _terrain.PendingJobs == 0;
 
     /// <summary>
-    /// The island draws take the camera in the island's frame (the ocean takes no axes) and only inside the planet's SOI,
-    /// so a heliocentric camera never casts its position into chunk coordinates.
+    /// The camera in island coordinates and the island's axes in the camera frame's, through the frame tree at render
+    /// time when the camera is in another frame. False outside the planet's SOI, so a heliocentric camera never casts
+    /// its position into chunk coordinates.
     /// </summary>
-    private bool IslandInView => _camera.Frame == _island.Frame && _camera.Position.Length() < _island.SoiRadius;
+    private bool TerrainView(out double3 camera, out doubleQuat axes)
+    {
+        camera = _camera.Position;
+        axes = IslandFrame.Axes;
+
+        if (_camera.Frame != _island.Frame)
+        {
+            if (!_sim.Celestial.Frames.TryRelativeRender(_island.Frame, _camera.Frame, out var island))
+                return false;
+
+            camera = doubleQuat.Conjugate(island.Rotation) * (camera - island.Position);
+            axes = island.Rotation;
+        }
+
+        var inSoi = camera.Length() < _island.SoiRadius;
+        camera -= _island.Origin;
+        return inSoi;
+    }
+
+    /// <summary>The island's terrain in the orbit test: lit by the star (camera frame axes, as its normals), no sky or fog.</summary>
+    private TerrainLighting OrbitTerrainLighting() => new()
+    {
+        SunDirection = _orbitTest!.SunDirection,
+        SunIntensity = OrbitSunIntensity,
+        SkyZenith = SpaceColour,
+        SkyHorizon = SpaceColour,
+        FogDensity = 0f,
+    };
 
     /// <summary>The camera in island coordinates; the island's origin during the orbit test, so the island stays loaded and still.</summary>
     private System.Numerics.Vector3 CameraOnIsland => _orbitTest is null ? _island.ToIsland(_camera.Position) : default;

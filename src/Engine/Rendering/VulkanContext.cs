@@ -28,6 +28,9 @@ public sealed unsafe class VulkanContext : IDisposable
 
     /// <summary>The device's drawIndirectCount feature (Vulkan 1.2), enabled when supported: GPU-culled draws read their count from a buffer.</summary>
     public readonly bool DrawIndirectCount;
+
+    /// <summary>The device's fragmentStoresAndAtomics feature, enabled when supported: --orbit-test's marker probe writes from fragments.</summary>
+    public readonly bool FragmentStoresAndAtomics;
     private readonly VkDebugUtilsMessengerEXT _messenger;
 
     public VulkanContext(GlfwWindow window, bool enableValidation)
@@ -60,7 +63,8 @@ public sealed unsafe class VulkanContext : IDisposable
 
         PipelineStatistics = supported.Features.PipelineStatisticsQuery;
         DrawIndirectCount = supported12.DrawIndirectCount;
-        Device = CreateDevice(PhysicalDevice, queueFamily, PipelineStatistics, DrawIndirectCount);
+        FragmentStoresAndAtomics = supported.Features.FragmentStoresAndAtomics;
+        Device = CreateDevice(PhysicalDevice, queueFamily, PipelineStatistics, DrawIndirectCount, FragmentStoresAndAtomics);
         GraphicsQueue = Device.GetQueue(queueFamily, 0);
         Allocator = Device.CreateVmaAllocator(new VmaAllocatorCreateInfo
         {
@@ -160,7 +164,7 @@ public sealed unsafe class VulkanContext : IDisposable
         return -1;
     }
 
-    private static DeviceEx CreateDevice(PhysicalDevice physicalDevice, int queueFamily, bool pipelineStatistics, bool drawIndirectCount)
+    private static DeviceEx CreateDevice(PhysicalDevice physicalDevice, int queueFamily, bool pipelineStatistics, bool drawIndirectCount, bool fragmentStores)
     {
         var priority = 1f;
         Span<VkDeviceQueueCreateInfo> queues =
@@ -186,6 +190,7 @@ public sealed unsafe class VulkanContext : IDisposable
             PipelineStatisticsQuery = pipelineStatistics,
             MultiDrawIndirect = true,
             DrawIndirectFirstInstance = true,
+            FragmentStoresAndAtomics = fragmentStores,
         };
 
         return physicalDevice.CreateDevice(new DeviceEx.CreateInfo

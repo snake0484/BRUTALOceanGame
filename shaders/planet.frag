@@ -3,6 +3,8 @@
 // so t = c / (sqrt(b^2 - c) - b) keeps full precision metres above a 1000 km surface (CameraProjection.SphereDistance
 // mirrors it). A 3D checker at two decades of cell size, anchored by the camera's position mod the period (double on
 // the CPU), shows motion at any altitude. Kind 1: the marker disc, biased toward the camera so the surface never cuts it.
+// The marker probe: every rasterised marker fragment writes where it puts the disc's centre and its own pixel, read
+// back after the frame's fence (PlanetRenderer, --orbit-test only).
 #extension GL_GOOGLE_include_directive : require
 #include "planet.glsl"
 
@@ -11,6 +13,16 @@ layout(location = 1) flat in vec4 vOrigin;
 layout(location = 2) flat in vec4 vRotation;
 
 layout(location = 0) out vec4 outColor;
+
+const uint PROBE_SLOTS = 256u; // PlanetRenderer.ProbeSlots
+
+layout(set = 0, binding = 1, std430) buffer MarkerProbe {
+    uint fragments;
+    uint pad0;
+    uint pad1;
+    uint pad2;
+    vec4 samples[PROBE_SLOTS]; // xy = the fragment's estimate of the centre's pixel, zw = gl_FragCoord.xy
+} probe;
 
 const vec3 DARK = vec3(0.26, 0.28, 0.32);
 const vec3 LIGHT = vec3(0.44, 0.42, 0.37);
@@ -50,10 +62,18 @@ void main()
 
     if (pc.shape.z > 0.5)
     {
+        // The quad lies square to the view axis, so disc coordinates are affine on screen: uv 0 sits at this pixel
+        // minus uv through the inverse of their screen derivatives.
+        vec2 centre = gl_FragCoord.xy - inverse(mat2(dFdx(vUv), dFdy(vUv))) * vUv;
         float r2 = dot(vUv, vUv);
 
         if (r2 > 1.0)
             discard;
+
+        uint slot = atomicAdd(probe.fragments, 1u);
+
+        if (slot < PROBE_SLOTS)
+            probe.samples[slot] = vec4(centre, gl_FragCoord.xy);
 
         vec3 normal = normalize(normalize(right) * vUv.x + normalize(up) * vUv.y - forward * sqrt(1.0 - r2));
         outColor = vec4(shade(pc.colour.rgb, normal, 0.6), 1.0);
