@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using BrutalGame.Frames;
 using BrutalGame.Physics;
 using BrutalGame.Terrain;
 using BrutalGame.Water.Ocean;
@@ -26,6 +27,11 @@ public sealed class SimWorld : IDisposable
     public readonly OceanSurface Ocean;
     public readonly TerrainParams Terrain;
 
+    /// <summary>Frame forest; celestial rails and spin are refreshed into it at the start of every tick.</summary>
+    public readonly FrameTree Frames;
+
+    public readonly CelestialSystem Celestial;
+
     /// <summary>Weather the swell wind follows when <see cref="DriveWind"/> is set; null pins the swell to <see cref="SetSwell"/>.</summary>
     public readonly WeatherField? Weather;
 
@@ -47,6 +53,8 @@ public sealed class SimWorld : IDisposable
         Terrain = terrain;
         Weather = weather;
         Physics = new PhysicsWorld(workerThreads: workerThreads);
+        Frames = new FrameTree();
+        Celestial = CelestialSystem.CreateTest(Frames, seed, _clock.TickSeconds);
         _shoreDepth = new TerrainShoreDepth(terrain);
         Ocean = new OceanSurface(new OceanSwell(seed), _shoreDepth);
 
@@ -100,6 +108,7 @@ public sealed class SimWorld : IDisposable
     {
         ApplyEdits();
         UpdateWind();
+        Celestial.Update(_clock.TickIndex);
 
         var dt = _clock.TickSeconds;
         Physics.Step((float)dt);

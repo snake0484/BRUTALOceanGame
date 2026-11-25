@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>BrutalGame.Frames</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Ahwoo.BRUTAL.Numerics" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Frames.Tests" />
+  </ItemGroup>
+</Project>

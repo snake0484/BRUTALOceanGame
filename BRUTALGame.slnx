@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/Debug/Debug.csproj" />
     <Project Path="src/Engine/Engine.csproj" />
+    <Project Path="src/Frames/Frames.csproj" />
     <Project Path="src/Game/Game.csproj" />
     <Project Path="src/Physics/Physics.csproj" />
     <Project Path="src/Sim/Sim.csproj" />
@@ -12,6 +13,7 @@
     <Project Path="src/Weather/Weather.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Frames.Tests/Frames.Tests.csproj" />
     <Project Path="tests/Physics.Tests/Physics.Tests.csproj" />
     <Project Path="tests/Sim.Tests/Sim.Tests.csproj" />
     <Project Path="tests/Terrain.Tests/Terrain.Tests.csproj" />
