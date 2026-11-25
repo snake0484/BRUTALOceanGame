@@ -3,7 +3,7 @@ namespace BrutalGame.Water.Ocean;
 /// <summary>
 /// Inputs for the CPU swell spectrum. Direction is where waves travel toward, radians, 0 = +X, π/2 = +Z.
 /// The local wind makes a wind sea (JONSWAP); a groundswell from a distant storm can be added on top, independent of
-/// the local wind (docs/surf-research.md): a narrow band of long-period waves with its own height, period and direction.
+/// the local wind (docs/water-architecture.md): a narrow band of long-period waves with its own height, period and direction.
 /// </summary>
 public struct SwellParams()
 {

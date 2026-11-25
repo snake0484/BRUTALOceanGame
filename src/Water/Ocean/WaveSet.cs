@@ -2,7 +2,7 @@ namespace BrutalGame.Water.Ocean;
 
 /// <summary>
 /// One discretised spectrum: fixed wave components drawn from JONSWAP with cos-2s spreading for the local wind sea, and,
-/// independent of the wind, a narrow Gaussian band of long-period groundswell (docs/surf-research.md).
+/// independent of the wind, a narrow Gaussian band of long-period groundswell (docs/water-architecture.md).
 /// Storage is preallocated so rebuilding on wind change does not allocate.
 /// </summary>
 internal sealed class WaveSet

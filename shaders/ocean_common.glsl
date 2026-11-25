@@ -77,7 +77,7 @@ float waterDepth(vec2 xz)
     return textureLod(depthMap, uv, 0.0).r;
 }
 
-// Swash (docs/breaking-waves.md): run-up events per shoreline point. Each bore that reaches the shoreline below a beach
+// Swash (docs/shore-wash.md): run-up events per shoreline point. Each bore that reaches the shoreline below a beach
 // point collapses into a sheet whose edge runs up the beach ballistically (Shen and Meyer: x = u0 t - a t^2 / 2 along the
 // beach, a = g tan(beta) x (1 + SWASH_FRICTION) on the way up, SWASH_BACK x g tan(beta) back down, so it drains slower
 // than it rushed up) and the surface above a point is the highest of the last SWASH_EVENTS bores' sheets, so a bore

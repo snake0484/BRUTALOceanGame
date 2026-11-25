@@ -60,4 +60,4 @@ Voxel size adapts to distance. The unit of work stays a dense 32³ chunk; what c
 - **Only real changes count.** `BeginRegion`/`EndRegion` compare a band before and after merging and mark changed only the cells whose top, sea state or sea LOD actually differ. A distant coarse leaf swapped for its children usually changes nothing.
 - **Pending regions merge only when it pays.** Regions merge only if the bounding box isn't much larger than the two. Two strips meeting at a corner used to become the whole grid.
 - **Retire is budgeted.** Coverage checks run under a 0.5 ms budget per update and resume where they stopped, with removals inside the budget. A coarse node's coverage is one pass over the desired leaves (the octree is aligned, so a finer leaf is inside exactly when its origin is), not a walk of up to 8^lod descendants. Before, a single check could take about 5 ms.
-- The depth-map side of this (regional uploads, the GPU shift) is in `docs/voxel-water.md`, under the bathymetry texture.
+- The depth-map side of this (regional uploads, the GPU shift, the shore reach flood) is in `docs/shore-wash.md`, under Inputs.

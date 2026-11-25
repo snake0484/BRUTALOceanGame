@@ -13,7 +13,7 @@ layout(location = 4) in vec3 vShoreDamp;  // per cascade (OceanPoint.shore)
 layout(location = 5) in float vSurfFoam;   // whitewater left behind by the surf
 layout(location = 6) in float vSwashEdge;  // 1 at the edge of a swash sheet, 0 half a metre behind it
 
-// Thin water is see-through (docs/breaking-waves.md, thirty-fourth pass): the terrain shows through it, darkened as wet
+// Thin water is see-through (docs/shore-wash.md): the terrain shows through it, darkened as wet
 // sand is, under the sky's reflection, and the water's own colour takes over as it deepens, so the shallows read as depth
 // and a swash sheet as a glassy film with an edge rather than paint.
 const float SHEET_OPAQUE = 0.6;    // m of water by which the body colour has taken over from the terrain seen through it
