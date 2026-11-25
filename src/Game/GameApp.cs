@@ -66,13 +66,9 @@ public sealed class GameApp : IDisposable
 
     /// <summary>The benchmark alternates the water's screen-space reflections (docs/water-ssr.md) instead of layer B.</summary>
     private readonly bool _benchSsr;
-    private readonly BreakerSet _breakers = new();
-    private readonly BreakerFaces _breakerFaces = new();
     private readonly OceanSurface _surface;
-    private readonly BreakerBores _breakerBores = new();
     private readonly FlyTest? _flyTest;
     private FrameSections _sections;
-    private readonly BreakerOverlay _breakerOverlay = new();
     private readonly long _startTime = Stopwatch.GetTimestamp();
     private readonly VoxelWaterRenderer _waterRenderer;
 
@@ -85,7 +81,7 @@ public sealed class GameApp : IDisposable
     private readonly int _reflectionScope;
     private readonly int _fftScope;
     private readonly int _windSeaScope;
-    private readonly int _sprayScope;
+    private readonly int _oceanComputeScope;
     private readonly int _uiScope;
     private readonly int _terrainScope;
     private readonly int _uploadScope;
@@ -98,7 +94,7 @@ public sealed class GameApp : IDisposable
     private readonly int _uiStats;
 
     /// <param name="camera">Optional start pose: x, y, z, yaw degrees, pitch degrees.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, int waterRate = 240, bool hideUi = false, bool coastal = true, double benchSeconds = 0.0, bool breakers = false, bool faces = true, bool lips = true, bool flyTest = false, float[]? swell = null, bool foldLip = false, bool chainLips = false, bool weather = true, float weatherOffset = 0f, float rain = -1f, bool benchRain = false, bool waterPipes = false, bool benchFog = false, bool fogOn = true, bool benchSsr = false, bool ssrOn = true, bool voxelSwell = true, float renderScale = 1f)
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, int waterRate = 240, bool hideUi = false, bool coastal = true, double benchSeconds = 0.0, bool flyTest = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float rain = -1f, bool benchRain = false, bool waterPipes = false, bool benchFog = false, bool fogOn = true, bool benchSsr = false, bool ssrOn = true, bool voxelSwell = true, float renderScale = 1f)
     {
         if (camera is not null)
         {
@@ -134,7 +130,7 @@ public sealed class GameApp : IDisposable
         _weather = new WeatherSystem(new WeatherClimate(), weatherOffset * 60.0, CameraXZ);
         _swell.SetWind(weather ? _weather.WithWind(wind) : wind);
         _oceanFft = new OceanFft(_renderer) { DebugView = foamDebug };
-        _oceanPanel = new OceanPanel(_swell, _oceanFft) { CoastalEnabled = coastal, ShowBreakers = breakers, ShowLips = lips, FoldLip = foldLip, ChainLips = chainLips };
+        _oceanPanel = new OceanPanel(_swell, _oceanFft) { CoastalEnabled = coastal };
         _weatherPanel = new WeatherPanel(_weather.Map) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset, OverrideRain = rain >= 0f, RainOverride = MathF.Max(rain, 0f) };
         _terrainRenderer = new TerrainRenderer(_renderer, _fog);
         _terrain = new TerrainWorld(_terrainRenderer, _physics);
@@ -149,8 +145,7 @@ public sealed class GameApp : IDisposable
         _editTest = editTest ? new EditTest(_terrain, _physics, _brush, _camera) : null;
         _water = new VoxelWaterSystem(_terrain, waterPipes) { StepsPerSecond = waterRate };
 
-        // Waves physically enter sea zones through their open-sea boundary. The bare swell, not the surface: breakers
-        // reach zones as bores (BreakerBores), and their drawn faces fade out inside zones, so the faces would count twice.
+        // Waves physically enter sea zones through their open-sea boundary.
         _water.Zones.SeaSurface = (x, z) => _swell.SampleHeight(x, z);
 
         // The same swell holds the sea's voxel cells, so free voxel water against the sea rises and falls with it. Its 8 m
@@ -164,14 +159,13 @@ public sealed class GameApp : IDisposable
             var s = _swell.Sample(x, z);
             return new System.Numerics.Vector3(s.Height, s.Velocity.X, s.Velocity.Z);
         };
-        _surface = new OceanSurface(_swell, _breakers) { FacesEnabled = faces };
+        _surface = new OceanSurface(_swell);
         _windSea = new WindSeaBands(_renderer);
         _waterRenderer = new VoxelWaterRenderer(_renderer, _rainCover, _fog, _reflections, _windSea.SlopeView, _windSea.Sampler);
-        _breakerFaces.Enabled = faces;
 
         _terrainPanel = new TerrainPanel(_terrain, _terrainRenderer, _physics, _water, _waterRenderer, _fog, _reflections);
         _bathymetry = new BathymetryTexture(_renderer);
-        _ocean = new OceanRenderer(_renderer, _oceanFft, _bathymetry.View, _bathymetry.Sampler, _rainCover, _fog, _reflections) { FacesEnabled = faces };
+        _ocean = new OceanRenderer(_renderer, _oceanFft, _bathymetry.View, _bathymetry.Sampler, _rainCover, _fog, _reflections);
         _rain = new RainRenderer(_renderer, _ocean);
         _flyTest = flyTest ? new FlyTest(_camera, _terrain, _bathymetry, _coastal, _rainCover) : null;
         _profiler = new ProfilerPanel(_stats, _renderer, _rainCover, _fog, _terrainRenderer, _ocean, _waterRenderer);
@@ -179,7 +173,7 @@ public sealed class GameApp : IDisposable
         _uploadScope = _renderer.GpuTimer.Register("Uploads");
         _fftScope = _renderer.GpuTimer.Register("Ocean FFT");
         _windSeaScope = _renderer.GpuTimer.Register("Wind sea FFT");
-        _sprayScope = _renderer.GpuTimer.Register("Spray");
+        _oceanComputeScope = _renderer.GpuTimer.Register("Ocean compute");
         _terrainScope = _renderer.GpuTimer.Register("Terrain");
         _oceanScope = _renderer.GpuTimer.Register("Ocean");
         _waterScope = _renderer.GpuTimer.Register("Voxel water");
@@ -332,16 +326,13 @@ public sealed class GameApp : IDisposable
                     gpu.End(commands, _windSeaScope);
                 }
 
-                _ocean.DrawLips = _oceanPanel.ShowLips;
-                _ocean.FoldLip = _oceanPanel.FoldLip;
-                _breakerFaces.UseChains = _oceanPanel.ChainLips;
                 PrepareRain(_renderer.FrameIndex, renderTime, (float)frameSeconds, extent.Height);
-                _ocean.Prepare(_renderer.FrameIndex, _swell, _breakerFaces, renderTime, (float)_clock.Alpha, viewProj, _camera.Position, _bathymetry.Rect,
-                    _water.Splashes, _water.Zones.FlowRect, _water.Zones.PackedFlow);
+                _ocean.Prepare(_renderer.FrameIndex, _swell, renderTime, (float)_clock.Alpha, viewProj, _camera.Position, _bathymetry.Rect,
+                    _water.Zones.FlowRect, _water.Zones.PackedFlow);
                 _sections.Prepare = Lap(ref mark);
-                gpu.Begin(commands, _sprayScope);
-                _ocean.RecordSpray(commands, _renderer.FrameIndex, _breakerFaces.SegmentCount, _breakerFaces.SlotCount, (float)frameSeconds, _clock.TickIndex);
-                gpu.End(commands, _sprayScope);
+                gpu.Begin(commands, _oceanComputeScope);
+                _ocean.RecordCompute(commands, _renderer.FrameIndex, (float)frameSeconds, _clock.TickIndex);
+                gpu.End(commands, _oceanComputeScope);
                 _rain.RecordSplashes(commands, _renderer.FrameIndex);
 
                 _renderer.BeginOpaquePass(commands);
@@ -361,7 +352,7 @@ public sealed class GameApp : IDisposable
 
                 gpu.Begin(commands, _oceanScope);
                 pipe.Begin(commands, _oceanStats);
-                _ocean.Record(commands, _renderer.FrameIndex, extent, _camera.Position, _breakerFaces.SegmentCount);
+                _ocean.Record(commands, _renderer.FrameIndex, extent, _camera.Position);
                 pipe.End(commands, _oceanStats);
                 gpu.End(commands, _oceanScope);
 
@@ -471,10 +462,6 @@ public sealed class GameApp : IDisposable
 
         start = Stopwatch.GetTimestamp();
         _swell.SetTime(tickIndex * dt);
-        _breakers.Update(_swell, (float)dt);
-        _breakerFaces.Build(_breakers, _swell, CameraXZ, BreakerFaces.LipDistance);
-        _breakerBores.Apply(_breakers, _swell, _water.Zones, (float)dt);
-        _oceanPanel.BreakerMs.Record(_breakers.LastUpdateMs);
         _oceanPanel.PrepareMs.Record((float)Stopwatch.GetElapsedTime(start).TotalMilliseconds);
     }
 
@@ -504,12 +491,7 @@ public sealed class GameApp : IDisposable
         _imgui.NewFrame();
         _profiler.Draw();
         _renderer.PipelineStats.Enabled = _profiler.Open && _profiler.PipelineStatsOn;
-        _oceanPanel.BreakerCount = _breakers.Count;
-        _oceanPanel.SurfTexels = _breakers.SurfTexels;
         _oceanPanel.Draw();
-        _breakerOverlay.Enabled = _oceanPanel.ShowBreakers;
-        var extent = _renderer.OutputExtent;
-        _breakerOverlay.Draw(_breakers, _camera.ViewProjection(extent.Width / (float)Math.Max(1u, extent.Height)));
         _terrainPanel.Draw();
         _weatherPanel.Draw(CameraXZ);
         _imgui.EndFrame();

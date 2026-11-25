@@ -1,4 +1,4 @@
-// Water shading shared by the ocean surface (ocean.frag), breaker lips (ocean_lip.frag) and voxel water
+// Water shading shared by the ocean surface (ocean.frag) and voxel water
 // (voxel_water.frag), so every water in the world is coloured and lit the same: the body by the water fog (water_fog.glsl,
 // marched near, closed form far), reflection of the scene (water_ssr.glsl) or the sky, sun, foam lace, tonemap and fog.
 // Needs a uniform block named frame with cameraPos (w = time), sunDir (w = intensity), skyZenith, skyHorizon (w = fog
@@ -12,7 +12,7 @@
 #ifndef WATER_NOISE_GLSL
 #define WATER_NOISE_GLSL
 const float FLOW_PERIOD = 1.0;  // s: each copy of the flow map slides for this long, by speed x this, before it fades out and resets
-const float LACE_WRAP = 600.0;  // seconds: foam and lip texture clocks wrap so noise coordinates stay small
+const float LACE_WRAP = 600.0;  // seconds: foam texture clocks wrap so noise coordinates stay small
 
 float hash12(vec2 p)
 {
@@ -40,7 +40,7 @@ const float WET_SAND = 0.7;                              // sand under water is 
 const float RAIN_ROUGHNESS = 0.3;                        // a sea roughened by rain: rings finer than a pixel ...
 const float RAIN_SKY_BLUR = 0.35;                        // ... scatter the sky's reflection toward its average
 
-// 0..1: how much rain roughens this pixel's surface (ocean.frag sets it; the lips leave it 0).
+// 0..1: how much rain roughens this pixel's surface (ocean.frag and voxel_water.frag set it).
 float gRainRough = 0.0;
 
 // Slope variance of waves too short for this pixel to resolve as normals (voxel_water.frag sets it): they widen the sun's
@@ -113,14 +113,13 @@ float lace(vec2 p, float t)
     return 0.5 * a * a + 0.3 * b * b + 0.2 * c * c;
 }
 
-// Flow mapping (ocean.frag, ocean_lip.frag): the water's forward speed relative to the rest grid over a breaking wave
-// (breakerFace's flow, FLOW_*) slides whatever is drawn on it, the lace and the ripple detail, along dir: two copies
+// Flow mapping (ocean.frag, voxel_water.frag): the water's forward speed relative to the rest grid (a sea zone's or the
+// voxel water's current) slides whatever is drawn on it, the lace and the ripple detail, along dir: two copies
 // on one global clock half a period (FLOW_PERIOD) apart, each displaced by speed x its phase and fading out as it
 // resets, so the water visibly streams at its speed. The clock is global and only the displacement scales with the
 // speed: a clock that ran at the speed (time x speed / cycle) wrapped a different number of times per metre wherever the
 // speed varied, and after half a minute crushed whole cycles of texture into bands centimetres wide. With the global
-// clock the stretch along a speed gradient is at most half a period x the gradient, whatever the time. The same clock
-// and speed on the surface and on the tongue, so the back, the crest and the lip stream as one. xy = the two phases
+// clock the stretch along a speed gradient is at most half a period x the gradient, whatever the time. xy = the two phases
 // (−0.5 .. 0.5 of a period), z = the weight of the first.
 vec3 flowPhases()
 {

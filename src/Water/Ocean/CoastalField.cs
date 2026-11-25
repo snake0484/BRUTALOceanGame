@@ -14,7 +14,7 @@ public sealed class CoastalField
 {
     public const int Resolution = 256;
 
-    /// <summary>A near field's cell (m): the breakers, the surf carrier and its atlas are on this grid.</summary>
+    /// <summary>A near field's cell (m): the surf carrier and its atlas are on this grid.</summary>
     public const float CellSize = 4f;
 
     /// <summary>A far field's cell (m): 4 km a side.</summary>
@@ -109,7 +109,7 @@ public sealed class CoastalField
 
     /// <summary>
     /// <see cref="Sample"/>, or past this field's edge (or where it has nothing) its far field's: the swell surface reads
-    /// this, so the islands' shadows carry on past the near field. The surf carrier and breakers read the near field alone.
+    /// this, so the islands' shadows carry on past the near field. The surf carrier reads the near field alone.
     /// </summary>
     public bool SampleWithFar(float x, float z, ref CoastalSample s) => Sample(x, z, ref s) || (Far?.Sample(x, z, ref s) ?? false);
 

@@ -14,13 +14,10 @@ layout(location = 1) out vec2 vRestXZ;       // x0 after morph (cascade sample c
 layout(location = 2) out vec4 vCpuPartials;  // CPU band (hx, hz, λDxx, λDzz)
 layout(location = 3) out float vCpuDxz;      // CPU band λDxz
 layout(location = 4) out vec3 vShoreDamp;    // per cascade: 0 on the beach, in a pond or a sea cave .. 1 on open deep water
-layout(location = 5) out float vBreakerFoam; // aerated water on a curling / broken breaker face
-layout(location = 6) out float vSurfFoam;
-layout(location = 7) out vec2 vFlow;         // the water's forward speed over a breaking wave (breakerFace)
-layout(location = 8) out vec4 vFold;         // always 0 here: the clipmap never folds (ocean_patch.vert does)
-layout(location = 9) out vec3 vTongue;       // always 0 here
-layout(location = 10) out float vSwashEdge;  // 1 at the edge of a swash sheet, 0 half a metre behind it (ocean.frag's edge line)
-layout(location = 11) out float vTurbulence; // sea-zone water churned by a pour, a crash or a wall, 0..1
+layout(location = 5) out float vSurfFoam;
+layout(location = 6) out vec2 vFlow;         // the water's forward speed: in sea zones the sim's current
+layout(location = 7) out float vSwashEdge;   // 1 at the edge of a swash sheet, 0 half a metre behind it (ocean.frag's edge line)
+layout(location = 8) out float vTurbulence;  // sea-zone water churned by a pour, a crash or a wall, 0..1
 
 void main()
 {
@@ -46,11 +43,8 @@ void main()
     vCpuPartials = p.cpuPartials;
     vCpuDxz = p.cpuDxz;
     vShoreDamp = p.shore;
-    vBreakerFoam = p.breakerFoam;
     vSurfFoam = p.surfFoam;
     vFlow = p.flow;
-    vFold = p.fold;
-    vTongue = p.tongue;
     vSwashEdge = p.swashEdge;
     vTurbulence = p.turbulence;
 

@@ -35,15 +35,6 @@ public sealed class OceanPanel
     public bool CoastalEnabled = true;
     public float CoastalBuildMs;
     public int CoastalBuilds;
-    public bool ShowBreakers;
-    public bool ShowLips;
-    public bool FoldLip;
-
-    /// <summary>Lips seeded by the chained crest polylines (the old seeding) instead of the raw crest crossings, for A/B comparison (BreakerFaces.UseChains).</summary>
-    public bool ChainLips;
-    public int BreakerCount;
-    public int SurfTexels;
-    public readonly TimingRing BreakerMs = new(TimingSamples);
 
     public OceanPanel(OceanSwell swell, OceanFft fft)
     {
@@ -141,14 +132,6 @@ public sealed class OceanPanel
         ImGui.Checkbox("Layer B coastal", ref CoastalEnabled);
         ImGui.SameLine();
         ImGui.Text($"{CoastalBuilds} builds  last {CoastalBuildMs:F1} ms (jobs)");
-        ImGui.Checkbox("Breakers", ref ShowBreakers);
-        ImGui.SameLine();
-        ImGui.Checkbox("Lips", ref ShowLips);
-        ImGui.SameLine();
-        ImGui.Checkbox("Fold lip"u8, ref FoldLip);
-        ImGui.Checkbox("Chain seeds"u8, ref ChainLips);
-        ImGui.SameLine();
-        ImGui.Text($"{BreakerCount} crests  {SurfTexels} surf texels  {BreakerMs.Average:F3} ms  max {BreakerMs.Max:F3}");
 
         ImGui.SeparatorText("Origin"u8);
         ImGui.PlotLines("##height"u8, _height.Values, _height.Offset, default, float.MaxValue, float.MaxValue, GraphSize);

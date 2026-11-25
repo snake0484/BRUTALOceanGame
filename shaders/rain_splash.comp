@@ -5,7 +5,7 @@
 // lands: on the ocean as drawn (oceanAt at the impact's rest position, so it rides the waves with its ring), or on the
 // terrain's top where that is higher or no ocean is drawn. Stateless: every slot is rewritten each frame.
 // The surface evaluation is a long serial chain and there are few crowns to hide it behind, so each cell gets LANES
-// lanes that split the swell's components between them (as ocean_lip_base.comp does) before one finishes the point.
+// lanes that split the swell's components between them (swellShare) before one finishes the point.
 
 #define RAIN_SPLASHES_WRITABLE
 #include "ocean_common.glsl"

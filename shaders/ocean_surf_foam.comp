@@ -1,9 +1,7 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// Surf foam that outlives its breaker (docs/breaking-waves.md): per 2 m cell of the depth map's grid, last frame's
-// coverage decays and whatever the surf makes now is added: throwing crests and rollers, and fresh foam at the edge of a
-// swash sheet as it rushes up the beach, which the sheet leaves as a film as it drains. Whitewater lingers and fades
-// behind a crest, and where a crest ends, instead of vanishing.
+// Surf foam left behind by the swash: per 2 m cell of the depth map's grid, last frame's coverage decays and fresh foam
+// at the edge of a swash sheet as it rushes up the beach is added, which the sheet leaves as a film as it drains.
 
 #define SURF_FOAM_WRITABLE
 #include "ocean_common.glsl"
@@ -34,15 +32,9 @@ void main()
         return;
     }
 
-    float height = 0.0, Dx = 0.0, Dz = 0.0, hx = 0.0, hz = 0.0, jxx = 0.0, jzz = 0.0, jxz = 0.0;
-    vec2 flow = vec2(0.0);
-    float made = breakerFace(0, x0, height, Dx, Dz, hx, hz, jxx, jzz, jxz, flow);
-
     // The up-rushing edge is fresh whitewater, a line that climbs the beach with the edge and is left to fade as the
-    // sheet drains back; never over the water, where the bore's own roller is the whitewater.
+    // sheet drains back; never over the water.
     float front;
     swashSheet(x0, waterDepth(x0), front);
-    made = max(made, SWASH_FOAM * front);
-
-    surfFoam.values[i] = max(before, made);
+    surfFoam.values[i] = max(before, SWASH_FOAM * front);
 }

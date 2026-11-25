@@ -75,13 +75,10 @@ public sealed class ZoneFlowSim
     public float BreakSlope = 0.6f;
     public float ChurnDepth = 0.5f;
 
-    /// <summary>Splashes kept per tick; the rest of a long wall's or a wide pour's are dropped.</summary>
-    public const int MaxSplashes = 512;
-
     /// <summary>Height (m) a neighbour's bed must stand over the water to be a wall the water slams into rather than runs up.</summary>
     public float WallHeight = 0.5f;
 
-    /// <summary>Speed (m/s) into a wall over which the water splashes up it, and the shallowest water (m) that does.</summary>
+    /// <summary>Speed (m/s) into a wall over which the water churns up it, and the shallowest water (m) that does.</summary>
     public float SplashSpeed = 0.4f;
     public float SplashDepth = 0.15f;
 
@@ -105,9 +102,6 @@ public sealed class ZoneFlowSim
     /// </summary>
     public float BoilSpeed = 8f;
     private const float MaxDrift = 3f;
-
-    private readonly WaterSplash[] _splashes = new WaterSplash[MaxSplashes];
-    private int _splashCount;
 
     /// <summary>Seconds a grown disc must stay calm before it remerges, and how often calm is checked.</summary>
     public float RemergeTime = 3f;
@@ -158,14 +152,6 @@ public sealed class ZoneFlowSim
     // Per cell, packed for the GPU once a tick (PackFlow): half (velocity x, z), half (turbulence, 0).
     private uint[] _packed = [];
 
-    // Sim time of the last breaker bore. Surf is the ocean's normal state, not a disturbance: while bores arrive the zone
-    // does not grow (growth is for edits draining), or every set of waves would enlarge it and its cost. Zone-wide,
-    // because a surge spreads through the sim to other edge cells within the quiet time.
-    private float _lastBore = float.NegativeInfinity;
-    private float _time;
-
-    /// <summary>Seconds after any bore during which the zone does not grow.</summary>
-    public float BoreQuiet = 2f;
     private float[] _flux = [];      // 4 per cell: -X, +X, -Z, +Z outflow (m^3/s)
     private float[] _inflow = [];    // 4 per cell: inflow from an open-sea boundary on that side
     private float[] _exchange = [];  // 4 per cell: net inflow from the open sea on that side, averaged over a wave period ...
@@ -191,9 +177,6 @@ public sealed class ZoneFlowSim
 
     public float Volume { get; private set; }
 
-    /// <summary>Where water slammed into a wall or landed from a pour as of the last <see cref="FindSplashes"/>: the ocean renderer throws spray there.</summary>
-    public ReadOnlySpan<WaterSplash> Splashes => _splashes.AsSpan(0, _splashCount);
-
     /// <summary>
     /// The sim's flow for the GPU as of the last <see cref="PackFlow"/>: (world x, world z of the grid's corner, cell size,
     /// cells across), and per cell two words, half (surface drift x, z) and half (turbulence, 0), row by row.
@@ -201,96 +184,6 @@ public sealed class ZoneFlowSim
     public Vector4 FlowRect => new(_origin.X, _origin.Y, CellSize, _nx);
 
     public ReadOnlySpan<uint> PackedFlow => _packed.AsSpan(0, 2 * Cells);
-
-    /// <summary>Total volume (m³) breaker bores have moved shoreward inside the zone (docs/breaking-waves.md, step 5).</summary>
-    public float InjectedVolume { get; private set; }
-
-    /// <summary>
-    /// A breaker's bore arriving in the zone. Mass-conserving: up to <paramref name="volume"/> (m³) moves from the zone
-    /// cells behind <paramref name="position"/> (against <paramref name="velocity"/>) to the cells ahead, at most half of
-    /// what is behind; outflow flux on all of them is raised so the water keeps moving at <paramref name="velocity"/>
-    /// (the step's limiter caps it to what each cell holds); foam is added. Net wave mass already arrives through the
-    /// sea boundary, and a real bore's return flow takes back what it carries, so nothing is created here.
-    /// Returns false where there is no zone water.
-    /// </summary>
-    /// <param name="thickness">Depth of the moving layer (about the bore height): only it carries the bore's momentum.</param>
-    public bool Inject(Vector2 position, float volume, Vector2 velocity, float thickness, float foam, float radius)
-    {
-        if (_nx == 0)
-            return false;
-
-        var speed = velocity.Length();
-        var dir = speed > 1e-4f ? velocity / speed : Vector2.Zero;
-        var behind = position - dir * radius;
-        var ahead = position + dir * radius;
-        var available = 0f;
-        var targets = 0;
-
-        Span<int> region = stackalloc int[4];
-        CellRange(position, 2f * radius, region);
-
-        for (var z = region[1]; z <= region[3]; z++)
-        {
-            for (var x = region[0]; x <= region[2]; x++)
-            {
-                var i = x + z * _nx;
-                if (_kind[i] != 1)
-                    continue;
-
-                var c = CellCentre(x, z);
-                if (Vector2.DistanceSquared(c, behind) <= radius * radius)
-                    available += MathF.Max(0f, _depth[i] - WetDepth);
-                else if (Vector2.DistanceSquared(c, ahead) <= radius * radius)
-                    targets++;
-            }
-        }
-
-        if (targets == 0 && available <= 0f)
-            return false;
-
-        var area = CellSize * CellSize;
-        var moved = targets > 0 ? MathF.Min(volume, 0.5f * available * area) : 0f;
-        var take = available > 0f ? moved / (available * area) : 0f;
-        var give = targets > 0 ? moved / (targets * area) : 0f;
-
-        for (var z = region[1]; z <= region[3]; z++)
-        {
-            for (var x = region[0]; x <= region[2]; x++)
-            {
-                var i = x + z * _nx;
-                var c = CellCentre(x, z);
-                if (_kind[i] != 1 || Vector2.DistanceSquared(c, position) > 4f * radius * radius)
-                    continue;
-
-                if (Vector2.DistanceSquared(c, behind) <= radius * radius)
-                    _depth[i] -= MathF.Max(0f, _depth[i] - WetDepth) * take;
-                else if (Vector2.DistanceSquared(c, ahead) <= radius * radius)
-                    _depth[i] += give;
-
-                _foam[i] = MathF.Min(1f, _foam[i] + foam);
-
-                for (var s = 0; s < 4; s++)
-                {
-                    var along = velocity.X * Sides[s].X + velocity.Y * Sides[s].Z;
-                    if (along > 0f)
-                        _flux[i * 4 + s] = MathF.Max(_flux[i * 4 + s], along * MathF.Min(_depth[i], thickness) * CellSize);
-                }
-            }
-        }
-
-        InjectedVolume += moved;
-        _lastBore = _time;
-        return true;
-    }
-
-    /// <summary>Cell index bounds (x0, z0, x1, z1) of a square of half-size <paramref name="reach"/>, clamped to the grid.</summary>
-    private void CellRange(Vector2 centre, float reach, Span<int> range)
-    {
-        range[0] = Math.Max(0, (int)MathF.Floor((centre.X - reach - _origin.X) / CellSize));
-        range[1] = Math.Max(0, (int)MathF.Floor((centre.Y - reach - _origin.Y) / CellSize));
-        range[2] = Math.Min(_nx - 1, (int)MathF.Floor((centre.X + reach - _origin.X) / CellSize));
-        range[3] = Math.Min(_nz - 1, (int)MathF.Floor((centre.Y + reach - _origin.Y) / CellSize));
-    }
 
     /// <summary>Water depth (m) of the zone cell at a world position; 0 outside the zone.</summary>
     public float DepthAt(Vector2 position)
@@ -700,14 +593,13 @@ public sealed class ZoneFlowSim
     }
 
     /// <summary>
-    /// Once per tick, after the substeps: where the water slams, it splashes and turns turbulent. Splashes are listed
-    /// where it runs into a wall (a side whose bed stands <see cref="WallHeight"/> over the surface, so it can only go up
-    /// it; a beach it runs up instead) and where a pour lands (water arriving from <see cref="PourDrop"/> or more above).
-    /// Turbulence is raised there and where flow is supercritical, carried with the flow, spread and left to die out.
+    /// Once per tick, after the substeps: where the water slams, it turns turbulent: where it runs into a wall (a side
+    /// whose bed stands <see cref="WallHeight"/> over the surface, so it can only go up it; a beach it runs up instead),
+    /// where a pour lands (water arriving from <see cref="PourDrop"/> or more above) and where flow is supercritical.
+    /// Turbulence is carried with the flow, spread and left to die out.
     /// </summary>
     public void Agitate(float dt)
     {
-        _splashCount = 0;
         var decay = MathF.Exp(-TurbulenceDecay * dt);
         var spread = TurbulenceSpread * dt / (CellSize * CellSize);
 
@@ -744,9 +636,7 @@ public sealed class ZoneFlowSim
                         if (fall < PourDrop || discharge < PourDischarge)
                             continue;
 
-                        var landing = MathF.Min(MathF.Sqrt(2f * Gravity * fall), 12f);
                         source = MathF.Max(source, Ramp(fall / FoamDrop) * Ramp(discharge / 0.5f));
-                        AddSplash(new Vector4(CellCentre(x, z).X, surface, CellCentre(x, z).Y, landing), new Vector4(-dx, -dz, discharge, WaterSplash.Pour));
                         continue;
                     }
 
@@ -754,9 +644,7 @@ public sealed class ZoneFlowSim
                     if (_depth[i] < SplashDepth || into < SplashSpeed || _bed[j] < surface + WallHeight)
                         continue;
 
-                    var foot = CellCentre(x, z) + new Vector2(dx, dz) * (0.5f * CellSize);
                     source = MathF.Max(source, Ramp((into - SplashSpeed) / 2f));
-                    AddSplash(new Vector4(foot.X, surface, foot.Y, into), new Vector4(dx, dz, _depth[i], WaterSplash.Wall));
                 }
 
                 // Carried with the flow (semi-Lagrangian, as foam is), spread by its eddies to the wet neighbours.
@@ -768,12 +656,6 @@ public sealed class ZoneFlowSim
         }
 
         (_turbulence, _turbulenceNext) = (_turbulenceNext, _turbulence);
-    }
-
-    private void AddSplash(Vector4 positionSpeed, Vector4 direction)
-    {
-        if (_splashCount < MaxSplashes)
-            _splashes[_splashCount++] = new WaterSplash { PositionSpeed = positionSpeed, Direction = direction };
     }
 
     /// <summary>
@@ -825,9 +707,8 @@ public sealed class ZoneFlowSim
     /// </summary>
     private void DetectGrowth(float dt)
     {
-        _time += dt;
         _growTimer -= dt;
-        if (_growTimer > 0f || Cells >= MaxCells || _time - _lastBore < BoreQuiet)
+        if (_growTimer > 0f || Cells >= MaxCells)
             return;
 
         var best = 0f;

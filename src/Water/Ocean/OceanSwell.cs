@@ -16,23 +16,6 @@ public sealed class OceanSwell
     public const int InversionIterations = 4;
 
     /// <summary>
-    /// Shaped samples (<see cref="Sample{TShape}"/>): Newton steps at most, the longest one (m), halvings of a step that
-    /// overshoots, the miss (m) that ends them early, and the Jacobian below which a step is a plain fixed-point one.
-    /// </summary>
-    private const int ShapedIterations = 16;
-    private const float MaxShapedStep = 4f;
-    private const int ShapedHalvings = 4;
-    private const float ShapedTolerance = 1e-4f;
-    private const float MinNewtonJacobian = 0.02f;
-
-    /// <summary>
-    /// Metres the rest position may lie from where a shaped sample took its coastal terms before they're retaken, and how
-    /// many times at most: near breaking the depth-limited surf wave changes height by centimetres per metre.
-    /// </summary>
-    private const float RetakeDistance = 0.05f;
-    private const int MaxRetakes = 3;
-
-    /// <summary>
     /// Choppiness × rms of the Gerstner trace Σ a·k·cos θ at most: 1 / this standard deviations to a fold (Jacobian 0),
     /// 4 here, 3e-5 of the surface, on the crests that whitecap. The worst case Σ|a·k| is 14× the rms over 128 random
     /// phases: bounding it pinned the chop at a fixed share of the slope, so a high sea peaked no harder than a low one.
@@ -74,8 +57,8 @@ public sealed class OceanSwell
 
     private const int ScratchArrays = 11;
 
-    // Surf-zone coherence (docs/breaking-waves.md, lip plan B): near shore, components in the peak band hand their energy
-    // to one coherent carrier wave, the same wave BreakerSet contours, so the drawn crests are the breaker crests.
+    // Surf-zone coherence: near shore, components in the peak band hand their energy to one coherent carrier wave, the
+    // wave the shore wash times its run-up from.
     private const float CoherentKh = 0.4f;
     private const float IncoherentKh = 1.2f;
     private const float BandInner = 0.5f;
@@ -89,9 +72,6 @@ public sealed class OceanSwell
     /// breaks and is held there. (The rest of the spectrum keeps the significant-height cap, γ = 0.55.)
     /// </summary>
     public const float WaveBreakingGamma = 0.78f;
-
-    /// <summary>The crests' break clocks (BreakerSet.BreakDistance), set by <see cref="OceanSurface"/>: the drawn carrier holds its breaking height while a lip is in the air (BreakerFace.HeldCap).</summary>
-    public BreakerSet? Breaking;
 
     /// <summary>
     /// Sets: the surf wave's height is modulated by a group envelope that travels with its crests (phase GroupRatio × the
@@ -118,9 +98,6 @@ public sealed class OceanSwell
     private float _carrierEnergy;
     private const float MinCothKh = 0.1f;
 
-    /// <summary>The surf carrier's wavenumber (<see cref="SurfCarrier"/>) is taken at no shallower than this.</summary>
-    private const float SpentDepthK = 0.3f;
-
     /// <summary>Layer B coastal maps; null = open ocean everywhere. Set on the main thread between ticks.</summary>
     public CoastalField? Coastal { get; set; }
 
@@ -131,114 +108,8 @@ public sealed class OceanSwell
     public float CoastalFade { get; set; } = 1f;
 
     /// <summary>
-    /// Surf state at (x, z) for breakers: water depth, the depth-limited breaking cap (1 = not breaking) and the local
-    /// significant wave height before the cap. False = open ocean.
-    /// </summary>
-    public bool SampleSurf(float x, float z, out float depth, out float cap, out float hs)
-    {
-        var s = new CoastalSample();
-        if (!SampleCoastal(x, z, ref s))
-        {
-            (depth, cap, hs) = (CoastalField.DeepDepth, 1f, SignificantWaveHeight);
-            return false;
-        }
-
-        var variance = 0f;
-        for (var j = RefMin; j <= RefMax; j++)
-            variance += _refEnergy[j] * s.Amp[j] * s.Amp[j];
-
-        depth = s.Depth;
-        hs = 4f * MathF.Sqrt(variance);
-        cap = hs > 1e-4f ? Math.Clamp(CoastalField.BreakingGamma * depth / hs, 0f, 1f) : 1f;
-        return true;
-    }
-
-    /// <summary>
-    /// The surf carrier at (x, z) in the current coastal field (ocean_common.glsl surfCarrierAt): phase (0 on a crest),
-    /// local wavevector (direction of k₀ d̂ + ∇lag, magnitude k(h)), unbroken height crest to trough (sets included, as the
-    /// surface draws it) and the water depth; in the field fading out instead when <paramref name="previous"/>. False where
-    /// the field has nothing or there is no carrier.
-    /// </summary>
-    public bool SurfCarrier(float x, float z, out SurfCarrierPoint carrier, bool previous = false)
-    {
-        carrier = default;
-        var field = previous ? CoastalPrevious : Coastal;
-        var s = new CoastalSample();
-        if (field is null || !CoherenceEnabled || _carrierEnergy <= 0f || !field.Sample(x, z, ref s))
-            return false;
-
-        var (dirZ, dirX) = MathF.SinCos(field.Direction);
-        var jc = (int)_carrierRef;
-        var tc = _carrierRef - jc;
-        var lag = float.Lerp(s.Lag[jc], s.Lag[jc + 1], tc);
-        var kx = _carrierK0 * dirX + float.Lerp(s.LagX[jc], s.LagX[jc + 1], tc);
-        var kz = _carrierK0 * dirZ + float.Lerp(s.LagZ[jc], s.LagZ[jc + 1], tc);
-        var shoal = float.Lerp(s.Amp[jc], s.Amp[jc + 1], tc);
-        var depth = MathF.Max(s.Depth, 0f);
-        var spatial = _carrierK0 * (dirX * x + dirZ * z) + lag;
-        var (unbroken, _) = CarrierBreaking(shoal * GroupEnvelope(spatial, _groupPhase), Coherence(Jonswap.WaveNumberApprox(_carrierOmega, depth) * depth), depth);
-
-        // Direction from the lag map; magnitude k(h), continuous in depth where the map's gradient steps at texel lines
-        // (the eikonal makes |∇phase| = k(h) anyway).
-        var k = Jonswap.WaveNumberApprox(_carrierOmega, MathF.Max(depth, SpentDepthK)) / MathF.Max(MathF.Sqrt(kx * kx + kz * kz), 1e-6f);
-        kx *= k;
-        kz *= k;
-
-        carrier = new SurfCarrierPoint { Phase = spatial + _carrierPhase, Kx = kx, Kz = kz, Unbroken = unbroken, Depth = s.Depth };
-        return true;
-    }
-
-    /// <summary>
-    /// The surf carrier's direction of travel at (x, z), from central differences of its lag a cell apart
-    /// (ocean_common.glsl carrierDirection): continuous, where the bilinear map's own gradient steps at every texel line
-    /// and, where refraction is strong, swings by tens of degrees between cells. In the field fading out when
-    /// <paramref name="previous"/>. False where the field runs out.
-    /// </summary>
-    public bool CarrierDirection(float x, float z, out float dirX, out float dirZ, bool previous = false)
-    {
-        (dirX, dirZ) = (0f, 0f);
-        var field = previous ? CoastalPrevious : Coastal;
-        if (field is null)
-            return false;
-
-        const float h = CoastalField.CellSize;
-        if (!CarrierLag(field, x + h, z, out var east) || !CarrierLag(field, x - h, z, out var west)
-            || !CarrierLag(field, x, z + h, out var north) || !CarrierLag(field, x, z - h, out var south))
-            return false;
-
-        var (sin, cos) = MathF.SinCos(field.Direction);
-        var gx = _carrierK0 * cos + (east - west) / (2f * h);
-        var gz = _carrierK0 * sin + (north - south) / (2f * h);
-        var length = MathF.Max(MathF.Sqrt(gx * gx + gz * gz), 1e-6f);
-        (dirX, dirZ) = (gx / length, gz / length);
-        return true;
-    }
-
-    /// <summary>
-    /// Water depth at (x, z) as the carrier reads it (ocean_common.glsl carrierDepthAt): from the current field, or the
-    /// one fading out when <paramref name="previous"/>; <see cref="CoastalField.DeepDepth"/> where a field has nothing.
-    /// </summary>
-    public float CarrierDepth(float x, float z, bool previous = false)
-    {
-        var field = previous ? CoastalPrevious : Coastal;
-        return field is not null && field.Depth(x, z, out var depth) ? depth : CoastalField.DeepDepth;
-    }
-
-    private bool CarrierLag(CoastalField field, float x, float z, out float lag)
-    {
-        var s = new CoastalSample();
-        lag = 0f;
-        if (!field.Sample(x, z, ref s))
-            return false;
-
-        var jc = (int)_carrierRef;
-        lag = float.Lerp(s.Lag[jc], s.Lag[jc + 1], _carrierRef - jc);
-        return true;
-    }
-
-    /// <summary>
     /// Peak angular frequency of the target spectrum's dominant band (rad/s): the groundswell's when it dominates, else the
-    /// wind sea's; 0 when calm. The surf carrier and the breakers follow it.
+    /// wind sea's; 0 when calm. The surf carrier follows it.
     /// </summary>
     public float PeakOmega => (float)_to.CarrierOmega;
 
@@ -478,7 +349,7 @@ public sealed class OceanSwell
         if (RefMax < RefMin)
             (RefMin, RefMax) = (0, 1);
 
-        // Carrier: the peak frequency, phase −ω t (crest where k₀ d̂·x + δψ − ω t ≡ 0, as BreakerSet extracts it).
+        // Carrier: the peak frequency, phase −ω t (crest where k₀ d̂·x + δψ − ω t ≡ 0).
         var omega = PeakOmega;
         _carrierOmega = omega;
         _carrierRef = CoastalField.RefCoord(Math.Max(omega, 1e-3f));
@@ -767,234 +638,6 @@ public sealed class OceanSwell
             Jacobian = dxx * dzz - dxz * dxz,
         };
     }
-
-    /// <summary>
-    /// <see cref="Sample(float, float)"/> with a shape drawn on the swell, such as the breaker faces
-    /// (<see cref="OceanSurface"/>). A shape can shear the surface far harder than the swell's chop (a pitched breaker's
-    /// wall is squeezed to an eighth), where the fixed-point inversion stalls, so this inverts with Newton steps on the
-    /// full Jacobian, halving any that overshoot.
-    /// </summary>
-    public WaveSample Sample<TShape>(float x, float z, ref TShape shape) where TShape : struct, IRestShape
-    {
-        // Coastal terms are linearised about where they're taken, and a shape can put the rest position metres from
-        // (x, z) (a pitched crest's lies about 6 m back), where the depth-limited surf wave is another height. Past
-        // RetakeDistance they're taken again there and the inversion finished from it, as the GPU evaluates them at each
-        // rest position.
-        var px = x;
-        var pz = z;
-        var sample = ShapedSample(x, z, px, pz, ref shape, out var x0, out var z0);
-
-        for (var i = 0; i < MaxRetakes && Coastal is not null; i++)
-        {
-            var dx = x0 - px;
-            var dz = z0 - pz;
-            if (dx * dx + dz * dz < RetakeDistance * RetakeDistance)
-                break;
-
-            px = x0;
-            pz = z0;
-            sample = ShapedSample(x, z, px, pz, ref shape, out x0, out z0);
-        }
-
-        return sample;
-    }
-
-    /// <summary>A shaped sample at world (x, z) with the coastal terms taken at (px, pz), where the inversion starts.</summary>
-    private WaveSample ShapedSample<TShape>(float x, float z, float px, float pz, ref TShape shape, out float x0, out float z0)
-        where TShape : struct, IRestShape
-    {
-        var current = new CoastalSample();
-        var previous = new CoastalSample();
-        var fields = SampleFields(px, pz, ref current, ref previous);
-        if (fields == 0)
-            return ShapedOf(DeepWaves(), x, z, px, pz, false, ref shape, out x0, out z0);
-
-        Span<float> scratch = stackalloc float[ScratchArrays * CoastalPadded];
-        var now = ShapedOf(CoastalWaves(Coastal!.Direction, px, pz, current, scratch), x, z, px, pz, false, ref shape, out x0, out z0);
-        if (fields == 1)
-            return now;
-
-        var before = ShapedOf(CoastalWaves(PreviousDirection, px, pz, previous, scratch), x, z, px, pz, true, ref shape, out _, out _);
-        var t = CoastalFade;
-        return new WaveSample
-        {
-            Height = float.Lerp(before.Height, now.Height, t),
-            Normal = float3.Normalize(float3.Lerp(before.Normal, now.Normal, t)),
-            Velocity = float3.Lerp(before.Velocity, now.Velocity, t),
-            Jacobian = float.Lerp(before.Jacobian, now.Jacobian, t),
-            Whitewater = float.Lerp(before.Whitewater, now.Whitewater, t),
-        };
-    }
-
-    /// <summary>The swell with the shape on it at rest position (x0, z0): height, displacement and their partials.</summary>
-    public RestPoint SampleRest<TShape>(float x0, float z0, ref TShape shape) where TShape : struct, IRestShape
-    {
-        var current = new CoastalSample();
-        var previous = new CoastalSample();
-        var fields = SampleFields(x0, z0, ref current, ref previous);
-        if (fields == 0)
-            return ShapedRest(DeepWaves(), x0, z0, false, ref shape);
-
-        Span<float> scratch = stackalloc float[ScratchArrays * CoastalPadded];
-        var now = ShapedRest(CoastalWaves(Coastal!.Direction, x0, z0, current, scratch), x0, z0, false, ref shape);
-        return fields == 2 ? RestPoint.Lerp(ShapedRest(CoastalWaves(PreviousDirection, x0, z0, previous, scratch), x0, z0, true, ref shape), now, CoastalFade) : now;
-    }
-
-    private WaveSample ShapedOf<TShape>(in Waves w, float x, float z, float startX, float startZ, bool previous, ref TShape shape, out float x0, out float z0)
-        where TShape : struct, IRestShape
-    {
-        x0 = startX;
-        z0 = startZ;
-        var p = ShapedRest(w, x0, z0, previous, ref shape);
-        var rx = x0 + p.Dx - x;
-        var rz = z0 + p.Dz - z;
-        var miss = rx * rx + rz * rz;
-
-        for (var i = 0; i < ShapedIterations && miss > ShapedTolerance * ShapedTolerance; i++)
-        {
-            var dxx = 1f + p.DxX;
-            var dzz = 1f + p.DzZ;
-            var det = dxx * dzz - p.DxZ * p.DxZ;
-            var sx = rx;
-            var sz = rz;
-
-            if (det > MinNewtonJacobian)
-            {
-                sx = (dzz * rx - p.DxZ * rz) / det;
-                sz = (dxx * rz - p.DxZ * rx) / det;
-            }
-
-            // On a pitched wall the Jacobian is about a tenth, so a Newton step from beside it leaps across the crest: cap it,
-            // halve it until the miss shrinks, and failing that take the plain fixed-point step (also halved), which shrinks
-            // the miss wherever the Jacobian lies in (0, 2), as the faces keep it.
-            var length = MathF.Sqrt(sx * sx + sz * sz);
-            if (length > MaxShapedStep)
-            {
-                sx *= MaxShapedStep / length;
-                sz *= MaxShapedStep / length;
-            }
-
-            var improved = false;
-            for (var h = 0; h <= 2 * ShapedHalvings + 1 && !improved; h++)
-            {
-                if (h == ShapedHalvings + 1)
-                {
-                    sx = rx;
-                    sz = rz;
-                }
-
-                var q = ShapedRest(w, x0 - sx, z0 - sz, previous, ref shape);
-                var qx = x0 - sx + q.Dx - x;
-                var qz = z0 - sz + q.Dz - z;
-                var qMiss = qx * qx + qz * qz;
-
-                if (qMiss < miss)
-                {
-                    x0 -= sx;
-                    z0 -= sz;
-                    p = q;
-                    rx = qx;
-                    rz = qz;
-                    miss = qMiss;
-                    improved = true;
-                }
-                else
-                {
-                    sx *= 0.5f;
-                    sz *= 0.5f;
-                }
-            }
-
-            if (!improved)
-                break;
-        }
-
-        return SampleOf(p);
-    }
-
-    /// <summary>The swell through one field at (x0, z0) with the shape on it; previous = the field fading out (or open ocean).</summary>
-    private RestPoint ShapedRest<TShape>(in Waves w, float x0, float z0, bool previous, ref TShape shape) where TShape : struct, IRestShape
-    {
-        var p = RestOf(w, x0, z0);
-        shape.Apply(x0, z0, previous, ref p);
-        return p;
-    }
-
-    private RestPoint RestOf(in Waves w, float x0, float z0)
-    {
-        var vx = Vector256.Create(x0);
-        var vz = Vector256.Create(z0);
-        var height = Vector256<float>.Zero;
-        var hx = Vector256<float>.Zero;
-        var hz = Vector256<float>.Zero;
-        var sx = Vector256<float>.Zero;
-        var sz = Vector256<float>.Zero;
-        var jxx = Vector256<float>.Zero;
-        var jzz = Vector256<float>.Zero;
-        var jxz = Vector256<float>.Zero;
-        var ux = Vector256<float>.Zero;
-        var uz = Vector256<float>.Zero;
-        var uy = Vector256<float>.Zero;
-
-        for (var i = 0; i < w.Padded; i += Lanes)
-        {
-            var kx = Load(w.Kx, i);
-            var kz = Load(w.Kz, i);
-            var theta = Vector256.FusedMultiplyAdd(kx, vx, Vector256.FusedMultiplyAdd(kz, vz, Load(w.Phase, i)));
-            var (sin, cos) = Vector256.SinCos(theta);
-            var cx = Load(w.Cx, i);
-            var cz = Load(w.Cz, i);
-
-            height = Vector256.FusedMultiplyAdd(Load(w.A, i), cos, height);
-            hx = Vector256.FusedMultiplyAdd(Load(w.Akx, i), sin, hx);
-            hz = Vector256.FusedMultiplyAdd(Load(w.Akz, i), sin, hz);
-            sx = Vector256.FusedMultiplyAdd(cx, sin, sx);
-            sz = Vector256.FusedMultiplyAdd(cz, sin, sz);
-            jxx = Vector256.FusedMultiplyAdd(cx * kx, cos, jxx);
-            jzz = Vector256.FusedMultiplyAdd(cz * kz, cos, jzz);
-            jxz = Vector256.FusedMultiplyAdd(cx * kz, cos, jxz);
-            ux = Vector256.FusedMultiplyAdd(Load(w.Awx, i), cos, ux);
-            uz = Vector256.FusedMultiplyAdd(Load(w.Awz, i), cos, uz);
-            uy = Vector256.FusedMultiplyAdd(Load(w.Aw, i), sin, uy);
-        }
-
-        return new RestPoint
-        {
-            Height = Vector256.Sum(height),
-            SlopeX = -Vector256.Sum(hx),
-            SlopeZ = -Vector256.Sum(hz),
-            Dx = -Vector256.Sum(sx),
-            Dz = -Vector256.Sum(sz),
-            DxX = -Vector256.Sum(jxx),
-            DzZ = -Vector256.Sum(jzz),
-            DxZ = -Vector256.Sum(jxz),
-            Velocity = new float3(Vector256.Sum(ux), Vector256.Sum(uy), Vector256.Sum(uz)),
-        };
-    }
-
-    private static WaveSample SampleOf(in RestPoint p)
-    {
-        var dxx = 1f + p.DxX;
-        var dzz = 1f + p.DzZ;
-        var dxz = p.DxZ;
-
-        // Tangents Tx = (dxx, slopeX, dxz), Tz = (dxz, slopeZ, dzz); normal = Tz x Tx.
-        var normal = new float3(
-            p.SlopeZ * dxz - dzz * p.SlopeX,
-            dzz * dxx - dxz * dxz,
-            dxz * p.SlopeX - p.SlopeZ * dxx
-        );
-
-        return new WaveSample
-        {
-            Height = p.Height,
-            Normal = float3.Normalize(normal),
-            Velocity = p.Velocity,
-            Jacobian = dxx * dzz - dxz * dxz,
-            Whitewater = p.Whitewater,
-        };
-    }
-
     /// <summary>Per-component terms a sample sums over: the cached open-ocean ones, or coastal ones for one point.</summary>
     private ref struct Waves
     {
@@ -1069,8 +712,8 @@ public sealed class OceanSwell
         var kzC = _carrierK0 * dirZ + lzC;
         var kC = MathF.Max(MathF.Sqrt(kxC * kxC + kzC * kzC), 1e-6f);
 
-        // Coherence from k(h) h, continuous in depth: the lag map's gradient steps at every texel line (SurfCarrier).
-        var coherence = CoherenceEnabled && _carrierEnergy > 0f ? Coherence(Jonswap.WaveNumberApprox(_carrierOmega, depth) * depth) : 0f;
+        // Coherence from k(h) h, continuous in depth: the lag map's gradient steps at every texel line.
+        var coherence = _carrierEnergy > 0f ? Coherence(Jonswap.WaveNumberApprox(_carrierOmega, depth) * depth) : 0f;
 
         for (var i = 0; i < _count; i++)
         {
@@ -1108,23 +751,7 @@ public sealed class OceanSwell
             var (unbroken, capC) = CarrierBreaking(shoalC * envelope, coherence, depth);
             var phase = _carrierPhase + lagC - lxC * px - lzC * pz;
 
-            // The held height is the wave's own, taken at its crest (the break clock is carried per position, and a
-            // wave's crest and the trough ahead of it hold different values): the crest behind's over most of the
-            // wavelength, handing over to the crest ahead's around the trough (BreakerFace.HoldBlend), so the crest keeps
-            // its amplitude across its whole peak and stays on the carrier crest, and only the trough's depth varies
-            // (ocean_common.glsl swellShare).
-            var theta = kxC * px + kzC * pz + phase;
-            var u = theta / MathF.Tau - MathF.Floor(theta / MathF.Tau);
-            var lambda = MathF.Tau / kC;
-            var hold = 0f;
-            if (Breaking is not null)
-            {
-                var behind = BreakerFace.BreakHold(Breaking.BreakDistance(px - kxC / kC * u * lambda, pz - kzC / kC * u * lambda), lambda);
-                var ahead = BreakerFace.BreakHold(Breaking.BreakDistance(px + kxC / kC * (1f - u) * lambda, pz + kzC / kC * (1f - u) * lambda), lambda);
-                hold = float.Lerp(behind, ahead, BreakerFace.HoldBlend(u));
-            }
-
-            var a = 0.5f * unbroken * BreakerFace.HeldCap(capC, depth, unbroken, hold);
+            var a = 0.5f * unbroken * capC;
             var chop = a * Choppiness * chopScale;
 
             // Shoaling peaks the carrier: bound harmonics (1, s, s²), normalised to its energy, all in phase at the crest.
@@ -1159,8 +786,8 @@ public sealed class OceanSwell
 
     /// <summary>
     /// The coherent surf wave's unbroken height (crest to trough, from its share of the peak band and the shoaling factor
-    /// at the carrier frequency, times the set envelope when given) and its breaking cap min(1, γ_wave h / H). The surface draws H × cap and the breakers
-    /// stage from the cap, so the wave grows until it breaks exactly where its crash is drawn.
+    /// at the carrier frequency, times the set envelope when given) and its breaking cap min(1, γ_wave h / H). The surface draws H × cap, so the wave
+    /// grows until it breaks.
     /// </summary>
     public (float Height, float Cap) CarrierBreaking(float shoaling, float coherence, float depth)
     {
@@ -1174,26 +801,6 @@ public sealed class OceanSwell
     /// </summary>
     public static float Sharpness(float height, float depth) =>
         MaxSharpness * Smooth((height / MathF.Max(depth, 0.1f) - SharpFrom) / (SharpFull - SharpFrom));
-
-    /// <summary>Tests: switch surf coherence off on the CPU (the GPU always applies it).</summary>
-    internal bool CoherenceEnabled = true;
-
-    /// <summary>Tests: Σ A² over the coastal wave set at (x, z), i.e. twice the local variance the surface carries.</summary>
-    internal float SurfVariance(float x, float z)
-    {
-        var sample = new CoastalSample();
-        var previous = new CoastalSample();
-        if (SampleFields(x, z, ref sample, ref previous) == 0)
-            return float.NaN;
-
-        Span<float> scratch = stackalloc float[ScratchArrays * CoastalPadded];
-        var w = CoastalWaves(Coastal!.Direction, x, z, sample, scratch);
-        var sum = 0f;
-        for (var i = 0; i < w.Padded; i++)
-            sum += w.A[i] * w.A[i];
-
-        return sum;
-    }
 
     /// <summary>Component slots of a coastal wave set: the components plus the carrier and its harmonics, padded to whole SIMD lanes.</summary>
     private int CoastalPadded => (_count + CarrierSlots + Lanes - 1) / Lanes * Lanes;
@@ -1288,65 +895,6 @@ public struct WaveSample
 
     /// <summary>Surface area ratio; below ~0.3 the surface is folding (feeds foam).</summary>
     public float Jacobian;
-
-    /// <summary>0..1 whitewater a shape adds (a throwing crest or a broken roller); 0 for the bare swell.</summary>
-    public float Whitewater;
-}
-
-/// <summary>The surf carrier at a point (<see cref="OceanSwell.SurfCarrier"/>).</summary>
-public struct SurfCarrierPoint
-{
-    /// <summary>Phase (rad), 0 on a crest, increasing the way the wave travels.</summary>
-    public float Phase;
-    public float Kx;
-    public float Kz;
-
-    /// <summary>Unbroken height crest to trough (m), sets included.</summary>
-    public float Unbroken;
-    public float Depth;
-}
-
-/// <summary>
-/// The surface at a rest position: height and its slope, the horizontal displacement (world = rest + D) and its partials,
-/// so d(world)/d(rest) = I + [[DxX, DxZ], [DxZ, DzZ]], and the water velocity.
-/// </summary>
-public struct RestPoint
-{
-    public float Height;
-    public float SlopeX;
-    public float SlopeZ;
-    public float Dx;
-    public float Dz;
-    public float DxX;
-    public float DzZ;
-    public float DxZ;
-    public float3 Velocity;
-    public float Whitewater;
-
-    public static RestPoint Lerp(in RestPoint a, in RestPoint b, float t) => new()
-    {
-        Height = float.Lerp(a.Height, b.Height, t),
-        SlopeX = float.Lerp(a.SlopeX, b.SlopeX, t),
-        SlopeZ = float.Lerp(a.SlopeZ, b.SlopeZ, t),
-        Dx = float.Lerp(a.Dx, b.Dx, t),
-        Dz = float.Lerp(a.Dz, b.Dz, t),
-        DxX = float.Lerp(a.DxX, b.DxX, t),
-        DzZ = float.Lerp(a.DzZ, b.DzZ, t),
-        DxZ = float.Lerp(a.DxZ, b.DxZ, t),
-        Velocity = float3.Lerp(a.Velocity, b.Velocity, t),
-        Whitewater = float.Lerp(a.Whitewater, b.Whitewater, t),
-    };
-}
-
-/// <summary>
-/// Something drawn on the swell and defined at rest positions, like the GPU's breaker faces: it adds to a
-/// <see cref="RestPoint"/>'s height, displacement and their partials. While a coastal rebuild crossfades in, it is applied
-/// for each field (previous = the one fading out, or the open ocean where it has nothing) and the results are blended as
-/// the swell is. A struct, so shaped samples don't box it.
-/// </summary>
-public interface IRestShape
-{
-    void Apply(float x0, float z0, bool previous, ref RestPoint p);
 }
 
 /// <summary>

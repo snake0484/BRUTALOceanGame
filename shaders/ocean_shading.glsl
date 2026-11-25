@@ -1,4 +1,4 @@
-// The ocean surface's FFT detail (ocean.frag, ocean_lip.frag): cascade partials, flow-mapped over a breaking wave, and the
+// The ocean surface's FFT detail (ocean.frag): cascade partials, flow-mapped with the water's current, and the
 // bathymetry sample. The shading itself (sky, body, foam lace, shadeWater) is water_shading.glsl, shared with voxel water.
 // Include after ocean_common.glsl.
 

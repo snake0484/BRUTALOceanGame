@@ -25,15 +25,6 @@ public sealed unsafe class OceanRenderer : IDisposable
     private const int PushConstantSize = 32;
     private const int UniformAlignment = 256;
 
-    /// <summary>Draw breaker lip meshes (docs/breaking-waves.md). Off only for A/B comparisons.</summary>
-    public bool DrawLips = true;
-
-    /// <summary>The lip as a fold of the ocean mesh on the fine patch (ocean_common.glsl breakerFace, ocean_patch.vert); off: the ribbon (--ribbon-lip). GPU only.</summary>
-    public bool FoldLip = true;
-
-    /// <summary>Off: the surface is drawn without breaker faces (A/B comparisons; OceanSurface.FacesEnabled on the CPU).</summary>
-    public bool FacesEnabled = true;
-
     public Vector3 SunDirection = Vector3.Normalize(new Vector3(0.45f, 0.30f, 0.55f));
     public float SunIntensity = 3f;
     public Vector3 SkyZenith = new(0.16f, 0.34f, 0.66f);
@@ -56,30 +47,6 @@ public sealed unsafe class OceanRenderer : IDisposable
     private readonly VkPipelineLayout _layout;
     private readonly VkPipeline _pipeline;
 
-    /// <summary>Breaker lips: one instance per crest segment, 2 × profile points − 1 quads each: out along the hook, back underneath (ocean_lip.vert).</summary>
-    private readonly VkPipeline _lipPipeline;
-    private const int LipProfile = 12;
-    private const int LipVertices = (2 * LipProfile - 1) * 6;
-
-    /// <summary>
-    /// The fold's fine patch (<see cref="FoldLip"/>, ocean_patch.vert): one instance per crest segment within its reach,
-    /// an indexed grid of PatchAlong × PatchAcross quads over the tongue's rest strip, drawn after the clipmap.
-    /// </summary>
-    private readonly VkPipeline _patchPipeline;
-    private const int PatchAlong = 8;
-    private const int PatchAcross = 20;
-    private const int PatchIndexCount = PatchAlong * PatchAcross * 6;
-    private readonly int _patchScope;
-
-    /// <summary>Segments within the patch's reach this frame (breakers.patchList), per frame in flight: the patch's instance count.</summary>
-    private readonly int[] _patchCount = new int[Renderer.FramesInFlight];
-    private const float PatchDistance = 80f;
-    private const float PatchMargin = 8f;
-
-    /// <summary>A segment is listed for the patch only if an end's breaking cap is below this: the lip appears as the curl rises from cap 1 (LIP_MIN_CURL by about 0.98).</summary>
-    private const float PatchCap = 0.985f;
-    private readonly int _fullIndexCount;
-    private readonly int _ringIndexCount;
 
     // Each level is drawn as 4 x 4 tiles of the grid, culled against the view frustum: the clipmap surrounds the camera,
     // so most of it is behind or beside the view, and the vertex work (the swell sum per vertex) dominates the ocean.
@@ -99,7 +66,7 @@ public sealed unsafe class OceanRenderer : IDisposable
     /// <summary>Clipmap tiles drawn last frame, out of all of them.</summary>
     public int TilesDrawn { get; private set; }
 
-    /// <summary>Clipmap surface triangles drawn last frame (the patch, lips and spray not counted).</summary>
+    /// <summary>Clipmap surface triangles drawn last frame.</summary>
     public int TrianglesLastFrame { get; private set; }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -160,29 +127,9 @@ public sealed unsafe class OceanRenderer : IDisposable
     private int _coastalCopyCount;
     private int _coastalStagingBase;
     private long _frameNumber;
-    private const int BreakerBinding = 2 + SampledMaps;
-    private const int BreakerHeaderBytes = 48;
-    private const int PatchListBytes = BreakerFaces.MaxSegments * sizeof(uint);
-    private const int SlotRefBytes = BreakerFaces.MaxSlots * sizeof(uint);
-    private const int BreakDistanceBytes = CoastalField.Resolution * CoastalField.Resolution * sizeof(ushort);
-    private static int BreakerBytes => BreakerHeaderBytes + BreakerFaces.MaxSegments * sizeof(BreakerSegment) + PatchListBytes + SlotRefBytes + BreakDistanceBytes;
-    private readonly GpuBuffer[] _breakers = new GpuBuffer[Renderer.FramesInFlight];
-    private readonly double[] _breakerTime = new double[Renderer.FramesInFlight];
-
-    // Spray (ocean_spray_*.comp / ocean_spray.vert): one GPU-only particle ring shared by all frames; frames run in
-    // queue order and barriers order each frame's compute after the previous frame's draw.
-    private const int SprayBinding = 3 + SampledMaps;
-    private const int SprayMax = 16384;
-    private const int SprayBytes = 16 + SprayMax * 64;
-    private readonly GpuBuffer _spray;
-    private readonly VkPipeline _sprayUpdate;
-    private readonly VkPipeline _spraySpawn;
-    private readonly VkPipeline _sprayPipeline;
-    private uint _spraySeed;
-
     // Surf foam left behind (ocean_surf_foam.comp): one float per cell of the depth map's 512² grid, GPU only, shared by
-    // all frames like the spray; cleared when the depth map re-centres.
-    private const int SurfFoamBinding = 4 + SampledMaps;
+    // all frames; cleared when the depth map re-centres.
+    private const int SurfFoamBinding = 2 + SampledMaps;
     private const int SurfFoamResolution = 512;
     private const int SurfFoamBytes = SurfFoamResolution * SurfFoamResolution * sizeof(float);
     private readonly GpuBuffer _surfFoam;
@@ -192,56 +139,39 @@ public sealed unsafe class OceanRenderer : IDisposable
     private long _foamTick = -1;
     private float _foamSeconds;
 
-    // Lip bases (ocean_lip_base.comp): the drawn surface at each lip base slot (a crossed crest edge), for the lip mesh and spray spawn.
-    private const int LipBaseBinding = 5 + SampledMaps;
-    private const int LipBaseBytes = BreakerFaces.MaxSlots * 80;
-    private readonly GpuBuffer _lipBases;
-    private readonly VkPipeline _lipBaseUpdate;
-
-    // Carrier atlas (ocean_carrier_atlas.comp): per tap, the surf carrier's lag, depth, shoal amplitude and active flag
-    // per coastal texel and the lag's central differences, what surfCarrierAt, carrierDirection and carrierDepthAt read
-    // instead of the 7-vec4 coastal texels. Shared by all frames; rebuilt when a tap's field or the carrier's wavenumber
-    // or reference changes.
-    private const int CarrierAtlasBinding = 6 + SampledMaps;
-    private const int CarrierAtlasLayers = 4;
+    // Carrier atlas (ocean_carrier_atlas.comp): the surf carrier's lag, depth, shoal amplitude and active flag per texel
+    // of the current coastal field, what surfBandAt reads instead of the 7-vec4 coastal texels. Shared by all frames;
+    // rebuilt when the field or the carrier's wavenumber or reference changes.
+    private const int CarrierAtlasBinding = 3 + SampledMaps;
 
     /// <summary>Where rain can't reach (rain_cover.glsl): no rings under cover, and the rain pipelines read it through this set.</summary>
-    private const int RainCoverBinding = 7 + SampledMaps;
-
-    // Splashes (ocean_spray_splash.comp): where sea-zone water slammed into a wall or landed from a pour as of the last
-    // tick, one host-visible buffer per frame in flight. They throw spray into the same ring as the breakers.
-    private const int SplashBinding = 8 + SampledMaps;
-    private const int MaxSplashes = 512;
-    private static int SplashBytes => 16 + MaxSplashes * sizeof(WaterSplash);
-    private readonly GpuBuffer[] _splashes = new GpuBuffer[Renderer.FramesInFlight];
-    private readonly int[] _splashCount = new int[Renderer.FramesInFlight];
-    private readonly VkPipeline _splashSpray;
+    private const int RainCoverBinding = 4 + SampledMaps;
 
     // Zone flow (ocean_common.glsl zoneFlowAt): the sea-zone sim's velocity and turbulence on its own 1 m cells, one
     // host-visible buffer per frame in flight. The surface's foam and ripples stream with it and roughen by it. A sim
     // bigger than MaxFlowCells goes up empty (the zone's cap is 12,000 cells, but edit discs alone can pass it).
-    private const int ZoneFlowBinding = 9 + SampledMaps;
+    private const int ZoneFlowBinding = 5 + SampledMaps;
 
     /// <summary>The water fog the body is marched through (water_fog.glsl): its uniforms and its volume.</summary>
-    private const int FogUniformBinding = 10 + SampledMaps;
-    private const int FogVolumeBinding = 11 + SampledMaps;
+    private const int FogUniformBinding = 6 + SampledMaps;
+    private const int FogVolumeBinding = 7 + SampledMaps;
     private readonly WaterFogVolume _fog;
 
-    /// <summary>The opaque scene copied for the surface's and lips' reflections (water_ssr.glsl, set 1).</summary>
+    /// <summary>The opaque scene copied for the surface's reflections (water_ssr.glsl, set 1).</summary>
     private readonly ScreenReflections _reflections;
     private const int MaxFlowCells = 32768;
     private const int ZoneFlowBytes = 32 + MaxFlowCells * 8;
     private readonly GpuBuffer[] _zoneFlow = new GpuBuffer[Renderer.FramesInFlight];
-    private const int Bindings = 12 + SampledMaps;
+    private const int Bindings = 8 + SampledMaps;
     private readonly RainCover _rainCover;
     private readonly VmaAllocator _allocator;
     private readonly VkImage _carrierAtlas;
     private readonly VmaAllocation _carrierAtlasAllocation;
     private readonly VkImageView _carrierAtlasView;
     private readonly VkPipeline _carrierAtlasUpdate;
-    private readonly (int Version, float K0, float Ref)[] _atlasKey = new (int, float, float)[2];
-    private readonly int[] _tapVersion = [-1, -1];
-    private int _atlasRebuild;
+    private (int Version, float K0, float Ref) _atlasKey = (-1, 0f, 0f);
+    private int _fieldVersion = -1;
+    private bool _atlasRebuild;
     private bool _initialised;
     private Vector4 _depthRect;
     private Vector4 _surfFoamRect;
@@ -249,12 +179,7 @@ public sealed unsafe class OceanRenderer : IDisposable
     // GPU scopes inside the ocean's own work, nested in the caller's (the profiler and --bench show each).
     private readonly GpuTimer _timer;
     private readonly int _surfaceScope;
-    private readonly int _lipScope;
-    private readonly int _sprayDrawScope;
     private readonly int _surfFoamScope;
-    private readonly int _lipBaseScope;
-    private readonly int _spawnScope;
-    private readonly int _splashSprayScope;
     private readonly int _atlasScope;
     private const int CoastalBytes = CoastalField.Resolution * CoastalField.Resolution * CoastalField.TexelFloats * sizeof(float);
 
@@ -273,9 +198,9 @@ public sealed unsafe class OceanRenderer : IDisposable
         _device = renderer.Context.Device;
         _pipelines = renderer.Context.Pipelines;
 
-        // One allocation: clipmap and patch indices, then one uniform block per frame in flight.
-        CountIndices(out _fullIndexCount, out _ringIndexCount);
-        var offset = Align((_fullIndexCount + _ringIndexCount + PatchIndexCount) * sizeof(ushort));
+        // One allocation: clipmap indices, then one uniform block per frame in flight.
+        CountIndices(out var fullIndexCount, out var ringIndexCount);
+        var offset = Align((fullIndexCount + ringIndexCount) * sizeof(ushort));
         for (var i = 0; i < Renderer.FramesInFlight; i++)
         {
             _frameOffsets[i] = offset;
@@ -294,22 +219,15 @@ public sealed unsafe class OceanRenderer : IDisposable
 
         for (var i = 0; i < Renderer.FramesInFlight; i++)
         {
-            _breakers[i] = new GpuBuffer(renderer.Context, BreakerBytes, VkBufferUsageFlags.StorageBufferBit, true);
-            _breakerTime[i] = double.NaN;
-            _splashes[i] = new GpuBuffer(renderer.Context, SplashBytes, VkBufferUsageFlags.StorageBufferBit, true);
             _zoneFlow[i] = new GpuBuffer(renderer.Context, ZoneFlowBytes, VkBufferUsageFlags.StorageBufferBit, true);
             _zoneFlow[i].AsSpan<byte>()[..32].Clear();
         }
 
-        _spray = new GpuBuffer(renderer.Context, SprayBytes, VkBufferUsageFlags.StorageBufferBit | VkBufferUsageFlags.TransferDstBit, false);
         _surfFoam = new GpuBuffer(renderer.Context, SurfFoamBytes, VkBufferUsageFlags.StorageBufferBit | VkBufferUsageFlags.TransferDstBit, false);
-        _lipBases = new GpuBuffer(renderer.Context, LipBaseBytes, VkBufferUsageFlags.StorageBufferBit, false);
         _allocator = renderer.Context.Allocator;
         _carrierAtlasView = CreateCarrierAtlas(out _carrierAtlas, out _carrierAtlasAllocation);
-        _atlasKey[0] = _atlasKey[1] = (-1, 0f, 0f);
 
         WriteIndices(_buffer.AsSpan<ushort>(), _tileFirst, _tileCount);
-        WritePatchIndices(_buffer.AsSpan<ushort>().Slice(_fullIndexCount + _ringIndexCount, PatchIndexCount));
         _setLayout = CreateSetLayout();
         _pool = CreatePool();
         CreateFrameResources();
@@ -320,25 +238,12 @@ public sealed unsafe class OceanRenderer : IDisposable
         ];
         _layout = _device.CreatePipelineLayout([_setLayout, reflections.SetLayout], push, null);
         _pipeline = CreatePipeline(renderer.RenderPass, "ocean.vert", "ocean.frag");
-        _lipPipeline = CreatePipeline(renderer.RenderPass, "ocean_lip.vert", "ocean_lip.frag");
-        _patchPipeline = CreatePipeline(renderer.RenderPass, "ocean_patch.vert", "ocean.frag");
-        _sprayPipeline = CreatePipeline(renderer.RenderPass, "ocean_spray.vert", "ocean_spray.frag", depthWrite: false);
-        _sprayUpdate = CreateComputePipeline("ocean_spray_update.comp");
-        _spraySpawn = CreateComputePipeline("ocean_spray_spawn.comp");
-        _splashSpray = CreateComputePipeline("ocean_spray_splash.comp");
         _surfFoamUpdate = CreateComputePipeline("ocean_surf_foam.comp");
-        _lipBaseUpdate = CreateComputePipeline("ocean_lip_base.comp");
         _carrierAtlasUpdate = CreateComputePipeline("ocean_carrier_atlas.comp");
 
         _timer = renderer.GpuTimer;
         _surfaceScope = _timer.Register("Ocean surface");
-        _lipScope = _timer.Register("Ocean lips");
-        _patchScope = _timer.Register("Ocean patch");
-        _sprayDrawScope = _timer.Register("Spray draw");
         _surfFoamScope = _timer.Register("Surf foam");
-        _lipBaseScope = _timer.Register("Lip bases");
-        _spawnScope = _timer.Register("Spray spawn");
-        _splashSprayScope = _timer.Register("Splash spray");
         _atlasScope = _timer.Register("Carrier atlas");
     }
 
@@ -351,7 +256,7 @@ public sealed unsafe class OceanRenderer : IDisposable
                 Format = VkFormat.R32G32B32A32SFloat,
                 Extent = new VkExtent3D { Width = CoastalField.Resolution, Height = CoastalField.Resolution, Depth = 1 },
                 MipLevels = 1,
-                ArrayLayers = CarrierAtlasLayers,
+                ArrayLayers = 1,
                 Samples = VkSampleCountFlags._1Bit,
                 Tiling = VkImageTiling.Optimal,
                 Usage = VkImageUsageFlags.StorageBit,
@@ -373,7 +278,7 @@ public sealed unsafe class OceanRenderer : IDisposable
                 Image = image,
                 ViewType = VkImageViewType._2DArray,
                 Format = VkFormat.R32G32B32A32SFloat,
-                SubresourceRange = new VkImageSubresourceRange { AspectMask = VkImageAspectFlags.ColorBit, LevelCount = 1, LayerCount = CarrierAtlasLayers },
+                SubresourceRange = new VkImageSubresourceRange { AspectMask = VkImageAspectFlags.ColorBit, LevelCount = 1, LayerCount = 1 },
             },
             null
         );
@@ -391,22 +296,22 @@ public sealed unsafe class OceanRenderer : IDisposable
                 SrcQueueFamilyIndex = VK.QUEUE_FAMILY_IGNORED,
                 DstQueueFamilyIndex = VK.QUEUE_FAMILY_IGNORED,
                 Image = _carrierAtlas,
-                SubresourceRange = new VkImageSubresourceRange { AspectMask = VkImageAspectFlags.ColorBit, LevelCount = 1, LayerCount = CarrierAtlasLayers },
+                SubresourceRange = new VkImageSubresourceRange { AspectMask = VkImageAspectFlags.ColorBit, LevelCount = 1, LayerCount = 1 },
             },
         ];
 
         commands.PipelineBarrier(VkPipelineStageFlags.TopOfPipeBit, VkPipelineStageFlags.ComputeShaderBit | VkPipelineStageFlags.VertexShaderBit, VkDependencyFlags.None, [], [], barriers);
     }
 
-    /// <summary>Bit tap when that tap's atlas must be rebuilt this frame: its field (version −1 = none) or the carrier's wavenumber or reference changed.</summary>
-    private int AtlasKey(int tap, int version, Vector4 carrier)
+    /// <summary>Whether the atlas must be rebuilt this frame: the field (version −1 = none) or the carrier's wavenumber or reference changed.</summary>
+    private bool AtlasStale(int version, Vector4 carrier)
     {
         var key = (version, carrier.X, carrier.Y);
-        if (_atlasKey[tap] == key)
-            return 0;
+        if (_atlasKey == key)
+            return false;
 
-        _atlasKey[tap] = key;
-        return version < 0 ? 0 : 1 << tap;
+        _atlasKey = key;
+        return version >= 0;
     }
 
     private const VkShaderStageFlags PushStages = VkShaderStageFlags.VertexBit | VkShaderStageFlags.ComputeBit;
@@ -477,31 +382,6 @@ public sealed unsafe class OceanRenderer : IDisposable
         }
     }
 
-    /// <summary>The patch grid: (PatchAlong + 1) × (PatchAcross + 1) vertices, row-major across the strip, as ocean_patch.vert numbers them.</summary>
-    private static void WritePatchIndices(Span<ushort> indices)
-    {
-        const int side = PatchAlong + 1;
-        var w = 0;
-
-        for (var j = 0; j < PatchAcross; j++)
-        {
-            for (var i = 0; i < PatchAlong; i++)
-            {
-                var v00 = (ushort)(j * side + i);
-                var v10 = (ushort)(v00 + 1);
-                var v01 = (ushort)(v00 + side);
-                var v11 = (ushort)(v01 + 1);
-
-                indices[w++] = v00;
-                indices[w++] = v01;
-                indices[w++] = v10;
-                indices[w++] = v10;
-                indices[w++] = v01;
-                indices[w++] = v11;
-            }
-        }
-    }
-
     /// <summary>
     /// The frustum's side and near planes (a, b, c, d with a x + b y + c z + d ≥ 0 inside) from a row-vector view-projection
     /// with Vulkan clip space (−w ≤ x, y ≤ w) and an infinite reverse-Z far plane, which needs no plane.
@@ -565,33 +445,9 @@ public sealed unsafe class OceanRenderer : IDisposable
             StageFlags = buffers,
         };
 
-        bindings[BreakerBinding] = new VkDescriptorSetLayoutBinding
-        {
-            Binding = BreakerBinding,
-            DescriptorType = VkDescriptorType.StorageBuffer,
-            DescriptorCount = 1,
-            StageFlags = buffers,
-        };
-
-        bindings[SprayBinding] = new VkDescriptorSetLayoutBinding
-        {
-            Binding = SprayBinding,
-            DescriptorType = VkDescriptorType.StorageBuffer,
-            DescriptorCount = 1,
-            StageFlags = buffers | VkShaderStageFlags.FragmentBit,
-        };
-
         bindings[SurfFoamBinding] = new VkDescriptorSetLayoutBinding
         {
             Binding = SurfFoamBinding,
-            DescriptorType = VkDescriptorType.StorageBuffer,
-            DescriptorCount = 1,
-            StageFlags = buffers,
-        };
-
-        bindings[LipBaseBinding] = new VkDescriptorSetLayoutBinding
-        {
-            Binding = LipBaseBinding,
             DescriptorType = VkDescriptorType.StorageBuffer,
             DescriptorCount = 1,
             StageFlags = buffers,
@@ -611,14 +467,6 @@ public sealed unsafe class OceanRenderer : IDisposable
             DescriptorType = VkDescriptorType.StorageBuffer,
             DescriptorCount = 1,
             StageFlags = stages,
-        };
-
-        bindings[SplashBinding] = new VkDescriptorSetLayoutBinding
-        {
-            Binding = SplashBinding,
-            DescriptorType = VkDescriptorType.StorageBuffer,
-            DescriptorCount = 1,
-            StageFlags = buffers,
         };
 
         bindings[ZoneFlowBinding] = new VkDescriptorSetLayoutBinding
@@ -657,7 +505,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         {
             new() { Type = VkDescriptorType.UniformBuffer, DescriptorCount = 2 * Renderer.FramesInFlight },
             new() { Type = VkDescriptorType.CombinedImageSampler, DescriptorCount = Renderer.FramesInFlight * (SampledMaps + 1) },
-            new() { Type = VkDescriptorType.StorageBuffer, DescriptorCount = Renderer.FramesInFlight * (CoastalSlots + 7) },
+            new() { Type = VkDescriptorType.StorageBuffer, DescriptorCount = Renderer.FramesInFlight * (CoastalSlots + 3) },
             new() { Type = VkDescriptorType.StorageImage, DescriptorCount = Renderer.FramesInFlight },
         };
 
@@ -737,26 +585,6 @@ public sealed unsafe class OceanRenderer : IDisposable
                 BufferInfo = coastal,
             };
 
-            var breakers = new VkDescriptorBufferInfo { Buffer = _breakers[i].Handle, Range = (ByteSize64)BreakerBytes };
-            writes[BreakerBinding] = new VkWriteDescriptorSet
-            {
-                DstSet = _sets[i],
-                DstBinding = BreakerBinding,
-                DescriptorCount = 1,
-                DescriptorType = VkDescriptorType.StorageBuffer,
-                BufferInfo = &breakers,
-            };
-
-            var spray = new VkDescriptorBufferInfo { Buffer = _spray.Handle, Range = (ByteSize64)SprayBytes };
-            writes[SprayBinding] = new VkWriteDescriptorSet
-            {
-                DstSet = _sets[i],
-                DstBinding = SprayBinding,
-                DescriptorCount = 1,
-                DescriptorType = VkDescriptorType.StorageBuffer,
-                BufferInfo = &spray,
-            };
-
             var surfFoam = new VkDescriptorBufferInfo { Buffer = _surfFoam.Handle, Range = (ByteSize64)SurfFoamBytes };
             writes[SurfFoamBinding] = new VkWriteDescriptorSet
             {
@@ -765,16 +593,6 @@ public sealed unsafe class OceanRenderer : IDisposable
                 DescriptorCount = 1,
                 DescriptorType = VkDescriptorType.StorageBuffer,
                 BufferInfo = &surfFoam,
-            };
-
-            var lipBases = new VkDescriptorBufferInfo { Buffer = _lipBases.Handle, Range = (ByteSize64)LipBaseBytes };
-            writes[LipBaseBinding] = new VkWriteDescriptorSet
-            {
-                DstSet = _sets[i],
-                DstBinding = LipBaseBinding,
-                DescriptorCount = 1,
-                DescriptorType = VkDescriptorType.StorageBuffer,
-                BufferInfo = &lipBases,
             };
 
             writes[CarrierAtlasBinding] = new VkWriteDescriptorSet
@@ -794,16 +612,6 @@ public sealed unsafe class OceanRenderer : IDisposable
                 DescriptorCount = 1,
                 DescriptorType = VkDescriptorType.StorageBuffer,
                 BufferInfo = &cover,
-            };
-
-            var splashes = new VkDescriptorBufferInfo { Buffer = _splashes[i].Handle, Range = (ByteSize64)SplashBytes };
-            writes[SplashBinding] = new VkWriteDescriptorSet
-            {
-                DstSet = _sets[i],
-                DstBinding = SplashBinding,
-                DescriptorCount = 1,
-                DescriptorType = VkDescriptorType.StorageBuffer,
-                BufferInfo = &splashes,
             };
 
             var zoneFlow = new VkDescriptorBufferInfo { Buffer = _zoneFlow[i].Handle, Range = (ByteSize64)ZoneFlowBytes };
@@ -845,7 +653,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         }
     }
 
-    private VkPipeline CreatePipeline(VkRenderPass renderPass, string vertex, string fragment, bool depthWrite = true)
+    private VkPipeline CreatePipeline(VkRenderPass renderPass, string vertex, string fragment)
     {
         var vert = ShaderLoader.Load(_device, vertex, ShaderKind.VertexShader);
         var frag = ShaderLoader.Load(_device, fragment, ShaderKind.FragmentShader);
@@ -875,7 +683,7 @@ public sealed unsafe class OceanRenderer : IDisposable
                 var depth = new VkPipelineDepthStencilStateCreateInfo
                 {
                     DepthTestEnable = true,
-                    DepthWriteEnable = depthWrite,
+                    DepthWriteEnable = true,
                     DepthCompareOp = VkCompareOp.Greater,
                 };
                 // Blended so thin simulated-zone water fades over the terrain (the ocean draws after terrain).
@@ -921,16 +729,15 @@ public sealed unsafe class OceanRenderer : IDisposable
     }
 
     /// <summary>
-    /// Writes this frame's waves, camera, coastal maps, breaker segments, splashes and zone flow. Call once per frame
-    /// before <see cref="RecordSpray"/> and <see cref="Record"/>, which read them.
+    /// Writes this frame's waves, camera, coastal maps and zone flow. Call once per frame before
+    /// <see cref="RecordCompute"/> and <see cref="Record"/>, which read them.
     /// </summary>
     /// <param name="tickAlpha">Fraction of a sim tick since the last one: blends the depth map's sea-zone layers.</param>
     /// <param name="depthRect">(origin x, origin z, world size, depth outside the map).</param>
-    /// <param name="splashes">Where sea-zone water slams into a wall or lands from a pour (ZoneFlowSim); spray is thrown there at a rate, so the same tick's list may be passed for several frames.</param>
     /// <param name="flowRect">The zone sim's grid: (corner x, corner z, cell size, cells across).</param>
     /// <param name="flow">Per zone sim cell, half (velocity x, z) and half (turbulence, 0), row by row.</param>
-    public void Prepare(int frameIndex, OceanSwell swell, BreakerFaces faces, double renderTime, float tickAlpha, in Matrix4x4 viewProj, Vector3 cameraPos, Vector4 depthRect,
-        ReadOnlySpan<WaterSplash> splashes, Vector4 flowRect, ReadOnlySpan<uint> flow)
+    public void Prepare(int frameIndex, OceanSwell swell, double renderTime, float tickAlpha, in Matrix4x4 viewProj, Vector3 cameraPos, Vector4 depthRect,
+        Vector4 flowRect, ReadOnlySpan<uint> flow)
     {
         _frameNumber++;
         var block = (byte*)_buffer.Mapped + _frameOffsets[frameIndex];
@@ -957,15 +764,8 @@ public sealed unsafe class OceanRenderer : IDisposable
         WriteCoastal(header, frameIndex, swell);
         (header->Carrier, header->CarrierChop) = swell.GpuCarrier(renderTime);
         header->WindSea = new Vector4(swell.GpuSpectrum.Params.WindSpeed, 0f, 0f, 0f);
-        _atlasRebuild = AtlasKey(0, _tapVersion[0], header->Carrier) | AtlasKey(1, _tapVersion[1], header->Carrier);
-        WriteBreakers(frameIndex, faces, renderTime, cameraPos);
+        _atlasRebuild = AtlasStale(_fieldVersion, header->Carrier);
         header->WaveCount = swell.CopyGpuWaves(waves, renderTime);
-
-        var count = Math.Min(splashes.Length, MaxSplashes);
-        var splashBlock = (byte*)_splashes[frameIndex].Mapped;
-        *(uint*)splashBlock = (uint)count;
-        splashes[..count].CopyTo(new Span<WaterSplash>(splashBlock + 16, MaxSplashes));
-        _splashCount[frameIndex] = count;
         WriteZoneFlow(frameIndex, flowRect, flow);
     }
 
@@ -985,24 +785,18 @@ public sealed unsafe class OceanRenderer : IDisposable
     }
 
     /// <summary>
-    /// Spray (docs/breaking-waves.md, rendering step 6): advances the particle ring, then spawns from breaker lips. Also
-    /// updates the surf foam left behind (ocean_surf_foam.comp). Outside a render pass, after <see cref="Prepare"/>.
+    /// The ocean's compute work before the water pass: coastal copies, the carrier atlas and the surf foam left behind
+    /// (ocean_surf_foam.comp). Outside a render pass, after <see cref="Prepare"/>.
     /// </summary>
-    public void RecordSpray(CommandBuffer commands, int frameIndex, int segments, int slots, float frameSeconds, long tickIndex)
+    public void RecordCompute(CommandBuffer commands, int frameIndex, float frameSeconds, long tickIndex)
     {
-        Span<float> push = stackalloc float[PushConstantSize / sizeof(float)];
-        push[0] = MathF.Min(frameSeconds, 0.1f);
-        push[1] = BitConverter.Int32BitsToSingle((int)(++_spraySeed * 2654435761u));
-        push[2] = segments;
-
-        // The previous frame's draw read the ring; this frame's compute rewrites it.
+        // The previous frame's draw read the surf foam; this frame's compute rewrites it.
         Barrier(commands, VkPipelineStageFlags.VertexShaderBit, VkAccessFlags.ShaderReadBit, VkPipelineStageFlags.ComputeShaderBit, VkAccessFlags.ShaderReadBit | VkAccessFlags.ShaderWriteBit);
         commands.BindDescriptorSets(VkPipelineBindPoint.Compute, _layout, 0, [_sets[frameIndex]], []);
 
         if (!_initialised)
         {
             TransitionAtlasToGeneral(commands);
-            commands.FillBuffer(_spray.Handle, (ByteSize64)0, (ByteSize64)SprayBytes, 0);
             commands.FillBuffer(_surfFoam.Handle, (ByteSize64)0, (ByteSize64)SurfFoamBytes, 0);
             var shaders = VkPipelineStageFlags.ComputeShaderBit | VkPipelineStageFlags.VertexShaderBit | VkPipelineStageFlags.FragmentShaderBit;
             Barrier(commands, VkPipelineStageFlags.TransferBit, VkAccessFlags.TransferWriteBit, shaders, VkAccessFlags.ShaderReadBit | VkAccessFlags.ShaderWriteBit);
@@ -1011,89 +805,42 @@ public sealed unsafe class OceanRenderer : IDisposable
 
         RecordCoastalCopies(commands);
 
-        // The carrier atlas, for the taps whose field or carrier changed (Prepare), before anything this frame reads it.
-        if (_atlasRebuild != 0)
+        // The carrier atlas, when the field or carrier changed (Prepare), before anything this frame reads it.
+        if (_atlasRebuild)
         {
-            Span<float> tap = stackalloc float[PushConstantSize / sizeof(float)];
             commands.BindPipeline(VkPipelineBindPoint.Compute, _carrierAtlasUpdate);
             _timer.Begin(commands, _atlasScope);
-
-            for (var t = 0; t < 2; t++)
-            {
-                if ((_atlasRebuild & 1 << t) == 0)
-                    continue;
-
-                tap[0] = t;
-                commands.PushConstants(_layout, PushStages, 0, MemoryMarshal.AsBytes(tap));
-                commands.Dispatch(CoastalField.Resolution / 16, CoastalField.Resolution / 16, 1);
-            }
-
+            commands.Dispatch(CoastalField.Resolution / 16, CoastalField.Resolution / 16, 1);
             _timer.End(commands, _atlasScope);
             Barrier(commands, VkPipelineStageFlags.ComputeShaderBit, VkAccessFlags.ShaderWriteBit, VkPipelineStageFlags.ComputeShaderBit | VkPipelineStageFlags.VertexShaderBit, VkAccessFlags.ShaderReadBit);
-            _atlasRebuild = 0;
+            _atlasRebuild = false;
         }
-
-        commands.PushConstants(_layout, PushStages, 0, MemoryMarshal.AsBytes(push));
-        commands.BindPipeline(VkPipelineBindPoint.Compute, _sprayUpdate);
-        commands.Dispatch((SprayMax + 255) / 256, 1, 1);
 
         // The surf foam map, once per tick (or at once when the depth map it lives on re-centres, since the old foam is
         // then in the wrong place), decaying by the time since its last update.
-        _foamSeconds += push[0];
-        if (tickIndex != _foamTick || _depthRect != _surfFoamRect)
-        {
-            Span<float> foam = stackalloc float[PushConstantSize / sizeof(float)];
-            foam[0] = _foamSeconds;
-            foam[3] = _depthRect == _surfFoamRect ? 0f : 1f;
-            commands.PushConstants(_layout, PushStages, 0, MemoryMarshal.AsBytes(foam));
-            commands.BindPipeline(VkPipelineBindPoint.Compute, _surfFoamUpdate);
-            _timer.Begin(commands, _surfFoamScope);
-            commands.Dispatch(SurfFoamResolution / 16, SurfFoamResolution / 16, 1);
-            _timer.End(commands, _surfFoamScope);
-            commands.PushConstants(_layout, PushStages, 0, MemoryMarshal.AsBytes(push));
-            _foamTick = tickIndex;
-            _foamSeconds = 0f;
-            _surfFoamRect = _depthRect;
-        }
+        _foamSeconds += MathF.Min(frameSeconds, 0.1f);
+        if (tickIndex == _foamTick && _depthRect == _surfFoamRect)
+            return;
 
-        if (slots > 0)
-        {
-            commands.BindPipeline(VkPipelineBindPoint.Compute, _lipBaseUpdate);
-            _timer.Begin(commands, _lipBaseScope);
-            commands.Dispatch(slots, 1, 1);
-            _timer.End(commands, _lipBaseScope);
-        }
-
-        Barrier(commands, VkPipelineStageFlags.ComputeShaderBit, VkAccessFlags.ShaderWriteBit, VkPipelineStageFlags.ComputeShaderBit, VkAccessFlags.ShaderReadBit | VkAccessFlags.ShaderWriteBit);
-
-        if (segments > 0)
-        {
-            commands.BindPipeline(VkPipelineBindPoint.Compute, _spraySpawn);
-            _timer.Begin(commands, _spawnScope);
-            commands.Dispatch((segments + 63) / 64, 1, 1);
-            _timer.End(commands, _spawnScope);
-        }
-
-        // Splash spray shares the ring: slots come from the same atomic head, so it needs no barrier after the breakers'.
-        var splashes = _splashCount[frameIndex];
-        if (splashes > 0)
-        {
-            push[2] = splashes;
-            commands.PushConstants(_layout, PushStages, 0, MemoryMarshal.AsBytes(push));
-            commands.BindPipeline(VkPipelineBindPoint.Compute, _splashSpray);
-            _timer.Begin(commands, _splashSprayScope);
-            commands.Dispatch((splashes + 63) / 64, 1, 1);
-            _timer.End(commands, _splashSprayScope);
-        }
-
+        Span<float> push = stackalloc float[PushConstantSize / sizeof(float)];
+        push[0] = _foamSeconds;
+        push[3] = _depthRect == _surfFoamRect ? 0f : 1f;
+        commands.PushConstants(_layout, PushStages, 0, MemoryMarshal.AsBytes(push));
+        commands.BindPipeline(VkPipelineBindPoint.Compute, _surfFoamUpdate);
+        _timer.Begin(commands, _surfFoamScope);
+        commands.Dispatch(SurfFoamResolution / 16, SurfFoamResolution / 16, 1);
+        _timer.End(commands, _surfFoamScope);
         Barrier(commands, VkPipelineStageFlags.ComputeShaderBit, VkAccessFlags.ShaderWriteBit, VkPipelineStageFlags.VertexShaderBit, VkAccessFlags.ShaderReadBit);
+        _foamTick = tickIndex;
+        _foamSeconds = 0f;
+        _surfFoamRect = _depthRect;
     }
 
     private static void Barrier(CommandBuffer commands, VkPipelineStageFlags srcStage, VkAccessFlags srcAccess, VkPipelineStageFlags dstStage, VkAccessFlags dstAccess) =>
         commands.PipelineBarrier(srcStage, dstStage, VkDependencyFlags.None, [new VkMemoryBarrier { SrcAccessMask = srcAccess, DstAccessMask = dstAccess }], [], []);
 
-    /// <summary>Records the surface (one draw per clipmap level), breaker lips and spray. Inside the water pass.</summary>
-    public void Record(CommandBuffer commands, int frameIndex, VkExtent2D extent, Vector3 cameraPos, int segments)
+    /// <summary>Records the surface (one draw per clipmap level). Inside the water pass.</summary>
+    public void Record(CommandBuffer commands, int frameIndex, VkExtent2D extent, Vector3 cameraPos)
     {
         commands.BindPipeline(VkPipelineBindPoint.Graphics, _pipeline);
         commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex], _reflections.Set(frameIndex)], []);
@@ -1149,30 +896,6 @@ public sealed unsafe class OceanRenderer : IDisposable
         TrianglesLastFrame = indices / 3;
 
         _timer.End(commands, _surfaceScope);
-
-        // The fold's fine patch over the tongue strips the clipmap collapsed; segments out of reach cull themselves.
-        if (FoldLip && _patchCount[frameIndex] > 0)
-        {
-            _timer.Begin(commands, _patchScope);
-            commands.BindPipeline(VkPipelineBindPoint.Graphics, _patchPipeline);
-            commands.DrawIndexed(PatchIndexCount, _patchCount[frameIndex], _fullIndexCount + _ringIndexCount, 0, 0);
-            _timer.End(commands, _patchScope);
-        }
-
-        // Breaker lips on top of the surface; segments without curl cull themselves in the vertex shader.
-        if (DrawLips && segments > 0)
-        {
-            _timer.Begin(commands, _lipScope);
-            commands.BindPipeline(VkPipelineBindPoint.Graphics, _lipPipeline);
-            commands.Draw(LipVertices, segments, 0, 0);
-            _timer.End(commands, _lipScope);
-        }
-
-        // Spray last: soft, depth-tested but not depth-written; dead slots cull themselves.
-        _timer.Begin(commands, _sprayDrawScope);
-        commands.BindPipeline(VkPipelineBindPoint.Graphics, _sprayPipeline);
-        commands.Draw(6, SprayMax, 0, 0);
-        _timer.End(commands, _sprayDrawScope);
     }
 
     private VkPipeline CreateComputePipeline(string file)
@@ -1219,8 +942,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         header->RefMin = swell.RefMin;
         header->RefMax = swell.RefMax;
 
-        _tapVersion[0] = -1;
-        _tapVersion[1] = -1;
+        _fieldVersion = -1;
         _coastalCopyCount = 0;
         _coastalStagingBase = frameIndex * CoastalCopiesPerFrame * CoastalChunkFloats;
 
@@ -1272,8 +994,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         var (dirZ, dirX) = MathF.SinCos(field.Direction);
         header->CoastDir = new Vector4(dirX, dirZ, prevSlot < 0 && previous is not null ? 1f : fade, prevSlot < 0 ? field.Direction : previous!.Direction);
         header->CoastSlots = bits;
-        _tapVersion[0] = field.Version;
-        _tapVersion[1] = prevSlot < 0 ? -1 : previous!.Version;
+        _fieldVersion = field.Version;
     }
 
     private static Vector4 Rect(CoastalField field) => new(field.Origin.X, field.Origin.Y, field.Cell, CoastalField.Resolution);
@@ -1298,57 +1019,6 @@ public sealed unsafe class OceanRenderer : IDisposable
     {
         if (slot >= 0)
             _coastalUsed[slot] = _frameNumber;
-    }
-
-    /// <summary>
-    /// Breaker crest segments the lips are swept along, their lip base slots and the break distances
-    /// (docs/breaking-waves.md): copied when a tick produced new ones; the header carries the render-time offset every
-    /// frame so crests advance smoothly between ticks, and whether the face is drawn. Layout: (break grid origin x, z,
-    /// cell size, render − tick seconds), (segments, break grid resolution, fold, faces on), (lip base slots, 0, 0, 0),
-    /// segments, patch list, slot refs, break distances (half floats).
-    /// </summary>
-    private void WriteBreakers(int frameIndex, BreakerFaces faces, double renderTime, Vector3 cameraPos)
-    {
-        var data = (byte*)_breakers[frameIndex].Mapped;
-        var breaking = faces.Breaking;
-        var hasBreaks = breaking is not null && !float.IsNaN(breaking.BreakOrigin.X);
-        *(Vector4*)data = new Vector4(hasBreaks ? breaking!.BreakOrigin : Vector2.Zero, CoastalField.CellSize, (float)(renderTime - faces.Time));
-        var info = (int*)(data + 16);
-        info[0] = faces.SegmentCount;
-        info[1] = hasBreaks ? CoastalField.Resolution : 0;
-        info[2] = FoldLip ? 1 : 0;
-        info[3] = FacesEnabled ? 1 : 0;
-        info[4] = faces.SlotCount;
-
-        if (_breakerTime[frameIndex] == faces.Time)
-            return;
-
-        _breakerTime[frameIndex] = faces.Time;
-        var segments = (BreakerSegment*)(data + BreakerHeaderBytes);
-        var list = (uint*)(segments + BreakerFaces.MaxSegments);
-        var slots = list + BreakerFaces.MaxSegments;
-        var distances = (ushort*)(slots + BreakerFaces.MaxSlots);
-        faces.Segments.AsSpan(0, faces.SegmentCount).CopyTo(new Span<BreakerSegment>(segments, BreakerFaces.MaxSegments));
-        faces.SlotRefs.AsSpan(0, faces.SlotCount).CopyTo(new Span<uint>(slots, BreakerFaces.MaxSlots));
-
-        // The fine patch's instances: the segments within its reach, so culled ones never issue.
-        var count = 0;
-        var reach = (PatchDistance + PatchMargin) * (PatchDistance + PatchMargin);
-        if (FoldLip)
-        {
-            for (var i = 0; i < faces.SegmentCount; i++)
-            {
-                ref readonly var segment = ref faces.Segments[i];
-                var dx = 0.5f * (segment.Ends.X + segment.Ends.Z) - cameraPos.X;
-                var dz = 0.5f * (segment.Ends.Y + segment.Ends.W) - cameraPos.Z;
-                if (dx * dx + dz * dz <= reach && MathF.Min(segment.Slots.Z, segment.Slots.W) < PatchCap)
-                    list[count++] = (uint)i;
-            }
-        }
-
-        _patchCount[frameIndex] = count;
-        if (hasBreaks)
-            breaking!.BreakDistanceBits.CopyTo(new Span<ushort>(distances, CoastalField.Resolution * CoastalField.Resolution));
     }
 
     /// <summary>
@@ -1423,20 +1093,11 @@ public sealed unsafe class OceanRenderer : IDisposable
     public void Dispose()
     {
         _device.DestroyPipeline(_pipeline, null);
-        _device.DestroyPipeline(_lipPipeline, null);
-        _device.DestroyPipeline(_patchPipeline, null);
-        _device.DestroyPipeline(_sprayPipeline, null);
-        _device.DestroyPipeline(_sprayUpdate, null);
-        _device.DestroyPipeline(_spraySpawn, null);
-        _device.DestroyPipeline(_splashSpray, null);
         _device.DestroyPipeline(_surfFoamUpdate, null);
-        _device.DestroyPipeline(_lipBaseUpdate, null);
         _device.DestroyPipeline(_carrierAtlasUpdate, null);
         _device.DestroyImageView(_carrierAtlasView, null);
         _allocator.DestroyImage(_carrierAtlas, _carrierAtlasAllocation);
-        _spray.Dispose();
         _surfFoam.Dispose();
-        _lipBases.Dispose();
         _device.DestroyPipelineLayout(_layout, null);
 
         _buffer.Dispose();
@@ -1445,12 +1106,6 @@ public sealed unsafe class OceanRenderer : IDisposable
             buffer.Dispose();
 
         _coastalStaging.Dispose();
-
-        foreach (var buffer in _breakers)
-            buffer.Dispose();
-
-        foreach (var buffer in _splashes)
-            buffer.Dispose();
 
         foreach (var buffer in _zoneFlow)
             buffer.Dispose();

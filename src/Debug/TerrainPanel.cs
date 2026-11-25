@@ -55,7 +55,7 @@ public sealed class TerrainPanel(TerrainWorld world, TerrainRenderer renderer, P
             ImGui.Text($"water blocks {water.Blocks}  awake {water.AwakeBlocks}  step {water.LastStepMs:F3} ms  mass {water.Mass:F1} m3");
             ImGui.Text($"water meshes {waterRenderer.MeshesLastFrame}  tris {waterRenderer.TrianglesLastFrame}  cached {waterRenderer.CachedMeshes}  upload {waterRenderer.UploadBytesLastFrame / 1024} KB");
             ImGui.Text($"water arena vertices {waterRenderer.VertexBytesUsed >> 20} MB  indices {waterRenderer.IndexBytesUsed >> 20} MB");
-            ImGui.Text($"sea zones {water.ZoneDiscs} discs {water.Zones.Cells} cells  {water.LastZoneMs:F3} ms  max flow {water.Zones.MaxSpeed:F1} m/s  volume {water.Zones.Volume:F0} m3  breakers in {water.Zones.InjectedVolume:F0} m3");
+            ImGui.Text($"sea zones {water.ZoneDiscs} discs {water.Zones.Cells} cells  {water.LastZoneMs:F3} ms  max flow {water.Zones.MaxSpeed:F1} m/s  volume {water.Zones.Volume:F0} m3");
 
             ImGui.SeparatorText("Water audit"u8);
             ImGui.Checkbox("Audit every step (slow)"u8, ref water.Audit);

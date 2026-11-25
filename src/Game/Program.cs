@@ -20,12 +20,7 @@ var waterPipes = true;
 var hideUi = false;
 var coastal = true;
 var benchSeconds = 0.0;
-var breakers = false;
-var faces = true;
-var lips = true;
-var foldLip = true;
 var flyTest = false;
-var chainLips = false;
 
 // Weather drives the ocean wind and the sky unless --wind pins the sea (tests, benchmarks); --weather forces it on.
 bool? weather = null;
@@ -103,20 +98,8 @@ for (var i = 0; i < args.Length; i++)
             i++;
         }
     }
-    else if (args[i] == "--no-lips")
-        lips = false;
-    else if (args[i] == "--fold-lip")
-        foldLip = true;
-    else if (args[i] == "--ribbon-lip")
-        foldLip = false;
-    else if (args[i] == "--chain-lips")
-        chainLips = true;
     else if (args[i] == "--fly-test")
         flyTest = true;
-    else if (args[i] == "--no-faces")
-        faces = false;
-    else if (args[i] == "--breakers")
-        breakers = true;
     else if (args[i] == "--no-coastal")
         coastal = false;
     else if (args[i] == "--water-pipes")
@@ -133,5 +116,5 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
-using var app = new GameApp(windSpeed, foamDebug, editTest, camera, waterRate ?? (waterPipes ? 60 : 240), hideUi, coastal, benchSeconds, breakers, faces, lips, flyTest, swell, foldLip, chainLips, weather ?? true, weatherOffset, rain, benchRain, waterPipes, benchFog, fogOn, benchSsr, ssrOn, voxelSwell, renderScale);
+using var app = new GameApp(windSpeed, foamDebug, editTest, camera, waterRate ?? (waterPipes ? 60 : 240), hideUi, coastal, benchSeconds, flyTest, swell, weather ?? true, weatherOffset, rain, benchRain, waterPipes, benchFog, fogOn, benchSsr, ssrOn, voxelSwell, renderScale);
 app.Run();
