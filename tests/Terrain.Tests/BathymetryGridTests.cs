@@ -66,8 +66,8 @@ public sealed class BathymetryGridTests
     }
 
     /// <summary>
-    /// A seabed 8 m down under a rock roof at +6 m: the sea sees the seabed (the water under the roof is drawn), rain
-    /// still sees the roof. Land rising through sea level keeps its own top.
+    /// A seabed 8 m down under a rock roof at +6 m: the sea sees the seabed (the water under the roof is drawn), the
+    /// tops still see the roof. Land rising through sea level keeps its own top.
     /// </summary>
     [Fact]
     public void Ground_IgnoresLandOverTheSea()

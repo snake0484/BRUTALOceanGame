@@ -11,7 +11,7 @@ namespace BrutalGame.Debug;
 /// CPU frame breakdown, managed allocations, GPU timings and pipeline statistics. Strings go through the ImString arena,
 /// so no GC allocation per frame.
 /// </summary>
-public sealed class ProfilerPanel(FrameStats stats, Renderer renderer, RainCover cover, TerrainRenderer terrain, OceanRenderer ocean)
+public sealed class ProfilerPanel(FrameStats stats, Renderer renderer, TerrainRenderer terrain, OceanRenderer ocean)
 {
     private static readonly float2 GraphSize = new(0f, 48f);
     private static readonly float4 AllocColour = new(1f, 0.35f, 0.3f, 1f);
@@ -64,7 +64,6 @@ public sealed class ProfilerPanel(FrameStats stats, Renderer renderer, RainCover
             Row("GPU fence wait"u8, stats.GpuWait);
             Row("Record"u8, stats.Record);
             Row("Submit + present"u8, stats.Present);
-            Row("Cover rebuild"u8, cover.BuildMs);
 
             DrawMemory();
             DrawGeometry();

@@ -21,9 +21,6 @@ bool? weather = null;
 // Weather time at launch (minutes): start inside a given system's life, sea and sky already settled.
 var weatherOffset = 0f;
 
-// Rain intensity 0..1 regardless of the weather (the Weather panel's override); negative = from the weather.
-var rain = -1f;
-var benchRain = false;
 // Scene resolution per axis relative to the window (0.5..1); the UI stays native.
 var renderScale = 1f;
 float[]? camera = null;
@@ -40,13 +37,6 @@ for (var i = 0; i < args.Length; i++)
         weather = false;
     else if (args[i] == "--weather-offset" && i + 1 < args.Length)
         weatherOffset = float.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture);
-    else if (args[i] == "--rain" && i + 1 < args.Length)
-        rain = float.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture);
-    else if (args[i] == "--bench-rain")
-    {
-        benchRain = true;
-        benchSeconds = benchSeconds > 0.0 ? benchSeconds : 12.0;
-    }
     else if (args[i] == "--render-scale" && i + 1 < args.Length)
         renderScale = float.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture);
     else if (args[i] == "--swell" && i + 3 < args.Length)
@@ -82,5 +72,5 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
-using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, coastal, benchSeconds, flyTest, swell, weather ?? true, weatherOffset, rain, benchRain, renderScale);
+using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, coastal, benchSeconds, flyTest, swell, weather ?? true, weatherOffset, renderScale);
 app.Run();

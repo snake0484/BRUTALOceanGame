@@ -69,7 +69,7 @@ public sealed class BathymetryGrid
 
     public (int X, int Z) Shift { get; private set; }
 
-    /// <summary>Topmost terrain surface per cell, overhangs and roofs included (what rain stops on).</summary>
+    /// <summary>Topmost terrain surface per cell, overhangs and roofs included.</summary>
     public ReadOnlySpan<float> Tops => _top;
 
     /// <summary>Topmost terrain surface per cell at or below the sea-level voxel layer; see <see cref="Ground"/>.</summary>

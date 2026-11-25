@@ -31,11 +31,6 @@ const vec3 SAND_ALBEDO = vec3(0.62, 0.56, 0.38);         // terrain.frag palette
 const vec3 SEABED_ABSORPTION = vec3(0.45, 0.07, 0.04);  // sea water, per metre: red goes first
 const vec3 SHALLOW_SCATTER = vec3(0.04, 0.24, 0.22);     // turquoise in-scatter that replaces the seabed with depth
 const float WET_SAND = 0.7;                              // sand under water is darker than the dry beach
-const float RAIN_ROUGHNESS = 0.3;                        // a sea roughened by rain: rings finer than a pixel ...
-const float RAIN_SKY_BLUR = 0.35;                        // ... scatter the sky's reflection toward its average
-
-// 0..1: how much rain roughens this pixel's surface (ocean.frag sets it).
-float gRainRough = 0.0;
 
 // Sky gradient plus sun glow (disk handled by specular on water).
 vec3 sky(vec3 dir)
@@ -61,11 +56,10 @@ float ggxSpecular(vec3 N, vec3 V, vec3 L)
     float NdotH = max(dot(N, H), 0.0);
     float NdotL = max(dot(N, L), 0.0);
     float NdotV = max(dot(N, V), 1e-4);
-    float roughness = mix(ROUGHNESS, RAIN_ROUGHNESS, gRainRough);
-    float a2 = roughness * roughness * roughness * roughness;
+    float a2 = ROUGHNESS * ROUGHNESS * ROUGHNESS * ROUGHNESS;
     float d = NdotH * NdotH * (a2 - 1.0) + 1.0;
     float D = a2 / (PI * d * d);
-    float k = roughness * 0.5;
+    float k = ROUGHNESS * 0.5;
     float vis = 1.0 / ((NdotL * (1.0 - k) + k) * (NdotV * (1.0 - k) + k));
     return D * vis * 0.25 * NdotL;
 }
@@ -150,10 +144,10 @@ vec3 shadeWater(vec3 worldPos, vec3 N, float depth, float thickness, float foam)
     float intensity = frame.sunDir.w;
     float F = fresnelSchlick(max(dot(N, V), 0.0));
 
-    // Sky reflection, kept above the horizon; rain blurs it toward the sky's average.
+    // Sky reflection, kept above the horizon.
     vec3 R = reflect(-V, N);
     R.y = max(R.y, 0.01);
-    vec3 reflection = mix(sky(normalize(R)), 0.5 * (frame.skyZenith.rgb + frame.skyHorizon.rgb), min(RAIN_SKY_BLUR * gRainRough, 0.6));
+    vec3 reflection = sky(normalize(R));
     vec3 colour = mix(waterBodyDepth(worldPos, N, V, depth, thickness), reflection, F);
 
     // Sun specular.

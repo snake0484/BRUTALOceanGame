@@ -14,7 +14,7 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 waterScatter;
     vec4 cascadeL;     // xyz = patch size L per cascade (m), w = cascade count
     vec4 cascadeKLo;   // xyz = band low |k| per cascade, w = persistent foam strength
-    vec4 foamParams;   // x = rain 0..1, y = rain time (s, looped), z = debug view (1 = Jacobian/foam), w unused
+    vec4 foamParams;   // x = debug view (1 = Jacobian/foam), yzw unused
     vec4 depthRect;    // xy = depth map world origin, z = world size, w = depth outside the map
     vec4 coastRect;    // layer B near field: xy = world origin, z = cell size, w = resolution (0 = none)
     vec4 refEnergy[3]; // swell variance per coastal reference frequency
@@ -25,7 +25,6 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 coastPrev;    // fading-out field: xy = world origin, z = cell size, w = resolution (0 = none)
     vec4 carrier;      // surf coherence (OceanSwell.GpuCarrier): k0, reference coord, phase, peak-band energy sum a^2
     vec4 carrierChop;  // x = choppiness, y = omega, z = set group phase, w = group ratio (a set every 1 / this waves)
-    vec4 windSea;      // x = wind speed the cascades' spectrum is raised by (m/s), yzw unused
     vec4 coastFar;     // the current near field's far field (CoastalField.Far): xy = world origin, z = cell size, w = resolution (0 = none)
     vec4 coastFarPrev; // the fading-out near field's far field, the same
     ivec4 counts;      // x = wave count, y..z = coastal reference range in use, w = buffer slots, 3 bits each: current, previous, current's far, previous's far
@@ -52,10 +51,6 @@ layout(std430, set = 0, binding = 5) readonly buffer Coastal { vec4 texels[]; } 
 #endif
 
 layout(set = 0, binding = 7, rgba32f) CARRIER_ATLAS_ACCESS uniform image2DArray carrierAtlas;
-
-#define RAIN_COVER_SET 0
-#define RAIN_COVER_BINDING 8
-#include "rain_cover.glsl"
 
 const int TEXEL_VEC4S = 7;
 const float BREAKING_GAMMA = 0.55;
@@ -304,27 +299,6 @@ layout(std430, set = 0, binding = 6) SURF_FOAM_ACCESS buffer SurfFoam
 {
     float values[];
 } surfFoam;
-
-// The wind sea the cascades show at xz, per cascade: returned, the share of its height (displacement); slopes, the share
-// of its slopes (normals, whitecaps). Over F m of open water upwind (rain_cover.glsl windCover) the wind U raises waves
-// only up to the JONSWAP peak kp = (22 (g² / (U F))^(1/3))² / g: shorter ones are saturated as on the open sea, longer
-// ones missing. So a cascade keeps the part of its band at or above kp, by height variance (a k^-3 tail: ∝ k^-2 between
-// the edges) and by slope variance (∝ ln k). At 10 m/s a 20 m pond keeps ripples under 0.2 m, a 200 m cove chop under
-// 1 m, open water all of it (fully grown by FETCH_REACH, where fetch stops being measured). Under cover there is no
-// wind, and both fall with the exposure.
-vec3 windSea(vec2 xz, out vec3 slopes)
-{
-    vec2 wind = windCover(xz);
-    float wp = 22.0 * pow(9.81 * 9.81 / (max(frame.windSea.x, 0.5) * max(wind.y, 0.5)), 1.0 / 3.0);
-    vec3 kp = vec3(wp * wp / 9.81);
-    vec3 lo = frame.cascadeKLo.xyz;
-    vec3 hi = vec3(frame.cascadeKLo.yz, 0.5 * TWO_PI * CASCADE_N / frame.cascadeL.z);
-    vec3 cut = clamp(kp, lo, hi);
-    float grown = smoothstep(0.5 * FETCH_REACH, FETCH_REACH, wind.y);
-    vec3 heights = (1.0 / (cut * cut) - 1.0 / (hi * hi)) / (1.0 / (lo * lo) - 1.0 / (hi * hi));
-    slopes = wind.x * mix(log(hi / cut) / log(hi / lo), vec3(1.0), grown);
-    return wind.x * mix(sqrt(heights), vec3(1.0), grown);
-}
 
 // Water depth (m) from the bathymetry map: sea level - ground, negative on land, below -500 in pits cut off from the
 // sea; deep outside it.
@@ -660,17 +634,14 @@ OceanPoint oceanFinish(vec2 x0, float se, Swell sw)
         }
     }
 
-    // GPU cascades: displacement only, faded out where the grid cannot resolve the band, and kept to the wind sea the
-    // wind raises over the water here (windSea).
-    vec3 slopeShare;
-    vec3 heightShare = windSea(x0, slopeShare);
+    // GPU cascades: displacement only, faded out where the grid cannot resolve the band; open fetch everywhere.
     vec3 cpuBand = vec3(Dx, height, Dz);
     vec3 fft = vec3(0.0);
     int cascades = min(int(frame.cascadeL.w), 3);
     for (int i = 0; i < cascades; ++i)
     {
         float lambdaLo = TWO_PI / max(frame.cascadeKLo[i], 1e-6);
-        float wv = (1.0 - smoothstep(0.25 * lambdaLo, 0.5 * lambdaLo, se)) * heightShare[i];
+        float wv = 1.0 - smoothstep(0.25 * lambdaLo, 0.5 * lambdaLo, se);
         if (wv <= 0.0)
             continue;
         vec4 dc = textureLod(dispMap, vec3(x0 / frame.cascadeL[i], float(i)), 0.0);
@@ -693,7 +664,7 @@ OceanPoint oceanFinish(vec2 x0, float se, Swell sw)
     p.position = vec3(x0.x + disp.x, disp.y, x0.y + disp.z);
     p.cpuPartials = vec4(hx, hz, -jxx, -jzz);
     p.cpuDxz = -jxz;
-    p.shore = shore * slopeShare;
+    p.shore = vec3(shore);
     p.surfFoam = surfFoamAt(x0);
     p.swashEdge = swashEdge;
     return p;

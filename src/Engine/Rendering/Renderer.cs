@@ -368,7 +368,7 @@ public sealed unsafe class Renderer : IDisposable
     /// <summary>Closes the opaque pass; <see cref="BeginWaterPass"/> draws over it.</summary>
     public void EndOpaquePass(CommandBuffer commands) => commands.EndRenderPass();
 
-    /// <summary>Opens the water pass over the opaque one (water, rain); <see cref="BeginUiPass"/> closes it.</summary>
+    /// <summary>Opens the water pass over the opaque one; <see cref="BeginUiPass"/> closes it.</summary>
     public void BeginWaterPass(CommandBuffer commands)
     {
         commands.BeginRenderPass(

@@ -37,8 +37,6 @@ public sealed class GameApp : IDisposable
     private readonly WeatherPanel _weatherPanel;
     private readonly SceneLighting _clearSky;
     private readonly OceanRenderer _ocean;
-    private readonly RainRenderer _rain;
-    private readonly RainCover _rainCover;
     private readonly OceanFft _oceanFft;
     private readonly FlyCamera _camera = new() { Pitch = -0.12f };
     private readonly TerrainRenderer _terrainRenderer;
@@ -52,7 +50,6 @@ public sealed class GameApp : IDisposable
     private readonly int _oceanScope;
     private readonly CoastalSystem _coastal = new();
     private readonly GpuBenchmark? _bench;
-    private readonly bool _benchRain;
     private readonly FlyTest? _flyTest;
     private FrameSections _sections;
     private readonly long _startTime = Stopwatch.GetTimestamp();
@@ -65,11 +62,10 @@ public sealed class GameApp : IDisposable
     /// <summary>Pipeline statistics scopes (<see cref="PipelineStats"/>): sequential, never nested.</summary>
     private readonly int _terrainStats;
     private readonly int _oceanStats;
-    private readonly int _rainStats;
     private readonly int _uiStats;
 
     /// <param name="camera">Optional start pose: x, y, z, yaw degrees, pitch degrees.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, bool coastal = true, double benchSeconds = 0.0, bool flyTest = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float rain = -1f, bool benchRain = false, float renderScale = 1f)
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, bool coastal = true, double benchSeconds = 0.0, bool flyTest = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f)
     {
         if (camera is not null)
         {
@@ -91,7 +87,6 @@ public sealed class GameApp : IDisposable
 
         _renderer = new Renderer(_window, _stats, Validation, vsync: benchSeconds <= 0.0, renderScale);
         _imgui = new ImGuiLayer(_window, _renderer);
-        _rainCover = new RainCover(_renderer.Context);
 
         var wind = new SwellParams
         {
@@ -104,7 +99,7 @@ public sealed class GameApp : IDisposable
         _swell.SetWind(weather ? _weather.WithWind(wind) : wind);
         _oceanFft = new OceanFft(_renderer) { DebugView = foamDebug };
         _oceanPanel = new OceanPanel(_swell, _oceanFft) { CoastalEnabled = coastal };
-        _weatherPanel = new WeatherPanel(_weather.Map) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset, OverrideRain = rain >= 0f, RainOverride = MathF.Max(rain, 0f) };
+        _weatherPanel = new WeatherPanel(_weather.Map) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset };
         _terrainRenderer = new TerrainRenderer(_renderer);
         _terrain = new TerrainWorld(_terrainRenderer, _physics);
 
@@ -116,10 +111,9 @@ public sealed class GameApp : IDisposable
         _editTest = editTest ? new EditTest(_terrain, _physics, _brush, _camera) : null;
         _terrainPanel = new TerrainPanel(_terrain, _terrainRenderer, _physics);
         _bathymetry = new BathymetryTexture(_renderer);
-        _ocean = new OceanRenderer(_renderer, _oceanFft, _bathymetry.View, _bathymetry.Sampler, _rainCover);
-        _rain = new RainRenderer(_renderer, _ocean);
-        _flyTest = flyTest ? new FlyTest(_camera, _terrain, _bathymetry, _coastal, _rainCover) : null;
-        _profiler = new ProfilerPanel(_stats, _renderer, _rainCover, _terrainRenderer, _ocean);
+        _ocean = new OceanRenderer(_renderer, _oceanFft, _bathymetry.View, _bathymetry.Sampler);
+        _flyTest = flyTest ? new FlyTest(_camera, _terrain, _bathymetry, _coastal) : null;
+        _profiler = new ProfilerPanel(_stats, _renderer, _terrainRenderer, _ocean);
 
         _uploadScope = _renderer.GpuTimer.Register("Uploads");
         _fftScope = _renderer.GpuTimer.Register("Ocean FFT");
@@ -131,7 +125,6 @@ public sealed class GameApp : IDisposable
         var pipelineStats = _renderer.PipelineStats;
         _terrainStats = pipelineStats.Register("Terrain", PipelinePass.Opaque);
         _oceanStats = pipelineStats.Register("Ocean", PipelinePass.Water);
-        _rainStats = pipelineStats.Register("Rain", PipelinePass.Water);
         _uiStats = pipelineStats.Register("ImGui", PipelinePass.Overlay);
 
         _clearSky = SceneLightingFromOcean();
@@ -139,8 +132,6 @@ public sealed class GameApp : IDisposable
 
         if (benchSeconds > 0.0)
             _bench = new GpuBenchmark(_renderer.GpuTimer, benchSeconds);
-
-        _benchRain = benchRain;
 
         if (hideUi || _bench is not null)
         {
@@ -151,7 +142,7 @@ public sealed class GameApp : IDisposable
         }
     }
 
-    /// <summary>--bench: alternates layer B (or the rain) on/off once the world has settled, then closes.</summary>
+    /// <summary>--bench: alternates layer B on/off once the world has settled, then closes.</summary>
     private void UpdateBench()
     {
         if (_bench is null)
@@ -160,8 +151,7 @@ public sealed class GameApp : IDisposable
         var ready = _terrain.LoadedChunks > 0 && _terrain.PendingJobs == 0 && _coastal.Builds > 0;
         _bench.Update(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, ready);
 
-        if (!_benchRain)
-            _oceanPanel.CoastalEnabled = _bench.FeatureOn;
+        _oceanPanel.CoastalEnabled = _bench.FeatureOn;
 
         if (_bench.Done)
             _window.ShouldClose = true;
@@ -232,13 +222,11 @@ public sealed class GameApp : IDisposable
                 _oceanFft.Record(commands, _renderer.FrameIndex, _swell, renderTime, (float)frameSeconds);
                 gpu.End(commands, _fftScope);
 
-                PrepareRain(_renderer.FrameIndex, renderTime, (float)frameSeconds, extent.Height);
                 _ocean.Prepare(_renderer.FrameIndex, _swell, renderTime, viewProj, _camera.Position, _bathymetry.Rect);
                 _sections.Prepare = Lap(ref mark);
                 gpu.Begin(commands, _oceanComputeScope);
                 _ocean.RecordCompute(commands, _renderer.FrameIndex, (float)frameSeconds, _clock.TickIndex);
                 gpu.End(commands, _oceanComputeScope);
-                _rain.RecordSplashes(commands, _renderer.FrameIndex);
 
                 _renderer.BeginOpaquePass(commands);
 
@@ -256,10 +244,6 @@ public sealed class GameApp : IDisposable
                 _ocean.Record(commands, _renderer.FrameIndex, extent, _camera.Position);
                 pipe.End(commands, _oceanStats);
                 gpu.End(commands, _oceanScope);
-
-                pipe.Begin(commands, _rainStats);
-                _rain.Record(commands, _renderer.FrameIndex, extent);
-                pipe.End(commands, _rainStats);
 
                 // The scene to the swapchain at native size (Upscale), then the UI over it, sharp at any render scale.
                 _renderer.BeginUiPass(commands);
@@ -292,23 +276,6 @@ public sealed class GameApp : IDisposable
     }
 
     private System.Numerics.Vector2 CameraXZ => new(_camera.Position.X, _camera.Position.Z);
-
-    /// <summary>
-    /// Rain where the camera is (or the panel's override), carried by the local wind, hidden under terrain tops. The cover
-    /// is written rain or not: the ocean's wind sea reads its fetch and shelter too, measured along the spectrum's wind.
-    /// </summary>
-    private void PrepareRain(int frameIndex, double renderTime, float frameSeconds, int screenHeight)
-    {
-        _rain.Intensity = _benchRain && _bench is { FeatureOn: false } ? 0f : _weatherPanel.OverrideRain ? _weatherPanel.RainOverride : _weatherPanel.DriveSky ? _weather.Local.Rain : 0f;
-        _rain.Wind = _weather.Local.Wind;
-        _weatherPanel.RainDrops = _rain.Drops;
-
-        var grid = _terrain.Bathymetry;
-        _rainCover.Write(frameIndex, _camera.Position, grid.Tops, grid.Origin, BathymetryGrid.Resolution, BathymetryGrid.CellSize, BathymetryGrid.SeaLevel, grid.Version, _swell.GpuSpectrum.Params.WindDirection);
-
-        var pixelAngle = 2f * MathF.Tan(_camera.FovY * 0.5f) / Math.Max(1, screenHeight);
-        _rain.Prepare(frameIndex, renderTime, frameSeconds, pixelAngle);
-    }
 
     /// <summary>Milliseconds since <paramref name="mark"/>, which moves to now.</summary>
     private static float Lap(ref long mark)
@@ -406,9 +373,7 @@ public sealed class GameApp : IDisposable
         _terrain.Dispose();
         _terrainRenderer.Dispose();
         _physics.Dispose();
-        _rain.Dispose();
         _ocean.Dispose();
-        _rainCover.Dispose();
         _bathymetry.Dispose();
         _oceanFft.Dispose();
         _imgui.Dispose();

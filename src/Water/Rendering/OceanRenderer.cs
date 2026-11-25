@@ -33,10 +33,6 @@ public sealed unsafe class OceanRenderer : IDisposable
     public Vector3 WaterDeep = new(0.004f, 0.026f, 0.055f);
     public Vector3 WaterScatter = new(0.0f, 0.11f, 0.10f);
 
-    /// <summary>Rain on the surface, 0..1, and its looped time (s), shared with <see cref="RainRenderer"/> (rain_ripples.glsl).</summary>
-    public float Rain;
-    public float RainTime;
-
     private readonly Device _device;
     private readonly PipelineCache _pipelines;
     private readonly VkDescriptorSetLayout _setLayout;
@@ -46,7 +42,6 @@ public sealed unsafe class OceanRenderer : IDisposable
     private readonly int[] _frameOffsets = new int[Renderer.FramesInFlight];
     private readonly VkPipelineLayout _layout;
     private readonly VkPipeline _pipeline;
-
 
     // Each level is drawn as 4 x 4 tiles of the grid, culled against the view frustum: the clipmap surrounds the camera,
     // so most of it is behind or beside the view, and the vertex work (the swell sum per vertex) dominates the ocean.
@@ -97,7 +92,6 @@ public sealed unsafe class OceanRenderer : IDisposable
         public Vector4 CoastPrevRect;
         public Vector4 Carrier;
         public Vector4 CarrierChop;
-        public Vector4 WindSea;
         public Vector4 CoastFarRect;
         public Vector4 CoastFarPrevRect;
         public int WaveCount;
@@ -143,11 +137,7 @@ public sealed unsafe class OceanRenderer : IDisposable
     // of the current coastal field, what surfBandAt reads instead of the 7-vec4 coastal texels. Shared by all frames;
     // rebuilt when the field or the carrier's wavenumber or reference changes.
     private const int CarrierAtlasBinding = 3 + SampledMaps;
-
-    /// <summary>Where rain can't reach (rain_cover.glsl): no rings under cover, and the rain pipelines read it through this set.</summary>
-    private const int RainCoverBinding = 4 + SampledMaps;
-    private const int Bindings = 5 + SampledMaps;
-    private readonly RainCover _rainCover;
+    private const int Bindings = 4 + SampledMaps;
     private readonly VmaAllocator _allocator;
     private readonly VkImage _carrierAtlas;
     private readonly VmaAllocation _carrierAtlasAllocation;
@@ -171,9 +161,8 @@ public sealed unsafe class OceanRenderer : IDisposable
     private readonly VkSampler _depthSampler;
 
     /// <param name="depthView">Signed depth map (BathymetryTexture), in SHADER_READ_ONLY_OPTIMAL.</param>
-    public OceanRenderer(Renderer renderer, OceanFft fft, VkImageView depthView, VkSampler depthSampler, RainCover rainCover)
+    public OceanRenderer(Renderer renderer, OceanFft fft, VkImageView depthView, VkSampler depthSampler)
     {
-        _rainCover = rainCover;
         _fft = fft;
         _depthView = depthView;
         _depthSampler = depthSampler;
@@ -293,11 +282,6 @@ public sealed unsafe class OceanRenderer : IDisposable
     private const VkShaderStageFlags PushStages = VkShaderStageFlags.VertexBit | VkShaderStageFlags.ComputeBit;
 
     public Vector3 SkyHorizonColor => SkyHorizon;
-
-    /// <summary>Set 0 of pipelines that read the ocean's frame and maps (<see cref="RainRenderer"/>).</summary>
-    internal VkDescriptorSetLayout SetLayout => _setLayout;
-
-    internal VkDescriptorSet Set(int frameIndex) => _sets[frameIndex];
 
     private static int FrameBufferSize => sizeof(FrameHeader) + MaxWaves * sizeof(GpuWave);
 
@@ -437,14 +421,6 @@ public sealed unsafe class OceanRenderer : IDisposable
             StageFlags = buffers,
         };
 
-        bindings[RainCoverBinding] = new VkDescriptorSetLayoutBinding
-        {
-            Binding = RainCoverBinding,
-            DescriptorType = VkDescriptorType.StorageBuffer,
-            DescriptorCount = 1,
-            StageFlags = stages,
-        };
-
         return _device.CreateDescriptorSetLayout(
             new VkDescriptorSetLayoutCreateInfo { BindingCount = Bindings, Bindings = bindings },
             null
@@ -457,7 +433,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         {
             new() { Type = VkDescriptorType.UniformBuffer, DescriptorCount = Renderer.FramesInFlight },
             new() { Type = VkDescriptorType.CombinedImageSampler, DescriptorCount = Renderer.FramesInFlight * SampledMaps },
-            new() { Type = VkDescriptorType.StorageBuffer, DescriptorCount = Renderer.FramesInFlight * (CoastalSlots + 2) },
+            new() { Type = VkDescriptorType.StorageBuffer, DescriptorCount = Renderer.FramesInFlight * (CoastalSlots + 1) },
             new() { Type = VkDescriptorType.StorageImage, DescriptorCount = Renderer.FramesInFlight },
         };
 
@@ -554,16 +530,6 @@ public sealed unsafe class OceanRenderer : IDisposable
                 DescriptorCount = 1,
                 DescriptorType = VkDescriptorType.StorageImage,
                 ImageInfo = &atlas,
-            };
-
-            var cover = new VkDescriptorBufferInfo { Buffer = _rainCover.Buffer(i), Range = (ByteSize64)RainCover.Bytes };
-            writes[RainCoverBinding] = new VkWriteDescriptorSet
-            {
-                DstSet = _sets[i],
-                DstBinding = RainCoverBinding,
-                DescriptorCount = 1,
-                DescriptorType = VkDescriptorType.StorageBuffer,
-                BufferInfo = &cover,
             };
 
             _device.UpdateDescriptorSets(writes, []);
@@ -671,12 +637,11 @@ public sealed unsafe class OceanRenderer : IDisposable
         header->WaterScatter = new Vector4(WaterScatter, 0f);
         header->CascadeL = _fft.CascadeSizes;
         header->CascadeKLo = OceanFft.BandLow(swell.GpuSpectrum.Params.MinWavelength) with { W = _fft.FoamStrength };
-        header->FoamParams = new Vector4(Rain, RainTime, _fft.DebugView ? 1f : 0f, 0f);
+        header->FoamParams = new Vector4(_fft.DebugView ? 1f : 0f, 0f, 0f, 0f);
         header->DepthRect = depthRect;
         _depthRect = depthRect;
         WriteCoastal(header, frameIndex, swell);
         (header->Carrier, header->CarrierChop) = swell.GpuCarrier(renderTime);
-        header->WindSea = new Vector4(swell.GpuSpectrum.Params.WindSpeed, 0f, 0f, 0f);
         _atlasRebuild = AtlasStale(_fieldVersion, header->Carrier);
         header->WaveCount = swell.CopyGpuWaves(waves, renderTime);
     }

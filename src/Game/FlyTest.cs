@@ -29,7 +29,7 @@ public struct FrameSections
 /// streams terrain and re-centres the bathymetry and coastal maps as it goes. It records each frame's main-thread
 /// sections, then logs percentiles and the slowest frames with what ran in them, and closes the window.
 /// </summary>
-public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryTexture map, CoastalSystem coastal, RainCover cover)
+public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryTexture map, CoastalSystem coastal)
 {
     private static readonly LogCategory Log = LogCategory.Make("FlyTest");
     /// <summary>The circle runs 60 m off the west beach, at least <see cref="Clearance"/> over the ground.</summary>
@@ -46,9 +46,6 @@ public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryText
     private readonly (int Cells, float Reach, float Total)[] _map = new (int, float, float)[MaxFrames];
     private readonly float[] _retire = new float[MaxFrames];
     private readonly int[] _events = new int[MaxFrames];
-    private readonly float[] _coverMs = new float[MaxFrames];
-    private int _coverCount;
-    private int _coverBuilds;
     private int _count;
     private double _start = -1.0;
     private int _selects;
@@ -73,7 +70,6 @@ public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryText
             _start = time;
             (_selects, _rebuilds, _uploads, _builds) = (world.Selects, world.Bathymetry.Version, map.Uploads, coastal.Builds);
             _collections = GC.CollectionCount(0);
-            _coverBuilds = cover.Builds;
         }
 
         var angle = (float)((time - _start) * Speed / _radius);
@@ -112,11 +108,6 @@ public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryText
         _frames[_count] = sections;
         _events[_count] = events;
         _count++;
-
-        if (cover.Builds != _coverBuilds)
-            _coverMs[_coverCount++] = cover.LastBuildMs;
-
-        _coverBuilds = cover.Builds;
     }
 
     private void Report()
@@ -128,16 +119,6 @@ public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryText
         var sorted = (float[])work.Clone();
         Array.Sort(sorted);
         Log.Info($"fly test: {_count} frames over {Seconds:F0} s at {Speed:F0} m/s; main-thread work p50 {Pick(sorted, 0.5):F2} ms, p95 {Pick(sorted, 0.95):F2}, p99 {Pick(sorted, 0.99):F2}, max {sorted[^1]:F2}");
-
-        // Rain/wind cover rebuilds (tops, fetch, shelter), once per 2 m the camera moves.
-        var coverMs = _coverMs.AsSpan(0, _coverCount).ToArray();
-        var coverTotal = 0f;
-        foreach (var ms in coverMs)
-            coverTotal += ms;
-
-        Array.Sort(coverMs);
-        if (coverMs.Length > 0)
-            Log.Info($"cover rebuilds: {coverMs.Length} in {_count} frames, p50 {Pick(coverMs, 0.5):F3} ms, p95 {Pick(coverMs, 0.95):F3}, max {coverMs[^1]:F3}, total {coverTotal:F1} ms");
 
         var order = new int[_count];
         for (var i = 0; i < _count; i++)

@@ -50,11 +50,6 @@ public sealed class WeatherPanel
     /// <summary>Debug offset of weather time from sim time, to scrub through systems' lives.</summary>
     public float TimeOffsetMinutes;
 
-    /// <summary>Rain drawn at <see cref="RainOverride"/> whatever the weather (--rain).</summary>
-    public bool OverrideRain;
-    public float RainOverride = 0.6f;
-    public int RainDrops;
-
     public WeatherPanel(WeatherMap map)
     {
         _map = map;
@@ -102,10 +97,7 @@ public sealed class WeatherPanel
         ImGui.SliderFloat("Time offset min"u8, ref TimeOffsetMinutes, 0f, 600f, "%.0f"u8);
         ImGui.Checkbox("Drive ocean wind"u8, ref DriveOcean);
         ImGui.SameLine();
-        ImGui.Checkbox("Drive sky + rain"u8, ref DriveSky);
-        ImGui.Checkbox("Override rain"u8, ref OverrideRain);
-        ImGui.SameLine();
-        ImGui.SliderFloat("##rain"u8, ref RainOverride, 0f, 1f, "%.2f"u8);
+        ImGui.Checkbox("Drive sky"u8, ref DriveSky);
     }
 
     private void DrawLocal(Vector2 camera)
@@ -220,7 +212,6 @@ public sealed class WeatherPanel
         ImGui.Text($"Tick     {TickMs.Average,7:F4} ms  max {TickMs.Max,7:F4}");
         ImGui.Text($"Rebuild  {_map.LastRebuildMs,7:F3} ms  ({_map.Rebuilds} rebuilds)");
         ImGui.Text($"Map      {MapMs.Average,7:F4} ms  max {MapMs.Max,7:F4}  ({_noDataCells} cells no data)");
-        ImGui.Text($"Rain     {RainDrops} drops (GPU timings in the profiler)");
         ImGui.PlotLines("##weather"u8, TickMs.Values, TickMs.Offset, default, 0f, MathF.Max(TickMs.Max, 0.01f), GraphSize);
     }
 

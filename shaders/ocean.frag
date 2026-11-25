@@ -4,7 +4,6 @@
 
 #include "ocean_common.glsl"
 #include "ocean_shading.glsl"
-#include "rain_ripples.glsl"
 
 layout(location = 0) in vec3 vWorldPos;
 layout(location = 1) in vec2 vRestXZ;
@@ -56,26 +55,12 @@ void main()
                             dxz * p.x - p.y * dxx));
     float J = dxx * dzz - dxz * dxz;
 
-    // Rain (rain_ripples.glsl, foamParams.x = intensity, y = its time): rings from every drop, in rest coordinates so
-    // they ride the waves, and beyond the drawn splash crowns their flashes. Rings finer than a pixel roughen the sea.
-    // None under cover (rain_cover.glsl): a roof, an overhang, a sea cave.
-    float rainWhite = 0.0;
-    if (frame.foamParams.x > 0.0)
-    {
-        float wet = frame.foamParams.x * rainReaches(vWorldPos);
-        float crowns = smoothstep(SPLASH_NEAR, SPLASH_FAR, length(vWorldPos.xz - frame.cameraPos.xz));
-        vec3 rain = rainOnWater(vRestXZ, dFdx(vRestXZ), dFdy(vRestXZ), frame.foamParams.y, wet, crowns);
-        N = normalize(N - vec3(rain.x, 0.0, rain.y));
-        rainWhite = rain.z;
-        gRainRough = wet * (0.5 + 0.5 * smoothstep(0.01, 0.04, footprint));
-    }
-
     if (dot(N, frame.cameraPos.xyz - vWorldPos) < 0.0)
         N = -N;
 
     // Whitecaps: the cascades' foam (ocean_fft.comp), seeded on the measured share of the surface for this wind and
-    // left to decay, drawn as lace so a patch reads as foam on water rather than flat white. They fade over the shallows,
-    // and where the fetch is too short to raise them, with the waves that make them (persistent is already faded so).
+    // left to decay, drawn as lace so a patch reads as foam on water rather than flat white. They fade over the shallows
+    // with the waves that make them (persistent is already faded so).
     float whitecap = clamp(persistent * frame.cascadeKLo.w, 0.0, 1.0);
 
     // Surf foam as lace (water_shading.glsl): a thin line at the very edge of the water where the swash runs out. What
@@ -84,10 +69,10 @@ void main()
     float edgeFoam = max(0.6 * (1.0 - smoothstep(0.0, 0.04, max(thickness, 0.0))), SWASH_EDGE_FOAM * vSwashEdge);
     float coverage = max(0.6 * vSurfFoam, edgeFoam);
     float surf = foamLace(vRestXZ, coverage, 0.0);
-    float foam = clamp(max(max(foamLace(vRestXZ, whitecap, 0.5), surf), 0.8 * rainWhite), 0.0, 1.0);
+    float foam = clamp(max(foamLace(vRestXZ, whitecap, 0.5), surf), 0.0, 1.0);
 
     // Debug: red = folding (1 - J), green = J, blue = foam coverage before lace (whitecap or surf).
-    if (frame.foamParams.z > 0.5)
+    if (frame.foamParams.x > 0.5)
     {
         outColor = vec4(clamp(1.0 - J, 0.0, 1.0), clamp(J, 0.0, 1.0) * 0.5, max(whitecap, coverage), 1.0);
         return;
