@@ -83,6 +83,13 @@ M0 landed on `space-pivot` (2f70258..1df5d87). Review items left for the milesto
 - **Debug paths:** OceanPanel and GameApp still write swell wind straight into the sim; route through sim commands. Refused digs have no feedback (show the count, then the D30 band overlay).
 - **Docs:** docs/ocean-gpu-contract.md's Frame UBO section is stale.
 
+### Carry-overs from M1 (2026-11-25)
+
+- **Orbit test:** smoothness can only fail in the inertial variant and does not catch uneven render time (also log the second difference of RenderTime against wall-clock); the GPU marker probe counts occluded fragments (wrap it in an occlusion query).
+- **Instance store:** the device-local instance store (8192) equals terrain's max handles, so a second GPU-culled user (hulls) would silently get nothing; size it for every user or fail loudly.
+- **Frames:** `CelestialSystem.Read` leaves render poses at identity until `Evaluate` runs; grids must write `FrameTree.Render` once they exist (M3). SimWorld still regenerates the test system each launch (save/load in M4).
+- **Ocean:** the foam lace now tiles every 182.9 m; check it from altitude with fly-test screenshot sheets.
+
 ## Open questions
 
 Decisions so far are logged in [decisions.md](decisions.md) (D9-D37) and in the Decided table above. Remaining open questions live in each doc's own list.
