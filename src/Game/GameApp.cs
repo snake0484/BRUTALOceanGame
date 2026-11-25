@@ -32,6 +32,9 @@ public sealed class GameApp : IDisposable
     private readonly ImGuiLayer _imgui;
     private readonly ProfilerPanel _profiler;
     private readonly OceanSwell _swell = new(seed: 1);
+    private readonly TerrainCoastalDepth _shoreDepth = new();
+    private readonly OceanSurface _surface;
+    private int _shoreOps = -1;
     private readonly OceanPanel _oceanPanel;
     private readonly WeatherSystem _weather;
     private readonly WeatherPanel _weatherPanel;
@@ -98,7 +101,8 @@ public sealed class GameApp : IDisposable
         _weather = new WeatherSystem(new WeatherClimate(), weatherOffset * 60.0, CameraXZ);
         _swell.SetWind(weather ? _weather.WithWind(wind) : wind);
         _oceanFft = new OceanFft(_renderer) { DebugView = foamDebug };
-        _oceanPanel = new OceanPanel(_swell, _oceanFft) { CoastalEnabled = coastal };
+        _surface = new OceanSurface(_swell, _shoreDepth);
+        _oceanPanel = new OceanPanel(_surface, _oceanFft) { CoastalEnabled = coastal };
         _weatherPanel = new WeatherPanel(_weather.Map) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset };
         _terrainRenderer = new TerrainRenderer(_renderer);
         _terrain = new TerrainWorld(_terrainRenderer, _physics);
@@ -189,6 +193,7 @@ public sealed class GameApp : IDisposable
             _editTest?.Update(_clock.SimTime);
             _terrainPanel.BrushRadius = _brush.Radius;
             _terrain.Update(_camera.Position);
+            SnapshotShoreDepth();
             _sections.Terrain = Lap(ref mark);
             UpdateWeather();
             _coastal.Update(_terrain, _swell, _clock.SimTime, _oceanPanel.CoastalEnabled);
@@ -222,6 +227,7 @@ public sealed class GameApp : IDisposable
                 _oceanFft.Record(commands, _renderer.FrameIndex, _swell, renderTime, (float)frameSeconds);
                 gpu.End(commands, _fftScope);
 
+                _ocean.ShoreWash = _oceanPanel.ShoreWash;
                 _ocean.Prepare(_renderer.FrameIndex, _swell, renderTime, viewProj, _camera.Position, _bathymetry.Rect);
                 _sections.Prepare = Lap(ref mark);
                 gpu.Begin(commands, _oceanComputeScope);
@@ -273,6 +279,16 @@ public sealed class GameApp : IDisposable
         _weather.Update(CameraXZ, _swell, _ocean, _clearSky, _weatherPanel.DriveOcean, _weatherPanel.DriveSky);
         var horizon = _ocean.SkyHorizon;
         _renderer.ClearColor = new float4(horizon.X, horizon.Y, horizon.Z, 1f);
+    }
+
+    /// <summary>The surface's depth cap reads the analytic terrain plus edits; re-snapshot when an edit lands (between ticks).</summary>
+    private void SnapshotShoreDepth()
+    {
+        if (_terrain.Ops.Count == _shoreOps)
+            return;
+
+        _shoreDepth.Snapshot(_terrain.Params, _terrain.Ops);
+        _shoreOps = _terrain.Ops.Count;
     }
 
     private System.Numerics.Vector2 CameraXZ => new(_camera.Position.X, _camera.Position.Z);

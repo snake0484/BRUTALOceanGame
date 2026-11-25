@@ -20,6 +20,7 @@ public sealed class OceanPanel
     private static readonly float2 GraphSize = new(0f, 48f);
 
     private readonly OceanSwell _swell;
+    private readonly OceanSurface _surface;
     private readonly OceanFft _fft;
     private readonly TimingRing _height = new(TimingSamples);
     private readonly TimingRing _bench = new(TimingSamples);
@@ -33,14 +34,16 @@ public sealed class OceanPanel
     public readonly TimingRing PrepareMs = new(TimingSamples);
     public bool Open = true;
     public bool CoastalEnabled = true;
+    public bool ShoreWash = true;
     public float CoastalBuildMs;
     public int CoastalBuilds;
 
-    public OceanPanel(OceanSwell swell, OceanFft fft)
+    public OceanPanel(OceanSurface surface, OceanFft fft)
     {
-        _swell = swell;
+        _surface = surface;
+        _swell = surface.Swell;
         _fft = fft;
-        _edit = swell.Wind;
+        _edit = _swell.Wind;
         _fetchKm = _edit.Fetch / 1000f;
         _deep = float.IsPositiveInfinity(_edit.Depth);
 
@@ -54,7 +57,7 @@ public sealed class OceanPanel
 
     public void Draw()
     {
-        _height.Record(_swell.SampleHeight(0f, 0f));
+        _height.Record(_surface.SampleHeight(0f, 0f));
 
         if (_benchmark)
             RunBenchmark();
@@ -132,11 +135,12 @@ public sealed class OceanPanel
         ImGui.Checkbox("Layer B coastal", ref CoastalEnabled);
         ImGui.SameLine();
         ImGui.Text($"{CoastalBuilds} builds  last {CoastalBuildMs:F1} ms (jobs)");
+        ImGui.Checkbox("Shore wash"u8, ref ShoreWash);
 
         ImGui.SeparatorText("Origin"u8);
         ImGui.PlotLines("##height"u8, _height.Values, _height.Offset, default, float.MaxValue, float.MaxValue, GraphSize);
 
-        var s = _swell.Sample(0f, 0f);
+        var s = _surface.Sample(0f, 0f);
         ImGui.Text($"h {s.Height,7:F3}  jacobian {s.Jacobian:F3}");
         ImGui.Text($"n   {s.Normal.X,7:F3} {s.Normal.Y,7:F3} {s.Normal.Z,7:F3}");
         ImGui.Text($"vel {s.Velocity.X,7:F3} {s.Velocity.Y,7:F3} {s.Velocity.Z,7:F3}");
@@ -159,7 +163,7 @@ public sealed class OceanPanel
     {
         var start = Stopwatch.GetTimestamp();
         foreach (var p in _benchPoints)
-            _swell.Sample(p.X, p.Y);
+            _surface.Sample(p.X, p.Y);
 
         _bench.Record((float)Stopwatch.GetElapsedTime(start).TotalMilliseconds);
     }

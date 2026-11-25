@@ -9,7 +9,7 @@ namespace BrutalGame;
 /// onto the column top). Unlike the streamed bathymetry it is the same at every LOD, so flying around never changes the
 /// coastal maps. Each cell averages 2×2 samples.
 /// </summary>
-public sealed class TerrainCoastalDepth : ICoastalDepth
+public sealed class TerrainCoastalDepth : ICoastalDepth, IShoreDepth
 {
     private BrushOp[] _ops = new BrushOp[64];
     private int _opCount;
@@ -48,6 +48,8 @@ public sealed class TerrainCoastalDepth : ICoastalDepth
             }
         }
     }
+
+    public float Depth(float x, float z) => _params.SeaLevel - Top(x, z);
 
     private float Top(float x, float z)
     {

@@ -98,6 +98,10 @@ public sealed class OceanSwell
     private float _carrierEnergy;
     private const float MinCothKh = 0.1f;
 
+    /// <summary>Depth-limited swell: every component scaled by min(1, this × depth / Hs) (ocean_common.glsl swellCap).</summary>
+    public const float DepthCapGamma = 0.55f;
+    private float _breakerHeight;
+
     /// <summary>Layer B coastal maps; null = open ocean everywhere. Set on the main thread between ticks.</summary>
     public CoastalField? Coastal { get; set; }
 
@@ -366,6 +370,29 @@ public sealed class OceanSwell
             _band[i] = i < _count && omega > 0f ? 1f - Smooth((MathF.Abs(_ref[i] - _carrierRef) - BandInner) / (BandOuter - BandInner)) : 0f;
             _carrierEnergy += i < _count ? _a[i] * _a[i] * _band[i] : 0f;
         }
+
+        // Komar and Gaylord (1972): H_b = 0.39 g^0.2 (T H0²)^0.4, H0 the coherent surf wave's deep-water height.
+        var h0 = 2f * MathF.Sqrt(MaxCoherence * _carrierEnergy);
+        _breakerHeight = omega > 0f ? 0.39f * MathF.Pow(9.81f, 0.2f) * MathF.Pow(MathF.Tau / omega * h0 * h0, 0.4f) : 0f;
+    }
+
+    /// <summary>
+    /// The shore wash for the GPU: (carrier travel direction x, z, breaker height, open swell Hs); breaker height 0 turns
+    /// the swash off.
+    /// </summary>
+    public System.Numerics.Vector4 GpuShore(bool swash)
+    {
+        var (dirZ, dirX) = MathF.SinCos(DominantDirection);
+        return new System.Numerics.Vector4(dirX, dirZ, swash ? _breakerHeight : 0f, SignificantWaveHeight);
+    }
+
+    /// <summary>Depth cap at a rest position: 1 without a depth source.</summary>
+    private float Cap(IShoreDepth? shore, float x0, float z0)
+    {
+        if (shore is null || SignificantWaveHeight <= 1e-4f)
+            return 1f;
+
+        return Math.Clamp(DepthCapGamma * shore.Depth(x0, z0) / SignificantWaveHeight, 0f, 1f);
     }
 
     private static float Smooth(float t)
@@ -495,72 +522,72 @@ public sealed class OceanSwell
     }
 
     /// <summary>
-    /// Surface position of the water particle whose rest position is (x0, z0).
+    /// Surface position of the water particle whose rest position is (x0, z0); <paramref name="shore"/> applies the depth cap.
     /// </summary>
-    public float3 SurfacePoint(float x0, float z0)
+    public float3 SurfacePoint(float x0, float z0, IShoreDepth? shore = null)
     {
         var current = new CoastalSample();
         var previous = new CoastalSample();
         var fields = SampleFields(x0, z0, ref current, ref previous);
         if (fields == 0)
-            return PointOf(DeepWaves(), x0, z0);
+            return PointOf(DeepWaves(), x0, z0, Cap(shore, x0, z0));
 
         Span<float> scratch = stackalloc float[ScratchArrays * CoastalPadded];
-        var point = PointOf(CoastalWaves(Coastal!.Direction, x0, z0, current, scratch), x0, z0);
-        return fields == 2 ? float3.Lerp(PointOf(CoastalWaves(PreviousDirection, x0, z0, previous, scratch), x0, z0), point, CoastalFade) : point;
+        var point = PointOf(CoastalWaves(Coastal!.Direction, x0, z0, current, scratch), x0, z0, 1f);
+        return fields == 2 ? float3.Lerp(PointOf(CoastalWaves(PreviousDirection, x0, z0, previous, scratch), x0, z0, 1f), point, CoastalFade) : point;
     }
 
-    private float3 PointOf(in Waves waves, float x0, float z0)
+    private float3 PointOf(in Waves waves, float x0, float z0, float cap)
     {
         SumDisplacement(waves, x0, z0, out var dx, out var dz);
-        return new float3(x0 + dx, SumHeight(waves, x0, z0), z0 + dz);
+        return new float3(x0 + cap * dx, cap * SumHeight(waves, x0, z0), z0 + cap * dz);
     }
 
     /// <summary>Water surface height at world (x, z).</summary>
-    public float SampleHeight(float x, float z)
+    public float SampleHeight(float x, float z, IShoreDepth? shore = null)
     {
         var current = new CoastalSample();
         var previous = new CoastalSample();
         var fields = SampleFields(x, z, ref current, ref previous);
         if (fields == 0)
-            return HeightOf(DeepWaves(), x, z);
+            return HeightOf(DeepWaves(), x, z, shore);
 
         Span<float> scratch = stackalloc float[ScratchArrays * CoastalPadded];
-        var height = HeightOf(CoastalWaves(Coastal!.Direction, x, z, current, scratch), x, z);
-        return fields == 2 ? float.Lerp(HeightOf(CoastalWaves(PreviousDirection, x, z, previous, scratch), x, z), height, CoastalFade) : height;
+        var height = HeightOf(CoastalWaves(Coastal!.Direction, x, z, current, scratch), x, z, null);
+        return fields == 2 ? float.Lerp(HeightOf(CoastalWaves(PreviousDirection, x, z, previous, scratch), x, z, null), height, CoastalFade) : height;
     }
 
-    private float HeightOf(in Waves waves, float x, float z)
+    private float HeightOf(in Waves waves, float x, float z, IShoreDepth? shore)
     {
-        Invert(waves, x, z, InversionIterations, out var x0, out var z0);
-        return SumHeight(waves, x0, z0);
+        var cap = Invert(waves, x, z, shore, out var x0, out var z0);
+        return cap * SumHeight(waves, x0, z0);
     }
 
-    public float3 SampleNormal(float x, float z) => Sample(x, z).Normal;
+    public float3 SampleNormal(float x, float z, IShoreDepth? shore = null) => Sample(x, z, shore).Normal;
 
-    public float3 SampleVelocity(float x, float z) => Sample(x, z).Velocity;
+    public float3 SampleVelocity(float x, float z, IShoreDepth? shore = null) => Sample(x, z, shore).Velocity;
 
-    public void SampleHeights(ReadOnlySpan<float2> positions, Span<float> heights)
+    public void SampleHeights(ReadOnlySpan<float2> positions, Span<float> heights, IShoreDepth? shore = null)
     {
         for (var i = 0; i < positions.Length; i++)
-            heights[i] = SampleHeight(positions[i].X, positions[i].Y);
+            heights[i] = SampleHeight(positions[i].X, positions[i].Y, shore);
     }
 
     /// <summary>Height, normal, orbital velocity and Jacobian at world (x, z).</summary>
-    public WaveSample Sample(float x, float z)
+    public WaveSample Sample(float x, float z, IShoreDepth? shore = null)
     {
         var current = new CoastalSample();
         var previous = new CoastalSample();
         var fields = SampleFields(x, z, ref current, ref previous);
         if (fields == 0)
-            return SampleOf(DeepWaves(), x, z);
+            return SampleOf(DeepWaves(), x, z, shore);
 
         Span<float> scratch = stackalloc float[ScratchArrays * CoastalPadded];
-        var now = SampleOf(CoastalWaves(Coastal!.Direction, x, z, current, scratch), x, z);
+        var now = SampleOf(CoastalWaves(Coastal!.Direction, x, z, current, scratch), x, z, null);
         if (fields == 1)
             return now;
 
-        var before = SampleOf(CoastalWaves(PreviousDirection, x, z, previous, scratch), x, z);
+        var before = SampleOf(CoastalWaves(PreviousDirection, x, z, previous, scratch), x, z, null);
         var t = CoastalFade;
         return new WaveSample
         {
@@ -575,9 +602,9 @@ public sealed class OceanSwell
     // early tiers and promoted it on whichever tick crossed the threshold (10 samples took 13 ms on first use, against
     // 0.05 ms once promoted).
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-    private WaveSample SampleOf(in Waves w, float x, float z)
+    private WaveSample SampleOf(in Waves w, float x, float z, IShoreDepth? shore)
     {
-        Invert(w, x, z, InversionIterations, out var x0, out var z0);
+        var cap = Invert(w, x, z, shore, out var x0, out var z0);
 
         var vx = Vector256.Create(x0);
         var vz = Vector256.Create(z0);
@@ -611,11 +638,11 @@ public sealed class OceanSwell
             uy = Vector256.FusedMultiplyAdd(Load(w.Aw, i), sin, uy);
         }
 
-        var slopeX = -Vector256.Sum(hx);
-        var slopeZ = -Vector256.Sum(hz);
-        var dxx = 1f - Vector256.Sum(jxx);
-        var dzz = 1f - Vector256.Sum(jzz);
-        var dxz = -Vector256.Sum(jxz);
+        var slopeX = -cap * Vector256.Sum(hx);
+        var slopeZ = -cap * Vector256.Sum(hz);
+        var dxx = 1f - cap * Vector256.Sum(jxx);
+        var dzz = 1f - cap * Vector256.Sum(jzz);
+        var dxz = -cap * Vector256.Sum(jxz);
 
         // Tangents Tx = (dxx, slopeX, dxz), Tz = (dxz, slopeZ, dzz); normal = Tz × Tx.
         var normal = new float3(
@@ -626,9 +653,9 @@ public sealed class OceanSwell
 
         return new WaveSample
         {
-            Height = Vector256.Sum(height),
+            Height = cap * Vector256.Sum(height),
             Normal = float3.Normalize(normal),
-            Velocity = new float3(Vector256.Sum(ux), Vector256.Sum(uy), Vector256.Sum(uz)),
+            Velocity = cap * new float3(Vector256.Sum(ux), Vector256.Sum(uy), Vector256.Sum(uz)),
             Jacobian = dxx * dzz - dxz * dxz,
         };
     }
@@ -826,20 +853,25 @@ public sealed class OceanSwell
         return (cap, steepness > MaxRmsSteepness ? MaxRmsSteepness / steepness : 1f);
     }
 
-    private void Invert(in Waves waves, float x, float z, int iterations, out float x0, out float z0)
+    /// <summary>The rest position under world (x, z), with the depth cap there (it scales the displacement too).</summary>
+    private float Invert(in Waves waves, float x, float z, IShoreDepth? shore, out float x0, out float z0)
     {
         x0 = x;
         z0 = z;
+        var cap = Cap(shore, x0, z0);
 
         if (Choppiness <= 0f)
-            return;
+            return cap;
 
-        for (var i = 0; i < iterations; i++)
+        for (var i = 0; i < InversionIterations; i++)
         {
             SumDisplacement(waves, x0, z0, out var dx, out var dz);
-            x0 = x - dx;
-            z0 = z - dz;
+            x0 = x - cap * dx;
+            z0 = z - cap * dz;
+            cap = Cap(shore, x0, z0);
         }
+
+        return cap;
     }
 
     private float SumHeight(in Waves w, float x0, float z0)

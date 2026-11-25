@@ -3,27 +3,27 @@ using Brutal.Numerics;
 namespace BrutalGame.Water.Ocean;
 
 /// <summary>
-/// The queryable ocean surface (CLAUDE.md, Water layers): the swell (layers A and B), the same wave the GPU draws apart
-/// from its high-frequency FFT detail and the shore wash. Buoyancy and other gameplay queries go through here rather than
-/// a layer. Read-only between ticks (the swell's SetTime runs on the main thread in the tick), so safe to call from jobs
-/// then; allocation-free.
+/// The queryable ocean surface (CLAUDE.md, Water layers): the swell, depth-limited by min(1, 0.55 h / Hs) from the
+/// world's analytic depth (the same cap the GPU applies), the wave the GPU draws apart from its high-frequency FFT detail
+/// and the shore wash. Buoyancy and other gameplay queries go through here rather than the swell. Read-only between ticks
+/// (the swell's SetTime runs on the main thread in the tick), so safe to call from jobs then; allocation-free.
 /// </summary>
-public sealed class OceanSurface(OceanSwell swell)
+public sealed class OceanSurface(OceanSwell swell, IShoreDepth? shore = null)
 {
     public OceanSwell Swell => swell;
 
     /// <summary>Height, normal, orbital velocity and Jacobian at world (x, z).</summary>
-    public WaveSample Sample(float x, float z) => swell.Sample(x, z);
+    public WaveSample Sample(float x, float z) => swell.Sample(x, z, shore);
 
     /// <summary>Water surface height at world (x, z).</summary>
-    public float SampleHeight(float x, float z) => swell.SampleHeight(x, z);
+    public float SampleHeight(float x, float z) => swell.SampleHeight(x, z, shore);
 
-    public float3 SampleNormal(float x, float z) => swell.SampleNormal(x, z);
+    public float3 SampleNormal(float x, float z) => swell.SampleNormal(x, z, shore);
 
-    public float3 SampleVelocity(float x, float z) => swell.SampleVelocity(x, z);
+    public float3 SampleVelocity(float x, float z) => swell.SampleVelocity(x, z, shore);
 
-    public void SampleHeights(ReadOnlySpan<float2> positions, Span<float> heights) => swell.SampleHeights(positions, heights);
+    public void SampleHeights(ReadOnlySpan<float2> positions, Span<float> heights) => swell.SampleHeights(positions, heights, shore);
 
     /// <summary>Surface position of the water particle whose rest position is (x0, z0).</summary>
-    public float3 SurfacePoint(float x0, float z0) => swell.SurfacePoint(x0, z0);
+    public float3 SurfacePoint(float x0, float z0) => swell.SurfacePoint(x0, z0, shore);
 }

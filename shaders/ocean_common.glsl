@@ -25,6 +25,7 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 coastPrev;    // fading-out field: xy = world origin, z = cell size, w = resolution (0 = none)
     vec4 carrier;      // surf coherence (OceanSwell.GpuCarrier): k0, reference coord, phase, peak-band energy sum a^2
     vec4 carrierChop;  // x = choppiness, y = omega, z = set group phase, w = group ratio (a set every 1 / this waves)
+    vec4 shore;        // xy = carrier travel direction, z = its breaker height (0 = no shore wash), w = open swell Hs
     vec4 coastFar;     // the current near field's far field (CoastalField.Far): xy = world origin, z = cell size, w = resolution (0 = none)
     vec4 coastFarPrev; // the fading-out near field's far field, the same
     ivec4 counts;      // x = wave count, y..z = coastal reference range in use, w = buffer slots, 3 bits each: current, previous, current's far, previous's far
@@ -40,17 +41,6 @@ layout(set = 0, binding = 4) uniform sampler2D depthMap; // signed depth (Bathym
 // buffers shared by all frames (OceanRenderer.Slot); counts.w says which hold the current near field and, while a rebuild
 // crossfades in, the one it replaces, and each one's far field.
 layout(std430, set = 0, binding = 5) readonly buffer Coastal { vec4 texels[]; } coastal[6];
-
-// Carrier atlas (ocean_carrier_atlas.comp): the surf carrier's (lag, water depth, shoal amplitude, active flag) per
-// texel of the current coastal field, mixed to the carrier's reference once per texel when the field or the carrier
-// changes. What surfBandAt reads, bilinear by hand from four texels. Read-only except in that compute shader.
-#ifdef CARRIER_ATLAS_WRITABLE
-#define CARRIER_ATLAS_ACCESS
-#else
-#define CARRIER_ATLAS_ACCESS readonly
-#endif
-
-layout(set = 0, binding = 7, rgba32f) CARRIER_ATLAS_ACCESS uniform image2DArray carrierAtlas;
 
 const int TEXEL_VEC4S = 7;
 const float BREAKING_GAMMA = 0.55;
@@ -237,51 +227,6 @@ vec2 coastalLimits(int tap)
     return vec2(cap, steepness > MAX_RMS_STEEPNESS ? MAX_RMS_STEEPNESS / steepness : 1.0);
 }
 
-// The four carrier atlas texels around xz in the current field and their bilinear weights: the same bilinear as
-// CoastalField.Sample on the CPU. False outside the map; a caller that needs an active texel tests a.w + b.w + c.w + d.w.
-bool carrierTexels(vec2 xz, out vec2 w, out vec4 a, out vec4 b, out vec4 c, out vec4 d)
-{
-    vec4 rect = frame.coastRect;
-    int res = int(rect.w);
-    vec2 f = (xz - rect.xy) / rect.z - 0.5;
-    if (res <= 0 || !(f.x >= 0.0 && f.y >= 0.0 && f.x < float(res - 1) && f.y < float(res - 1)))
-        return false;
-
-    ivec2 i = ivec2(f);
-    w = f - vec2(i);
-    a = imageLoad(carrierAtlas, ivec3(i.x, i.y, 0));
-    b = imageLoad(carrierAtlas, ivec3(i.x + 1, i.y, 0));
-    c = imageLoad(carrierAtlas, ivec3(i.x, i.y + 1, 0));
-    d = imageLoad(carrierAtlas, ivec3(i.x + 1, i.y + 1, 0));
-    return true;
-}
-
-float bilerp(float a, float b, float c, float d, vec2 w)
-{
-    return mix(mix(a, b, w.x), mix(c, d, w.x), w.y);
-}
-
-// Whether the surf can make foam at x0 now (ocean_surf_foam.comp): inside the current field, in water no deeper than
-// the coherent surf wave can break in here (its shoaled height at the top of a set over the breaking ratio, with
-// SURF_BAND_MARGIN, plus SURF_BAND_REACH behind a crest) and no higher up the beach than the swash reaches. One atlas
-// lookup against a swash evaluation per cell outside.
-const float SURF_BAND_MARGIN = 1.3;
-const float SURF_BAND_REACH = 1.0;
-const float SWASH_REACH = 2.0; // SWASH_MAX: no higher up the beach than the swash reaches
-
-bool surfBandAt(vec2 x0)
-{
-    vec2 w;
-    vec4 a, b, c, d;
-    if (frame.carrier.w <= 0.0 || !carrierTexels(x0, w, a, b, c, d) || a.w + b.w + c.w + d.w <= 0.0)
-        return false;
-
-    float depth = bilerp(a.y, b.y, c.y, d.y, w);
-    float peak = (1.0 + GROUP_DEPTH) / sqrt(1.0 + 0.5 * GROUP_DEPTH * GROUP_DEPTH);
-    float unbroken = 2.0 * sqrt(MAX_COHERENCE * frame.carrier.w) * bilerp(a.z, b.z, c.z, d.z, w) * peak;
-    return depth >= -SWASH_REACH && depth <= SURF_BAND_MARGIN * unbroken / WAVE_BREAKING_GAMMA + SURF_BAND_REACH;
-}
-
 const float SURF_SPACING_FULL = 4.0; // swash at full strength up to this grid spacing (m) ...
 const float SURF_SPACING_NONE = 8.0; // ... and gone by this one
 
@@ -310,15 +255,23 @@ float waterDepth(vec2 xz)
     return textureLod(depthMap, uv, 0.0).r;
 }
 
+// Depth-limited swell (OceanSurface): every component scaled by min(1, BREAKING_GAMMA h / Hs), so the open swell
+// cannot run through the beach; 0 on land and in pits cut off from the sea.
+float swellCap(vec2 x0)
+{
+    return frame.shore.w > 1e-4 ? clamp(BREAKING_GAMMA * waterDepth(x0) / frame.shore.w, 0.0, 1.0) : 1.0;
+}
+
 // Swash (docs/breaking-waves.md): run-up events per shoreline point. Each bore that reaches the shoreline below a beach
 // point collapses into a sheet whose edge runs up the beach ballistically (Shen and Meyer: x = u0 t - a t^2 / 2 along the
 // beach, a = g tan(beta) x (1 + SWASH_FRICTION) on the way up, SWASH_BACK x g tan(beta) back down, so it drains slower
 // than it rushed up) and the surface above a point is the highest of the last SWASH_EVENTS bores' sheets, so a bore
-// arriving in a backwash pushes the edge out again rather than one half sine a period. Timing is the carrier's phase at
-// the shoreline point below (found along the depth gradient); the amplitude is that bore's: the carrier's shoaled height
-// at the shore for the crest that arrived (the set envelope it carried), less what the break has dissipated since it
-// began (surfWidth: the distance from where it broke to the shore), so the small waves between sets barely move
-// the edge and a set wave runs far up, and along the beach the edge is a wavy line. The sheet behind an edge is the
+// arriving in a backwash pushes the edge out again rather than one half sine a period. Timing is the open carrier's
+// phase at the shoreline point below (found along the depth gradient): along a straight shore Snell's law keeps k0 sin
+// of the angle, so the arrival phase is the open wave's there. The amplitude is that bore's: the carrier's breaker height
+// (frame.shore.z) for the crest that arrived (the set envelope it carried), less what the break has dissipated since it
+// began (surfWidth: the distance from where it broke to the shore), so the small waves between sets barely move the edge
+// and a set wave runs far up, and lee shores facing away from the carrier get none. The sheet behind an edge is the
 // Shen-Meyer lens, (x_edge - x)^2 / (9 g t^2), thick just behind a fresh edge and thinning as the sheet ages, over a
 // minimum film. GPU only.
 const int SWASH_EVENTS = 4;          // bores remembered per point; the oldest fades out over its last period
@@ -354,7 +307,7 @@ float swashSheet(vec2 x0, float d, out float front)
 {
     front = 0.0;
     gSwashEdge = 0.0;
-    if (d > SWASH_SEA || d < -SWASH_MAX || frame.carrier.w <= 0.0)
+    if (d > SWASH_SEA || d < -SWASH_MAX || frame.shore.z <= 0.0)
         return -1e3;
 
     // The shoreline below x0: along the depth gradient to where the depth reaches 0; the beach slope is the gradient's.
@@ -365,21 +318,15 @@ float swashSheet(vec2 x0, float d, out float front)
         return -1e3;
 
     float slope = sqrt(g2);
-    vec2 seaward = grad / g2;
-    vec2 shore = x0 - d * seaward;
-    if (!coastalSample(shore) || !cHas[0])
-        return -1e3;
-
-    int jc = int(frame.carrier.y);
-    vec4 ref = mix(coastalRef(0, jc), coastalRef(0, jc + 1), frame.carrier.y - float(jc));
-    float spatial = frame.carrier.x * dot(cDir[0], shore) + ref.x;
+    vec2 shore = x0 - d * grad / g2;
+    float spatial = frame.carrier.x * dot(frame.shore.xy, shore);
     float p = fract(-(spatial + frame.carrier.z) / TWO_PI); // periods since the last crest reached the shoreline
     float period = TWO_PI / max(frame.carrierChop.y, 1e-3);
 
-    // The bore's energy height at the shore, before its set envelope: the carrier's shoaled height there, less the
-    // break's dissipation over the surf zone it has crossed.
-    float breaker = 2.0 * sqrt(MAX_COHERENCE * frame.carrier.w) * ref.w;
-    float unbroken = breaker * exp(-surfWidth(breaker, slope) / SWASH_DISSIPATE);
+    // The bore's energy height at the shore, before its set envelope: the breaker height on a shore facing the carrier,
+    // less the break's dissipation over the surf zone it has crossed.
+    float exposure = sqrt(max(dot(frame.shore.xy, -grad / slope), 0.0));
+    float unbroken = frame.shore.z * exposure * exp(-surfWidth(frame.shore.z, slope) / SWASH_DISSIPATE);
     float up = max(9.81 * slope * (1.0 + SWASH_FRICTION), SWASH_DECEL_MIN);
     float back = SWASH_BACK * up;
     float u0Max = sqrt(2.0 * up * SWASH_MAX / slope);
@@ -536,6 +483,19 @@ Swell swellPart(vec2 x0, float lo, float hi, int tap, int first, int stride)
         o.jxx += cx * k.x * c;
         o.jzz += cz * k.y * c;
         o.jxz += cx * k.y * c;
+    }
+
+    if (!coast)
+    {
+        float cap = swellCap(x0);
+        o.height *= cap;
+        o.hx *= cap;
+        o.hz *= cap;
+        o.Dx *= cap;
+        o.Dz *= cap;
+        o.jxx *= cap;
+        o.jzz *= cap;
+        o.jxz *= cap;
     }
 
     if (coherence > 0.0 && first == 0)

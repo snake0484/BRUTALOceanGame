@@ -25,8 +25,9 @@ void main()
     vec2 x0 = frame.depthRect.xy + (vec2(c) + 0.5) * (frame.depthRect.z / float(SURF_FOAM_RES));
     float before = pc.params.w > 0.5 ? 0.0 : surfFoam.values[i] * exp(-pc.params.x / FOAM_LIFE);
 
-    // Outside the surf band nothing is made: the cell only decays (surfBandAt, one atlas lookup).
-    if (!surfBandAt(x0))
+    // Outside the swash's depth band nothing is made: the cell only decays.
+    float d = waterDepth(x0);
+    if (d < -SWASH_MAX || d > SWASH_SEA + 1.0)
     {
         surfFoam.values[i] = before;
         return;
@@ -35,6 +36,6 @@ void main()
     // The up-rushing edge is fresh whitewater, a line that climbs the beach with the edge and is left to fade as the
     // sheet drains back; never over the water.
     float front;
-    swashSheet(x0, waterDepth(x0), front);
+    swashSheet(x0, d, front);
     surfFoam.values[i] = max(before, SWASH_FOAM * front);
 }

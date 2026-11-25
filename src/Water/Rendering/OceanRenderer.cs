@@ -4,7 +4,6 @@ using Brutal;
 using Brutal.ShaderCApi;
 using Brutal.VulkanApi;
 using Brutal.VulkanApi.Abstractions;
-using Brutal.VulkanApi.Vma;
 using BrutalGame.Engine.Rendering;
 using BrutalGame.Water.Ocean;
 
@@ -32,6 +31,9 @@ public sealed unsafe class OceanRenderer : IDisposable
     public float FogDensity = 0.00012f;
     public Vector3 WaterDeep = new(0.004f, 0.026f, 0.055f);
     public Vector3 WaterScatter = new(0.0f, 0.11f, 0.10f);
+
+    /// <summary>Swash sheets and the foam they leave; off for an A/B bench.</summary>
+    public bool ShoreWash = true;
 
     private readonly Device _device;
     private readonly PipelineCache _pipelines;
@@ -92,6 +94,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         public Vector4 CoastPrevRect;
         public Vector4 Carrier;
         public Vector4 CarrierChop;
+        public Vector4 Shore;
         public Vector4 CoastFarRect;
         public Vector4 CoastFarPrevRect;
         public int WaveCount;
@@ -133,19 +136,7 @@ public sealed unsafe class OceanRenderer : IDisposable
     private long _foamTick = -1;
     private float _foamSeconds;
 
-    // Carrier atlas (ocean_carrier_atlas.comp): the surf carrier's lag, depth, shoal amplitude and active flag per texel
-    // of the current coastal field, what surfBandAt reads instead of the 7-vec4 coastal texels. Shared by all frames;
-    // rebuilt when the field or the carrier's wavenumber or reference changes.
-    private const int CarrierAtlasBinding = 3 + SampledMaps;
-    private const int Bindings = 4 + SampledMaps;
-    private readonly VmaAllocator _allocator;
-    private readonly VkImage _carrierAtlas;
-    private readonly VmaAllocation _carrierAtlasAllocation;
-    private readonly VkImageView _carrierAtlasView;
-    private readonly VkPipeline _carrierAtlasUpdate;
-    private (int Version, float K0, float Ref) _atlasKey = (-1, 0f, 0f);
-    private int _fieldVersion = -1;
-    private bool _atlasRebuild;
+    private const int Bindings = 3 + SampledMaps;
     private bool _initialised;
     private Vector4 _depthRect;
     private Vector4 _surfFoamRect;
@@ -154,7 +145,6 @@ public sealed unsafe class OceanRenderer : IDisposable
     private readonly GpuTimer _timer;
     private readonly int _surfaceScope;
     private readonly int _surfFoamScope;
-    private readonly int _atlasScope;
     private const int CoastalBytes = CoastalField.Resolution * CoastalField.Resolution * CoastalField.TexelFloats * sizeof(float);
 
     private readonly VkImageView _depthView;
@@ -189,8 +179,6 @@ public sealed unsafe class OceanRenderer : IDisposable
         _coastalStaging = new GpuBuffer(renderer.Context, CoastalChunkFloats * sizeof(float) * CoastalCopiesPerFrame * Renderer.FramesInFlight, VkBufferUsageFlags.TransferSrcBit, true);
 
         _surfFoam = new GpuBuffer(renderer.Context, SurfFoamBytes, VkBufferUsageFlags.StorageBufferBit | VkBufferUsageFlags.TransferDstBit, false);
-        _allocator = renderer.Context.Allocator;
-        _carrierAtlasView = CreateCarrierAtlas(out _carrierAtlas, out _carrierAtlasAllocation);
 
         WriteIndices(_buffer.AsSpan<ushort>(), _tileFirst, _tileCount);
         _setLayout = CreateSetLayout();
@@ -204,79 +192,10 @@ public sealed unsafe class OceanRenderer : IDisposable
         _layout = _device.CreatePipelineLayout([_setLayout], push, null);
         _pipeline = CreatePipeline(renderer.RenderPass, "ocean.vert", "ocean.frag");
         _surfFoamUpdate = CreateComputePipeline("ocean_surf_foam.comp");
-        _carrierAtlasUpdate = CreateComputePipeline("ocean_carrier_atlas.comp");
 
         _timer = renderer.GpuTimer;
         _surfaceScope = _timer.Register("Ocean surface");
         _surfFoamScope = _timer.Register("Surf foam");
-        _atlasScope = _timer.Register("Carrier atlas");
-    }
-
-    private VkImageView CreateCarrierAtlas(out VkImage image, out VmaAllocation allocation)
-    {
-        var result = _allocator.CreateImage(
-            new VkImageCreateInfo
-            {
-                ImageType = VkImageType._2D,
-                Format = VkFormat.R32G32B32A32SFloat,
-                Extent = new VkExtent3D { Width = CoastalField.Resolution, Height = CoastalField.Resolution, Depth = 1 },
-                MipLevels = 1,
-                ArrayLayers = 1,
-                Samples = VkSampleCountFlags._1Bit,
-                Tiling = VkImageTiling.Optimal,
-                Usage = VkImageUsageFlags.StorageBit,
-                SharingMode = VkSharingMode.Exclusive,
-                InitialLayout = VkImageLayout.Undefined,
-            },
-            new VmaAllocationCreateInfo { Usage = VmaMemoryUsage.AutoPreferDevice },
-            out image,
-            out allocation,
-            out _
-        );
-
-        if (result != VkResult.Success)
-            throw new InvalidOperationException($"vmaCreateImage failed: {result}");
-
-        return _device.CreateImageView(
-            new VkImageViewCreateInfo
-            {
-                Image = image,
-                ViewType = VkImageViewType._2DArray,
-                Format = VkFormat.R32G32B32A32SFloat,
-                SubresourceRange = new VkImageSubresourceRange { AspectMask = VkImageAspectFlags.ColorBit, LevelCount = 1, LayerCount = 1 },
-            },
-            null
-        );
-    }
-
-    private void TransitionAtlasToGeneral(CommandBuffer commands)
-    {
-        Span<VkImageMemoryBarrier> barriers =
-        [
-            new VkImageMemoryBarrier
-            {
-                DstAccessMask = VkAccessFlags.ShaderReadBit | VkAccessFlags.ShaderWriteBit,
-                OldLayout = VkImageLayout.Undefined,
-                NewLayout = VkImageLayout.General,
-                SrcQueueFamilyIndex = VK.QUEUE_FAMILY_IGNORED,
-                DstQueueFamilyIndex = VK.QUEUE_FAMILY_IGNORED,
-                Image = _carrierAtlas,
-                SubresourceRange = new VkImageSubresourceRange { AspectMask = VkImageAspectFlags.ColorBit, LevelCount = 1, LayerCount = 1 },
-            },
-        ];
-
-        commands.PipelineBarrier(VkPipelineStageFlags.TopOfPipeBit, VkPipelineStageFlags.ComputeShaderBit | VkPipelineStageFlags.VertexShaderBit, VkDependencyFlags.None, [], [], barriers);
-    }
-
-    /// <summary>Whether the atlas must be rebuilt this frame: the field (version −1 = none) or the carrier's wavenumber or reference changed.</summary>
-    private bool AtlasStale(int version, Vector4 carrier)
-    {
-        var key = (version, carrier.X, carrier.Y);
-        if (_atlasKey == key)
-            return false;
-
-        _atlasKey = key;
-        return version >= 0;
     }
 
     private const VkShaderStageFlags PushStages = VkShaderStageFlags.VertexBit | VkShaderStageFlags.ComputeBit;
@@ -413,14 +332,6 @@ public sealed unsafe class OceanRenderer : IDisposable
             StageFlags = buffers,
         };
 
-        bindings[CarrierAtlasBinding] = new VkDescriptorSetLayoutBinding
-        {
-            Binding = CarrierAtlasBinding,
-            DescriptorType = VkDescriptorType.StorageImage,
-            DescriptorCount = 1,
-            StageFlags = buffers,
-        };
-
         return _device.CreateDescriptorSetLayout(
             new VkDescriptorSetLayoutCreateInfo { BindingCount = Bindings, Bindings = bindings },
             null
@@ -434,11 +345,10 @@ public sealed unsafe class OceanRenderer : IDisposable
             new() { Type = VkDescriptorType.UniformBuffer, DescriptorCount = Renderer.FramesInFlight },
             new() { Type = VkDescriptorType.CombinedImageSampler, DescriptorCount = Renderer.FramesInFlight * SampledMaps },
             new() { Type = VkDescriptorType.StorageBuffer, DescriptorCount = Renderer.FramesInFlight * (CoastalSlots + 1) },
-            new() { Type = VkDescriptorType.StorageImage, DescriptorCount = Renderer.FramesInFlight },
         };
 
         return _device.CreateDescriptorPool(
-            new VkDescriptorPoolCreateInfo { MaxSets = Renderer.FramesInFlight, PoolSizeCount = 4, PoolSizes = sizes },
+            new VkDescriptorPoolCreateInfo { MaxSets = Renderer.FramesInFlight, PoolSizeCount = 3, PoolSizes = sizes },
             null
         );
     }
@@ -468,7 +378,6 @@ public sealed unsafe class OceanRenderer : IDisposable
         };
 
         Span<VkWriteDescriptorSet> writes = stackalloc VkWriteDescriptorSet[Bindings];
-        var atlas = new VkDescriptorImageInfo { ImageView = _carrierAtlasView, ImageLayout = VkImageLayout.General };
 
         for (var i = 0; i < Renderer.FramesInFlight; i++)
         {
@@ -521,15 +430,6 @@ public sealed unsafe class OceanRenderer : IDisposable
                 DescriptorCount = 1,
                 DescriptorType = VkDescriptorType.StorageBuffer,
                 BufferInfo = &surfFoam,
-            };
-
-            writes[CarrierAtlasBinding] = new VkWriteDescriptorSet
-            {
-                DstSet = _sets[i],
-                DstBinding = CarrierAtlasBinding,
-                DescriptorCount = 1,
-                DescriptorType = VkDescriptorType.StorageImage,
-                ImageInfo = &atlas,
             };
 
             _device.UpdateDescriptorSets(writes, []);
@@ -642,12 +542,12 @@ public sealed unsafe class OceanRenderer : IDisposable
         _depthRect = depthRect;
         WriteCoastal(header, frameIndex, swell);
         (header->Carrier, header->CarrierChop) = swell.GpuCarrier(renderTime);
-        _atlasRebuild = AtlasStale(_fieldVersion, header->Carrier);
+        header->Shore = swell.GpuShore(ShoreWash);
         header->WaveCount = swell.CopyGpuWaves(waves, renderTime);
     }
 
     /// <summary>
-    /// The ocean's compute work before the water pass: coastal copies, the carrier atlas and the surf foam left behind
+    /// The ocean's compute work before the water pass: coastal copies and the surf foam left behind
     /// (ocean_surf_foam.comp). Outside a render pass, after <see cref="Prepare"/>.
     /// </summary>
     public void RecordCompute(CommandBuffer commands, int frameIndex, float frameSeconds, long tickIndex)
@@ -658,7 +558,6 @@ public sealed unsafe class OceanRenderer : IDisposable
 
         if (!_initialised)
         {
-            TransitionAtlasToGeneral(commands);
             commands.FillBuffer(_surfFoam.Handle, (ByteSize64)0, (ByteSize64)SurfFoamBytes, 0);
             var shaders = VkPipelineStageFlags.ComputeShaderBit | VkPipelineStageFlags.VertexShaderBit | VkPipelineStageFlags.FragmentShaderBit;
             Barrier(commands, VkPipelineStageFlags.TransferBit, VkAccessFlags.TransferWriteBit, shaders, VkAccessFlags.ShaderReadBit | VkAccessFlags.ShaderWriteBit);
@@ -666,17 +565,6 @@ public sealed unsafe class OceanRenderer : IDisposable
         }
 
         RecordCoastalCopies(commands);
-
-        // The carrier atlas, when the field or carrier changed (Prepare), before anything this frame reads it.
-        if (_atlasRebuild)
-        {
-            commands.BindPipeline(VkPipelineBindPoint.Compute, _carrierAtlasUpdate);
-            _timer.Begin(commands, _atlasScope);
-            commands.Dispatch(CoastalField.Resolution / 16, CoastalField.Resolution / 16, 1);
-            _timer.End(commands, _atlasScope);
-            Barrier(commands, VkPipelineStageFlags.ComputeShaderBit, VkAccessFlags.ShaderWriteBit, VkPipelineStageFlags.ComputeShaderBit | VkPipelineStageFlags.VertexShaderBit, VkAccessFlags.ShaderReadBit);
-            _atlasRebuild = false;
-        }
 
         // The surf foam map, once per tick (or at once when the depth map it lives on re-centres, since the old foam is
         // then in the wrong place), decaying by the time since its last update.
@@ -804,7 +692,6 @@ public sealed unsafe class OceanRenderer : IDisposable
         header->RefMin = swell.RefMin;
         header->RefMax = swell.RefMax;
 
-        _fieldVersion = -1;
         _coastalCopyCount = 0;
         _coastalStagingBase = frameIndex * CoastalCopiesPerFrame * CoastalChunkFloats;
 
@@ -856,7 +743,6 @@ public sealed unsafe class OceanRenderer : IDisposable
         var (dirZ, dirX) = MathF.SinCos(field.Direction);
         header->CoastDir = new Vector4(dirX, dirZ, prevSlot < 0 && previous is not null ? 1f : fade, prevSlot < 0 ? field.Direction : previous!.Direction);
         header->CoastSlots = bits;
-        _fieldVersion = field.Version;
     }
 
     private static Vector4 Rect(CoastalField field) => new(field.Origin.X, field.Origin.Y, field.Cell, CoastalField.Resolution);
@@ -956,9 +842,6 @@ public sealed unsafe class OceanRenderer : IDisposable
     {
         _device.DestroyPipeline(_pipeline, null);
         _device.DestroyPipeline(_surfFoamUpdate, null);
-        _device.DestroyPipeline(_carrierAtlasUpdate, null);
-        _device.DestroyImageView(_carrierAtlasView, null);
-        _allocator.DestroyImage(_carrierAtlas, _carrierAtlasAllocation);
         _surfFoam.Dispose();
         _device.DestroyPipelineLayout(_layout, null);
 
