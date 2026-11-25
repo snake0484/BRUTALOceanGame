@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Brutal;
+using Brutal.Numerics;
 using Brutal.ShaderCApi;
 using Brutal.VulkanApi;
 using Brutal.VulkanApi.Abstractions;
@@ -10,7 +11,8 @@ namespace BrutalGame.Engine.Rendering;
 /// <summary>
 /// Solid lit boxes and spheres for debugging (physics bodies etc.). Geometry comes from gl_VertexIndex,
 /// instances from a per-frame host-visible storage buffer. Main thread only.
-/// Per frame: Clear, Add*, then Draw inside the main pass.
+/// Per frame: Clear, Add*, then Draw inside the main pass. Positions are double in the camera's frame; Draw places each
+/// shape at (position − camera), subtracted in double, under a translation-free view.
 /// </summary>
 public sealed unsafe class DebugShapeRenderer : IDisposable
 {
@@ -37,6 +39,7 @@ public sealed unsafe class DebugShapeRenderer : IDisposable
 
     // Boxes fill from the front, spheres from the back, so both share MaxShapes and draw as contiguous ranges.
     private readonly Instance[] _staged = new Instance[MaxShapes];
+    private readonly double3[] _positions = new double3[MaxShapes];
     private int _boxCount;
     private int _sphereCount;
 
@@ -96,42 +99,49 @@ public sealed unsafe class DebugShapeRenderer : IDisposable
     }
 
     /// <summary>Drops the shape when MaxShapes is reached. Colour is linear albedo.</summary>
-    public void AddBox(Vector3 position, Quaternion rotation, Vector3 halfExtents, Vector3 colour)
+    public void AddBox(double3 position, Quaternion rotation, Vector3 halfExtents, Vector3 colour)
     {
         if (Count >= MaxShapes)
             return;
 
-        ref var instance = ref _staged[_boxCount++];
-        instance.Model = Matrix4x4.CreateScale(halfExtents) * Matrix4x4.CreateFromQuaternion(rotation) * Matrix4x4.CreateTranslation(position);
-        instance.Colour = new Vector4(colour, 1f);
+        var index = _boxCount++;
+        _positions[index] = position;
+        _staged[index].Model = Matrix4x4.CreateScale(halfExtents) * Matrix4x4.CreateFromQuaternion(rotation);
+        _staged[index].Colour = new Vector4(colour, 1f);
     }
 
     /// <summary>Drops the shape when MaxShapes is reached. Colour is linear albedo.</summary>
-    public void AddSphere(Vector3 position, Quaternion rotation, float radius, Vector3 colour)
+    public void AddSphere(double3 position, Quaternion rotation, float radius, Vector3 colour)
     {
         if (Count >= MaxShapes)
             return;
 
-        ref var instance = ref _staged[MaxShapes - 1 - _sphereCount++];
-        instance.Model = Matrix4x4.CreateScale(radius) * Matrix4x4.CreateFromQuaternion(rotation) * Matrix4x4.CreateTranslation(position);
-        instance.Colour = new Vector4(colour, 1f);
+        var index = MaxShapes - 1 - _sphereCount++;
+        _positions[index] = position;
+        _staged[index].Model = Matrix4x4.CreateScale(radius) * Matrix4x4.CreateFromQuaternion(rotation);
+        _staged[index].Colour = new Vector4(colour, 1f);
     }
 
-    /// <summary>Inside the main pass: uploads this frame's shapes and issues one instanced draw per shape kind.</summary>
-    public void Draw(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, Vector3 cameraPos, in SceneLighting lighting)
+    /// <summary>
+    /// Inside the main pass: uploads this frame's shapes at (position − <paramref name="camera"/>) and issues one instanced
+    /// draw per shape kind. <paramref name="viewProj"/> has no translation.
+    /// </summary>
+    public void Draw(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, double3 camera, in SceneLighting lighting)
     {
         if (Count == 0)
             return;
 
         var uniforms = (FrameUniforms*)((byte*)_uniforms.Mapped + frameIndex * UniformStride);
         uniforms->ViewProj = viewProj;
-        uniforms->CameraPos = new Vector4(cameraPos, 0f);
+        uniforms->CameraPos = Vector4.Zero;
         uniforms->SunDir = new Vector4(lighting.SunDirection, lighting.SunIntensity);
         uniforms->SkyZenith = new Vector4(lighting.SkyZenith, 0f);
         uniforms->SkyHorizon = new Vector4(lighting.SkyHorizon, lighting.FogDensity);
 
         var mapped = new Span<Instance>((byte*)_instances.Mapped + frameIndex * InstanceFrameBytes, MaxShapes);
         var firstSphere = MaxShapes - _sphereCount;
+        Relocate(0, _boxCount, camera);
+        Relocate(firstSphere, MaxShapes, camera);
         _staged.AsSpan(0, _boxCount).CopyTo(mapped);
         _staged.AsSpan(firstSphere, _sphereCount).CopyTo(mapped[firstSphere..]);
 
@@ -153,6 +163,16 @@ public sealed unsafe class DebugShapeRenderer : IDisposable
             kind = KindSphere;
             commands.PushConstants(_layout, VkShaderStageFlags.VertexBit, 0, new ReadOnlySpan<byte>(&kind, PushConstantSize));
             commands.Draw(SphereVertices, _sphereCount, 0, firstSphere);
+        }
+    }
+
+    private void Relocate(int start, int end, double3 camera)
+    {
+        for (var i = start; i < end; i++)
+        {
+            var relative = _positions[i] - camera;
+            ref var model = ref _staged[i].Model;
+            (model.M41, model.M42, model.M43) = ((float)relative.X, (float)relative.Y, (float)relative.Z);
         }
     }
 

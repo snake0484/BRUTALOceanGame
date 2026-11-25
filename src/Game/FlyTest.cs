@@ -29,7 +29,7 @@ public struct FrameSections
 /// streams terrain and re-centres the bathymetry as it goes. It records each frame's main-thread
 /// sections, then logs percentiles and the slowest frames with what ran in them, and closes the window.
 /// </summary>
-public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryTexture map)
+public sealed class FlyTest(FlyCamera camera, IslandFrame island, TerrainWorld world, BathymetryTexture map)
 {
     private static readonly LogCategory Log = LogCategory.Make("FlyTest");
     /// <summary>The circle runs 60 m off the west beach, at least <see cref="Clearance"/> over the ground.</summary>
@@ -74,9 +74,8 @@ public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryText
         var angle = (float)((time - _start) * Speed / _radius);
         var (sin, cos) = MathF.SinCos(angle);
         var (x, z) = (_radius * cos, _radius * sin);
-        camera.Position = new Vector3(x, MathF.Max(Height, TerrainGenerator.SurfaceHeight(x, z, world.Params) + Clearance), z);
-        camera.Yaw = MathF.Atan2(cos, -sin) - 0.35f;
-        camera.Pitch = -0.25f;
+        camera.Position = island.ToFrame(new Vector3(x, MathF.Max(Height, TerrainGenerator.SurfaceHeight(x, z, world.Params) + Clearance), z));
+        camera.LookAlong(FlyCamera.Direction(MathF.Atan2(cos, -sin) - 0.35f, -0.25f));
     }
 
     /// <summary>After the frame: records its sections and which costly steps ran.</summary>

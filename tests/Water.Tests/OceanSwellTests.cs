@@ -326,4 +326,44 @@ public sealed class OceanSwellTests(ITestOutputHelper output)
         Assert.Equal(10f, 1f / swell.GroupRatio, 0.01f);
         Assert.Equal(1f / 0.06f, 1f / narrow.GroupRatio, 0.01f);
     }
+
+    /// <summary>
+    /// Camera-relative GPU waves: rebasing the phases by k·origin in double makes the surface at a relative position the
+    /// unrebased surface at origin + that position, 1e6 m out, where float world coordinates would be 6 cm apart.
+    /// </summary>
+    [Fact]
+    public void GpuWavesRebased_MatchWorldPhase()
+    {
+        var swell = Create(42, new SwellParams { WindSpeed = 12f, SwellHeight = 1.5f, SwellPeriod = 13f, SwellDirection = 0.7f }, 1234.5);
+        var world = new GpuWave[OceanSwell.MaxComponents];
+        var relative = new GpuWave[OceanSwell.MaxComponents];
+        var (originX, originZ) = (1.0e6 + 123.456, -7.5e5 + 0.789);
+        var count = swell.CopyGpuWaves(world, swell.Time);
+        Assert.Equal(count, swell.CopyGpuWaves(relative, swell.Time, originX, originZ));
+
+        var maxError = 0.0;
+
+        foreach (var pt in Points)
+        {
+            var (heightWorld, heightRelative) = (0.0, 0.0);
+
+            for (var i = 0; i < count; i++)
+            {
+                heightWorld += world[i].Amplitude * Math.Cos(world[i].Kx * (originX + pt.X) + world[i].Kz * (originZ + pt.Y) + world[i].Phase);
+                heightRelative += relative[i].Amplitude * Math.Cos(relative[i].Kx * pt.X + relative[i].Kz * pt.Y + relative[i].Phase);
+            }
+
+            maxError = Math.Max(maxError, Math.Abs(heightWorld - heightRelative));
+        }
+
+        output.WriteLine($"max height error {maxError:E2} m over {count} waves");
+        Assert.True(maxError < 1e-4, $"max error {maxError} m");
+
+        var carrier = swell.GpuCarrier(swell.Time);
+        var rebased = swell.GpuCarrier(swell.Time, originX, originZ);
+        var shore = swell.GpuShore(true);
+        var spatial = carrier.X * carrier.X / 9.81f * (shore.X * originX + shore.Y * originZ);
+        Assert.Equal(0.0, Math.IEEERemainder(rebased.Y - carrier.Y - spatial, Math.Tau), 1e-5);
+        Assert.Equal(0.0, Math.IEEERemainder(rebased.W - carrier.W - carrier.Z * spatial, Math.Tau), 1e-4);
+    }
 }

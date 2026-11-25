@@ -12,7 +12,7 @@ namespace BrutalGame;
 /// Scripted check for --edit-test: once terrain has loaded, carve craters where the camera looks and drop spheres
 /// onto the terrain, then log where the spheres settled relative to the collision surface.
 /// </summary>
-public sealed class EditTest(SimWorld sim, TerrainWorld world, TerrainBrush brush, FlyCamera camera)
+public sealed class EditTest(SimWorld sim, TerrainWorld world, TerrainBrush brush, FlyCamera camera, IslandFrame island)
 {
     private static readonly LogCategory Log = LogCategory.Make("EditTest");
     private const float DigRadius = 7f;
@@ -33,7 +33,7 @@ public sealed class EditTest(SimWorld sim, TerrainWorld world, TerrainBrush brus
         {
             for (var i = 0; i < 3; i++)
             {
-                var hit = sim.Physics.CastRay(camera.Position, brush.RayThrough(-0.3f + 0.3f * i, 0.25f, 16f / 9f), 800f);
+                var hit = sim.Physics.CastRay(island.ToIsland(camera.Position), brush.RayThrough(-0.3f + 0.3f * i, 0.25f, 16f / 9f), 800f);
                 if (!hit.Hit)
                     continue;
 

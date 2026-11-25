@@ -1,54 +1,67 @@
 using System.Numerics;
 using Brutal.GlfwApi;
 using Brutal.Numerics;
+using BrutalGame.Frames;
 
 namespace BrutalGame.Engine.Scene;
 
 /// <summary>
-/// Free-fly debug camera. Right mouse drag looks, WASD/EQ/Space moves. Infinite reverse-Z projection.
+/// Free-fly debug camera with a double pose in a frame. Right mouse drag looks, WASD/EQ/Space moves. Up is radial from
+/// the frame's origin (a body surface frame has the body's centre there). The view has no translation: renderers draw
+/// at (origin − <see cref="Position"/>) computed in double. Infinite reverse-Z projection.
 /// </summary>
 public sealed class FlyCamera
 {
-    private const float MaxPitch = 89f * MathF.PI / 180f;
-    private const float FastMultiplier = 8f;
-    private const float SlowMultiplier = 0.2f;
+    private const double MaxPitch = 89.0 * Math.PI / 180.0;
+    private const double FastMultiplier = 8.0;
+    private const double SlowMultiplier = 0.2;
 
-    public Vector3 Position = new(0f, 12f, 0f);
-    public float Yaw;
-    public float Pitch = -0.15f;
+    public FrameId Frame = FrameId.None;
+    public double3 Position = new(0.0, 12.0, 0.0);
+
+    /// <summary>Camera axes (right X, up Y, back Z) to frame axes.</summary>
+    public doubleQuat Rotation = doubleQuat.Identity;
+
     public float FovY = 60f * MathF.PI / 180f;
     public float Near = 0.1f;
-    public float MoveSpeed = 15f;
-    public float LookSensitivity = 0.0025f;
+    public double MoveSpeed = 15.0;
+    public double LookSensitivity = 0.0025;
 
     private bool _looking;
     private double2 _lastCursor;
 
-    public Vector3 Forward
+    public double3 Forward => -(Rotation * double3.UnitZ);
+
+    public double3 Right => Rotation * double3.UnitX;
+
+    public double3 Up
     {
         get
         {
-            var cp = MathF.Cos(Pitch);
-            return new Vector3(cp * MathF.Cos(Yaw), MathF.Sin(Pitch), cp * MathF.Sin(Yaw));
+            var length = Position.Length();
+            return length > 1e-9 ? Position / length : double3.UnitY;
         }
     }
 
-    public Matrix4x4 View => Matrix4x4.CreateLookAt(Position, Position + Forward, Vector3.UnitY);
-
-    public Matrix4x4 Projection(float aspect)
+    /// <summary>Unit direction from yaw (from +X toward +Z) and pitch (toward +Y) in the frame's axes.</summary>
+    public static double3 Direction(double yaw, double pitch)
     {
-        var f = 1f / MathF.Tan(FovY * 0.5f);
-
-        return new Matrix4x4(
-            f / aspect, 0f, 0f, 0f,
-            0f, -f, 0f, 0f,
-            0f, 0f, 0f, -1f,
-            0f, 0f, Near, 0f);
+        var cp = Math.Cos(pitch);
+        return new double3(cp * Math.Cos(yaw), Math.Sin(pitch), cp * Math.Sin(yaw));
     }
 
+    /// <summary>Points the camera along <paramref name="forward"/>, level about <see cref="Up"/>.</summary>
+    public void LookAlong(double3 forward) => Rotation = CameraProjection.LookRotation(forward, Up, Right);
+
+    /// <summary>Rotation only: world-relative (point − <see cref="Position"/>) to view space.</summary>
+    public Matrix4x4 View => CameraProjection.View(Rotation);
+
+    public Matrix4x4 Projection(float aspect) => CameraProjection.Projection(FovY, aspect, Near);
+
+    /// <summary>Camera-relative view-projection: draws must be positioned at (origin − <see cref="Position"/>).</summary>
     public Matrix4x4 ViewProjection(float aspect) => View * Projection(aspect);
 
-    public void Update(GlfwWindow window, float dt, bool uiWantsMouse, bool uiWantsKeyboard)
+    public void Update(GlfwWindow window, double dt, bool uiWantsMouse, bool uiWantsKeyboard)
     {
         UpdateLook(window, uiWantsMouse);
 
@@ -79,28 +92,39 @@ public sealed class FlyCamera
         }
 
         var cursor = window.CursorPos;
-        var dx = (float)(cursor.X - _lastCursor.X);
-        var dy = (float)(cursor.Y - _lastCursor.Y);
+        var dx = cursor.X - _lastCursor.X;
+        var dy = cursor.Y - _lastCursor.Y;
         _lastCursor = cursor;
 
-        Yaw += dx * LookSensitivity;
-        Pitch = Math.Clamp(Pitch - dy * LookSensitivity, -MaxPitch, MaxPitch);
+        if (dx == 0.0 && dy == 0.0)
+            return;
+
+        var up = Up;
+        var forward = Forward;
+        var sinPitch = Math.Clamp(double3.Dot(forward, up), -1.0, 1.0);
+        var heading = forward - up * sinPitch;
+        var length = heading.Length();
+        heading = length > 1e-9 ? heading / length : double3.Cross(up, Right);
+        heading = doubleQuat.CreateFromAxisAngle(up, -dx * LookSensitivity) * heading;
+
+        var pitch = Math.Clamp(Math.Asin(sinPitch) - dy * LookSensitivity, -MaxPitch, MaxPitch);
+        LookAlong(heading * Math.Cos(pitch) + up * Math.Sin(pitch));
     }
 
-    private void UpdateMove(GlfwWindow window, float dt)
+    private void UpdateMove(GlfwWindow window, double dt)
     {
-        var forward = Forward;
-        var right = Vector3.Normalize(Vector3.Cross(forward, Vector3.UnitY));
-        var move = Vector3.Zero;
+        var move = double3.Zero;
 
-        if (Down(window, GlfwKey.W)) move += forward;
-        if (Down(window, GlfwKey.S)) move -= forward;
-        if (Down(window, GlfwKey.D)) move += right;
-        if (Down(window, GlfwKey.A)) move -= right;
-        if (Down(window, GlfwKey.E) || Down(window, GlfwKey.Space)) move += Vector3.UnitY;
-        if (Down(window, GlfwKey.Q)) move -= Vector3.UnitY;
+        if (Down(window, GlfwKey.W)) move += Forward;
+        if (Down(window, GlfwKey.S)) move -= Forward;
+        if (Down(window, GlfwKey.D)) move += Right;
+        if (Down(window, GlfwKey.A)) move -= Right;
+        if (Down(window, GlfwKey.E) || Down(window, GlfwKey.Space)) move += Up;
+        if (Down(window, GlfwKey.Q)) move -= Up;
 
-        if (move == Vector3.Zero)
+        var length = move.Length();
+
+        if (length < 1e-9)
             return;
 
         var speed = MoveSpeed;
@@ -110,7 +134,7 @@ public sealed class FlyCamera
         else if (Down(window, GlfwKey.LeftControl))
             speed *= SlowMultiplier;
 
-        Position += Vector3.Normalize(move) * (speed * dt);
+        Position += move * (speed * dt / length);
     }
 
     private static bool Down(GlfwWindow window, GlfwKey key) => window.GetKey(key) != GlfwKeyAction.Release;

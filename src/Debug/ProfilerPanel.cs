@@ -63,6 +63,7 @@ public sealed class ProfilerPanel(FrameStats stats, Renderer renderer, TerrainRe
             Row("UI build"u8, stats.Ui);
             Row("GPU fence wait"u8, stats.GpuWait);
             Row("Record"u8, stats.Record);
+            Row("  terrain cull + draw"u8, terrain.DrawMs);
             Row("Submit + present"u8, stats.Present);
 
             DrawMemory();

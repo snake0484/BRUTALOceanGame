@@ -1,12 +1,13 @@
 using Brutal.Logging;
 using BrutalGame.Engine.Rendering;
+using BrutalGame.Engine.Time;
 
 namespace BrutalGame;
 
 /// <summary>
 /// --bench: vsync off, so the GPU runs flat out at stable clocks. After the world settles and a warmup, alternates a
 /// feature (the shore wash) on and off in short blocks, so clock drift hits both sides equally, then logs the
-/// median and mean of every GPU scope per side and closes the window.
+/// median and mean of every GPU scope (and the given CPU timings) per side and closes the window.
 /// </summary>
 public sealed class GpuBenchmark
 {
@@ -17,6 +18,8 @@ public sealed class GpuBenchmark
     private const int MaxSamples = 1 << 16;
 
     private readonly GpuTimer _timer;
+    private readonly string[] _cpuNames;
+    private readonly TimingRing[] _cpuRings;
     private readonly int _blocks;
     private readonly float[][,] _samples = new float[2][,];
     private readonly int[] _counts = new int[2];
@@ -25,13 +28,16 @@ public sealed class GpuBenchmark
     private int _block = -1;
 
     /// <param name="seconds">Measured time, split into alternating blocks (at least 2).</param>
-    public GpuBenchmark(GpuTimer timer, double seconds)
+    /// <param name="cpuNames">Labels of <paramref name="cpuRings"/>, CPU timings sampled alongside the GPU scopes.</param>
+    public GpuBenchmark(GpuTimer timer, double seconds, string[] cpuNames, TimingRing[] cpuRings)
     {
         _timer = timer;
+        _cpuNames = cpuNames;
+        _cpuRings = cpuRings;
         _blocks = Math.Max(2, (int)Math.Round(seconds / BlockSeconds));
 
         for (var side = 0; side < 2; side++)
-            _samples[side] = new float[GpuTimer.MaxScopes, MaxSamples];
+            _samples[side] = new float[GpuTimer.MaxScopes + cpuRings.Length, MaxSamples];
     }
 
     public bool Done { get; private set; }
@@ -89,6 +95,9 @@ public sealed class GpuBenchmark
         for (var s = 0; s < _timer.ScopeCount; s++)
             _samples[side][s, n] = _timer.Ring(s).Last;
 
+        for (var c = 0; c < _cpuRings.Length; c++)
+            _samples[side][GpuTimer.MaxScopes + c, n] = _cpuRings[c].Last;
+
         _counts[side] = n + 1;
     }
 
@@ -102,8 +111,16 @@ public sealed class GpuBenchmark
         {
             var on = Stats(1, s, scratch);
             var off = Stats(0, s, scratch);
-            Log.Info($"{_timer.Name(s),-12} {on.Median,10:F4} {off.Median,10:F4} {on.Median - off.Median,8:F4} {on.Mean,9:F4} {off.Mean,9:F4}");
+            Row(_timer.Name(s), on, off);
         }
+
+        for (var c = 0; c < _cpuRings.Length; c++)
+            Row(_cpuNames[c], Stats(1, GpuTimer.MaxScopes + c, scratch), Stats(0, GpuTimer.MaxScopes + c, scratch));
+    }
+
+    private static void Row(string name, (float Median, float Mean) on, (float Median, float Mean) off)
+    {
+        Log.Info($"{name,-12} {on.Median,10:F4} {off.Median,10:F4} {on.Median - off.Median,8:F4} {on.Mean,9:F4} {off.Mean,9:F4}");
     }
 
     private (float Median, float Mean) Stats(int side, int scope, float[] scratch)

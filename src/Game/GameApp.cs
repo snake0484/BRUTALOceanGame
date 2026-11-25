@@ -20,11 +20,15 @@ public sealed class GameApp : IDisposable
 {
     private const int TimingSamples = 256;
     private const string Title = "BRUTALGame";
+    private const float OrbitSunIntensity = 1.5f;
 #if DEBUG
     private const bool Validation = true;
 #else
     private const bool Validation = false;
 #endif
+
+    private static readonly System.Numerics.Vector3 SpaceColour = new(0.004f, 0.005f, 0.008f);
+    private static readonly System.Numerics.Vector3 MarkerColour = new(1f, 0.35f, 0.05f);
 
     private readonly GlfwWindow _window;
     private readonly FrameStats _stats = new(TimingSamples);
@@ -39,7 +43,9 @@ public sealed class GameApp : IDisposable
     private readonly SceneLighting _clearSky;
     private readonly OceanRenderer _ocean;
     private readonly OceanFft _oceanFft;
-    private readonly FlyCamera _camera = new() { Pitch = -0.12f };
+    private readonly FlyCamera _camera = new();
+    private readonly IslandFrame _island;
+    private readonly InstanceBuffer _instances;
     private readonly TerrainRenderer _terrainRenderer;
     private readonly TerrainWorld _terrain;
     private readonly BathymetryTexture _bathymetry;
@@ -49,13 +55,17 @@ public sealed class GameApp : IDisposable
     private readonly int _oceanScope;
     private readonly GpuBenchmark? _bench;
     private readonly FlyTest? _flyTest;
+    private readonly OrbitTest? _orbitTest;
+    private readonly PlanetRenderer? _planets;
     private FrameSections _sections;
     private readonly long _startTime = Stopwatch.GetTimestamp();
     private readonly int _fftScope;
     private readonly int _oceanComputeScope;
     private readonly int _uiScope;
     private readonly int _terrainScope;
+    private readonly int _terrainCullScope;
     private readonly int _uploadScope;
+    private readonly int _planetScope = -1;
 
     /// <summary>Pipeline statistics scopes (<see cref="PipelineStats"/>): sequential, never nested.</summary>
     private readonly int _terrainStats;
@@ -63,17 +73,17 @@ public sealed class GameApp : IDisposable
     private readonly int _uiStats;
 
     /// <param name="camera">Optional start pose: x, y, z, yaw degrees, pitch degrees.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool flyTest = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f)
+    /// <param name="orbitTest">--orbit-test: the test planet as a smooth sphere, flown from 2 m to 1e8 m; the island is not drawn.</param>
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool flyTest = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, bool orbitTest = false)
     {
         var weatherField = new WeatherField(new WeatherClimate());
         _sim = new SimWorld(seed: 1, WorkerBudget.Tick, new TerrainParams(), weatherField) { DriveWind = weather, WeatherTimeOffset = weatherOffset * 60.0 };
 
+        _island = new IslandFrame(_sim.Celestial);
+        _camera.Frame = _island.Frame;
+
         if (camera is not null)
-        {
-            _camera.Position = new System.Numerics.Vector3(camera[0], camera[1], camera[2]);
-            _camera.Yaw = camera[3] * MathF.PI / 180f;
-            _camera.Pitch = camera[4] * MathF.PI / 180f;
-        }
+            PlaceCamera(new System.Numerics.Vector3(camera[0], camera[1], camera[2]), camera[3] * MathF.PI / 180f, camera[4] * MathF.PI / 180f);
 
         if (!Glfw.Init())
             throw new InvalidOperationException("Failed to initialize GLFW");
@@ -102,27 +112,39 @@ public sealed class GameApp : IDisposable
         _oceanFft = new OceanFft(_renderer) { DebugView = foamDebug };
         _oceanPanel = new OceanPanel(_sim.Ocean, _oceanFft);
         _weatherPanel = new WeatherPanel(_weather.Map) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset };
-        _terrainRenderer = new TerrainRenderer(_renderer);
+        _instances = new InstanceBuffer(_renderer);
+        _terrainRenderer = new TerrainRenderer(_renderer, _instances);
+
+        if (orbitTest)
+        {
+            _orbitTest = new OrbitTest(_camera, _sim.Celestial);
+            _planets = new PlanetRenderer(_renderer, _instances);
+        }
+
         _terrain = new TerrainWorld(_terrainRenderer, _sim.Physics, _sim.Terrain);
 
         // Without --cam, 55 m off the west beach, 28 m up, looking at it.
         if (camera is null)
-            _camera.Position = new System.Numerics.Vector3(Coastline.WestX(_terrain.Params, 0f) - 55f, 28f, 0f);
+            PlaceCamera(new System.Numerics.Vector3(Coastline.WestX(_terrain.Params, 0f) - 55f, 28f, 0f), 0f, -0.12f);
 
-        _brush = new TerrainBrush(_sim, _camera);
-        _editTest = editTest ? new EditTest(_sim, _terrain, _brush, _camera) : null;
+        _brush = new TerrainBrush(_sim, _camera, _island);
+        _editTest = editTest ? new EditTest(_sim, _terrain, _brush, _camera, _island) : null;
         _terrainPanel = new TerrainPanel(_terrain, _terrainRenderer, _sim.Physics);
         _bathymetry = new BathymetryTexture(_renderer);
         _ocean = new OceanRenderer(_renderer, _oceanFft, _bathymetry.View, _bathymetry.Sampler);
-        _flyTest = flyTest ? new FlyTest(_camera, _terrain, _bathymetry) : null;
+        _flyTest = flyTest ? new FlyTest(_camera, _island, _terrain, _bathymetry) : null;
         _profiler = new ProfilerPanel(_stats, _renderer, _terrainRenderer, _ocean);
 
         _uploadScope = _renderer.GpuTimer.Register("Uploads");
         _fftScope = _renderer.GpuTimer.Register("Ocean FFT");
         _oceanComputeScope = _renderer.GpuTimer.Register("Ocean compute");
+        _terrainCullScope = _renderer.GpuTimer.Register("Terrain cull");
         _terrainScope = _renderer.GpuTimer.Register("Terrain");
         _oceanScope = _renderer.GpuTimer.Register("Ocean");
         _uiScope = _renderer.GpuTimer.Register("ImGui");
+
+        if (_planets is not null)
+            _planetScope = _renderer.GpuTimer.Register("Planet");
 
         var pipelineStats = _renderer.PipelineStats;
         _terrainStats = pipelineStats.Register("Terrain", PipelinePass.Opaque);
@@ -133,7 +155,7 @@ public sealed class GameApp : IDisposable
         UpdateWeather();
 
         if (benchSeconds > 0.0)
-            _bench = new GpuBenchmark(_renderer.GpuTimer, benchSeconds);
+            _bench = new GpuBenchmark(_renderer.GpuTimer, benchSeconds, ["CPU frame", "CPU record", "Terrain rec"], [_stats.Frame, _stats.Record, _terrainRenderer.DrawMs]);
 
         if (hideUi || _bench is not null)
         {
@@ -180,8 +202,12 @@ public sealed class GameApp : IDisposable
             var mark = Stopwatch.GetTimestamp();
             RunTicks(frameSeconds);
             _sections.Ticks = Lap(ref mark);
-            _camera.Update(_window, (float)frameSeconds, _imgui.WantCaptureMouse, _imgui.WantCaptureKeyboard);
+
+            if (_orbitTest is null)
+                _camera.Update(_window, frameSeconds, _imgui.WantCaptureMouse, _imgui.WantCaptureKeyboard);
+
             _flyTest?.Fly(_sim.Clock.SimTime, WorldReady);
+            _orbitTest?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady, _renderer.OutputExtent.Height);
 
             var terrainStart = Stopwatch.GetTimestamp();
             mark = terrainStart;
@@ -189,7 +215,7 @@ public sealed class GameApp : IDisposable
             _editTest?.Update(_sim.Clock.SimTime);
             _terrainPanel.BrushRadius = _brush.Radius;
             SyncEdits();
-            _terrain.Update(_camera.Position);
+            _terrain.Update(CameraOnIsland);
             _sections.Terrain = Lap(ref mark);
             UpdateWeather();
             UpdateBench();
@@ -207,8 +233,10 @@ public sealed class GameApp : IDisposable
                 var gpu = _renderer.GpuTimer;
                 var pipe = _renderer.PipelineStats;
                 var viewProj = _camera.ViewProjection(aspect);
+                var islandCamera = _camera.Position - _island.Origin;
 
                 mark = Stopwatch.GetTimestamp();
+                _instances.BeginFrame(_renderer.FrameIndex);
                 gpu.Begin(commands, _uploadScope);
                 _terrainRenderer.RecordUploads(commands, _renderer.FrameIndex);
                 _bathymetry.Record(commands, _renderer.FrameIndex, _terrain.Bathymetry);
@@ -220,29 +248,51 @@ public sealed class GameApp : IDisposable
                 _oceanFft.Record(commands, _renderer.FrameIndex, _swell, renderTime, (float)frameSeconds);
                 gpu.End(commands, _fftScope);
 
-                _ocean.ShoreWash = _oceanPanel.ShoreWash;
-                _ocean.Prepare(_renderer.FrameIndex, _swell, renderTime, viewProj, _camera.Position, _bathymetry.Rect);
-                _sections.Prepare = Lap(ref mark);
-                gpu.Begin(commands, _oceanComputeScope);
-                _ocean.RecordCompute(commands, _renderer.FrameIndex, (float)frameSeconds, _sim.Clock.TickIndex);
-                gpu.End(commands, _oceanComputeScope);
+                // The orbit test draws only the planet: the island placeholder sits 1e6 m away and is retired in M2.
+                var island = _orbitTest is null;
+
+                if (island)
+                {
+                    _ocean.ShoreWash = _oceanPanel.ShoreWash;
+                    _ocean.Prepare(_renderer.FrameIndex, _swell, renderTime, viewProj, islandCamera, _bathymetry.Rect);
+                    _sections.Prepare = Lap(ref mark);
+                    gpu.Begin(commands, _oceanComputeScope);
+                    _ocean.RecordCompute(commands, _renderer.FrameIndex, (float)frameSeconds, _sim.Clock.TickIndex);
+                    gpu.End(commands, _oceanComputeScope);
+
+                    gpu.Begin(commands, _terrainCullScope);
+                    _terrainRenderer.Cull(commands, _renderer.FrameIndex, viewProj, islandCamera, IslandFrame.Axes);
+                    gpu.End(commands, _terrainCullScope);
+                }
 
                 _renderer.BeginOpaquePass(commands);
 
-                gpu.Begin(commands, _terrainScope);
-                pipe.Begin(commands, _terrainStats);
-                _terrainRenderer.Draw(commands, _renderer.FrameIndex, extent, viewProj, _camera.Position, TerrainLightingFromOcean());
-                pipe.End(commands, _terrainStats);
-                gpu.End(commands, _terrainScope);
+                if (island)
+                {
+                    gpu.Begin(commands, _terrainScope);
+                    pipe.Begin(commands, _terrainStats);
+                    _terrainRenderer.Draw(commands, _renderer.FrameIndex, extent, viewProj, islandCamera, TerrainLightingFromOcean());
+                    pipe.End(commands, _terrainStats);
+                    gpu.End(commands, _terrainScope);
+                }
+                else
+                {
+                    gpu.Begin(commands, _planetScope);
+                    DrawPlanet(commands, extent, aspect);
+                    gpu.End(commands, _planetScope);
+                }
 
                 _renderer.EndOpaquePass(commands);
                 _renderer.BeginWaterPass(commands);
 
-                gpu.Begin(commands, _oceanScope);
-                pipe.Begin(commands, _oceanStats);
-                _ocean.Record(commands, _renderer.FrameIndex, extent, _camera.Position);
-                pipe.End(commands, _oceanStats);
-                gpu.End(commands, _oceanScope);
+                if (island)
+                {
+                    gpu.Begin(commands, _oceanScope);
+                    pipe.Begin(commands, _oceanStats);
+                    _ocean.Record(commands, _renderer.FrameIndex, extent);
+                    pipe.End(commands, _oceanStats);
+                    gpu.End(commands, _oceanScope);
+                }
 
                 // The scene to the swapchain at native size (Upscale), then the UI over it, sharp at any render scale.
                 _renderer.BeginUiPass(commands);
@@ -260,23 +310,60 @@ public sealed class GameApp : IDisposable
             _sections.Present = _stats.Present.Last;
             _sections.GpuWait = _stats.GpuWait.Last;
             _flyTest?.Record(_sim.Clock.SimTime, _sections);
+            RecordOrbitTest();
 
-            if (_flyTest is { Done: true })
+            if (_flyTest is { Done: true } || _orbitTest is { Done: true })
                 _window.ShouldClose = true;
         }
     }
 
-    /// <summary>Weather at the camera into the sky; the clear colour follows the fogged horizon.</summary>
+    /// <summary>Weather at the camera into the sky; the clear colour follows the fogged horizon (space in the orbit test).</summary>
     private void UpdateWeather()
     {
         _weather.Update(CameraXZ, _ocean, _clearSky, _weatherPanel.DriveSky);
-        var horizon = _ocean.SkyHorizon;
+        var horizon = _orbitTest is null ? _ocean.SkyHorizon : SpaceColour;
         _renderer.ClearColor = new float4(horizon.X, horizon.Y, horizon.Z, 1f);
+    }
+
+    /// <summary>--orbit-test: the planet sphere and the marker, lit by the star through the frame tree.</summary>
+    private void DrawPlanet(Brutal.VulkanApi.CommandBuffer commands, Brutal.VulkanApi.VkExtent2D extent, float aspect)
+    {
+        _planets!.Begin(commands, _renderer.FrameIndex, extent, _camera, aspect, _orbitTest!.SunDirection, OrbitSunIntensity);
+        _planets.DrawSphere(commands, _orbitTest.PlanetCentre, _orbitTest.PlanetRadius, _orbitTest.PlanetAxes);
+        _planets.DrawMarker(commands, _orbitTest.Marker, _orbitTest.MarkerRadius, MarkerColour);
+    }
+
+    private void RecordOrbitTest()
+    {
+        if (_orbitTest is null)
+            return;
+
+        var output = _renderer.OutputExtent;
+        var aspect = output.Width / (float)output.Height;
+        var viewport = new System.Numerics.Vector2(output.Width, output.Height);
+        _orbitTest.Record(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, aspect, viewport, _stats.Frame.Last, _sections.Work, _renderer.GpuTimer.Ring(_planetScope).Last);
     }
 
     private bool WorldReady => _terrain.LoadedChunks > 0 && _terrain.PendingJobs == 0;
 
-    private System.Numerics.Vector2 CameraXZ => new(_camera.Position.X, _camera.Position.Z);
+    /// <summary>The camera in island coordinates; the island's origin during the orbit test, so the island stays loaded and still.</summary>
+    private System.Numerics.Vector3 CameraOnIsland => _orbitTest is null ? _island.ToIsland(_camera.Position) : default;
+
+    private System.Numerics.Vector2 CameraXZ
+    {
+        get
+        {
+            var camera = CameraOnIsland;
+            return new System.Numerics.Vector2(camera.X, camera.Z);
+        }
+    }
+
+    /// <summary>The camera at an island point, looking along yaw (from +X toward +Z) and pitch.</summary>
+    private void PlaceCamera(System.Numerics.Vector3 position, float yaw, float pitch)
+    {
+        _camera.Position = _island.ToFrame(position);
+        _camera.LookAlong(FlyCamera.Direction(yaw, pitch));
+    }
 
     /// <summary>Milliseconds since <paramref name="mark"/>, which moves to now.</summary>
     private static float Lap(ref long mark)
@@ -375,6 +462,8 @@ public sealed class GameApp : IDisposable
         _renderer.WaitIdle();
         _terrain.Dispose();
         _terrainRenderer.Dispose();
+        _planets?.Dispose();
+        _instances.Dispose();
         _sim.Dispose();
         _ocean.Dispose();
         _bathymetry.Dispose();

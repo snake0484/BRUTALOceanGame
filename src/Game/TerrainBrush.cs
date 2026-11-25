@@ -11,7 +11,7 @@ namespace BrutalGame;
 /// Mouse terrain editing: LMB digs, Ctrl+LMB places, [ and ] change radius. Rays hit terrain collision. Edits go to the
 /// sim as commands; digs into the shore or seabed are refused there (ShoreGuard).
 /// </summary>
-public sealed class TerrainBrush(SimWorld sim, FlyCamera camera)
+public sealed class TerrainBrush(SimWorld sim, FlyCamera camera, IslandFrame island)
 {
     private const float MaxDistance = 600f;
     private const float Interval = 0.08f;
@@ -30,7 +30,7 @@ public sealed class TerrainBrush(SimWorld sim, FlyCamera camera)
         else if (window.GetKey(GlfwKey.RightBracket) == GlfwKeyAction.Press)
             Radius = MathF.Min(16f, Radius + 4f * dt);
 
-        LastHit = sim.Physics.CastRay(camera.Position, CursorRay(window), MaxDistance);
+        LastHit = sim.Physics.CastRay(island.ToIsland(camera.Position), CursorRay(window), MaxDistance);
 
         if (uiWantsMouse || window.GetMouseButton(GlfwMouseButton.Left) != GlfwButtonAction.Press || _cooldown > 0f || !LastHit.Hit)
             return;
@@ -49,11 +49,11 @@ public sealed class TerrainBrush(SimWorld sim, FlyCamera camera)
         return RayThrough(ndcX, ndcY, size.X / (float)Math.Max(size.Y, 1));
     }
 
-    /// <summary>World ray direction through normalised device coords (y down).</summary>
+    /// <summary>Island ray direction through normalised device coords (y down).</summary>
     public Vector3 RayThrough(float ndcX, float ndcY, float aspect)
     {
-        var forward = camera.Forward;
-        var right = Vector3.Normalize(Vector3.Cross(forward, Vector3.UnitY));
+        var forward = IslandFrame.ToIslandDirection(camera.Forward);
+        var right = IslandFrame.ToIslandDirection(camera.Right);
         var up = Vector3.Cross(right, forward);
         var tan = MathF.Tan(camera.FovY * 0.5f);
         return Vector3.Normalize(forward + right * (ndcX * tan * aspect) - up * (ndcY * tan));

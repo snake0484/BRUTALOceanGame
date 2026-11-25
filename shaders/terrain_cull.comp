@@ -1,0 +1,100 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Terrain chunk cull (review C8, P4): one invocation per chunk slot (TerrainRenderer.Cull). A visible chunk gets an
+// instance record and a VkDrawIndexedIndirectCommand. Camera-relative in exact integer chunk steps: the origin is
+// (chunk base - camera chunk) * chunk metres - camera remainder, so it holds float precision at any distance.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+#define INSTANCES_WRITE
+#include "instance.glsl"
+
+layout(std140, set = 0, binding = 0) uniform Cull {
+    vec4 planes[6];    // frustum planes in terrain axes, camera at the origin
+    ivec4 cameraChunk; // xyz = floor(camera / chunk metres), w = slots to test
+    vec4 cameraFrac;   // xyz = camera - cameraChunk * chunk metres, w = LOD 0 chunk metres
+    vec4 rotation;     // terrain axes to the camera frame's
+    uvec4 params;      // x = first instance record, y = 1: compact (count buffer), 0: one command per slot
+} cull;
+
+struct Chunk {
+    ivec3 base;        // origin in LOD 0 chunks
+    float voxelScale;  // 2^lod
+    uint indexCount;   // 0 = empty or free
+    uint firstIndex;
+    int vertexOffset;
+    float meshScale;   // voxelScale / PackedTerrainVertex.StepsPerVoxel
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer Chunks {
+    Chunk chunks[];
+};
+
+struct DrawCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint firstInstance;
+};
+
+layout(std430, set = 0, binding = 2) buffer Draws {
+    uint drawCount;
+    uint indexTotal;
+    uint pad0;
+    uint pad1;
+    DrawCommand commands[];
+} draws;
+
+// Surface Nets apron cells and skirts put vertices up to 2 voxels outside the chunk cube.
+const float CULL_MARGIN_VOXELS = 2.0;
+
+bool visible(vec3 origin, float voxelScale)
+{
+    float margin = CULL_MARGIN_VOXELS * voxelScale;
+    vec3 lo = origin - margin;
+    vec3 hi = origin + cull.cameraFrac.w * voxelScale + margin;
+
+    for (int i = 0; i < 6; ++i)
+    {
+        vec4 p = cull.planes[i];
+        vec3 corner = mix(lo, hi, greaterThanEqual(p.xyz, vec3(0.0)));
+
+        if (dot(p.xyz, corner) + p.w < 0.0)
+            return false;
+    }
+
+    return true;
+}
+
+void main()
+{
+    uint slot = gl_GlobalInvocationID.x;
+
+    if (slot >= uint(cull.cameraChunk.w))
+        return;
+
+    Chunk chunk = chunks[slot];
+    bool compact = cull.params.y != 0u;
+    vec3 origin = vec3(chunk.base - cull.cameraChunk.xyz) * cull.cameraFrac.w - cull.cameraFrac.xyz;
+
+    if (chunk.indexCount == 0u || !visible(origin, chunk.voxelScale))
+    {
+        if (!compact)
+            draws.commands[slot] = DrawCommand(0u, 0u, 0u, 0, 0u);
+
+        return;
+    }
+
+    uint index = atomicAdd(draws.drawCount, 1u);
+    atomicAdd(draws.indexTotal, chunk.indexCount);
+
+    if (!compact)
+        index = slot;
+
+    uint record = cull.params.x + index;
+    instances[record].relOrigin = rotateByQuat(cull.rotation, origin);
+    instances[record].scale = chunk.meshScale;
+    instances[record].rotation = cull.rotation;
+    draws.commands[index] = DrawCommand(chunk.indexCount, 1u, chunk.firstIndex, chunk.vertexOffset, record);
+}

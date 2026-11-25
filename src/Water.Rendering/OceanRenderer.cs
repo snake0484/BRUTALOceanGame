@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Brutal;
+using Brutal.Numerics;
 using Brutal.ShaderCApi;
 using Brutal.VulkanApi;
 using Brutal.VulkanApi.Abstractions;
@@ -109,6 +110,7 @@ public sealed unsafe class OceanRenderer : IDisposable
     private const int Bindings = 2 + SampledMaps;
     private bool _initialised;
     private Vector4 _depthRect;
+    private double3 _camera;
     private Vector4 _surfFoamRect;
 
     // GPU scopes inside the ocean's own work, nested in the caller's (the profiler and --bench show each).
@@ -456,22 +458,28 @@ public sealed unsafe class OceanRenderer : IDisposable
 
     /// <summary>
     /// Writes this frame's waves, camera and shore wash. Call once per frame before <see cref="RecordCompute"/> and
-    /// <see cref="Record"/>, which read them.
+    /// <see cref="Record"/>, which read them. The GPU works camera-relative: x, z relative to the camera and y the height
+    /// above sea level; everything with a world phase (waves, carrier, cascade tiles, depth map) is rebased in double.
     /// </summary>
+    /// <param name="viewProj">Translation-free view-projection.</param>
+    /// <param name="camera">The camera in the sea's frame, whose sea level is y = 0.</param>
     /// <param name="depthRect">(origin x, origin z, world size, depth outside the map).</param>
-    public void Prepare(int frameIndex, OceanSwell swell, double renderTime, in Matrix4x4 viewProj, Vector3 cameraPos, Vector4 depthRect)
+    public void Prepare(int frameIndex, OceanSwell swell, double renderTime, in Matrix4x4 viewProj, double3 camera, Vector4 depthRect)
     {
         var block = (byte*)_buffer.Mapped + _frameOffsets[frameIndex];
         var header = (FrameHeader*)block;
         var waves = new Span<GpuWave>(block + WavesOffset, MaxWaves);
+        var height = (float)camera.Y;
+        _camera = camera;
 
-        header->ViewProj = viewProj;
-        ExtractFrustum(viewProj);
+        // Sea positions are heights above sea level: lower them by the camera's height into camera-relative space.
+        header->ViewProj = Matrix4x4.CreateTranslation(0f, -height, 0f) * viewProj;
+        ExtractFrustum(header->ViewProj);
 
         // Vertical cull range: the tallest swell crests and troughs.
         var reach = 2f * swell.SignificantWaveHeight + 4f;
         (_cullTop, _cullBottom) = (reach, -reach);
-        header->CameraPos = new Vector4(cameraPos, (float)(renderTime % TimeWrap));
+        header->CameraPos = new Vector4(0f, height, 0f, (float)(renderTime % TimeWrap));
         header->SunDir = new Vector4(SunDirection, SunIntensity);
         header->SkyZenith = new Vector4(SkyZenith, 0f);
         header->SkyHorizon = new Vector4(SkyHorizon, FogDensity);
@@ -479,12 +487,12 @@ public sealed unsafe class OceanRenderer : IDisposable
         header->WaterScatter = new Vector4(WaterScatter, 0f);
         header->CascadeL = _fft.CascadeSizes;
         header->CascadeKLo = OceanFft.BandLow(swell.GpuSpectrum.Params.MinWavelength) with { W = _fft.FoamStrength };
-        (header->CascadeAnchorX, header->CascadeAnchorZ) = CascadeAnchors(header->CascadeL, cameraPos);
-        header->DepthRect = depthRect;
+        (header->CascadeAnchorX, header->CascadeAnchorZ) = CascadeAnchors(header->CascadeL, camera);
+        header->DepthRect = new Vector4((float)(depthRect.X - camera.X), (float)(depthRect.Y - camera.Z), depthRect.Z, depthRect.W);
         _depthRect = depthRect;
-        header->Carrier = swell.GpuCarrier(renderTime);
+        header->Carrier = swell.GpuCarrier(renderTime, camera.X, camera.Z);
         header->Shore = swell.GpuShore(ShoreWash);
-        header->WaveCount = swell.CopyGpuWaves(waves, renderTime);
+        header->WaveCount = swell.CopyGpuWaves(waves, renderTime, camera.X, camera.Z);
         header->DebugView = _fft.DebugView ? 1f : 0f;
     }
 
@@ -529,22 +537,23 @@ public sealed unsafe class OceanRenderer : IDisposable
 
     /// <summary>
     /// Per cascade, the camera's position in its tile, frac(camera / L), in double: the shader samples a cascade at
-    /// (x − camera) / L + this, so texture coordinates stay small anywhere in the world.
+    /// x / L + this (x camera-relative), so texture coordinates stay small anywhere in the world. W carries the camera
+    /// in the sea frame for the foam lace's noise, which has no period to wrap at.
     /// </summary>
-    private static (Vector4 X, Vector4 Z) CascadeAnchors(Vector4 sizes, Vector3 camera)
+    private static (Vector4 X, Vector4 Z) CascadeAnchors(Vector4 sizes, double3 camera)
     {
         static float Frac(double v) => (float)(v - Math.Floor(v));
 
         return (
-            new Vector4(Frac(camera.X / (double)sizes.X), Frac(camera.X / (double)sizes.Y), Frac(camera.X / (double)sizes.Z), 0f),
-            new Vector4(Frac(camera.Z / (double)sizes.X), Frac(camera.Z / (double)sizes.Y), Frac(camera.Z / (double)sizes.Z), 0f));
+            new Vector4(Frac(camera.X / sizes.X), Frac(camera.X / sizes.Y), Frac(camera.X / sizes.Z), (float)camera.X),
+            new Vector4(Frac(camera.Z / sizes.X), Frac(camera.Z / sizes.Y), Frac(camera.Z / sizes.Z), (float)camera.Z));
     }
 
     private static void Barrier(CommandBuffer commands, VkPipelineStageFlags srcStage, VkAccessFlags srcAccess, VkPipelineStageFlags dstStage, VkAccessFlags dstAccess) =>
         commands.PipelineBarrier(srcStage, dstStage, VkDependencyFlags.None, [new VkMemoryBarrier { SrcAccessMask = srcAccess, DstAccessMask = dstAccess }], [], []);
 
-    /// <summary>Records the surface (one draw per clipmap level). Inside the water pass.</summary>
-    public void Record(CommandBuffer commands, int frameIndex, VkExtent2D extent, Vector3 cameraPos)
+    /// <summary>Records the surface (one draw per clipmap level), camera-relative from <see cref="Prepare"/>. Inside the water pass.</summary>
+    public void Record(CommandBuffer commands, int frameIndex, VkExtent2D extent)
     {
         commands.BindPipeline(VkPipelineBindPoint.Graphics, _pipeline);
         commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex]], []);
@@ -561,9 +570,10 @@ public sealed unsafe class OceanRenderer : IDisposable
 
         for (var level = 0; level < Levels; level++)
         {
-            var snap = 2f * spacing;
-            var centreX = MathF.Round(cameraPos.X / snap) * snap;
-            var centreZ = MathF.Round(cameraPos.Z / snap) * snap;
+            // Snapped in the sea frame in double, then made camera-relative.
+            double snap = 2f * spacing;
+            var centreX = (float)(Math.Round(_camera.X / snap) * snap - _camera.X);
+            var centreZ = (float)(Math.Round(_camera.Z / snap) * snap - _camera.Z);
             push[0] = centreX;
             push[1] = centreZ;
             push[2] = spacing;

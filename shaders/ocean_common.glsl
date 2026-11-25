@@ -1,11 +1,13 @@
 // Shared ocean surface evaluation (ocean.vert): frame block, maps, the depth-limited swell, the shore wash, and
 // oceanAt(), the displaced surface at a rest position. Must match the CPU OceanSwell / OceanSurface (see each section).
+// Camera-relative: x, z are relative to the camera and y is the height above sea level. Everything with a world phase
+// (wave and carrier phases, cascade anchors, depthRect) is rebased to the camera in double by OceanRenderer.Prepare.
 
 struct Wave { vec4 a; vec4 b; }; // a = (kx, kz, phase, amplitude), b = (cx, cz, omega, unused)
 
 layout(set = 0, binding = 0, std140) uniform Frame {
     mat4 viewProj;
-    vec4 cameraPos;      // xyz world, w = time, wrapped at 3000 s (OceanRenderer.TimeWrap)
+    vec4 cameraPos;      // (0, camera height above sea level, 0), w = time, wrapped at 3000 s (OceanRenderer.TimeWrap)
     vec4 sunDir;         // xyz toward sun, w = intensity
     vec4 skyZenith;
     vec4 skyHorizon;     // w = fog density
@@ -13,9 +15,9 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 waterScatter;
     vec4 cascadeL;       // xyz = patch size L per cascade (m), w = cascade count
     vec4 cascadeKLo;     // xyz = band low |k| per cascade, w = persistent foam strength
-    vec4 cascadeAnchorX; // xyz = frac(camera x / L) per cascade (cascadeUv)
-    vec4 cascadeAnchorZ; // xyz = frac(camera z / L) per cascade
-    vec4 depthRect;      // xy = depth map world origin, z = world size, w = depth outside the map
+    vec4 cascadeAnchorX; // xyz = frac(camera x / L) per cascade (cascadeUv), w = camera x in the sea frame (foamLace)
+    vec4 cascadeAnchorZ; // xyz = frac(camera z / L) per cascade, w = camera z in the sea frame
+    vec4 depthRect;      // xy = depth map origin relative to the camera, z = world size, w = depth outside the map
     vec4 carrier;        // surf carrier (OceanSwell.GpuCarrier): x = omega, y = phase, z = set group ratio (a set every 1 / this waves), w = set group phase
     vec4 shore;          // xy = carrier travel direction, z = its breaker height (0 = no shore wash), w = open swell Hs
     int waveCount;
@@ -42,11 +44,11 @@ float groupEnvelope(float spatial)
     return (1.0 + GROUP_DEPTH * cos(frame.carrier.z * spatial + frame.carrier.w)) / sqrt(1.0 + 0.5 * GROUP_DEPTH * GROUP_DEPTH);
 }
 
-// Cascade i's texture coordinate at world x: relative to the camera plus the camera's place in the tile, so it stays
-// small anywhere in the world.
+// Cascade i's texture coordinate at camera-relative x plus the camera's place in the tile, so it stays small anywhere
+// in the world.
 vec3 cascadeUv(vec2 x, int i)
 {
-    return vec3((x - frame.cameraPos.xz) / frame.cascadeL[i] + vec2(frame.cascadeAnchorX[i], frame.cascadeAnchorZ[i]), float(i));
+    return vec3(x / frame.cascadeL[i] + vec2(frame.cascadeAnchorX[i], frame.cascadeAnchorZ[i]), float(i));
 }
 
 const float SURF_SPACING_FULL = 4.0; // swash at full strength up to this grid spacing (m) ...
@@ -195,7 +197,7 @@ float surfFoamAt(vec2 xz)
 
 struct OceanPoint
 {
-    vec3 position;     // displaced world position
+    vec3 position;     // displaced position (camera-relative x, z; height above sea level y)
     vec4 cpuPartials;  // (hx, hz, λDxx, λDzz)
     float cpuDxz;
     float shore;       // share of the FFT slopes drawn: 0 on the beach .. 1 on open water

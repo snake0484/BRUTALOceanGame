@@ -4,14 +4,14 @@
 
 layout(set = 0, binding = 0, std140) uniform Frame {
     mat4 viewProj;
-    vec4 cameraPos;   // xyz world
+    vec4 cameraPos;   // zero: positions are camera-relative
     vec4 sunDir;      // xyz toward sun, w = intensity
     vec4 skyZenith;
     vec4 skyHorizon;  // w = fog density
 } frame;
 
 struct Instance {
-    mat4 model;   // scale * rotation * translation, unit shape -> world
+    mat4 model;   // scale * rotation * translation, unit shape -> camera-relative
     vec4 colour;  // rgb linear albedo
 };
 

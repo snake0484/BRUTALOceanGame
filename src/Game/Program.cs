@@ -13,6 +13,7 @@ var editTest = false;
 var hideUi = false;
 var benchSeconds = 0.0;
 var flyTest = false;
+var orbitTest = false;
 
 // Weather drives the ocean wind and the sky unless --wind pins the sea (tests, benchmarks); --weather forces it on.
 bool? weather = null;
@@ -61,6 +62,8 @@ for (var i = 0; i < args.Length; i++)
     }
     else if (args[i] == "--fly-test")
         flyTest = true;
+    else if (args[i] == "--orbit-test")
+        orbitTest = true;
     else if (args[i] == "--cam" && i + 5 < args.Length)
     {
         camera = new float[5];
@@ -69,5 +72,5 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
-using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, flyTest, swell, weather ?? true, weatherOffset, renderScale);
+using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, flyTest, swell, weather ?? true, weatherOffset, renderScale, orbitTest);
 app.Run();

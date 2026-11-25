@@ -1,6 +1,6 @@
 // Water shading for the ocean surface (ocean.frag): the body by depth, sky reflection, sun, foam lace, tonemap and fog.
 // Needs a uniform block named frame with cameraPos (w = time), sunDir (w = intensity), skyZenith, skyHorizon (w = fog
-// density), waterDeep and waterScatter. Fragment stage only (fwidth).
+// density), waterDeep, waterScatter and cascadeAnchorX/Z (w = camera in the sea frame). Fragment stage only (fwidth).
 #ifndef WATER_SHADING_GLSL
 #define WATER_SHADING_GLSL
 
@@ -107,7 +107,8 @@ float foamLace(vec2 xz, float coverage, float churn)
     if (coverage <= 0.01)
         return 0.0;
     float t = mod(frame.cameraPos.w, LACE_WRAP) * mix(LACE_CALM, LACE_ROLLER, churn);
-    return laceVeins(lace(xz * LACE_SCALE, t), footprint, coverage);
+    vec2 sea = xz + vec2(frame.cascadeAnchorX.w, frame.cascadeAnchorZ.w);
+    return laceVeins(lace(sea * LACE_SCALE, t), footprint, coverage);
 }
 
 // The water body by depth: deep tint, scatter through crests, and the sand seen through the shallows.

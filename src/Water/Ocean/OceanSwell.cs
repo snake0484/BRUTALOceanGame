@@ -256,13 +256,16 @@ public sealed class OceanSwell
     }
 
     /// <summary>
-    /// The surf carrier for the GPU at <paramref name="renderTime"/>: (ω, phase, set group ratio, set group phase).
+    /// The surf carrier for the GPU at <paramref name="renderTime"/>: (ω, phase, set group ratio, set group phase), its
+    /// phases rebased in double so the GPU's rest positions are relative to (<paramref name="originX"/>, <paramref name="originZ"/>).
     /// </summary>
-    public System.Numerics.Vector4 GpuCarrier(double renderTime)
+    public System.Numerics.Vector4 GpuCarrier(double renderTime, double originX = 0.0, double originZ = 0.0)
     {
+        var (dirZ, dirX) = MathF.SinCos(DominantDirection);
+        var spatial = _carrierOmega * _carrierOmega / 9.81f * (dirX * originX + dirZ * originZ);
         var dt = renderTime - Time;
-        var phase = Wrap(_carrierPhase - _carrierOmega * dt);
-        var group = Wrap(_groupPhase - _carrierOmega * GroupRatio * dt);
+        var phase = Wrap(_carrierPhase - _carrierOmega * dt + spatial);
+        var group = Wrap(_groupPhase - _carrierOmega * GroupRatio * dt + GroupRatio * spatial);
         return new System.Numerics.Vector4(_carrierOmega, (float)phase, GroupRatio, (float)group);
     }
 
@@ -338,16 +341,17 @@ public sealed class OceanSwell
 
     /// <summary>
     /// Writes the active components for the GPU, phase advanced from the last tick to <paramref name="renderTime"/>
-    /// in double precision so the GPU low band matches CPU sampling at that time. Returns the count written.
+    /// in double precision so the GPU low band matches CPU sampling at that time, and rebased by k·origin so the GPU's
+    /// rest positions are relative to (<paramref name="originX"/>, <paramref name="originZ"/>). Returns the count written.
     /// </summary>
-    public int CopyGpuWaves(Span<GpuWave> destination, double renderTime)
+    public int CopyGpuWaves(Span<GpuWave> destination, double renderTime, double originX = 0.0, double originZ = 0.0)
     {
         var count = Math.Min(_count, destination.Length);
         var dt = renderTime - Time;
 
         for (var i = 0; i < count; i++)
         {
-            var phase = _phase[i] - _omega[i] * dt;
+            var phase = _phase[i] - _omega[i] * dt + _kx[i] * originX + _kz[i] * originZ;
             phase -= Math.Floor(phase / Math.Tau) * Math.Tau;
             destination[i] = new GpuWave
             {

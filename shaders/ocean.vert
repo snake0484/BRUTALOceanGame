@@ -5,7 +5,7 @@
 #include "ocean_common.glsl"
 
 layout(push_constant) uniform Level {
-    vec4 level; // (centreX, centreZ, spacing, N)
+    vec4 level; // (centreX, centreZ relative to the camera, spacing, N)
     vec4 morph; // (morphStart, morphEnd, levelIndex, 0)
 } pc;
 
@@ -27,7 +27,7 @@ void main()
     vec2 x0 = pc.level.xy + vec2(g) * spacing;
 
     // CDLOD morph: collapse odd vertices onto even ones toward the outer edge.
-    vec2 toCam = abs(x0 - frame.cameraPos.xz);
+    vec2 toCam = abs(x0);
     float d = max(toCam.x, toCam.y) / (float(n) * spacing);
     float m = clamp((d - pc.morph.x) / (pc.morph.y - pc.morph.x), 0.0, 1.0);
     vec2 odd = mod(vec2(g), 2.0);

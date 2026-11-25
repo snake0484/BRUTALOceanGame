@@ -4,13 +4,13 @@
 
 layout(set = 0, binding = 0, std140) uniform Frame {
     mat4 viewProj;
-    vec4 cameraPos;   // xyz world
+    vec4 cameraPos;   // (0, camera height above sea level, 0), the frame vWorldPos is in
     vec4 sunDir;      // xyz toward sun, w = intensity
     vec4 skyZenith;
     vec4 skyHorizon;  // w = fog density
 } frame;
 
-layout(location = 0) in vec3 vWorldPos;
+layout(location = 0) in vec3 vWorldPos; // camera-relative x, z; height above sea level y
 layout(location = 1) in vec3 vNormal;
 layout(location = 2) flat in uint vMaterial;
 

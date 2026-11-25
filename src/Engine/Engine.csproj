@@ -14,4 +14,7 @@
     <PackageReference Include="Ahwoo.BRUTAL.Vulkan.Abstractions" />
     <PackageReference Include="Ahwoo.BRUTAL.Vulkan.Vma" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Frames\Frames.csproj" />
+  </ItemGroup>
 </Project>

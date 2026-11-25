@@ -25,6 +25,9 @@ public sealed unsafe class VulkanContext : IDisposable
 
     /// <summary>The device's pipelineStatisticsQuery feature, enabled when supported (<see cref="PipelineStats"/>).</summary>
     public readonly bool PipelineStatistics;
+
+    /// <summary>The device's drawIndirectCount feature (Vulkan 1.2), enabled when supported: GPU-culled draws read their count from a buffer.</summary>
+    public readonly bool DrawIndirectCount;
     private readonly VkDebugUtilsMessengerEXT _messenger;
 
     public VulkanContext(GlfwWindow window, bool enableValidation)
@@ -48,8 +51,16 @@ public sealed unsafe class VulkanContext : IDisposable
 
         PhysicalDevice = PickPhysicalDevice(out var queueFamily);
         DeviceName = PhysicalDevice.GetDeviceName();
-        PipelineStatistics = PhysicalDevice.GetFeatures().PipelineStatisticsQuery;
-        Device = CreateDevice(PhysicalDevice, queueFamily, PipelineStatistics);
+        var supported12 = new VkPhysicalDeviceVulkan12Features();
+        var supported = new VkPhysicalDeviceFeatures2 { Next = &supported12 };
+        PhysicalDevice.GetFeatures2(ref supported);
+
+        if (!supported.Features.MultiDrawIndirect || !supported.Features.DrawIndirectFirstInstance)
+            throw new InvalidOperationException("GPU lacks multiDrawIndirect or drawIndirectFirstInstance, needed by indirect terrain draws.");
+
+        PipelineStatistics = supported.Features.PipelineStatisticsQuery;
+        DrawIndirectCount = supported12.DrawIndirectCount;
+        Device = CreateDevice(PhysicalDevice, queueFamily, PipelineStatistics, DrawIndirectCount);
         GraphicsQueue = Device.GetQueue(queueFamily, 0);
         Allocator = Device.CreateVmaAllocator(new VmaAllocatorCreateInfo
         {
@@ -149,7 +160,7 @@ public sealed unsafe class VulkanContext : IDisposable
         return -1;
     }
 
-    private static DeviceEx CreateDevice(PhysicalDevice physicalDevice, int queueFamily, bool pipelineStatistics)
+    private static DeviceEx CreateDevice(PhysicalDevice physicalDevice, int queueFamily, bool pipelineStatistics, bool drawIndirectCount)
     {
         var priority = 1f;
         Span<VkDeviceQueueCreateInfo> queues =
@@ -167,8 +178,15 @@ public sealed unsafe class VulkanContext : IDisposable
         VulkanHelpers.AddMandatoryIfSupportedDeviceExtensions(extensions, physicalDevice);
 
         // Core 1.3 features our shaders rely on: shaderc emits OpDemoteToHelperInvocation for `discard`.
-        var features13 = new VkPhysicalDeviceVulkan13Features { ShaderDemoteToHelperInvocation = true };
-        var features = new VkPhysicalDeviceFeatures { PipelineStatisticsQuery = pipelineStatistics };
+        // Indirect draws: many per call, firstInstance indexes the instance records, count from a buffer when supported.
+        var features12 = new VkPhysicalDeviceVulkan12Features { DrawIndirectCount = drawIndirectCount };
+        var features13 = new VkPhysicalDeviceVulkan13Features { ShaderDemoteToHelperInvocation = true, Next = &features12 };
+        var features = new VkPhysicalDeviceFeatures
+        {
+            PipelineStatisticsQuery = pipelineStatistics,
+            MultiDrawIndirect = true,
+            DrawIndirectFirstInstance = true,
+        };
 
         return physicalDevice.CreateDevice(new DeviceEx.CreateInfo
         {

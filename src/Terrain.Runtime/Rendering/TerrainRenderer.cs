@@ -1,18 +1,23 @@
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Brutal;
+using Brutal.Numerics;
 using Brutal.ShaderCApi;
 using Brutal.VulkanApi;
 using Brutal.VulkanApi.Abstractions;
 using BrutalGame.Engine.Rendering;
+using BrutalGame.Engine.Time;
 using BrutalGame.Terrain;
 
 namespace BrutalGame.Terrain.Runtime.Rendering;
 
 /// <summary>
-/// Draws terrain chunks from one device-local vertex arena and one index arena.
-/// Uploads go through a host-visible staging ring and are copied before the main pass.
-/// Main thread only. Per frame: Upload/Free (any time), RecordUploads (after BeginFrame, before the pass), Draw (in the pass).
+/// Draws terrain chunks from one device-local vertex arena and one index arena with one indirect draw (review C8, P4):
+/// a GPU chunk table mirrors the live slots, and a compute pass frustum-culls it into instance records and
+/// VkDrawIndexedIndirectCommands. Uploads (meshes and table records) go through a host-visible staging ring and are
+/// copied before the main pass. Main thread only. Per frame: Upload/Free (any time), RecordUploads (after BeginFrame),
+/// Cull (after InstanceBuffer.BeginFrame, outside a pass), Draw (in the pass).
 /// </summary>
 public sealed unsafe class TerrainRenderer : IDisposable
 {
@@ -29,9 +34,19 @@ public sealed unsafe class TerrainRenderer : IDisposable
     // One more region than frames in flight: Upload may run before BeginFrame waits on the oldest fence.
     private const int StagingRegions = Renderer.FramesInFlight + 1;
     private const int UniformAlignment = 256;
-    private const int PushConstantSize = 16;
-    // Surface Nets apron cells and skirts put vertices up to 2 voxels outside the chunk cube.
-    private const float CullMarginVoxels = 2f;
+
+    // GPU chunk table (terrain_cull.comp Chunk): one 32 B record per handle. Each staging region ends with room for a
+    // full table rewrite.
+    private const int ChunkStride = 32;
+    private const int TableStagingBytes = MaxHandles * ChunkStride;
+    private const int MeshStagingBytes = StagingRegionBytes - TableStagingBytes;
+    private const double ChunkMetres = ChunkConstants.Size * ChunkConstants.VoxelSize;
+
+    // Per frame in flight: a 16 B header (draw count, index total) then one VkDrawIndexedIndirectCommand per slot.
+    private const int DrawHeaderBytes = 16;
+    private const int DrawCommandStride = 20;
+    private const int DrawRegionBytes = (DrawHeaderBytes + MaxHandles * DrawCommandStride + UniformAlignment - 1) / UniformAlignment * UniformAlignment;
+    private const int CullGroupSize = 64;
 
     private readonly Device _device;
     private readonly PipelineCache _pipelines;
@@ -39,6 +54,11 @@ public sealed unsafe class TerrainRenderer : IDisposable
     private readonly GpuBuffer _indexArena;
     private readonly GpuBuffer _staging;
     private readonly GpuBuffer _uniforms;
+    private readonly GpuBuffer _chunkTable;
+    private readonly GpuBuffer _draws;
+    private readonly GpuBuffer _cullUniforms;
+    private readonly InstanceBuffer _instances;
+    private readonly bool _indirectCount;
     private readonly RangeAllocator _vertexRanges;
     private readonly RangeAllocator _indexRanges;
     private readonly VkDescriptorSetLayout _setLayout;
@@ -46,6 +66,10 @@ public sealed unsafe class TerrainRenderer : IDisposable
     private readonly VkDescriptorSet[] _sets = new VkDescriptorSet[Renderer.FramesInFlight];
     private readonly VkPipelineLayout _layout;
     private readonly VkPipeline _pipeline;
+    private readonly VkDescriptorSetLayout _cullSetLayout;
+    private readonly VkDescriptorSet[] _cullSets = new VkDescriptorSet[Renderer.FramesInFlight];
+    private readonly VkPipelineLayout _cullLayout;
+    private readonly VkPipeline _cullPipeline;
 
     private readonly Slot[] _slots = new Slot[MaxHandles];
     private readonly int[] _freeHandles = new int[MaxHandles];
@@ -53,6 +77,8 @@ public sealed unsafe class TerrainRenderer : IDisposable
     private readonly PendingFree[] _pendingFrees = new PendingFree[MaxRanges];
     private readonly VkBufferCopy[] _vertexCopies = new VkBufferCopy[MaxUploadsPerFrame];
     private readonly VkBufferCopy[] _indexCopies = new VkBufferCopy[MaxUploadsPerFrame];
+    private readonly int[] _dirty = new int[MaxHandles];
+    private readonly VkBufferCopy[] _tableCopies = new VkBufferCopy[MaxHandles];
 
     private int _freeHandleCount;
     private int _liveCount;
@@ -62,18 +88,23 @@ public sealed unsafe class TerrainRenderer : IDisposable
     private int _stagingRegion;
     private int _stagingCursor;
     private long _submission;
+    private int _dirtyCount;
+    private int _highWater;
+    private int _tableHighWater;
+    private int _drawSlots;
+    private long _cullTicks;
 
     private struct Slot
     {
-        public Vector3 Origin;
+        public ChunkCoord Coord;
         public float VoxelScale;
         public int VertexOffset;
         public int VertexCount;
         public int IndexOffset;
         public int IndexCount;
-        public long CopiedAt;
         public int LiveIndex;
         public bool Used;
+        public bool Dirty;
     }
 
     private struct PendingFree
@@ -95,14 +126,47 @@ public sealed unsafe class TerrainRenderer : IDisposable
         public Vector4 SkyHorizon;
     }
 
-    public TerrainRenderer(Renderer renderer)
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GpuChunk
+    {
+        public int BaseX;
+        public int BaseY;
+        public int BaseZ;
+        public float VoxelScale;
+        public int IndexCount;
+        public int FirstIndex;
+        public int VertexOffset;
+        public float MeshScale;
+    }
+
+    // std140 as terrain_cull.comp's Cull block; Size covers its padded uvec4.
+    [StructLayout(LayoutKind.Sequential, Size = 160)]
+    private struct CullUniforms
+    {
+        public fixed float Planes[24];
+        public int CameraChunkX;
+        public int CameraChunkY;
+        public int CameraChunkZ;
+        public int Slots;
+        public Vector4 CameraFrac;
+        public Quaternion Rotation;
+        public uint FirstInstance;
+        public uint Compact;
+    }
+
+    public TerrainRenderer(Renderer renderer, InstanceBuffer instances)
     {
         if (sizeof(PackedTerrainVertex) != VertexStride)
             throw new InvalidOperationException($"PackedTerrainVertex is {sizeof(PackedTerrainVertex)} bytes, expected {VertexStride}.");
 
+        if (sizeof(GpuChunk) != ChunkStride || sizeof(CullUniforms) > UniformAlignment)
+            throw new InvalidOperationException("GpuChunk or CullUniforms layout does not match terrain_cull.comp.");
+
         var context = renderer.Context;
         _device = context.Device;
         _pipelines = context.Pipelines;
+        _instances = instances;
+        _indirectCount = context.DrawIndirectCount;
 
         var vertexCapacity = (int)(VertexArenaBytes / VertexStride);
         var indexCapacity = (int)(IndexArenaBytes / sizeof(uint));
@@ -113,6 +177,12 @@ public sealed unsafe class TerrainRenderer : IDisposable
         _indexArena = new GpuBuffer(context, indexCapacity * sizeof(uint), VkBufferUsageFlags.IndexBufferBit | VkBufferUsageFlags.TransferDstBit, false);
         _staging = new GpuBuffer(context, StagingRegionBytes * StagingRegions, VkBufferUsageFlags.TransferSrcBit, true);
         _uniforms = new GpuBuffer(context, UniformStride * Renderer.FramesInFlight, VkBufferUsageFlags.UniformBufferBit, true);
+        _chunkTable = new GpuBuffer(context, MaxHandles * ChunkStride, VkBufferUsageFlags.StorageBufferBit | VkBufferUsageFlags.TransferDstBit, false);
+        _draws = new GpuBuffer(context, DrawRegionBytes * Renderer.FramesInFlight, VkBufferUsageFlags.StorageBufferBit | VkBufferUsageFlags.IndirectBufferBit, true);
+        _cullUniforms = new GpuBuffer(context, UniformAlignment * Renderer.FramesInFlight, VkBufferUsageFlags.UniformBufferBit, true);
+
+        for (var i = 0; i < Renderer.FramesInFlight; i++)
+            new Span<byte>((byte*)_draws.Mapped + i * DrawRegionBytes, DrawHeaderBytes).Clear();
 
         for (var i = 0; i < MaxHandles; i++)
             _freeHandles[i] = MaxHandles - 1 - i;
@@ -120,19 +190,23 @@ public sealed unsafe class TerrainRenderer : IDisposable
         _freeHandleCount = MaxHandles;
 
         _setLayout = CreateSetLayout();
+        _cullSetLayout = CreateCullSetLayout();
         _pool = CreatePool();
         CreateSets();
+        CreateCullSets();
 
-        Span<VkPushConstantRange> push =
-        [
-            new VkPushConstantRange { StageFlags = VkShaderStageFlags.VertexBit, Size = (ByteSize32)PushConstantSize },
-        ];
-        _layout = _device.CreatePipelineLayout([_setLayout], push, null);
+        _layout = _device.CreatePipelineLayout([_setLayout, instances.SetLayout], [], null);
         _pipeline = CreatePipeline(renderer.RenderPass);
+        _cullLayout = _device.CreatePipelineLayout([_cullSetLayout, instances.SetLayout], [], null);
+        _cullPipeline = CreateCullPipeline();
     }
+
+    /// <summary>CPU time of <see cref="Cull"/> plus <see cref="Draw"/>: terrain command recording.</summary>
+    public readonly TimingRing DrawMs = new(256);
 
     public int ChunkCount => _liveCount;
 
+    /// <summary>Chunks the GPU cull drew, read back once the frame's fence has signalled (frames in flight behind).</summary>
     public int DrawnLastFrame { get; private set; }
 
     public int TrianglesLastFrame { get; private set; }
@@ -168,17 +242,30 @@ public sealed unsafe class TerrainRenderer : IDisposable
 
         var handle = _freeHandles[--_freeHandleCount];
         ref var slot = ref _slots[handle];
-        slot.Origin = coord.WorldOrigin;
+        slot.Coord = coord;
         slot.VoxelScale = 1 << coord.Lod;
         slot.VertexOffset = vertexOffset;
         slot.VertexCount = vertexCount;
         slot.IndexOffset = indexOffset;
         slot.IndexCount = indexCount;
-        slot.CopiedAt = _submission;
         slot.LiveIndex = _liveCount;
         slot.Used = true;
         _live[_liveCount++] = handle;
+        _highWater = Math.Max(_highWater, handle + 1);
+        MarkDirty(handle);
         return handle;
+    }
+
+    // The slot's table record is rewritten at the next RecordUploads, in order with its mesh copy.
+    private void MarkDirty(int handle)
+    {
+        ref var slot = ref _slots[handle];
+
+        if (slot.Dirty)
+            return;
+
+        slot.Dirty = true;
+        _dirty[_dirtyCount++] = handle;
     }
 
     private bool Stage(ChunkMesh mesh, int vertexCount, int indexCount, out int vertexOffset, out int indexOffset)
@@ -188,7 +275,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
         var vertexBytes = vertexCount * VertexStride;
         var indexBytes = indexCount * sizeof(uint);
 
-        if (_copyCount == MaxUploadsPerFrame || _stagingCursor + vertexBytes + indexBytes > StagingRegionBytes)
+        if (_copyCount == MaxUploadsPerFrame || _stagingCursor + vertexBytes + indexBytes > MeshStagingBytes)
             return false;
 
         vertexOffset = _vertexRanges.Allocate(vertexCount);
@@ -240,6 +327,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
         _slots[last].LiveIndex = slot.LiveIndex;
         slot.Used = false;
         _freeHandles[_freeHandleCount++] = handle;
+        MarkDirty(handle);
 
         if (slot.VertexCount == 0)
             return;
@@ -254,31 +342,93 @@ public sealed unsafe class TerrainRenderer : IDisposable
     }
 
     /// <summary>
-    /// Call once per submitted frame, after Renderer.BeginFrame and before the main pass.
-    /// Records staged copies plus a transfer -> vertex input barrier, and releases deferred frees.
+    /// Call once per submitted frame, after Renderer.BeginFrame and before <see cref="Cull"/>. Records staged mesh and
+    /// chunk table copies plus a transfer -> vertex input and compute barrier, and releases deferred frees.
     /// </summary>
     public void RecordUploads(CommandBuffer commands, int frameIndex)
     {
         ReleaseDeferred();
+        var tableCopies = StageTable();
 
         if (_copyCount > 0)
         {
             commands.CopyBuffer(_staging.Handle, _vertexArena.Handle, new ReadOnlySpan<VkBufferCopy>(_vertexCopies, 0, _copyCount));
             commands.CopyBuffer(_staging.Handle, _indexArena.Handle, new ReadOnlySpan<VkBufferCopy>(_indexCopies, 0, _copyCount));
+        }
+
+        // The table is rewritten in place: wait for earlier frames' culls still reading it.
+        if (tableCopies > 0)
+        {
+            commands.PipelineBarrier(VkPipelineStageFlags.ComputeShaderBit, VkPipelineStageFlags.TransferBit, VkDependencyFlags.None, [], [], []);
+            commands.CopyBuffer(_staging.Handle, _chunkTable.Handle, new ReadOnlySpan<VkBufferCopy>(_tableCopies, 0, tableCopies));
+        }
+
+        if (_copyCount > 0 || tableCopies > 0)
+        {
             commands.PipelineBarrier(
                 VkPipelineStageFlags.TransferBit,
-                VkPipelineStageFlags.VertexInputBit,
+                VkPipelineStageFlags.VertexInputBit | VkPipelineStageFlags.ComputeShaderBit,
                 VkDependencyFlags.None,
-                [new VkMemoryBarrier { SrcAccessMask = VkAccessFlags.TransferWriteBit, DstAccessMask = VkAccessFlags.VertexAttributeReadBit | VkAccessFlags.IndexReadBit }],
+                [
+                    new VkMemoryBarrier
+                    {
+                        SrcAccessMask = VkAccessFlags.TransferWriteBit,
+                        DstAccessMask = VkAccessFlags.VertexAttributeReadBit | VkAccessFlags.IndexReadBit | VkAccessFlags.ShaderReadBit,
+                    },
+                ],
                 [],
                 []
             );
         }
 
+        _tableHighWater = _highWater;
         _copyCount = 0;
         _stagingCursor = 0;
         _stagingRegion = (_stagingRegion + 1) % StagingRegions;
         _submission++;
+    }
+
+    // Dirty slots' records into the end of this staging region: live chunks as drawn, free slots as empty.
+    private int StageTable()
+    {
+        var regionStart = (long)_stagingRegion * StagingRegionBytes + MeshStagingBytes;
+        var records = (GpuChunk*)((byte*)_staging.Mapped + regionStart);
+
+        for (var i = 0; i < _dirtyCount; i++)
+        {
+            var handle = _dirty[i];
+            ref var slot = ref _slots[handle];
+            slot.Dirty = false;
+            records[i] = slot.Used ? ToGpu(slot) : default;
+            _tableCopies[i] = new VkBufferCopy
+            {
+                SrcOffset = (ByteSize64)(regionStart + (long)i * ChunkStride),
+                DstOffset = (ByteSize64)((long)handle * ChunkStride),
+                Size = (ByteSize64)(long)ChunkStride,
+            };
+        }
+
+        var count = _dirtyCount;
+        _dirtyCount = 0;
+        return count;
+    }
+
+    // Base in LOD 0 chunks keeps the GPU's camera-relative origin exact (terrain_cull.comp).
+    private static GpuChunk ToGpu(in Slot slot)
+    {
+        var coord = slot.Coord;
+
+        return new GpuChunk
+        {
+            BaseX = coord.X << coord.Lod,
+            BaseY = coord.Y << coord.Lod,
+            BaseZ = coord.Z << coord.Lod,
+            VoxelScale = slot.VoxelScale,
+            IndexCount = slot.IndexCount,
+            FirstIndex = slot.IndexOffset,
+            VertexOffset = slot.VertexOffset,
+            MeshScale = slot.VoxelScale * PackedTerrainVertex.InvStepsPerVoxel,
+        };
     }
 
     // A range freed at stamp S was last read or written by submission S; it is idle once submission S + FramesInFlight has begun.
@@ -298,49 +448,118 @@ public sealed unsafe class TerrainRenderer : IDisposable
         }
     }
 
-    /// <summary>Inside the opaque pass: frustum-culls chunks and draws the visible ones, one DrawIndexed each.</summary>
-    public void Draw(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, Vector3 cameraPos, in TerrainLighting lighting)
+    /// <summary>
+    /// Outside a render pass, after <see cref="RecordUploads"/>: dispatches the GPU frustum cull over every chunk slot,
+    /// which writes this frame's instance records (reserved here) and indirect draws for <see cref="Draw"/>.
+    /// Camera-relative: each record is <paramref name="rotation"/> × (origin − <paramref name="camera"/>), the
+    /// difference taken in whole chunks plus the camera's remainder, so it is exact at any distance.
+    /// </summary>
+    /// <param name="camera">The camera in the terrain's frame, whose sea level is y = 0.</param>
+    /// <param name="rotation">The terrain frame's axes to the camera frame's (the axes <paramref name="viewProj"/> takes).</param>
+    public void Cull(CommandBuffer commands, int frameIndex, in Matrix4x4 viewProj, double3 camera, doubleQuat rotation)
     {
-        var uniforms = (FrameUniforms*)((byte*)_uniforms.Mapped + frameIndex * UniformStride);
-        uniforms->ViewProj = viewProj;
-        uniforms->CameraPos = new Vector4(cameraPos, 0f);
-        uniforms->SunDir = new Vector4(lighting.SunDirection, lighting.SunIntensity);
-        uniforms->SkyZenith = new Vector4(lighting.SkyZenith, 0f);
-        uniforms->SkyHorizon = new Vector4(lighting.SkyHorizon, lighting.FogDensity);
+        var start = Stopwatch.GetTimestamp();
 
-        commands.BindPipeline(VkPipelineBindPoint.Graphics, _pipeline);
-        commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex]], []);
-        commands.BindVertexBuffers(0, [_vertexArena.Handle], [(ByteSize64)0]);
-        commands.BindIndexBuffer(_indexArena.Handle, (ByteSize64)0, VkIndexType.UInt32);
-        commands.SetViewport(0, [new VkViewport { Width = extent.Width, Height = extent.Height, MaxDepth = 1f }]);
-        commands.SetScissor(0, [new VkRect2D { Extent = extent }]);
+        // This region's last cull finished before BeginFrame's fence wait; host writes are visible at submit.
+        var header = (uint*)((byte*)_draws.Mapped + frameIndex * DrawRegionBytes);
+        DrawnLastFrame = (int)header[0];
+        TrianglesLastFrame = (int)(header[1] / 3);
+        header[0] = 0;
+        header[1] = 0;
+        _drawSlots = 0;
 
-        var planes = stackalloc Vector4[6];
-        ExtractPlanes(viewProj, planes);
-        var drawn = 0;
-        var indices = 0;
-        var push = Vector4.Zero;
+        var first = _tableHighWater > 0 ? _instances.Reserve(_tableHighWater) : -1;
 
-        for (var i = 0; i < _liveCount; i++)
+        if (first >= 0)
         {
-            ref var slot = ref _slots[_live[i]];
-
-            if (slot.IndexCount == 0 || slot.CopiedAt >= _submission || !Visible(planes, slot.Origin, slot.VoxelScale))
-                continue;
-
-            push = new Vector4(slot.Origin, slot.VoxelScale * PackedTerrainVertex.InvStepsPerVoxel);
-            commands.PushConstants(_layout, VkShaderStageFlags.VertexBit, 0, new ReadOnlySpan<byte>(&push, PushConstantSize));
-            commands.DrawIndexed(slot.IndexCount, 1, slot.IndexOffset, slot.VertexOffset, 0);
-            drawn++;
-            indices += slot.IndexCount;
+            WriteCullUniforms(frameIndex, viewProj, camera, rotation, first);
+            commands.BindPipeline(VkPipelineBindPoint.Compute, _cullPipeline);
+            commands.BindDescriptorSets(VkPipelineBindPoint.Compute, _cullLayout, 0, [_cullSets[frameIndex], _instances.Set], []);
+            commands.Dispatch((_tableHighWater + CullGroupSize - 1) / CullGroupSize, 1, 1);
+            commands.PipelineBarrier(
+                VkPipelineStageFlags.ComputeShaderBit,
+                VkPipelineStageFlags.DrawIndirectBit | VkPipelineStageFlags.VertexShaderBit | VkPipelineStageFlags.HostBit,
+                VkDependencyFlags.None,
+                [
+                    new VkMemoryBarrier
+                    {
+                        SrcAccessMask = VkAccessFlags.ShaderWriteBit,
+                        DstAccessMask = VkAccessFlags.IndirectCommandReadBit | VkAccessFlags.ShaderReadBit | VkAccessFlags.HostReadBit,
+                    },
+                ],
+                [],
+                []
+            );
+            _drawSlots = _tableHighWater;
         }
 
-        DrawnLastFrame = drawn;
-        TrianglesLastFrame = indices / 3;
+        _cullTicks = Stopwatch.GetTimestamp() - start;
     }
 
-    // Row-vector convention (clip = v * M): clip component j is column j. Planes: w±x, w±y, z >= 0, w - z >= 0 (reverse-Z near).
-    private static void ExtractPlanes(in Matrix4x4 m, Vector4* planes)
+    private void WriteCullUniforms(int frameIndex, in Matrix4x4 viewProj, double3 camera, doubleQuat rotation, int firstInstance)
+    {
+        var uniforms = (CullUniforms*)((byte*)_cullUniforms.Mapped + frameIndex * UniformAlignment);
+        var axes = new Quaternion((float)rotation.X, (float)rotation.Y, (float)rotation.Z, (float)rotation.W);
+        ExtractPlanes(viewProj, Quaternion.Conjugate(axes), (Vector4*)uniforms->Planes);
+
+        var chunkX = Math.Floor(camera.X / ChunkMetres);
+        var chunkY = Math.Floor(camera.Y / ChunkMetres);
+        var chunkZ = Math.Floor(camera.Z / ChunkMetres);
+        uniforms->CameraChunkX = (int)chunkX;
+        uniforms->CameraChunkY = (int)chunkY;
+        uniforms->CameraChunkZ = (int)chunkZ;
+        uniforms->Slots = _tableHighWater;
+        uniforms->CameraFrac = new Vector4(
+            (float)(camera.X - chunkX * ChunkMetres),
+            (float)(camera.Y - chunkY * ChunkMetres),
+            (float)(camera.Z - chunkZ * ChunkMetres),
+            (float)ChunkMetres
+        );
+        uniforms->Rotation = axes;
+        uniforms->FirstInstance = (uint)firstInstance;
+        uniforms->Compact = _indirectCount ? 1u : 0u;
+    }
+
+    /// <summary>
+    /// Inside the opaque pass: draws what <see cref="Cull"/> kept with one DrawIndexedIndirectCount (without that
+    /// feature, one DrawIndexedIndirect over every slot, culled ones with no instances). <paramref name="viewProj"/>
+    /// has no translation.
+    /// </summary>
+    /// <param name="camera">The camera in the terrain's frame, whose sea level is y = 0.</param>
+    public void Draw(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, double3 camera, in TerrainLighting lighting)
+    {
+        var start = Stopwatch.GetTimestamp();
+
+        if (_drawSlots > 0)
+        {
+            var uniforms = (FrameUniforms*)((byte*)_uniforms.Mapped + frameIndex * UniformStride);
+            uniforms->ViewProj = viewProj;
+            uniforms->CameraPos = new Vector4(0f, (float)camera.Y, 0f, 0f);
+            uniforms->SunDir = new Vector4(lighting.SunDirection, lighting.SunIntensity);
+            uniforms->SkyZenith = new Vector4(lighting.SkyZenith, 0f);
+            uniforms->SkyHorizon = new Vector4(lighting.SkyHorizon, lighting.FogDensity);
+
+            commands.BindPipeline(VkPipelineBindPoint.Graphics, _pipeline);
+            commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex], _instances.Set], []);
+            commands.BindVertexBuffers(0, [_vertexArena.Handle], [(ByteSize64)0]);
+            commands.BindIndexBuffer(_indexArena.Handle, (ByteSize64)0, VkIndexType.UInt32);
+            commands.SetViewport(0, [new VkViewport { Width = extent.Width, Height = extent.Height, MaxDepth = 1f }]);
+            commands.SetScissor(0, [new VkRect2D { Extent = extent }]);
+
+            var region = (long)frameIndex * DrawRegionBytes;
+
+            if (_indirectCount)
+                commands.DrawIndexedIndirectCount(_draws.Handle, (ByteSize64)(region + DrawHeaderBytes), _draws.Handle, (ByteSize64)region, _drawSlots, DrawCommandStride);
+            else
+                commands.DrawIndexedIndirect(_draws.Handle, (ByteSize64)(region + DrawHeaderBytes), _drawSlots, (ByteSize32)DrawCommandStride);
+        }
+
+        DrawMs.Record((float)((_cullTicks + Stopwatch.GetTimestamp() - start) * 1000.0 / Stopwatch.Frequency));
+    }
+
+    // Row-vector convention (clip = v * M): clip component j is column j. Planes: w±x, w±y, z >= 0, w - z >= 0 (reverse-Z near),
+    // their normals turned by toTerrain so boxes are tested in terrain axes.
+    private static void ExtractPlanes(in Matrix4x4 m, Quaternion toTerrain, Vector4* planes)
     {
         var cx = new Vector4(m.M11, m.M21, m.M31, m.M41);
         var cy = new Vector4(m.M12, m.M22, m.M32, m.M42);
@@ -353,26 +572,15 @@ public sealed unsafe class TerrainRenderer : IDisposable
         planes[3] = cw - cy;
         planes[4] = cz;
         planes[5] = cw - cz;
-    }
 
-    private static bool Visible(Vector4* planes, Vector3 origin, float voxelScale)
-    {
-        var margin = CullMarginVoxels * voxelScale;
-        var min = origin - new Vector3(margin);
-        var max = origin + new Vector3(ChunkConstants.Size * voxelScale + margin);
+        if (toTerrain.IsIdentity)
+            return;
 
         for (var i = 0; i < 6; i++)
         {
             var p = planes[i];
-            var x = p.X >= 0f ? max.X : min.X;
-            var y = p.Y >= 0f ? max.Y : min.Y;
-            var z = p.Z >= 0f ? max.Z : min.Z;
-
-            if (p.X * x + p.Y * y + p.Z * z + p.W < 0f)
-                return false;
+            planes[i] = new Vector4(Vector3.Transform(new Vector3(p.X, p.Y, p.Z), toTerrain), p.W);
         }
-
-        return true;
     }
 
     private VkDescriptorSetLayout CreateSetLayout()
@@ -391,12 +599,29 @@ public sealed unsafe class TerrainRenderer : IDisposable
         return _device.CreateDescriptorSetLayout(new VkDescriptorSetLayoutCreateInfo { BindingCount = 1, Bindings = bindings }, null);
     }
 
+    // terrain_cull.comp set 0: cull uniforms, chunk table, this frame's draws.
+    private VkDescriptorSetLayout CreateCullSetLayout()
+    {
+        var bindings = stackalloc VkDescriptorSetLayoutBinding[]
+        {
+            new() { Binding = 0, DescriptorType = VkDescriptorType.UniformBuffer, DescriptorCount = 1, StageFlags = VkShaderStageFlags.ComputeBit },
+            new() { Binding = 1, DescriptorType = VkDescriptorType.StorageBuffer, DescriptorCount = 1, StageFlags = VkShaderStageFlags.ComputeBit },
+            new() { Binding = 2, DescriptorType = VkDescriptorType.StorageBuffer, DescriptorCount = 1, StageFlags = VkShaderStageFlags.ComputeBit },
+        };
+
+        return _device.CreateDescriptorSetLayout(new VkDescriptorSetLayoutCreateInfo { BindingCount = 3, Bindings = bindings }, null);
+    }
+
     private VkDescriptorPool CreatePool()
     {
-        var size = new VkDescriptorPoolSize { Type = VkDescriptorType.UniformBuffer, DescriptorCount = Renderer.FramesInFlight };
+        var sizes = stackalloc VkDescriptorPoolSize[]
+        {
+            new() { Type = VkDescriptorType.UniformBuffer, DescriptorCount = 2 * Renderer.FramesInFlight },
+            new() { Type = VkDescriptorType.StorageBuffer, DescriptorCount = 2 * Renderer.FramesInFlight },
+        };
 
         return _device.CreateDescriptorPool(
-            new VkDescriptorPoolCreateInfo { MaxSets = Renderer.FramesInFlight, PoolSizeCount = 1, PoolSizes = &size },
+            new VkDescriptorPoolCreateInfo { MaxSets = 2 * Renderer.FramesInFlight, PoolSizeCount = 2, PoolSizes = sizes },
             null
         );
     }
@@ -440,6 +665,100 @@ public sealed unsafe class TerrainRenderer : IDisposable
                 ],
                 []
             );
+        }
+    }
+
+    private void CreateCullSets()
+    {
+        var layouts = stackalloc VkDescriptorSetLayout[Renderer.FramesInFlight];
+
+        for (var i = 0; i < Renderer.FramesInFlight; i++)
+            layouts[i] = _cullSetLayout;
+
+        _device.AllocateDescriptorSets(
+            new VkDescriptorSetAllocateInfo
+            {
+                DescriptorPool = _pool,
+                DescriptorSetCount = Renderer.FramesInFlight,
+                SetLayouts = layouts,
+            },
+            _cullSets
+        );
+
+        var table = new VkDescriptorBufferInfo
+        {
+            Buffer = _chunkTable.Handle,
+            Offset = (ByteSize64)0,
+            Range = (ByteSize64)(MaxHandles * ChunkStride),
+        };
+
+        for (var i = 0; i < Renderer.FramesInFlight; i++)
+        {
+            var uniforms = new VkDescriptorBufferInfo
+            {
+                Buffer = _cullUniforms.Handle,
+                Offset = (ByteSize64)(i * UniformAlignment),
+                Range = (ByteSize64)sizeof(CullUniforms),
+            };
+            var draws = new VkDescriptorBufferInfo
+            {
+                Buffer = _draws.Handle,
+                Offset = (ByteSize64)(i * DrawRegionBytes),
+                Range = (ByteSize64)DrawRegionBytes,
+            };
+
+            _device.UpdateDescriptorSets(
+                [
+                    new VkWriteDescriptorSet
+                    {
+                        DstSet = _cullSets[i],
+                        DstBinding = 0,
+                        DescriptorCount = 1,
+                        DescriptorType = VkDescriptorType.UniformBuffer,
+                        BufferInfo = &uniforms,
+                    },
+                    new VkWriteDescriptorSet
+                    {
+                        DstSet = _cullSets[i],
+                        DstBinding = 1,
+                        DescriptorCount = 1,
+                        DescriptorType = VkDescriptorType.StorageBuffer,
+                        BufferInfo = &table,
+                    },
+                    new VkWriteDescriptorSet
+                    {
+                        DstSet = _cullSets[i],
+                        DstBinding = 2,
+                        DescriptorCount = 1,
+                        DescriptorType = VkDescriptorType.StorageBuffer,
+                        BufferInfo = &draws,
+                    },
+                ],
+                []
+            );
+        }
+    }
+
+    private VkPipeline CreateCullPipeline()
+    {
+        var module = ShaderLoader.Load(_device, "terrain_cull.comp", ShaderKind.ComputeShader);
+
+        try
+        {
+            fixed (byte* name = "main"u8)
+            {
+                return _pipelines.CreateComputePipeline(
+                    new VkComputePipelineCreateInfo
+                    {
+                        Stage = new VkPipelineShaderStageCreateInfo { Stage = VkShaderStageFlags.ComputeBit, Module = module, Name = name },
+                        Layout = _cullLayout,
+                    }
+                );
+            }
+        }
+        finally
+        {
+            _device.DestroyShaderModule(module, null);
         }
     }
 
@@ -536,9 +855,15 @@ public sealed unsafe class TerrainRenderer : IDisposable
         _device.WaitIdle();
         _device.DestroyPipeline(_pipeline, null);
         _device.DestroyPipelineLayout(_layout, null);
+        _device.DestroyPipeline(_cullPipeline, null);
+        _device.DestroyPipelineLayout(_cullLayout, null);
         _device.DestroyDescriptorPool(_pool, null);
         _device.DestroyDescriptorSetLayout(_setLayout, null);
+        _device.DestroyDescriptorSetLayout(_cullSetLayout, null);
 
+        _cullUniforms.Dispose();
+        _draws.Dispose();
+        _chunkTable.Dispose();
         _uniforms.Dispose();
         _staging.Dispose();
         _indexArena.Dispose();
