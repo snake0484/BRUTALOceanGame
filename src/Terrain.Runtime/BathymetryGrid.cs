@@ -368,58 +368,6 @@ public sealed class BathymetryGrid
         LastRebuildMs = (float)elapsedMs;
     }
 
-    /// <summary>Terrain top at world xz, bilinear over the 2 m cells. Unknown cells read as deep seabed.</summary>
-    public float SampleTop(float x, float z)
-    {
-        var fx = (x - Origin.X) / CellSize - 0.5f;
-        var fz = (z - Origin.Y) / CellSize - 0.5f;
-        var x0 = (int)MathF.Floor(fx);
-        var z0 = (int)MathF.Floor(fz);
-        var tx = fx - x0;
-        var tz = fz - z0;
-        return float.Lerp(float.Lerp(TopAt(x0, z0), TopAt(x0 + 1, z0), tx), float.Lerp(TopAt(x0, z0 + 1), TopAt(x0 + 1, z0 + 1), tx), tz);
-    }
-
-    private float TopAt(int gx, int gz)
-    {
-        gx = Math.Clamp(gx, 0, Resolution - 1);
-        gz = Math.Clamp(gz, 0, Resolution - 1);
-        var top = _top[gx + gz * Resolution];
-        return float.IsNaN(top) ? SeaLevel - UnknownDepth : top;
-    }
-
-    /// <summary>The ground the sea sees (<see cref="Ground"/>) at world xz, bilinear over the 2 m cells. Unknown cells read as deep seabed.</summary>
-    public float SampleGround(float x, float z)
-    {
-        var fx = (x - Origin.X) / CellSize - 0.5f;
-        var fz = (z - Origin.Y) / CellSize - 0.5f;
-        var x0 = (int)MathF.Floor(fx);
-        var z0 = (int)MathF.Floor(fz);
-        var tx = fx - x0;
-        var tz = fz - z0;
-        return float.Lerp(float.Lerp(GroundAt(x0, z0), GroundAt(x0 + 1, z0), tx), float.Lerp(GroundAt(x0, z0 + 1), GroundAt(x0 + 1, z0 + 1), tx), tz);
-    }
-
-    private float GroundAt(int gx, int gz)
-    {
-        var i = Math.Clamp(gx, 0, Resolution - 1) + Math.Clamp(gz, 0, Resolution - 1) * Resolution;
-        var ground = Ground(_top[i], _bed[i], _sea[i]);
-        return float.IsNaN(ground) ? SeaLevel - UnknownDepth : ground;
-    }
-
     /// <summary>Bumped on every rebuild.</summary>
     public int Version { get; private set; }
-
-    public float SampleDepth(float x, float z)
-    {
-        var gx = (int)MathF.Floor((x - Origin.X) / CellSize);
-        var gz = (int)MathF.Floor((z - Origin.Y) / CellSize);
-
-        if ((uint)gx >= Resolution || (uint)gz >= Resolution)
-            return UnknownDepth;
-
-        var i = gx + gz * Resolution;
-        var ground = Ground(_top[i], _bed[i], _sea[i]);
-        return float.IsNaN(ground) ? UnknownDepth : MathF.Max(0f, SeaLevel - ground);
-    }
 }

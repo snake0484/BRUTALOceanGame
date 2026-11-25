@@ -8,6 +8,15 @@ public sealed class BathymetryGridTests
 {
     private const int N = BathymetryGrid.Resolution;
 
+    private static int Cell(BathymetryGrid grid, float x, float z) =>
+        (int)MathF.Floor((x - grid.Origin.X) / BathymetryGrid.CellSize) + (int)MathF.Floor((z - grid.Origin.Y) / BathymetryGrid.CellSize) * N;
+
+    private static float Ground(BathymetryGrid grid, Vector3 p)
+    {
+        var i = Cell(grid, p.X, p.Z);
+        return BathymetryGrid.Ground(grid.Tops[i], grid.Beds[i], grid.Sea[i]);
+    }
+
     [Theory]
     [InlineData(16, 0)]
     [InlineData(-16, 0)]
@@ -58,11 +67,11 @@ public sealed class BathymetryGridTests
 
         grid.EndRebuild(0.0);
         var probe = new Vector2(40f, -24f);
-        var before = grid.SampleTop(probe.X, probe.Y);
+        var before = grid.Tops[Cell(grid, probe.X, probe.Y)];
 
         Assert.True(grid.Recenter(new Vector3(200f, 0f, 150f), out var dx, out var dz));
         Assert.True(dx != 0 || dz != 0);
-        Assert.Equal(before, grid.SampleTop(probe.X, probe.Y));
+        Assert.Equal(before, grid.Tops[Cell(grid, probe.X, probe.Y)]);
     }
 
     /// <summary>
@@ -103,10 +112,8 @@ public sealed class BathymetryGridTests
 
         var sea = below.WorldOrigin + new Vector3(24.5f, 0f, 16.5f) * below.VoxelScale;
         var land = below.WorldOrigin + new Vector3(4.5f, 0f, 16.5f) * below.VoxelScale;
-        Assert.Equal(-8f, grid.SampleGround(sea.X, sea.Z), 3);
-        Assert.Equal(8f, grid.SampleDepth(sea.X, sea.Z), 3);
-        Assert.Equal(6f, grid.SampleTop(sea.X, sea.Z), 3);
-        Assert.Equal(3f, grid.SampleGround(land.X, land.Z), 3);
-        Assert.Equal(0f, grid.SampleDepth(land.X, land.Z), 3);
+        Assert.Equal(-8f, Ground(grid, sea), 3);
+        Assert.Equal(6f, grid.Tops[Cell(grid, sea.X, sea.Z)], 3);
+        Assert.Equal(3f, Ground(grid, land), 3);
     }
 }

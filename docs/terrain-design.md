@@ -157,7 +157,7 @@ public sealed class SurfaceNetsMesher   // one per worker thread; not thread-saf
 
 - `BathymetryGrid` is a 2D grid (cell 2 m) covering the streamed area, centred on the camera and snapped.
 - **Value:** water depth = max(0, seaLevel − seabedHeight), where seabedHeight is the topmost solid surface in that column. It is taken from loaded chunk densities (first downward zero crossing), so edits will be respected later. Columns without loaded data fall back to `TerrainGenerator.SurfaceHeight`.
-- **Updates:** columns are rebuilt when their chunks finish loading or change. The CPU side exposes `SampleDepth(x, z)`, and the grid is uploaded to the GPU as an R16F texture when it changes.
+- **Updates:** columns are rebuilt when their chunks finish loading or change. The CPU ocean takes its depth from `IShoreDepth` (`TerrainShoreDepth`), not this grid; the grid is uploaded to the GPU as an R16F texture when it changes.
 - **Ocean use in v1:**
   - Shore foam and shallow-water tint in `ocean.frag`.
   - Damping of FFT and CPU wave amplitude where depth falls toward 0, so waves don't pass through beaches. This is only a placeholder until the Layer B coastal maps (`docs/water-architecture.md`).

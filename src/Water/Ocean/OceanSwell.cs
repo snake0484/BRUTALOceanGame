@@ -71,8 +71,9 @@ public sealed class OceanSwell
     private int _paddedCount;
 
     private float _carrierOmega;
-    private float _carrierPhase;
-    private float _groupPhase;
+    private float _carrierDirection;
+    private double _carrierPhase;
+    private double _groupPhase;
     private float _breakerHeight;
     private double _spreadNormFor = double.NaN;
     private double _spreadNorm;
@@ -83,7 +84,7 @@ public sealed class OceanSwell
     }
 
     /// <summary>Direction the dominant band travels toward (radians): the surf carrier's.</summary>
-    public float DominantDirection => _to.CarrierDirection;
+    public float DominantDirection => _carrierDirection;
 
     /// <summary>Sets: one every 1 / this waves, from the dominant band's bandwidth.</summary>
     public float GroupRatio { get; private set; } = 2f * (float)WaveSet.WindSeaBandwidth;
@@ -97,7 +98,7 @@ public sealed class OceanSwell
 
     public float SignificantWaveHeight { get; private set; }
 
-    public float PeakPeriod => _to.CarrierOmega > 0.0 ? (float)(Math.Tau / _to.CarrierOmega) : 0f;
+    public float PeakPeriod => _carrierOmega > 0f ? MathF.Tau / _carrierOmega : 0f;
 
     /// <summary>0..1 progress of the active wind blend, 1 when settled.</summary>
     public float BlendProgress { get; private set; } = 1f;
@@ -140,13 +141,19 @@ public sealed class OceanSwell
     }
 
     /// <summary>
-    /// Advances to simulation time and caches per-component phase. O(components), no allocation.
+    /// Advances to simulation time and caches per-component phase. O(components), no allocation. The surf carrier's
+    /// phases integrate the last tick's ω, so a wind change bends their rate instead of jumping them.
     /// </summary>
     public void SetTime(double time)
     {
+        var dt = time - Time;
+        _carrierPhase = Wrap(_carrierPhase - _carrierOmega * dt);
+        _groupPhase = Wrap(_groupPhase - _carrierOmega * GroupRatio * dt);
         Time = time;
         Prepare();
     }
+
+    private static double Wrap(double phase) => phase - Math.Floor(phase / Math.Tau) * Math.Tau;
 
     private void Prepare()
     {
@@ -172,7 +179,8 @@ public sealed class OceanSwell
         BlendProgress = (float)weight;
 
         var smooth = weight * weight * (3.0 - 2.0 * weight);
-        UpdateGpuSpectrum(_blending ? (float)smooth : 1f);
+        var t = _blending ? (float)smooth : 1f;
+        UpdateGpuSpectrum(t);
         _count = 0;
 
         if (_blending)
@@ -206,19 +214,20 @@ public sealed class OceanSwell
             _cz[i] *= choppiness;
         }
 
-        PrepareCarrier();
+        PrepareCarrier(t);
     }
 
-    /// <summary>The surf carrier this tick: phase −ω t, the set phase, and its breaker height.</summary>
-    private void PrepareCarrier()
+    /// <summary>
+    /// The surf carrier this tick: ω, set ratio and direction blended with the components' weight
+    /// <paramref name="t"/>, and its breaker height.
+    /// </summary>
+    private void PrepareCarrier(float t)
     {
-        var omega = (float)_to.CarrierOmega;
+        var from = _blending ? _from : _to;
+        var omega = float.Lerp((float)from.CarrierOmega, (float)_to.CarrierOmega, t);
         _carrierOmega = omega;
-        var phase = -(double)omega * Time;
-        _carrierPhase = (float)(phase - Math.Floor(phase / Math.Tau) * Math.Tau);
-        GroupRatio = Math.Clamp(2f * (float)_to.CarrierBandwidth, MinGroupRatio, MaxGroupRatio);
-        var group = phase * GroupRatio;
-        _groupPhase = (float)(group - Math.Floor(group / Math.Tau) * Math.Tau);
+        GroupRatio = float.Lerp(SetRatio(from), SetRatio(_to), t);
+        _carrierDirection = from.CarrierDirection + MathF.IEEERemainder(_to.CarrierDirection - from.CarrierDirection, MathF.Tau) * t;
 
         if (omega <= 0f)
         {
@@ -238,6 +247,8 @@ public sealed class OceanSwell
         _breakerHeight = 0.39f * MathF.Pow(9.81f, 0.2f) * MathF.Pow(MathF.Tau / omega * h0 * h0, 0.4f);
     }
 
+    private static float SetRatio(WaveSet set) => Math.Clamp(2f * (float)set.CarrierBandwidth, MinGroupRatio, MaxGroupRatio);
+
     private static float Smooth(float t)
     {
         t = Math.Clamp(t, 0f, 1f);
@@ -249,10 +260,9 @@ public sealed class OceanSwell
     /// </summary>
     public System.Numerics.Vector4 GpuCarrier(double renderTime)
     {
-        var phase = _carrierPhase - _carrierOmega * (renderTime - Time);
-        phase -= Math.Floor(phase / Math.Tau) * Math.Tau;
-        var group = _groupPhase - _carrierOmega * GroupRatio * (renderTime - Time);
-        group -= Math.Floor(group / Math.Tau) * Math.Tau;
+        var dt = renderTime - Time;
+        var phase = Wrap(_carrierPhase - _carrierOmega * dt);
+        var group = Wrap(_groupPhase - _carrierOmega * GroupRatio * dt);
         return new System.Numerics.Vector4(_carrierOmega, (float)phase, GroupRatio, (float)group);
     }
 

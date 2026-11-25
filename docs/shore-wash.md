@@ -11,11 +11,11 @@ Everything the wash reads is a per-frame uniform or a bilinear map read, so noth
 | Input | Where | What |
 | --- | --- | --- |
 | Signed depth map | `depthMap` (binding 4) ← `BathymetryTexture` ← `BathymetryGrid` | Sea level − ground per 2 m cell, 512² (1 km) around the camera; negative on land, `Pit` (−1000) in pits cut off from the sea, `depthRect.w` (deep) outside the map |
-| Carrier | `frame.carrier` ← `OceanSwell.GpuCarrier` | ω, phase −ω t, set group ratio, set group phase |
+| Carrier | `frame.carrier` ← `OceanSwell.GpuCarrier` | ω, phase −∫ω dt, set group ratio, set group phase |
 | Shore | `frame.shore` ← `OceanSwell.GpuShore` | xy = carrier travel direction, z = breaker height H_b (0 turns the wash off), w = open swell Hs |
 | Set envelope | `groupEnvelope` (ocean_common.glsl) | Height × (1 ± 0.7) / √(1 + 0.7²/2), mean square 1 |
 
-**The carrier** is the dominant band's peak (`WaveSet.CarrierOmega`, `CarrierDirection`): the groundswell once its energy is at least a quarter of the wind sea's (`SwellDominance`), otherwise the wind sea. Its deep-water height H0 = 2√(0.75 × the energy of the components within the peak band) (`CarrierShare`, `BandInner/Outer`). Sets come every 1 / `GroupRatio` waves, `GroupRatio` = 2 × the band's relative bandwidth within 1/20..1/4 (every 8 waves for a wind sea, 10 for a 5%-wide groundswell).
+**The carrier** is the dominant band's peak (`WaveSet.CarrierOmega`, `CarrierDirection`): the groundswell once its energy is at least a quarter of the wind sea's (`SwellDominance`), otherwise the wind sea. Its deep-water height H0 = 2√(0.75 × the energy of the components within the peak band) (`CarrierShare`, `BandInner/Outer`). Sets come every 1 / `GroupRatio` waves, `GroupRatio` = 2 × the band's relative bandwidth within 1/20..1/4 (every 8 waves for a wind sea, 10 for a 5%-wide groundswell). On a wind change ω, `GroupRatio` and the direction blend with the components' weight, and both phases integrate ω per tick, so the swash never jumps (test: `WindChange_CarrierIsContinuous`).
 
 **Breaker height** (`OceanSwell.PrepareCarrier`, once per tick): Komar and Gaylord (1972), H_b = 0.39 g^0.2 (T H0²)^0.4. Test: `Shore_BreakerHeightFromTheCarrier`.
 

@@ -178,6 +178,52 @@ public sealed class OceanSwellTests(ITestOutputHelper output)
         Assert.Equal(20f, swell.Wind.WindSpeed);
     }
 
+    /// <summary>
+    /// A wind change minutes into play that moves the carrier from the wind sea to a groundswell: each tick's carrier
+    /// phases are the last tick's advanced by its ω (what the GPU drew up to the tick), and ω, sets, direction and breaker
+    /// height move by small steps, so the swash never jumps.
+    /// </summary>
+    [Fact]
+    public void WindChange_CarrierIsContinuous()
+    {
+        var swell = Create(42, new SwellParams { WindSpeed = 8f, WindDirection = 0f }, 300.0);
+        var tick = (long)(300.0 / Tick);
+        var prev = swell.GpuCarrier(swell.Time);
+        var prevShore = swell.GpuShore(true);
+        var prevTime = swell.Time;
+        var (maxPhase, maxGroup, maxOmega, maxRatio, maxDir, maxBreaker) = (0.0, 0.0, 0f, 0f, 0f, 0f);
+
+        for (var end = tick + 3000; tick <= end; tick++)
+        {
+            if (tick == end - 2800)
+                swell.SetWind(new SwellParams { WindSpeed = 8f, WindDirection = 0f, SwellHeight = 1.5f, SwellPeriod = 14f, SwellDirection = 2.5f });
+
+            swell.SetTime(tick * Tick);
+            var cur = swell.GpuCarrier(swell.Time);
+            var shore = swell.GpuShore(true);
+            var expected = prev.Y - prev.X * (swell.Time - prevTime);
+            var expectedGroup = prev.W - prev.X * prev.Z * (swell.Time - prevTime);
+
+            maxPhase = Math.Max(maxPhase, Math.Abs(Math.IEEERemainder(cur.Y - expected, Math.Tau)));
+            maxGroup = Math.Max(maxGroup, Math.Abs(Math.IEEERemainder(cur.W - expectedGroup, Math.Tau)));
+            maxOmega = MathF.Max(maxOmega, MathF.Abs(cur.X - prev.X));
+            maxRatio = MathF.Max(maxRatio, MathF.Abs(cur.Z - prev.Z));
+            maxDir = MathF.Max(maxDir, MathF.Abs(MathF.Atan2(shore.X * prevShore.Y - shore.Y * prevShore.X, shore.X * prevShore.X + shore.Y * prevShore.Y)));
+            maxBreaker = MathF.Max(maxBreaker, MathF.Abs(shore.Z - prevShore.Z));
+            (prev, prevShore, prevTime) = (cur, shore, swell.Time);
+        }
+
+        output.WriteLine($"max steps: phase {maxPhase:E2}, group {maxGroup:E2} rad, ω {maxOmega:E2}, ratio {maxRatio:E2}, direction {maxDir:E2} rad, breaker {maxBreaker:E2} m; settled Tp {swell.PeakPeriod:F2} s");
+        Assert.Equal(1f, swell.BlendProgress);
+        Assert.InRange(swell.PeakPeriod, 13.99f, 14.01f);
+        Assert.True(maxPhase < 1e-4, $"phase step {maxPhase}");
+        Assert.True(maxGroup < 1e-4, $"group step {maxGroup}");
+        Assert.True(maxOmega < 1e-3f, $"ω step {maxOmega}");
+        Assert.True(maxRatio < 1e-3f, $"ratio step {maxRatio}");
+        Assert.True(maxDir < 5e-3f, $"direction step {maxDir}");
+        Assert.True(maxBreaker < 0.02f, $"breaker step {maxBreaker}");
+    }
+
     [Fact]
     public void VerticalVelocityMatchesHeightRate()
     {
@@ -203,24 +249,6 @@ public sealed class OceanSwellTests(ITestOutputHelper output)
 
         output.WriteLine($"Hs {hs:F3}, max |vy - dh/dt| {maxErr:F5} m/s");
         Assert.True(maxErr < 0.01f * hs + 0.005f, $"max err {maxErr} m/s");
-    }
-
-    /// <summary>The explicit wavenumber stays within 2% of the exact dispersion solve from the beach to deep water.</summary>
-    [Fact]
-    public void WaveNumberApprox_MatchesDispersion()
-    {
-        var worst = 0.0;
-        foreach (var omega in (ReadOnlySpan<float>)[0.3f, 0.6f, 0.9f, 1.5f, 3f])
-        {
-            for (var depth = 0.05f; depth < 200f; depth *= 1.3f)
-            {
-                var exact = Jonswap.WaveNumber(omega, depth);
-                worst = Math.Max(worst, Math.Abs(Jonswap.WaveNumberApprox(omega, depth) / exact - 1.0));
-            }
-        }
-
-        output.WriteLine($"worst relative error {worst:P2}");
-        Assert.True(worst < 0.02);
     }
 
     /// <summary>A groundswell has the height, period and direction asked for, with no wind at all.</summary>

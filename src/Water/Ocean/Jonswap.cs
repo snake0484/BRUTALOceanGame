@@ -55,17 +55,6 @@ public static class Jonswap
         return k;
     }
 
-    /// <summary>
-    /// Explicit wavenumber (Fenton and McKee 1990): k0 / tanh((k0 h)^(3/4))^(2/3), within about 1.5% of
-    /// <see cref="WaveNumber"/> and far cheaper; for per-texel and per-segment work each tick.
-    /// </summary>
-    public static float WaveNumberApprox(float omega, float depth)
-    {
-        var deep = omega * omega / (float)Gravity;
-        var kh = deep * MathF.Max(depth, 1e-3f);
-        return kh > 10f ? deep : deep / MathF.Pow(MathF.Tanh(MathF.Pow(kh, 0.75f)), 2f / 3f);
-    }
-
     /// <summary>Normalisation Ns so that Ns · cos^(2s)(θ/2) integrates to 1 over [-π, π].</summary>
     public static double SpreadingNormalisation(double s)
     {

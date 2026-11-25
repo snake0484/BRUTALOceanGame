@@ -78,7 +78,7 @@ The four complex signals packed two real fields each: A = Dx + iÂ·Dz, B = h + iÂ
 - binding 0: the Frame UBO. Two vec4 are inserted after `waterScatter` and before `counts`:
   - `vec4 cascadeL;` (xyz = L, w = cascade count)
   - `vec4 cascadeKLo;` (xyz = band low |k|, w = persistent foam strength)
-  - `vec4 foamParams;` (x = rain 0..1, y = rain time, looped; see `rain.md`; z = debug view, w = sim tick alpha)
+  - `float debugView;` after `waveCount` (1 = Jacobian/foam debug view)
   - `vec4 windSea;` after `carrierChop` (x = the spectrum's wind speed, for the fetch limit below)
 - binding 1: `sampler2DArray dispMap`
 - binding 2: `sampler2DArray derivMap`

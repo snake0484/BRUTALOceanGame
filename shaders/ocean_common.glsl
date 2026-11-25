@@ -15,11 +15,11 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 cascadeKLo;     // xyz = band low |k| per cascade, w = persistent foam strength
     vec4 cascadeAnchorX; // xyz = frac(camera x / L) per cascade (cascadeUv)
     vec4 cascadeAnchorZ; // xyz = frac(camera z / L) per cascade
-    vec4 foamParams;     // x = debug view (1 = Jacobian/foam), yzw unused
     vec4 depthRect;      // xy = depth map world origin, z = world size, w = depth outside the map
     vec4 carrier;        // surf carrier (OceanSwell.GpuCarrier): x = omega, y = phase, z = set group ratio (a set every 1 / this waves), w = set group phase
     vec4 shore;          // xy = carrier travel direction, z = its breaker height (0 = no shore wash), w = open swell Hs
     int waveCount;
+    float debugView;     // 1 = Jacobian/foam
     Wave waves[512];
 } frame;
 
@@ -198,7 +198,7 @@ struct OceanPoint
     vec3 position;     // displaced world position
     vec4 cpuPartials;  // (hx, hz, λDxx, λDzz)
     float cpuDxz;
-    vec3 shore;        // per cascade, the share of its slopes drawn: 0 on the beach, in a pond, deep in a sea cave .. 1 on open deep water
+    float shore;       // share of the FFT slopes drawn: 0 on the beach .. 1 on open water
     float surfFoam;    // whitewater left behind by the surf (ocean_surf_foam.comp)
     float swashEdge;   // 1 at the edge of the swash sheet drawn here, 0 half a metre behind it or where the sea is the surface (ocean.frag's edge line)
 };
@@ -250,7 +250,7 @@ Swell swellAt(vec2 x0, float lo, float hi, float cap)
 // The ocean surface at rest position x0, for a grid of effective spacing se (anti-aliasing filter width).
 OceanPoint oceanAt(vec2 x0, float se)
 {
-    // Depth-limited swell (OceanSurface): min(1, BREAKING_GAMMA h / Hs), so the open swell cannot run through the beach;
+    // Depth-limited swell (OceanSwell.Cap): min(1, BREAKING_GAMMA h / Hs), so the open swell cannot run through the beach;
     // 0 on land and in pits cut off from the sea.
     float depth = waterDepth(x0);
     float cap = frame.shore.w > 1e-4 ? clamp(BREAKING_GAMMA * depth / frame.shore.w, 0.0, 1.0) : 1.0;
@@ -306,7 +306,7 @@ OceanPoint oceanAt(vec2 x0, float se)
     p.position = vec3(x0.x + disp.x, disp.y, x0.y + disp.z);
     p.cpuPartials = vec4(sw.hx, sw.hz, -sw.jxx, -sw.jzz);
     p.cpuDxz = -sw.jxz;
-    p.shore = vec3(shore);
+    p.shore = shore;
     p.surfFoam = surfFoamAt(x0);
     p.swashEdge = swashEdge;
     return p;

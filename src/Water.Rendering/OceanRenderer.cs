@@ -80,11 +80,11 @@ public sealed unsafe class OceanRenderer : IDisposable
         public Vector4 CascadeKLo;
         public Vector4 CascadeAnchorX;
         public Vector4 CascadeAnchorZ;
-        public Vector4 FoamParams;
         public Vector4 DepthRect;
         public Vector4 Carrier;
         public Vector4 Shore;
         public int WaveCount;
+        public float DebugView;
     }
 
     /// <summary>
@@ -412,7 +412,7 @@ public sealed unsafe class OceanRenderer : IDisposable
                     DepthWriteEnable = true,
                     DepthCompareOp = VkCompareOp.Greater,
                 };
-                // Blended so thin simulated-zone water fades over the terrain (the ocean draws after terrain).
+                // Blended so thin water at the shore shows the terrain through it (the ocean draws after terrain).
                 var blendAttachment = new VkPipelineColorBlendAttachmentState
                 {
                     BlendEnable = true,
@@ -468,9 +468,9 @@ public sealed unsafe class OceanRenderer : IDisposable
         header->ViewProj = viewProj;
         ExtractFrustum(viewProj);
 
-        // Vertical cull range: the tallest swell crests and troughs, and water standing in dug holes well below the sea.
-        var hs = swell.SignificantWaveHeight;
-        (_cullTop, _cullBottom) = (2f * hs + 4f, -MathF.Max(2f * hs + 4f, 25f));
+        // Vertical cull range: the tallest swell crests and troughs.
+        var reach = 2f * swell.SignificantWaveHeight + 4f;
+        (_cullTop, _cullBottom) = (reach, -reach);
         header->CameraPos = new Vector4(cameraPos, (float)(renderTime % TimeWrap));
         header->SunDir = new Vector4(SunDirection, SunIntensity);
         header->SkyZenith = new Vector4(SkyZenith, 0f);
@@ -480,12 +480,12 @@ public sealed unsafe class OceanRenderer : IDisposable
         header->CascadeL = _fft.CascadeSizes;
         header->CascadeKLo = OceanFft.BandLow(swell.GpuSpectrum.Params.MinWavelength) with { W = _fft.FoamStrength };
         (header->CascadeAnchorX, header->CascadeAnchorZ) = CascadeAnchors(header->CascadeL, cameraPos);
-        header->FoamParams = new Vector4(_fft.DebugView ? 1f : 0f, 0f, 0f, 0f);
         header->DepthRect = depthRect;
         _depthRect = depthRect;
         header->Carrier = swell.GpuCarrier(renderTime);
         header->Shore = swell.GpuShore(ShoreWash);
         header->WaveCount = swell.CopyGpuWaves(waves, renderTime);
+        header->DebugView = _fft.DebugView ? 1f : 0f;
     }
 
     /// <summary>

@@ -36,6 +36,10 @@ public sealed unsafe class BathymetryTexture : IDisposable
     /// <summary>Upload rectangles per record: at most the grid's changed regions.</summary>
     private const int MaxUploads = 32;
 
+    /// <summary>Stages that read the depth map: the ocean's vertex and fragment shaders and ocean_surf_foam.comp.</summary>
+    private const VkPipelineStageFlags ShaderStages =
+        VkPipelineStageFlags.VertexShaderBit | VkPipelineStageFlags.FragmentShaderBit | VkPipelineStageFlags.ComputeShaderBit;
+
     private readonly byte[] _reach = new byte[Texels];
     private readonly byte[] _reachScratch = new byte[Texels];
     private readonly int[] _queue = new int[Texels];
@@ -173,14 +177,14 @@ public sealed unsafe class BathymetryTexture : IDisposable
             RecordShift(commands, shift, range);
         else
             Transition(commands, _image, _initialised ? VkImageLayout.ShaderReadOnlyOptimal : VkImageLayout.Undefined, VkImageLayout.TransferDstOptimal,
-                VkPipelineStageFlags.VertexShaderBit | VkPipelineStageFlags.FragmentShaderBit, 0, range);
+                ShaderStages, 0, range);
 
         if (count > 0)
             commands.CopyBufferToImage(_staging.Handle, _image, VkImageLayout.TransferDstOptimal, _copies.AsSpan(0, count));
 
         commands.PipelineBarrier(
             VkPipelineStageFlags.TransferBit,
-            VkPipelineStageFlags.VertexShaderBit | VkPipelineStageFlags.FragmentShaderBit,
+            ShaderStages,
             VkDependencyFlags.None,
             [],
             [],
@@ -214,7 +218,7 @@ public sealed unsafe class BathymetryTexture : IDisposable
         var layers = new VkImageSubresourceLayers { AspectMask = VkImageAspectFlags.ColorBit, LayerCount = 1 };
 
         Transition(commands, _image, VkImageLayout.ShaderReadOnlyOptimal, VkImageLayout.TransferSrcOptimal,
-            VkPipelineStageFlags.VertexShaderBit | VkPipelineStageFlags.FragmentShaderBit, VkAccessFlags.TransferReadBit, range);
+            ShaderStages, VkAccessFlags.TransferReadBit, range);
         Transition(commands, _scratch, VkImageLayout.Undefined, VkImageLayout.TransferDstOptimal, VkPipelineStageFlags.TopOfPipeBit, 0, range);
         commands.CopyImage(_image, VkImageLayout.TransferSrcOptimal, _scratch, VkImageLayout.TransferDstOptimal,
         [

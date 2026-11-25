@@ -13,7 +13,7 @@ layout(location = 0) out vec3 vWorldPos;     // final displaced position (CPU sw
 layout(location = 1) out vec2 vRestXZ;       // x0 after morph (cascade sample coordinate)
 layout(location = 2) out vec4 vCpuPartials;  // CPU band (hx, hz, λDxx, λDzz)
 layout(location = 3) out float vCpuDxz;      // CPU band λDxz
-layout(location = 4) out vec3 vShoreDamp;    // per cascade: 0 on the beach, in a pond or a sea cave .. 1 on open deep water
+layout(location = 4) out float vShoreDamp;   // share of the FFT slopes drawn: 0 on the beach .. 1 on open water
 layout(location = 5) out float vSurfFoam;
 layout(location = 6) out float vSwashEdge;   // 1 at the edge of a swash sheet, 0 half a metre behind it (ocean.frag's edge line)
 

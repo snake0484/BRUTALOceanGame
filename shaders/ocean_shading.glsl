@@ -4,9 +4,9 @@
 #include "water_shading.glsl"
 
 // FFT cascade partials (hx, hz, λDxx, λDzz) and λDxz at rest position restXZ, faded where the pixel footprint cannot
-// resolve a cascade, and per cascade over the beach and to the wind sea there (shoreDamp, OceanPoint.shore);
-// persistent foam from the same cascades, faded alike.
-vec4 cascadePartials(vec2 restXZ, float footprint, vec3 shoreDamp, out float pxz, out float persistent)
+// resolve a cascade, and over the beach (shoreDamp, OceanPoint.shore); persistent foam from the same cascades, faded
+// alike.
+vec4 cascadePartials(vec2 restXZ, float footprint, float shoreDamp, out float pxz, out float persistent)
 {
     vec4 p = vec4(0.0);
     pxz = 0.0;
@@ -19,7 +19,7 @@ vec4 cascadePartials(vec2 restXZ, float footprint, vec3 shoreDamp, out float pxz
         if (wf <= 0.0)
             continue;
         vec3 uv = cascadeUv(restXZ, i);
-        float w = wf * shoreDamp[i];
+        float w = wf * shoreDamp;
         p += w * texture(derivMap, uv);
         pxz += w * texture(dispMap, uv).w;
         persistent += w * texture(foamMap, uv).r;

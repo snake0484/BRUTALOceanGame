@@ -9,7 +9,7 @@ layout(location = 0) in vec3 vWorldPos;
 layout(location = 1) in vec2 vRestXZ;
 layout(location = 2) in vec4 vCpuPartials; // CPU band (hx, hz, λDxx, λDzz)
 layout(location = 3) in float vCpuDxz;     // CPU band λDxz
-layout(location = 4) in vec3 vShoreDamp;  // per cascade (OceanPoint.shore)
+layout(location = 4) in float vShoreDamp; // OceanPoint.shore
 layout(location = 5) in float vSurfFoam;   // whitewater left behind by the surf
 layout(location = 6) in float vSwashEdge;  // 1 at the edge of a swash sheet, 0 half a metre behind it
 
@@ -72,7 +72,7 @@ void main()
     float foam = clamp(max(foamLace(vRestXZ, whitecap, 0.5), surf), 0.0, 1.0);
 
     // Debug: red = folding (1 - J), green = J, blue = foam coverage before lace (whitecap or surf).
-    if (frame.foamParams.x > 0.5)
+    if (frame.debugView > 0.5)
     {
         outColor = vec4(clamp(1.0 - J, 0.0, 1.0), clamp(J, 0.0, 1.0) * 0.5, max(whitecap, coverage), 1.0);
         return;
