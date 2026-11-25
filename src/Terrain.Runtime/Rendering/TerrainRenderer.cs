@@ -42,6 +42,9 @@ public sealed unsafe class TerrainRenderer : IDisposable
     private const int MeshStagingBytes = StagingRegionBytes - TableStagingBytes;
     private const double ChunkMetres = ChunkConstants.Size * ChunkConstants.VoxelSize;
 
+    /// <summary>Past this the camera's whole-chunk cast nears int range; no terrain is visible from that far anyway.</summary>
+    private const double MaxCameraMetres = (1 << 24) * ChunkMetres;
+
     // Per frame in flight: a 16 B header (draw count, index total) then one VkDrawIndexedIndirectCommand per slot.
     private const int DrawHeaderBytes = 16;
     private const int DrawCommandStride = 20;
@@ -454,7 +457,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
     /// Camera-relative: each record is <paramref name="rotation"/> × (origin − <paramref name="camera"/>), the
     /// difference taken in whole chunks plus the camera's remainder, so it is exact at any distance.
     /// </summary>
-    /// <param name="camera">The camera in the terrain's frame, whose sea level is y = 0.</param>
+    /// <param name="camera">The camera in the terrain's frame, whose sea level is y = 0; nothing is drawn past <see cref="MaxCameraMetres"/> or for NaN.</param>
     /// <param name="rotation">The terrain frame's axes to the camera frame's (the axes <paramref name="viewProj"/> takes).</param>
     public void Cull(CommandBuffer commands, int frameIndex, in Matrix4x4 viewProj, double3 camera, doubleQuat rotation)
     {
@@ -468,7 +471,8 @@ public sealed unsafe class TerrainRenderer : IDisposable
         header[1] = 0;
         _drawSlots = 0;
 
-        var first = _tableHighWater > 0 ? _instances.Reserve(_tableHighWater) : -1;
+        var inRange = Math.Abs(camera.X) < MaxCameraMetres && Math.Abs(camera.Y) < MaxCameraMetres && Math.Abs(camera.Z) < MaxCameraMetres;
+        var first = _tableHighWater > 0 && inRange ? _instances.Reserve(_tableHighWater) : -1;
 
         if (first >= 0)
         {

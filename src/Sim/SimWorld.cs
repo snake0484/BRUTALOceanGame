@@ -27,7 +27,7 @@ public sealed class SimWorld : IDisposable
     public readonly OceanSurface Ocean;
     public readonly TerrainParams Terrain;
 
-    /// <summary>Frame forest; celestial rails and spin are refreshed into it at the start of every tick.</summary>
+    /// <summary>Frame forest; celestial rails and spin are written into it for the step's end at the start of every tick (see <see cref="Tick"/>).</summary>
     public readonly FrameTree Frames;
 
     public readonly CelestialSystem Celestial;
@@ -57,6 +57,7 @@ public sealed class SimWorld : IDisposable
         Celestial = CelestialSystem.CreateTest(Frames, seed, _clock.TickSeconds);
         _shoreDepth = new TerrainShoreDepth(terrain);
         Ocean = new OceanSurface(new OceanSwell(seed), _shoreDepth);
+        UpdateRenderPoses();
 
         if (weather is not null)
             _wind = new SwellWind(weather);
@@ -86,6 +87,17 @@ public sealed class SimWorld : IDisposable
     public int Advance(double frameSeconds) => _clock.Advance(frameSeconds);
 
     /// <summary>
+    /// Render time (s): <see cref="RenderTick"/> plus <see cref="FixedClock.Alpha"/>, one tick behind the sim, so drawing
+    /// interpolates between the last two ticks' states (as grids will) and matches the ocean's render time.
+    /// </summary>
+    public double RenderTime => (RenderTick + _clock.Alpha) * _clock.TickSeconds;
+
+    public long RenderTick => _clock.TickIndex - 1;
+
+    /// <summary>Per frame, after the ticks: rails and spin at <see cref="RenderTime"/> into <see cref="FrameTree.Render"/>.</summary>
+    public void UpdateRenderPoses() => Celestial.Evaluate(RenderTick, _clock.Alpha);
+
+    /// <summary>
     /// The groundswell and the wind used when weather doesn't drive it. With weather driving, the sea wind at this tick
     /// replaces the wind at once (the first wind never blends).
     /// </summary>
@@ -104,11 +116,16 @@ public sealed class SimWorld : IDisposable
     /// <summary>Queues a brush edit, stamped with the next tick to run; it is checked and applied at that tick's start.</summary>
     public void QueueEdit(in BrushOp op) => _pending.Add(new EditCommand(_clock.TickIndex, op));
 
+    /// <summary>
+    /// Steps the sim from <c>TickIndex dt</c> to <c>(TickIndex + 1) dt</c>. Convention: when it returns, physics and the frame
+    /// poses both describe <see cref="FixedClock.SimTime"/> with the incremented <see cref="FixedClock.TickIndex"/>, so rails
+    /// and spin are written for the step's end before the physics step runs (<c>Celestial.Tick == TickIndex</c>).
+    /// </summary>
     public void Tick()
     {
         ApplyEdits();
         UpdateWind();
-        Celestial.Update(_clock.TickIndex);
+        Celestial.Update(_clock.TickIndex + 1);
 
         var dt = _clock.TickSeconds;
         Physics.Step((float)dt);

@@ -93,6 +93,8 @@ public struct Placement
   - Celestial rails are evaluated only for systems that hold a bubble or a player's interest. Other systems cost nothing: rails are closed form in the tick, so a system is exact whenever it is next looked at.
 - **Why double3 and not int64 fixed point:** positions are always stored relative to the parent frame. Inside a 1000 km planet's SOI (around 5e7 m) the double ulp is about 1e-8 m. Even heliocentric at 40 AU it is about 1 mm, and only ships in transit live there. Rotation, Kepler and transform maths all need double anyway. Rejected: int64 fixed point in the sim (uniform precision isn't needed with hierarchical frames, and it makes every rotation and orbit awkward). int64 is used **on the wire** at 1/1024 m.
 - **Time:** one global `TickIndex` for every system. Orbit phase and spin angle come from `tick % PeriodTicks`, so they never lose precision, even after years of server uptime.
+  - **Tick convention (implemented):** `SimWorld.Tick()` steps from `TickIndex·dt` to `(TickIndex+1)·dt` and writes rails and spin for the step's end before physics steps, so when it returns physics and frame poses both describe `TickIndex·dt` with `TickIndex` already incremented.
+  - **Rails are world data (implemented):** `PeriodTicks`, the fitted semi-major axis, `DayTicks` and the SOI are decided once at generation and stored (`RailElements`, `CelestialRecord`, `CelestialSystem.Write`/`Read`, bit-exact round trip), never re-derived from doubles on a client, so every build agrees on the integer period. Positions evaluated from them are server-authoritative and never hash-compared.
   - **Game time stops while the server is empty (user decision).** `FixedClock` advances only while at least one player is connected (a listen server always has its host). When the last player leaves, the server finishes the tick, persists `TickIndex` with the world, and pauses; nothing catches up on resume.
   - Everything time-based in the sim is keyed on ticks, never on wall clock: rails, spin, weather, anchor reserves and warnings, sinking rails, wormhole and black-hole lifetimes, fines and cooldowns. So they all pause together, and an offline owner's anchored station loses nothing while nobody plays.
 
@@ -280,7 +282,7 @@ v_c = Rᵀ (v_p − u − ω × (p_p − o))
 
 **Tick order:**
 1. Clock (paused while no player is connected).
-2. Rails and pose cache (systems with interest only; Lagrange frames from their pairs' rails).
+2. Rails and pose cache for the step's end, `TickIndex + 1` (systems with interest only; Lagrange frames from their pairs' rails).
    2b. Warp routes (warp.md): evaluate, send due beacons, run due commits in `(TDrop, WarpId)` order, queue the drops due at TDrop.
 3. Queued transfers and rebases (including warp drops, with the drop-sphere test and any `WarpBlast`).
 4. Inputs.
@@ -293,6 +295,7 @@ v_c = Rᵀ (v_p − u − ω × (p_p − o))
 ### Camera-relative rendering
 
 - **Camera:** `FrameId` + `double3` + `doubleQuat`. The view matrix has **no translation**.
+- **Render-rate poses in double (X5, implemented for rails and spin):** each frame `CelestialSystem.Evaluate(TickIndex − 1, alpha)` writes the closed-form poses at render time into `FrameTree.Render`, and draws compose them with `TryRelativeRender`. Render time trails the sim by one tick plus alpha, the same as interpolating grids between the last two ticks and as the ocean's render time. `--orbit-test inertial` flies the camera in the planet's inertial frame with the planet turning under it: pose error against the closed form ~1e-14 px, where tick poses would step ~1 px.
 - **Per frame:**
   - Each planet: one `double` relative pose to the camera, giving a float rotation for its axes.
   - Each chunk: `(chunkOrigin_d − camPos_d)` cast to float into the existing push constant. About 20 ns × 5000 chunks ≈ 0.1 ms.

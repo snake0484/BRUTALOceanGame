@@ -70,11 +70,14 @@ public readonly struct OrbitPath
     }
 
     /// <summary>Where the camera at <paramref name="camera"/> looks: a circle about the marker, 0.15 of the range across.</summary>
-    public double3 LookAt(double s, double3 camera)
+    public double3 LookAt(double s, double3 camera) => LookAt(s, camera, Marker);
+
+    /// <summary><see cref="LookAt(double, double3)"/> about a marker that has moved to <paramref name="marker"/>.</summary>
+    public double3 LookAt(double s, double3 camera, double3 marker)
     {
-        var range = (Marker - camera).Length();
+        var range = (marker - camera).Length();
         var (sin, cos) = Math.SinCos(2.0 * Math.PI * LookTurns * Math.Clamp(s, 0.0, 1.0));
-        return Marker + (_east * cos + _north * sin) * (LookRadius * range);
+        return marker + (_east * cos + _north * sin) * (LookRadius * range);
     }
 
     /// <summary>
@@ -84,7 +87,13 @@ public readonly struct OrbitPath
     /// </summary>
     public OrbitSample Measure(double3 camera, doubleQuat rotation, in Matrix4x4 viewProj, float fovY, float aspect, Vector2 viewport)
     {
-        var relative = Marker - camera;
+        return Measure(Marker, camera, rotation, viewProj, fovY, aspect, viewport);
+    }
+
+    /// <summary><see cref="Measure(double3, doubleQuat, in Matrix4x4, float, float, Vector2)"/> for a marker at <paramref name="marker"/> on the sphere.</summary>
+    public OrbitSample Measure(double3 marker, double3 camera, doubleQuat rotation, in Matrix4x4 viewProj, float fovY, float aspect, Vector2 viewport)
+    {
+        var relative = marker - camera;
         var relativeF = ToFloat(relative);
         var toCentre = -camera;
         var altitude = toCentre.Length() - Radius;

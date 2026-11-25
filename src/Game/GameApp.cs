@@ -73,8 +73,8 @@ public sealed class GameApp : IDisposable
     private readonly int _uiStats;
 
     /// <param name="camera">Optional start pose: x, y, z, yaw degrees, pitch degrees.</param>
-    /// <param name="orbitTest">--orbit-test: the test planet as a smooth sphere, flown from 2 m to 1e8 m; the island is not drawn.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool flyTest = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, bool orbitTest = false)
+    /// <param name="orbitTest">--orbit-test [inertial]: the test planet as a smooth sphere, flown from 2 m to 1e8 m with the camera in its surface or inertial frame; the island is not drawn.</param>
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool flyTest = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null)
     {
         var weatherField = new WeatherField(new WeatherClimate());
         _sim = new SimWorld(seed: 1, WorkerBudget.Tick, new TerrainParams(), weatherField) { DriveWind = weather, WeatherTimeOffset = weatherOffset * 60.0 };
@@ -115,9 +115,9 @@ public sealed class GameApp : IDisposable
         _instances = new InstanceBuffer(_renderer);
         _terrainRenderer = new TerrainRenderer(_renderer, _instances);
 
-        if (orbitTest)
+        if (orbitTest is { } orbitFrame)
         {
-            _orbitTest = new OrbitTest(_camera, _sim.Celestial);
+            _orbitTest = new OrbitTest(_camera, _sim.Celestial, orbitFrame);
             _planets = new PlanetRenderer(_renderer, _instances);
         }
 
@@ -201,13 +201,14 @@ public sealed class GameApp : IDisposable
 
             var mark = Stopwatch.GetTimestamp();
             RunTicks(frameSeconds);
+            _sim.UpdateRenderPoses();
             _sections.Ticks = Lap(ref mark);
 
             if (_orbitTest is null)
                 _camera.Update(_window, frameSeconds, _imgui.WantCaptureMouse, _imgui.WantCaptureKeyboard);
 
             _flyTest?.Fly(_sim.Clock.SimTime, WorldReady);
-            _orbitTest?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady, _renderer.OutputExtent.Height);
+            _orbitTest?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady, _renderer.OutputExtent.Height, _sim.RenderTime);
 
             var terrainStart = Stopwatch.GetTimestamp();
             mark = terrainStart;
@@ -249,7 +250,7 @@ public sealed class GameApp : IDisposable
                 gpu.End(commands, _fftScope);
 
                 // The orbit test draws only the planet: the island placeholder sits 1e6 m away and is retired in M2.
-                var island = _orbitTest is null;
+                var island = _orbitTest is null && IslandInView;
 
                 if (island)
                 {
@@ -345,6 +346,12 @@ public sealed class GameApp : IDisposable
     }
 
     private bool WorldReady => _terrain.LoadedChunks > 0 && _terrain.PendingJobs == 0;
+
+    /// <summary>
+    /// The island draws take the camera in the island's frame (the ocean takes no axes) and only inside the planet's SOI,
+    /// so a heliocentric camera never casts its position into chunk coordinates.
+    /// </summary>
+    private bool IslandInView => _camera.Frame == _island.Frame && _camera.Position.Length() < _island.SoiRadius;
 
     /// <summary>The camera in island coordinates; the island's origin during the orbit test, so the island stays loaded and still.</summary>
     private System.Numerics.Vector3 CameraOnIsland => _orbitTest is null ? _island.ToIsland(_camera.Position) : default;

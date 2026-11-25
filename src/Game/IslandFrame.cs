@@ -14,6 +14,9 @@ public sealed class IslandFrame
     public readonly FrameId Frame;
     public readonly double3 Origin;
 
+    /// <summary>The planet's SOI (m from its centre, the frame's origin): past it the island is not drawn.</summary>
+    public readonly double SoiRadius;
+
     /// <summary>Island axes to <see cref="Frame"/> axes: the same axes.</summary>
     public static doubleQuat Axes => doubleQuat.Identity;
 
@@ -26,6 +29,7 @@ public sealed class IslandFrame
 
             Frame = body.Surface;
             Origin = new double3(0.0, body.Radius, 0.0);
+            SoiRadius = body.SoiRadius;
             return;
         }
 

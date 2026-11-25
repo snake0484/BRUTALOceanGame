@@ -3,8 +3,10 @@ namespace BrutalGame.Frames;
 /// <summary>
 /// The frame forest: one tree per star system (Solar roots) plus wormhole tunnel roots, all in one preallocated SoA
 /// store indexed by <see cref="FrameId.Value"/>. <see cref="Local"/> is the per-tick pose cache: rails and spin write it
-/// once per tick (<see cref="CelestialSystem.Update"/>), grids after the physics step. Zero allocations after
-/// construction. Main-thread only.
+/// once per tick (<see cref="CelestialSystem.Update"/>), grids after the physics step. <see cref="Render"/> is the same
+/// poses at render time, between ticks, in double (<see cref="CelestialSystem.Evaluate"/>); drawing composes it with
+/// <see cref="TryRelativeRender"/> so stars, moons and frames moving under the camera step at render rate, never at the
+/// tick (docs/pivot/review.md X5). Zero allocations after construction. Main-thread only.
 /// </summary>
 public sealed class FrameTree
 {
@@ -19,6 +21,9 @@ public sealed class FrameTree
 
     public readonly FramePose[] Local;
 
+    /// <summary>Poses at render time; rails and spin write theirs each frame, grids will write their interpolated pose.</summary>
+    public readonly FramePose[] Render;
+
     /// <summary>Grid: ship entity; body frames: celestial index; Lagrange: LagrangePoint index.</summary>
     public readonly int[] OwnerEntity;
 
@@ -31,6 +36,7 @@ public sealed class FrameTree
         Depth = new byte[capacity];
         System = new SystemId[capacity];
         Local = new FramePose[capacity];
+        Render = new FramePose[capacity];
         OwnerEntity = new int[capacity];
     }
 
@@ -78,7 +84,12 @@ public sealed class FrameTree
     /// <paramref name="from"/> into <paramref name="to"/>. Composed in double up to the common ancestor only, so nearby
     /// frames never pass through heliocentric magnitudes. False across trees (systems have no pose relative to each other).
     /// </summary>
-    public bool TryRelative(FrameId from, FrameId to, out FramePose pose)
+    public bool TryRelative(FrameId from, FrameId to, out FramePose pose) => Relative(Local, from, to, out pose);
+
+    /// <summary><see cref="TryRelative"/> at render time, from <see cref="Render"/>: for drawing only, never for the sim.</summary>
+    public bool TryRelativeRender(FrameId from, FrameId to, out FramePose pose) => Relative(Render, from, to, out pose);
+
+    private bool Relative(FramePose[] poses, FrameId from, FrameId to, out FramePose pose)
     {
         if (System[from.Value] != System[to.Value])
         {
@@ -93,21 +104,21 @@ public sealed class FrameTree
 
         while (Depth[f] > Depth[t])
         {
-            up = FramePose.Compose(Local[f], up);
+            up = FramePose.Compose(poses[f], up);
             f = Parent[f].Value;
         }
 
         while (Depth[t] > Depth[f])
         {
-            down = FramePose.Compose(Local[t], down);
+            down = FramePose.Compose(poses[t], down);
             t = Parent[t].Value;
         }
 
         while (f != t)
         {
-            up = FramePose.Compose(Local[f], up);
+            up = FramePose.Compose(poses[f], up);
             f = Parent[f].Value;
-            down = FramePose.Compose(Local[t], down);
+            down = FramePose.Compose(poses[t], down);
             t = Parent[t].Value;
         }
 
@@ -127,6 +138,7 @@ public sealed class FrameTree
     {
         Kind[id.Value] = kind;
         Local[id.Value] = FramePose.Identity;
+        Render[id.Value] = FramePose.Identity;
         OwnerEntity[id.Value] = owner;
     }
 }
