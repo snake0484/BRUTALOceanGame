@@ -136,7 +136,7 @@ public class HullBakeTests
 
         foreach (var mesher in new[] { HullMesher.DualContouring, HullMesher.SurfaceNets })
         {
-            using var baker = new HullBaker(2) { Mesher = mesher };
+            using var baker = new HullBaker(2) { Mesher = mesher, ExactSurfaces = false };
             baker.Start(session.Doc.Brushes.AsSpan(), Densities);
             baker.Wait();
             var worst = 0.0;
@@ -164,6 +164,76 @@ public class HullBakeTests
             else
                 Assert.True(worst > 0.03, $"surface nets corner off by {worst:F4} m");
         }
+    }
+
+    /// <summary>A brush nothing else reaches is drawn from its own polygons: every vertex lies on its surface.</summary>
+    [Fact]
+    public void ExactSurfaces_LieOnTheBrush()
+    {
+        var session = new DesignSession();
+        session.Snap.Enabled = false;
+        var cylinder = HullCommands.AddBrush(session, BrushShape.Cylinder, BrushOp.Add, 0, 0, 0, 700, 1500, 700, BrushRotation.FromSteps(2, 5, 1), UndoTests.Alloy);
+        var box = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 40 * 1024, 333, -77, 1100, 500, 900, BrushRotation.FromSteps(3, 0, 0), UndoTests.Alloy);
+        Mesh.MeshCommands.ConvertToMesh(session, box);
+        Mesh.MeshCommands.Apply(session, box, b =>
+        {
+            b.Creases.Clear();
+            b.Levels = 1;
+            return true;
+        });
+
+        using var baker = new HullBaker(2);
+        baker.Start(session.Doc.Brushes.AsSpan(), session.Doc.Meshes, Densities);
+        baker.Wait();
+        Assert.Equal(baker.Bricks.Count, baker.ExactBricks);
+
+        session.TryGetBrush(cylinder, out var c);
+        session.TryGetBrush(box, out var m);
+        var mesh = MeshCache.Get(session.Doc.Meshes[m.Param]);
+        var rotation = new double[9];
+        var worst = 0.0;
+        var vertices = 0;
+
+        foreach (var brick in baker.Bricks)
+        {
+            foreach (var v in brick.VertexSpan)
+            {
+                var p = v.DecodePosition(HullBins.CellMetres);
+                var ship = new Vector3d(brick.Origin.X + p.X, brick.Origin.Y + p.Y, brick.Origin.Z + p.Z);
+                var near = ship.X < 20 ? c : m;
+                BrushRotation.Matrix(near.Rotation, rotation);
+                double dx = ship.X - near.PositionX, dy = ship.Y - near.PositionY, dz = ship.Z - near.PositionZ;
+                var local = new System.Numerics.Vector3(
+                    (float)(rotation[0] * dx + rotation[3] * dy + rotation[6] * dz),
+                    (float)(rotation[1] * dx + rotation[4] * dy + rotation[7] * dz),
+                    (float)(rotation[2] * dx + rotation[5] * dy + rotation[8] * dz));
+                var distance = near.Shape == BrushShape.Mesh ? mesh.Distance(local, 1f) : Math.Abs(BrushGeometry.Distance(BrushShape.Cylinder, local, BrushGeometry.Half(near)));
+                worst = Math.Max(worst, distance);
+                vertices++;
+            }
+        }
+
+        Assert.True(vertices > 100);
+        Assert.True(worst < 0.002, $"exact vertex off the surface by {worst:F4} m");
+    }
+
+    /// <summary>Bricks a cut reaches fall back to the grid mesh; the rest of the hull stays exact.</summary>
+    [Fact]
+    public void ExactSurfaces_FallBackToTheGridWhereCut()
+    {
+        var session = new DesignSession();
+        SampleHulls.MeshHull(session, UndoTests.Alloy, UndoTests.Titanium);
+        using var baker = new HullBaker(2);
+        baker.Start(session.Doc.Brushes.AsSpan(), session.Doc.Meshes, Densities);
+        baker.Wait();
+
+        Assert.InRange(baker.ExactBricks, 1, baker.Bricks.Count - 1);
+
+        using var grid = new HullBaker(2) { ExactSurfaces = false };
+        grid.Start(session.Doc.Brushes.AsSpan(), session.Doc.Meshes, Densities);
+        grid.Wait();
+        Assert.Equal(grid.Mass, baker.Mass);
+        Assert.Equal(0, grid.ExactBricks);
     }
 
     [Fact]

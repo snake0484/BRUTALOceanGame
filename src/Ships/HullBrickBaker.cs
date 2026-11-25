@@ -59,6 +59,7 @@ public sealed class HullBrickBaker : IHermiteField
     private readonly ChunkMesh _mesh = new();
     private readonly SurfaceNetsMesher _surfaceNets = new();
     private readonly HullDualContour _dualContour = new();
+    private readonly ExactSurface _exact = new();
     private readonly ushort[] _winner = new ushort[N];
     private readonly byte[] _near = new byte[N];
     private readonly List<int> _nearList = new();
@@ -86,7 +87,12 @@ public sealed class HullBrickBaker : IHermiteField
 
     public HullMesher Mesher = HullMesher.DualContouring;
 
-    public void Bake(BrickKey key, ReadOnlySpan<HullBrush> brushes, ReadOnlySpan<int> binned, IReadOnlyList<PreparedMesh?> meshes, HullBrick result)
+    /// <param name="exact">
+    /// Index into <paramref name="binned"/> of the only brush reaching this brick (an Add): its own polygons are the mesh,
+    /// clipped to the brick; -1 meshes the grid. <paramref name="grow"/> bits 0-2 grow the clip box one cell down X, Y, Z
+    /// (toward grid-meshed neighbours, so the two surfaces overlap rather than leave a crack).
+    /// </param>
+    public void Bake(BrickKey key, ReadOnlySpan<HullBrush> brushes, ReadOnlySpan<int> binned, IReadOnlyList<PreparedMesh?> meshes, HullBrick result, int exact = -1, int grow = 0)
     {
         var start = Stopwatch.GetTimestamp();
         _chunk.Density.AsSpan().Fill(sbyte.MaxValue);
@@ -119,7 +125,16 @@ public sealed class HullBrickBaker : IHermiteField
         _chunk.RecomputeHasSurface();
         _mesh.Clear();
 
-        if (_chunk.HasSurface)
+        if (exact >= 0)
+        {
+            ref readonly var b = ref _brushes[exact];
+            const double cell = HullBins.CellMetres;
+            var min = new Vector3d((grow & 1) != 0 ? -cell : 0.0, (grow & 2) != 0 ? -cell : 0.0, (grow & 4) != 0 ? -cell : 0.0);
+            var max = new Vector3d(HullBins.BrickMetres, HullBins.BrickMetres, HullBins.BrickMetres);
+            _exact.Append(b.Source, b.Mesh, _origin, min, max, _mesh);
+            _mesh.Pack(HullBins.CellMetres);
+        }
+        else if (_chunk.HasSurface)
         {
             if (Mesher == HullMesher.DualContouring)
                 _dualContour.Mesh(_chunk, _mesh, HullBins.CellMetres, this);

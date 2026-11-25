@@ -187,8 +187,9 @@ public sealed class DesignerApp : IDisposable
         _stats.Reused = _baker.LastReused;
         _stats.MaxBrushesPerBrick = _baker.MaxBrushesPerBrick;
         _stats.PrepareMs = _baker.LastPrepareMs;
+        _stats.ExactBricks = _baker.ExactBricks;
         var com = _baker.Mass.CentreOfMass;
-        Console.WriteLine($"bake {_baker.Version}: {_stats.Bricks} bricks ({_stats.Rebaked} rebaked, {_stats.Reused} reused), {_stats.Triangles} tris, {_stats.BakeMs:F2} ms wall, {_stats.BakeCpuMs:F2} ms cpu, mesh prep {_stats.PrepareMs:F2} ms; mass {_baker.Mass.MassKg:F1} kg, volume {_baker.Mass.VolumeM3:F3} m3, CoM ({com.X:F3}, {com.Y:F3}, {com.Z:F3}); hash {_stats.Hash}");
+        Console.WriteLine($"bake {_baker.Version}: {_stats.Bricks} bricks ({_stats.ExactBricks} exact, {_stats.Rebaked} rebaked, {_stats.Reused} reused), {_stats.Triangles} tris, {_stats.BakeMs:F2} ms wall, {_stats.BakeCpuMs:F2} ms cpu, mesh prep {_stats.PrepareMs:F2} ms; mass {_baker.Mass.MassKg:F1} kg, volume {_baker.Mass.VolumeM3:F3} m3, CoM ({com.X:F3}, {com.Y:F3}, {com.Z:F3}); hash {_stats.Hash}");
     }
 
     private void UpdatePalette(PlanDocument doc)

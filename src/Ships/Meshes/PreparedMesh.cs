@@ -18,8 +18,14 @@ public sealed class PreparedMesh
     public readonly Vector3[] A, B, C;
     public readonly Vector3[] Normals;
 
-    /// <summary>Area-weighted vertex normals of the subdivided mesh, for smooth shading between facets.</summary>
-    public readonly Vector3[] VertexNormals;
+    /// <summary>
+    /// Shading normal per triangle corner (3 per triangle): the area-weighted mean of the triangles at that vertex whose
+    /// face normals lie within <see cref="SmoothAngleCos"/> of this one, so smooth surfaces shade smooth and creases
+    /// (subdivision creases, extrude rims) stay hard.
+    /// </summary>
+    public readonly Vector3[] CornerNormals;
+
+    public const float SmoothAngleCos = 0.766f;
     public readonly Vector3 Min, Max;
 
     private readonly int[] _order;
@@ -56,21 +62,7 @@ public sealed class PreparedMesh
             Max = Vector3.Max(Max, Vector3.Max(A[t], Vector3.Max(B[t], C[t])));
         }
 
-        VertexNormals = new Vector3[triangles.Vertices.Length];
-
-        for (var t = 0; t < n; t++)
-        {
-            var weighted = Vector3.Cross(B[t] - A[t], C[t] - A[t]);
-            VertexNormals[triangles.Indices[3 * t]] += weighted;
-            VertexNormals[triangles.Indices[3 * t + 1]] += weighted;
-            VertexNormals[triangles.Indices[3 * t + 2]] += weighted;
-        }
-
-        for (var v = 0; v < VertexNormals.Length; v++)
-        {
-            var length = VertexNormals[v].Length();
-            VertexNormals[v] = length > 0f ? VertexNormals[v] / length : Vector3.UnitY;
-        }
+        CornerNormals = BuildCornerNormals(triangles, n);
 
         _order = new int[n];
 
@@ -100,10 +92,49 @@ public sealed class PreparedMesh
         var v = Math.Clamp((d11 * d20 - d01 * d21) / denom, 0f, 1f);
         var w = Math.Clamp((d00 * d21 - d01 * d20) / denom, 0f, 1f - v);
         var u = 1f - v - w;
-        var idx = Source.Indices;
-        var n = VertexNormals[idx[3 * t]] * u + VertexNormals[idx[3 * t + 1]] * v + VertexNormals[idx[3 * t + 2]] * w;
+        var n = CornerNormals[3 * t] * u + CornerNormals[3 * t + 1] * v + CornerNormals[3 * t + 2] * w;
         var length = n.Length();
         return length > 1e-6f ? n / length : Normals[t];
+    }
+
+    private Vector3[] BuildCornerNormals(MeshTriangles triangles, int n)
+    {
+        var idx = triangles.Indices;
+        var start = new int[triangles.Vertices.Length + 1];
+
+        foreach (var v in idx)
+            start[v + 1]++;
+
+        for (var v = 0; v < triangles.Vertices.Length; v++)
+            start[v + 1] += start[v];
+
+        var fill = (int[])start.Clone();
+        var incident = new int[idx.Length];
+
+        for (var c = 0; c < idx.Length; c++)
+            incident[fill[idx[c]]++] = c / 3;
+
+        var corners = new Vector3[idx.Length];
+
+        for (var c = 0; c < idx.Length; c++)
+        {
+            var t = c / 3;
+            var v = idx[c];
+            var sum = Vector3.Zero;
+
+            for (var k = start[v]; k < start[v + 1]; k++)
+            {
+                var other = incident[k];
+
+                if (Vector3.Dot(Normals[other], Normals[t]) >= SmoothAngleCos)
+                    sum += Vector3.Cross(B[other] - A[other], C[other] - A[other]);
+            }
+
+            var length = sum.Length();
+            corners[c] = length > 0f ? sum / length : Normals[t];
+        }
+
+        return corners;
     }
 
     public static Vector3 Metres(MeshVertex v) => new((float)(v.X * MetresPerUnit), (float)(v.Y * MetresPerUnit), (float)(v.Z * MetresPerUnit));

@@ -21,6 +21,7 @@ public sealed class DesignStats
     public int MaxBrushesPerBrick;
     public bool Baking;
     public float PrepareMs;
+    public int ExactBricks;
     public PlanHash Hash;
     public readonly ValidationLog Validation = new();
     public string Message = "";
@@ -362,7 +363,7 @@ public sealed class DesignerPanels
             ImGui.Text($"CoM {com.X:F3}, {com.Y:F3}, {com.Z:F3} m");
             ImGui.Text($"inertia {inertia.Xx:E2}, {inertia.Yy:E2}, {inertia.Zz:E2} kg m2");
             ImGui.Separator();
-            ImGui.Text($"bricks {stats.Bricks}  triangles {stats.Triangles}  max brushes/brick {stats.MaxBrushesPerBrick}");
+            ImGui.Text($"bricks {stats.Bricks} ({stats.ExactBricks} exact)  triangles {stats.Triangles}  max brushes/brick {stats.MaxBrushesPerBrick}");
             ImGui.Text($"bake {stats.BakeMs:F2} ms wall  {stats.BakeCpuMs:F2} ms cpu  rebaked {stats.Rebaked} reused {stats.Reused}{(stats.Baking ? "  (baking)" : "")}");
             ImGui.Text($"mesh prepare {stats.PrepareMs:F2} ms (subdivide + BVH, cached by mesh hash)");
             ImGui.Text($"plan hash {stats.Hash}  undo {session.Undo.UndoCount} redo {session.Undo.RedoCount}");
