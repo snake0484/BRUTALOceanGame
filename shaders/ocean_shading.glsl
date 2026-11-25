@@ -18,7 +18,7 @@ vec4 cascadePartials(vec2 restXZ, float footprint, vec3 shoreDamp, out float pxz
         float wf = clamp(1.0 - (footprint / (Li / CASCADE_N) - 1.0) / 3.0, 0.0, 1.0);
         if (wf <= 0.0)
             continue;
-        vec3 uv = vec3(restXZ / Li, float(i));
+        vec3 uv = cascadeUv(restXZ, i);
         float w = wf * shoreDamp[i];
         p += w * texture(derivMap, uv);
         pxz += w * texture(dispMap, uv).w;

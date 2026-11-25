@@ -12,7 +12,7 @@ public struct FrameSections
 {
     public float Ticks;
     public float Terrain;
-    public float Coastal;
+    public float Weather;
     public float Ui;
     public float Uploads;
     public float Prepare;
@@ -21,15 +21,15 @@ public struct FrameSections
     public float GpuWait;
 
     /// <summary>Main-thread work, everything but waiting on the GPU. Record spans all command recording, Uploads and Prepare included.</summary>
-    public readonly float Work => Ticks + Terrain + Coastal + Ui + Record + Present;
+    public readonly float Work => Ticks + Terrain + Weather + Ui + Record + Present;
 }
 
 /// <summary>
 /// --fly-test: once the world has loaded, flies the camera round the main island's coast at <see cref="Speed"/>, which
-/// streams terrain and re-centres the bathymetry and coastal maps as it goes. It records each frame's main-thread
+/// streams terrain and re-centres the bathymetry as it goes. It records each frame's main-thread
 /// sections, then logs percentiles and the slowest frames with what ran in them, and closes the window.
 /// </summary>
-public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryTexture map, CoastalSystem coastal)
+public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryTexture map)
 {
     private static readonly LogCategory Log = LogCategory.Make("FlyTest");
     /// <summary>The circle runs 60 m off the west beach, at least <see cref="Clearance"/> over the ground.</summary>
@@ -51,7 +51,6 @@ public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryText
     private int _selects;
     private int _rebuilds;
     private int _uploads;
-    private int _builds;
     private int _collections;
 
     public bool Done { get; private set; }
@@ -68,7 +67,7 @@ public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryText
                 return;
 
             _start = time;
-            (_selects, _rebuilds, _uploads, _builds) = (world.Selects, world.Bathymetry.Version, map.Uploads, coastal.Builds);
+            (_selects, _rebuilds, _uploads) = (world.Selects, world.Bathymetry.Version, map.Uploads);
             _collections = GC.CollectionCount(0);
         }
 
@@ -97,9 +96,8 @@ public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryText
         events |= world.Selects != _selects ? 1 : 0;
         events |= world.Bathymetry.Version != _rebuilds ? (world.LastRebuildFull ? 4 : 2) : 0;
         events |= map.Uploads != _uploads ? (map.LastUploadCells >= 512 * 512 ? 16 : 8) : 0;
-        events |= coastal.Builds != _builds ? 32 : 0;
         events |= GC.CollectionCount(0) != _collections ? 64 : 0;
-        (_selects, _rebuilds, _uploads, _builds) = (world.Selects, world.Bathymetry.Version, map.Uploads, coastal.Builds);
+        (_selects, _rebuilds, _uploads) = (world.Selects, world.Bathymetry.Version, map.Uploads);
         _collections = GC.CollectionCount(0);
         _terrain[_count] = world.LastUpdate;
         _retire[_count] = world.LastRetireMs;
@@ -125,13 +123,13 @@ public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryText
             order[i] = i;
 
         Array.Sort(work, order);
-        Log.Info("slowest frames (ms): work = ticks + terrain + water + coastal + ui + record (uploads, prepare) + present | gpu wait | events");
+        Log.Info("slowest frames (ms): work = ticks + terrain + weather + ui + record (uploads, prepare) + present | gpu wait | events");
 
         for (var k = 0; k < Math.Min(Worst, _count); k++)
         {
             var i = order[_count - 1 - k];
             var f = _frames[i];
-            Log.Info($"  #{i,5} {f.Work,6:F2} = {f.Ticks:F2} + {f.Terrain:F2} + {f.Coastal:F2} + {f.Ui:F2} + {f.Record:F2} ({f.Uploads:F2}, {f.Prepare:F2}) + {f.Present:F2} | {f.GpuWait:F2} | {Describe(_events[i])} | terrain: select {_terrain[i].Select:F2}, uploads {_terrain[i].Uploads:F2}, stream {_terrain[i].Stream:F2} (retire {_retire[i]:F2}), bathymetry {_terrain[i].Bathymetry:F2} | map: {_map[i].Cells} cells, reach {_map[i].Reach:F2}, total {_map[i].Total:F2}");
+            Log.Info($"  #{i,5} {f.Work,6:F2} = {f.Ticks:F2} + {f.Terrain:F2} + {f.Weather:F2} + {f.Ui:F2} + {f.Record:F2} ({f.Uploads:F2}, {f.Prepare:F2}) + {f.Present:F2} | {f.GpuWait:F2} | {Describe(_events[i])} | terrain: select {_terrain[i].Select:F2}, uploads {_terrain[i].Uploads:F2}, stream {_terrain[i].Stream:F2} (retire {_retire[i]:F2}), bathymetry {_terrain[i].Bathymetry:F2} | map: {_map[i].Cells} cells, reach {_map[i].Reach:F2}, total {_map[i].Total:F2}");
         }
     }
 
@@ -142,6 +140,5 @@ public sealed class FlyTest(FlyCamera camera, TerrainWorld world, BathymetryText
             (events & 1) != 0 ? "select" : "",
             (events & 4) != 0 ? "rebuild-full" : (events & 2) != 0 ? "rebuild" : "",
             (events & 16) != 0 ? "upload-full" : (events & 8) != 0 ? "upload" : "",
-            (events & 32) != 0 ? "coastal-build" : "",
             (events & 64) != 0 ? "gc" : "").Trim();
 }

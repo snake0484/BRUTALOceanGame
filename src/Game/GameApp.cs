@@ -32,7 +32,7 @@ public sealed class GameApp : IDisposable
     private readonly ImGuiLayer _imgui;
     private readonly ProfilerPanel _profiler;
     private readonly OceanSwell _swell = new(seed: 1);
-    private readonly TerrainCoastalDepth _shoreDepth = new();
+    private readonly TerrainShoreDepth _shoreDepth = new();
     private readonly OceanSurface _surface;
     private int _shoreOps = -1;
     private readonly OceanPanel _oceanPanel;
@@ -51,7 +51,6 @@ public sealed class GameApp : IDisposable
     private readonly EditTest? _editTest;
     private FixedClock _clock = new(TickRate);
     private readonly int _oceanScope;
-    private readonly CoastalSystem _coastal = new();
     private readonly GpuBenchmark? _bench;
     private readonly FlyTest? _flyTest;
     private FrameSections _sections;
@@ -68,7 +67,7 @@ public sealed class GameApp : IDisposable
     private readonly int _uiStats;
 
     /// <param name="camera">Optional start pose: x, y, z, yaw degrees, pitch degrees.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, bool coastal = true, double benchSeconds = 0.0, bool flyTest = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f)
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool flyTest = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f)
     {
         if (camera is not null)
         {
@@ -102,7 +101,7 @@ public sealed class GameApp : IDisposable
         _swell.SetWind(weather ? _weather.WithWind(wind) : wind);
         _oceanFft = new OceanFft(_renderer) { DebugView = foamDebug };
         _surface = new OceanSurface(_swell, _shoreDepth);
-        _oceanPanel = new OceanPanel(_surface, _oceanFft) { CoastalEnabled = coastal };
+        _oceanPanel = new OceanPanel(_surface, _oceanFft);
         _weatherPanel = new WeatherPanel(_weather.Map) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset };
         _terrainRenderer = new TerrainRenderer(_renderer);
         _terrain = new TerrainWorld(_terrainRenderer, _physics);
@@ -116,7 +115,7 @@ public sealed class GameApp : IDisposable
         _terrainPanel = new TerrainPanel(_terrain, _terrainRenderer, _physics);
         _bathymetry = new BathymetryTexture(_renderer);
         _ocean = new OceanRenderer(_renderer, _oceanFft, _bathymetry.View, _bathymetry.Sampler);
-        _flyTest = flyTest ? new FlyTest(_camera, _terrain, _bathymetry, _coastal) : null;
+        _flyTest = flyTest ? new FlyTest(_camera, _terrain, _bathymetry) : null;
         _profiler = new ProfilerPanel(_stats, _renderer, _terrainRenderer, _ocean);
 
         _uploadScope = _renderer.GpuTimer.Register("Uploads");
@@ -146,16 +145,14 @@ public sealed class GameApp : IDisposable
         }
     }
 
-    /// <summary>--bench: alternates layer B on/off once the world has settled, then closes.</summary>
+    /// <summary>--bench: alternates the shore wash on/off once the world has settled, then closes.</summary>
     private void UpdateBench()
     {
         if (_bench is null)
             return;
 
-        var ready = _terrain.LoadedChunks > 0 && _terrain.PendingJobs == 0 && _coastal.Builds > 0;
-        _bench.Update(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, ready);
-
-        _oceanPanel.CoastalEnabled = _bench.FeatureOn;
+        _bench.Update(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady);
+        _oceanPanel.ShoreWash = _bench.FeatureOn;
 
         if (_bench.Done)
             _window.ShouldClose = true;
@@ -185,7 +182,7 @@ public sealed class GameApp : IDisposable
             RunTicks(frameSeconds);
             _sections.Ticks = Lap(ref mark);
             _camera.Update(_window, (float)frameSeconds, _imgui.WantCaptureMouse, _imgui.WantCaptureKeyboard);
-            _flyTest?.Fly(_clock.SimTime, _terrain.LoadedChunks > 0 && _terrain.PendingJobs == 0 && _coastal.Builds > 0);
+            _flyTest?.Fly(_clock.SimTime, WorldReady);
 
             var terrainStart = Stopwatch.GetTimestamp();
             mark = terrainStart;
@@ -196,11 +193,8 @@ public sealed class GameApp : IDisposable
             SnapshotShoreDepth();
             _sections.Terrain = Lap(ref mark);
             UpdateWeather();
-            _coastal.Update(_terrain, _swell, _clock.SimTime, _oceanPanel.CoastalEnabled);
-            _oceanPanel.CoastalBuildMs = _coastal.LastBuildMs;
-            _oceanPanel.CoastalBuilds = _coastal.Builds;
             UpdateBench();
-            _sections.Coastal = Lap(ref mark);
+            _sections.Weather = Lap(ref mark);
             _terrainPanel.UpdateMs.Record((float)Stopwatch.GetElapsedTime(terrainStart).TotalMilliseconds);
             BuildUi();
             _sections.Ui = Lap(ref mark);
@@ -290,6 +284,8 @@ public sealed class GameApp : IDisposable
         _shoreDepth.Snapshot(_terrain.Params, _terrain.Ops);
         _shoreOps = _terrain.Ops.Count;
     }
+
+    private bool WorldReady => _terrain.LoadedChunks > 0 && _terrain.PendingJobs == 0;
 
     private System.Numerics.Vector2 CameraXZ => new(_camera.Position.X, _camera.Position.Z);
 
@@ -385,7 +381,6 @@ public sealed class GameApp : IDisposable
     {
         _window.OnKey -= OnKey;
         _renderer.WaitIdle();
-        _coastal.Dispose();
         _terrain.Dispose();
         _terrainRenderer.Dispose();
         _physics.Dispose();

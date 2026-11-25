@@ -78,55 +78,25 @@ public sealed unsafe class OceanRenderer : IDisposable
         public Vector4 WaterScatter;
         public Vector4 CascadeL;
         public Vector4 CascadeKLo;
+        public Vector4 CascadeAnchorX;
+        public Vector4 CascadeAnchorZ;
         public Vector4 FoamParams;
         public Vector4 DepthRect;
-        public Vector4 CoastRect;
-        public Vector4 RefEnergy0;
-        public Vector4 RefEnergy1;
-        public Vector4 RefEnergy2;
-        public Vector4 RefChop0;
-        public Vector4 RefChop1;
-        public Vector4 RefChop2;
-        public Vector4 RefK0_0;
-        public Vector4 RefK0_1;
-        public Vector4 RefK0_2;
-        public Vector4 CoastDir;
-        public Vector4 CoastPrevRect;
         public Vector4 Carrier;
-        public Vector4 CarrierChop;
         public Vector4 Shore;
-        public Vector4 CoastFarRect;
-        public Vector4 CoastFarPrevRect;
         public int WaveCount;
-        public int RefMin;
-        public int RefMax;
-        public int CoastSlots;
     }
 
-    private readonly OceanFft _fft;
-    // Layer B maps: device-local buffers shared by all frames. A new field is staged and copied into one no frame in
-    // flight still reads, a sixteenth per frame, and drawn once complete; until then the GPU keeps drawing the field it replaces.
-    /// <summary>Near and far fields: the current pair, the pair fading out, and a field being copied.</summary>
-    private const int CoastalSlots = 6;
-    private const int CoastalCopyChunks = 16;
-    private const int CoastalFloats = CoastalField.Resolution * CoastalField.Resolution * CoastalField.TexelFloats;
-    private const int CoastalChunkFloats = (CoastalFloats + CoastalCopyChunks - 1) / CoastalCopyChunks;
+    /// <summary>
+    /// Shader time wraps here (s): a multiple of the foam lace's LACE_WRAP (600 s) and <see cref="OceanFft.LoopPeriod"/>,
+    /// so nothing jumps at the wrap and float time keeps millisecond precision however long the game runs.
+    /// </summary>
+    private const double TimeWrap = 3000.0;
 
-    /// <summary>Chunks staged per frame: one per field of the current and previous pairs.</summary>
-    private const int CoastalCopiesPerFrame = 4;
-    private readonly GpuBuffer[] _coastal = new GpuBuffer[CoastalSlots];
-    private readonly GpuBuffer _coastalStaging;
-    private readonly VkBufferCopy[] _coastalCopies = new VkBufferCopy[CoastalCopiesPerFrame];
-    private readonly int[] _coastalCopySlots = new int[CoastalCopiesPerFrame];
-    private readonly int[] _coastalVersion = new int[CoastalSlots];
-    private readonly int[] _coastalCopied = new int[CoastalSlots];
-    private readonly long[] _coastalUsed = new long[CoastalSlots];
-    private int _coastalCopyCount;
-    private int _coastalStagingBase;
-    private long _frameNumber;
+    private readonly OceanFft _fft;
     // Surf foam left behind (ocean_surf_foam.comp): one float per cell of the depth map's 512² grid, GPU only, shared by
     // all frames; cleared when the depth map re-centres.
-    private const int SurfFoamBinding = 2 + SampledMaps;
+    private const int SurfFoamBinding = 1 + SampledMaps;
     private const int SurfFoamResolution = 512;
     private const int SurfFoamBytes = SurfFoamResolution * SurfFoamResolution * sizeof(float);
     private readonly GpuBuffer _surfFoam;
@@ -136,7 +106,7 @@ public sealed unsafe class OceanRenderer : IDisposable
     private long _foamTick = -1;
     private float _foamSeconds;
 
-    private const int Bindings = 3 + SampledMaps;
+    private const int Bindings = 2 + SampledMaps;
     private bool _initialised;
     private Vector4 _depthRect;
     private Vector4 _surfFoamRect;
@@ -145,7 +115,6 @@ public sealed unsafe class OceanRenderer : IDisposable
     private readonly GpuTimer _timer;
     private readonly int _surfaceScope;
     private readonly int _surfFoamScope;
-    private const int CoastalBytes = CoastalField.Resolution * CoastalField.Resolution * CoastalField.TexelFloats * sizeof(float);
 
     private readonly VkImageView _depthView;
     private readonly VkSampler _depthSampler;
@@ -169,14 +138,6 @@ public sealed unsafe class OceanRenderer : IDisposable
         }
 
         _buffer = new GpuBuffer(renderer.Context, offset, VkBufferUsageFlags.IndexBufferBit | VkBufferUsageFlags.UniformBufferBit, true);
-
-        for (var s = 0; s < CoastalSlots; s++)
-        {
-            _coastal[s] = new GpuBuffer(renderer.Context, CoastalBytes, VkBufferUsageFlags.StorageBufferBit | VkBufferUsageFlags.TransferDstBit, false);
-            _coastalUsed[s] = -Renderer.FramesInFlight - 1;
-        }
-
-        _coastalStaging = new GpuBuffer(renderer.Context, CoastalChunkFloats * sizeof(float) * CoastalCopiesPerFrame * Renderer.FramesInFlight, VkBufferUsageFlags.TransferSrcBit, true);
 
         _surfFoam = new GpuBuffer(renderer.Context, SurfFoamBytes, VkBufferUsageFlags.StorageBufferBit | VkBufferUsageFlags.TransferDstBit, false);
 
@@ -202,7 +163,10 @@ public sealed unsafe class OceanRenderer : IDisposable
 
     public Vector3 SkyHorizonColor => SkyHorizon;
 
-    private static int FrameBufferSize => sizeof(FrameHeader) + MaxWaves * sizeof(GpuWave);
+    /// <summary>std140 starts the wave array on a 16-byte boundary after the header.</summary>
+    private static int WavesOffset => (sizeof(FrameHeader) + 15) & ~15;
+
+    private static int FrameBufferSize => WavesOffset + MaxWaves * sizeof(GpuWave);
 
     private static int Align(int value) => (value + UniformAlignment - 1) / UniformAlignment * UniformAlignment;
 
@@ -316,14 +280,6 @@ public sealed unsafe class OceanRenderer : IDisposable
             };
         }
 
-        bindings[1 + SampledMaps] = new VkDescriptorSetLayoutBinding
-        {
-            Binding = 1 + SampledMaps,
-            DescriptorType = VkDescriptorType.StorageBuffer,
-            DescriptorCount = CoastalSlots,
-            StageFlags = buffers,
-        };
-
         bindings[SurfFoamBinding] = new VkDescriptorSetLayoutBinding
         {
             Binding = SurfFoamBinding,
@@ -344,7 +300,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         {
             new() { Type = VkDescriptorType.UniformBuffer, DescriptorCount = Renderer.FramesInFlight },
             new() { Type = VkDescriptorType.CombinedImageSampler, DescriptorCount = Renderer.FramesInFlight * SampledMaps },
-            new() { Type = VkDescriptorType.StorageBuffer, DescriptorCount = Renderer.FramesInFlight * (CoastalSlots + 1) },
+            new() { Type = VkDescriptorType.StorageBuffer, DescriptorCount = Renderer.FramesInFlight },
         };
 
         return _device.CreateDescriptorPool(
@@ -408,19 +364,6 @@ public sealed unsafe class OceanRenderer : IDisposable
                     ImageInfo = maps + m,
                 };
             }
-
-            var coastal = stackalloc VkDescriptorBufferInfo[CoastalSlots];
-            for (var s = 0; s < CoastalSlots; s++)
-                coastal[s] = new VkDescriptorBufferInfo { Buffer = _coastal[s].Handle, Range = (ByteSize64)CoastalBytes };
-
-            writes[1 + SampledMaps] = new VkWriteDescriptorSet
-            {
-                DstSet = _sets[i],
-                DstBinding = 1 + SampledMaps,
-                DescriptorCount = CoastalSlots,
-                DescriptorType = VkDescriptorType.StorageBuffer,
-                BufferInfo = coastal,
-            };
 
             var surfFoam = new VkDescriptorBufferInfo { Buffer = _surfFoam.Handle, Range = (ByteSize64)SurfFoamBytes };
             writes[SurfFoamBinding] = new VkWriteDescriptorSet
@@ -512,16 +455,15 @@ public sealed unsafe class OceanRenderer : IDisposable
     }
 
     /// <summary>
-    /// Writes this frame's waves, camera and coastal maps. Call once per frame before <see cref="RecordCompute"/> and
+    /// Writes this frame's waves, camera and shore wash. Call once per frame before <see cref="RecordCompute"/> and
     /// <see cref="Record"/>, which read them.
     /// </summary>
     /// <param name="depthRect">(origin x, origin z, world size, depth outside the map).</param>
     public void Prepare(int frameIndex, OceanSwell swell, double renderTime, in Matrix4x4 viewProj, Vector3 cameraPos, Vector4 depthRect)
     {
-        _frameNumber++;
         var block = (byte*)_buffer.Mapped + _frameOffsets[frameIndex];
         var header = (FrameHeader*)block;
-        var waves = new Span<GpuWave>(block + sizeof(FrameHeader), MaxWaves);
+        var waves = new Span<GpuWave>(block + WavesOffset, MaxWaves);
 
         header->ViewProj = viewProj;
         ExtractFrustum(viewProj);
@@ -529,7 +471,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         // Vertical cull range: the tallest swell crests and troughs, and water standing in dug holes well below the sea.
         var hs = swell.SignificantWaveHeight;
         (_cullTop, _cullBottom) = (2f * hs + 4f, -MathF.Max(2f * hs + 4f, 25f));
-        header->CameraPos = new Vector4(cameraPos, (float)renderTime);
+        header->CameraPos = new Vector4(cameraPos, (float)(renderTime % TimeWrap));
         header->SunDir = new Vector4(SunDirection, SunIntensity);
         header->SkyZenith = new Vector4(SkyZenith, 0f);
         header->SkyHorizon = new Vector4(SkyHorizon, FogDensity);
@@ -537,17 +479,17 @@ public sealed unsafe class OceanRenderer : IDisposable
         header->WaterScatter = new Vector4(WaterScatter, 0f);
         header->CascadeL = _fft.CascadeSizes;
         header->CascadeKLo = OceanFft.BandLow(swell.GpuSpectrum.Params.MinWavelength) with { W = _fft.FoamStrength };
+        (header->CascadeAnchorX, header->CascadeAnchorZ) = CascadeAnchors(header->CascadeL, cameraPos);
         header->FoamParams = new Vector4(_fft.DebugView ? 1f : 0f, 0f, 0f, 0f);
         header->DepthRect = depthRect;
         _depthRect = depthRect;
-        WriteCoastal(header, frameIndex, swell);
-        (header->Carrier, header->CarrierChop) = swell.GpuCarrier(renderTime);
+        header->Carrier = swell.GpuCarrier(renderTime);
         header->Shore = swell.GpuShore(ShoreWash);
         header->WaveCount = swell.CopyGpuWaves(waves, renderTime);
     }
 
     /// <summary>
-    /// The ocean's compute work before the water pass: coastal copies and the surf foam left behind
+    /// The ocean's compute work before the water pass: the surf foam left behind
     /// (ocean_surf_foam.comp). Outside a render pass, after <see cref="Prepare"/>.
     /// </summary>
     public void RecordCompute(CommandBuffer commands, int frameIndex, float frameSeconds, long tickIndex)
@@ -564,7 +506,6 @@ public sealed unsafe class OceanRenderer : IDisposable
             _initialised = true;
         }
 
-        RecordCoastalCopies(commands);
 
         // The surf foam map, once per tick (or at once when the depth map it lives on re-centres, since the old foam is
         // then in the wrong place), decaying by the time since its last update.
@@ -584,6 +525,19 @@ public sealed unsafe class OceanRenderer : IDisposable
         _foamTick = tickIndex;
         _foamSeconds = 0f;
         _surfFoamRect = _depthRect;
+    }
+
+    /// <summary>
+    /// Per cascade, the camera's position in its tile, frac(camera / L), in double: the shader samples a cascade at
+    /// (x − camera) / L + this, so texture coordinates stay small anywhere in the world.
+    /// </summary>
+    private static (Vector4 X, Vector4 Z) CascadeAnchors(Vector4 sizes, Vector3 camera)
+    {
+        static float Frac(double v) => (float)(v - Math.Floor(v));
+
+        return (
+            new Vector4(Frac(camera.X / (double)sizes.X), Frac(camera.X / (double)sizes.Y), Frac(camera.X / (double)sizes.Z), 0f),
+            new Vector4(Frac(camera.Z / (double)sizes.X), Frac(camera.Z / (double)sizes.Y), Frac(camera.Z / (double)sizes.Z), 0f));
     }
 
     private static void Barrier(CommandBuffer commands, VkPipelineStageFlags srcStage, VkAccessFlags srcAccess, VkPipelineStageFlags dstStage, VkAccessFlags dstAccess) =>
@@ -671,173 +625,6 @@ public sealed unsafe class OceanRenderer : IDisposable
         }
     }
 
-    /// <summary>
-    /// Layer B maps for this frame: the current field and, while a rebuild fades in, the one it replaces. A field still
-    /// being copied isn't drawn yet; the GPU keeps drawing the one it replaces on its own until it is complete.
-    /// </summary>
-    private void WriteCoastal(FrameHeader* header, int frameIndex, OceanSwell swell)
-    {
-        var field = swell.Coastal;
-        var energy = swell.RefEnergy;
-        header->RefEnergy0 = new Vector4(energy[0], energy[1], energy[2], energy[3]);
-        header->RefEnergy1 = new Vector4(energy[4], energy[5], energy[6], energy[7]);
-        header->RefEnergy2 = new Vector4(energy[8], energy[9], energy[10], energy[11]);
-        var chop = swell.RefChop;
-        header->RefChop0 = new Vector4(chop[0], chop[1], chop[2], chop[3]);
-        header->RefChop1 = new Vector4(chop[4], chop[5], chop[6], chop[7]);
-        header->RefChop2 = new Vector4(chop[8], chop[9], chop[10], chop[11]);
-        header->RefK0_0 = new Vector4(CoastalField.RefK0(0), CoastalField.RefK0(1), CoastalField.RefK0(2), CoastalField.RefK0(3));
-        header->RefK0_1 = new Vector4(CoastalField.RefK0(4), CoastalField.RefK0(5), CoastalField.RefK0(6), CoastalField.RefK0(7));
-        header->RefK0_2 = new Vector4(CoastalField.RefK0(8), CoastalField.RefK0(9), CoastalField.RefK0(10), CoastalField.RefK0(11));
-        header->RefMin = swell.RefMin;
-        header->RefMax = swell.RefMax;
-
-        _coastalCopyCount = 0;
-        _coastalStagingBase = frameIndex * CoastalCopiesPerFrame * CoastalChunkFloats;
-
-        header->CoastFarRect = Vector4.Zero;
-        header->CoastFarPrevRect = Vector4.Zero;
-
-        if (field is null)
-        {
-            header->CoastRect = Vector4.Zero;
-            header->CoastPrevRect = Vector4.Zero;
-            return;
-        }
-
-        var previous = swell.CoastalPrevious;
-        var slot = PairSlots(field, out var farSlot);
-        var prevFarSlot = -1;
-        var prevSlot = previous is null ? -1 : PairSlots(previous, out prevFarSlot);
-        var fade = swell.CoastalFade;
-
-        if (slot < 0)
-        {
-            if (prevSlot < 0)
-            {
-                header->CoastRect = Vector4.Zero;
-                header->CoastPrevRect = Vector4.Zero;
-                return;
-            }
-
-            (field, slot, farSlot, previous, prevSlot, fade) = (previous!, prevSlot, prevFarSlot, null, -1, 1f);
-        }
-
-        Use(slot);
-        Use(farSlot);
-        header->CoastRect = Rect(field);
-        header->CoastFarRect = farSlot < 0 ? Vector4.Zero : Rect(field.Far!);
-        var bits = slot | Math.Max(farSlot, 0) << 6;
-
-        if (prevSlot >= 0)
-        {
-            Use(prevSlot);
-            Use(prevFarSlot);
-            header->CoastPrevRect = Rect(previous!);
-            header->CoastFarPrevRect = prevFarSlot < 0 ? Vector4.Zero : Rect(previous!.Far!);
-            bits |= prevSlot << 3 | Math.Max(prevFarSlot, 0) << 9;
-        }
-        else
-            header->CoastPrevRect = Vector4.Zero;
-
-        var (dirZ, dirX) = MathF.SinCos(field.Direction);
-        header->CoastDir = new Vector4(dirX, dirZ, prevSlot < 0 && previous is not null ? 1f : fade, prevSlot < 0 ? field.Direction : previous!.Direction);
-        header->CoastSlots = bits;
-    }
-
-    private static Vector4 Rect(CoastalField field) => new(field.Origin.X, field.Origin.Y, field.Cell, CoastalField.Resolution);
-
-    /// <summary>
-    /// A near field's buffer slot, or -1 until it and its far field are both copied; <paramref name="farSlot"/> = the far
-    /// field's, -1 without one.
-    /// </summary>
-    private int PairSlots(CoastalField field, out int farSlot)
-    {
-        farSlot = -1;
-        var slot = Slot(field);
-
-        if (field.Far is null)
-            return slot;
-
-        farSlot = Slot(field.Far);
-        return farSlot < 0 ? -1 : slot;
-    }
-
-    private void Use(int slot)
-    {
-        if (slot >= 0)
-            _coastalUsed[slot] = _frameNumber;
-    }
-
-    /// <summary>
-    /// The buffer holding all of <paramref name="field"/>, or -1 while it is still being copied (another sixteenth goes
-    /// up each call). A new field starts in the buffer least recently drawn from, once no frame in flight reads it.
-    /// </summary>
-    private int Slot(CoastalField field)
-    {
-        var total = field.Texels.Length;
-        var slot = -1;
-
-        for (var s = 0; s < CoastalSlots && slot < 0; s++)
-            if (_coastalVersion[s] == field.Version)
-                slot = s;
-
-        if (slot < 0)
-        {
-            for (var s = 0; s < CoastalSlots; s++)
-            {
-                if (_coastalUsed[s] + Renderer.FramesInFlight >= _frameNumber || (slot >= 0 && _coastalUsed[s] >= _coastalUsed[slot]))
-                    continue;
-
-                slot = s;
-            }
-
-            if (slot < 0)
-                return -1;
-
-            _coastalVersion[slot] = field.Version;
-            _coastalCopied[slot] = 0;
-        }
-
-        // A field still going up holds its buffer, or the other field of its pair could take it and both restart.
-        if (_coastalCopied[slot] < total)
-        {
-            _coastalUsed[slot] = _frameNumber;
-
-            if (_coastalCopyCount == CoastalCopiesPerFrame)
-                return -1;
-
-            var chunk = Math.Min(CoastalChunkFloats, total - _coastalCopied[slot]);
-            var staged = _coastalStagingBase + _coastalCopyCount * CoastalChunkFloats;
-            field.Texels.AsSpan(_coastalCopied[slot], chunk).CopyTo(_coastalStaging.AsSpan<float>().Slice(staged, chunk));
-            _coastalCopies[_coastalCopyCount] = new VkBufferCopy
-            {
-                SrcOffset = (ByteSize64)((long)staged * sizeof(float)),
-                DstOffset = (ByteSize64)((long)_coastalCopied[slot] * sizeof(float)),
-                Size = (ByteSize64)((long)chunk * sizeof(float)),
-            };
-            _coastalCopySlots[_coastalCopyCount++] = slot;
-            _coastalCopied[slot] += chunk;
-            return -1;
-        }
-
-        return slot;
-    }
-
-    /// <summary>The coastal chunks <see cref="Prepare"/> staged, then visible to every later read of the maps.</summary>
-    private void RecordCoastalCopies(CommandBuffer commands)
-    {
-        if (_coastalCopyCount == 0)
-            return;
-
-        for (var i = 0; i < _coastalCopyCount; i++)
-            commands.CopyBuffer(_coastalStaging.Handle, _coastal[_coastalCopySlots[i]].Handle, new ReadOnlySpan<VkBufferCopy>(_coastalCopies, i, 1));
-
-        var shaders = VkPipelineStageFlags.ComputeShaderBit | VkPipelineStageFlags.VertexShaderBit | VkPipelineStageFlags.FragmentShaderBit;
-        Barrier(commands, VkPipelineStageFlags.TransferBit, VkAccessFlags.TransferWriteBit, shaders, VkAccessFlags.ShaderReadBit);
-        _coastalCopyCount = 0;
-    }
-
     public void Dispose()
     {
         _device.DestroyPipeline(_pipeline, null);
@@ -846,11 +633,6 @@ public sealed unsafe class OceanRenderer : IDisposable
         _device.DestroyPipelineLayout(_layout, null);
 
         _buffer.Dispose();
-
-        foreach (var buffer in _coastal)
-            buffer.Dispose();
-
-        _coastalStaging.Dispose();
 
         _device.DestroyDescriptorPool(_pool, null);
         _device.DestroyDescriptorSetLayout(_setLayout, null);

@@ -1,23 +1,20 @@
-using System.Numerics;
 using BrutalGame.Terrain;
 using BrutalGame.Water.Ocean;
 
 namespace BrutalGame;
 
 /// <summary>
-/// Layer B seabed from the analytic terrain surface plus a snapshot of the brush edits (as spheres cut into or added
-/// onto the column top). Unlike the streamed bathymetry it is the same at every LOD, so flying around never changes the
-/// coastal maps. Each cell averages 2×2 samples.
+/// Water depth from the analytic terrain surface plus a snapshot of the brush edits (spheres cut into or added onto the
+/// column top), for the surface's depth cap. Unlike the streamed bathymetry it is the same at every LOD and needs no
+/// camera, so the CPU never reads the camera window (docs/pivot/review.md C7).
 /// </summary>
-public sealed class TerrainCoastalDepth : ICoastalDepth, IShoreDepth
+public sealed class TerrainShoreDepth : IShoreDepth
 {
     private BrushOp[] _ops = new BrushOp[64];
     private int _opCount;
     private TerrainParams _params;
 
-    public int OpCount => _opCount;
-
-    /// <summary>Main thread, before a build starts; the jobs read this snapshot.</summary>
+    /// <summary>Main thread, between ticks; samples read this snapshot.</summary>
     public void Snapshot(in TerrainParams p, IReadOnlyList<BrushOp> ops)
     {
         _params = p;
@@ -28,25 +25,6 @@ public sealed class TerrainCoastalDepth : ICoastalDepth, IShoreDepth
 
         for (var i = 0; i < _opCount; i++)
             _ops[i] = ops[i];
-    }
-
-    public void Fill(Span<float> depth, Vector2 origin, float cell, int z0, int z1)
-    {
-        const int n = CoastalField.Resolution;
-
-        for (var z = z0; z < z1; z++)
-        {
-            for (var x = 0; x < n; x++)
-            {
-                var corner = origin + new Vector2(x * cell, z * cell);
-                var sum = 0f;
-
-                for (var k = 0; k < 4; k++)
-                    sum += Top(corner.X + ((k & 1) + 0.5f) * cell * 0.5f, corner.Y + ((k >> 1) + 0.5f) * cell * 0.5f);
-
-                depth[x + z * n] = _params.SeaLevel - 0.25f * sum;
-            }
-        }
     }
 
     public float Depth(float x, float z) => _params.SeaLevel - Top(x, z);

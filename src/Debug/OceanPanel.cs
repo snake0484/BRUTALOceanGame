@@ -33,10 +33,7 @@ public sealed class OceanPanel
 
     public readonly TimingRing PrepareMs = new(TimingSamples);
     public bool Open = true;
-    public bool CoastalEnabled = true;
     public bool ShoreWash = true;
-    public float CoastalBuildMs;
-    public int CoastalBuilds;
 
     public OceanPanel(OceanSurface surface, OceanFft fft)
     {
@@ -132,9 +129,6 @@ public sealed class OceanPanel
         ImGui.SeparatorText("Swell"u8);
         ImGui.Text($"Hs {_swell.SignificantWaveHeight:F2} m  Tp {_swell.PeakPeriod:F2} s  components {_swell.ComponentCount}");
         ImGui.Text($"choppiness {_swell.Choppiness:F3}  t {_swell.Time:F2} s");
-        ImGui.Checkbox("Layer B coastal", ref CoastalEnabled);
-        ImGui.SameLine();
-        ImGui.Text($"{CoastalBuilds} builds  last {CoastalBuildMs:F1} ms (jobs)");
         ImGui.Checkbox("Shore wash"u8, ref ShoreWash);
 
         ImGui.SeparatorText("Origin"u8);

@@ -8,12 +8,16 @@ namespace BrutalGame.Water.Ocean;
 /// <summary>
 /// CPU swell: physics-relevant low band of the ocean, deterministic from seed, wind history and time.
 /// Call <see cref="SetWind"/> when wind changes and <see cref="SetTime"/> once per tick on the main thread.
-/// Sample methods are read-only between SetTime calls and safe to call from jobs.
+/// Sample methods are read-only between SetTime calls and safe to call from jobs. An <see cref="IShoreDepth"/> applies
+/// the depth cap (see <see cref="DepthCapGamma"/>).
 /// </summary>
 public sealed class OceanSwell
 {
     public const int MaxComponents = WaveSet.Capacity * 2;
     public const int InversionIterations = 4;
+
+    /// <summary>Depth-limited swell: every component scaled by min(1, this × depth / Hs) (ocean_common.glsl swellCap).</summary>
+    public const float DepthCapGamma = 0.55f;
 
     /// <summary>
     /// Choppiness × rms of the Gerstner trace Σ a·k·cos θ at most: 1 / this standard deviations to a fold (Jacobian 0),
@@ -22,6 +26,21 @@ public sealed class OceanSwell
     /// </summary>
     private const float MaxRmsSteepness = 0.25f;
     private static readonly int Lanes = Vector256<float>.Count;
+
+    // Surf carrier: the wave the shore wash times its run-up from, at the dominant band's peak, carrying this share of the
+    // energy of the components within the peak band (|ln(ω / ω_peak)| under BandInner, fading out by BandOuter).
+    private const float CarrierShare = 0.75f;
+    private const float BandInner = 0.139f;
+    private const float BandOuter = 0.278f;
+
+    /// <summary>
+    /// Sets: the surf wave's height is modulated by a group envelope that travels with its crests (phase GroupRatio × the
+    /// carrier's spatial phase − GroupRatio ω t, so a set every 1 / GroupRatio waves). A narrow band beats into long
+    /// groups, so GroupRatio is twice the dominant band's relative bandwidth (a set every 8 waves for a wind sea, every 10
+    /// for a 5%-wide groundswell), within these bounds. The envelope itself is ocean_common.glsl groupEnvelope.
+    /// </summary>
+    private const float MinGroupRatio = 1f / 20f;
+    private const float MaxGroupRatio = 1f / 4f;
 
     public double BlendSeconds = 30.0;
 
@@ -48,156 +67,26 @@ public sealed class OceanSwell
     private readonly float[] _awz = new float[MaxComponents];
     private readonly float[] _aw = new float[MaxComponents];
     private readonly float[] _omega = new float[MaxComponents];
-    private readonly float[] _coth = new float[MaxComponents];
-    private readonly float[] _ref = new float[MaxComponents];
-    private readonly float[] _refEnergy = new float[CoastalField.RefCount];
-    private readonly float[] _refChop = new float[CoastalField.RefCount];
     private int _count;
     private int _paddedCount;
 
-    private const int ScratchArrays = 11;
-
-    // Surf-zone coherence: near shore, components in the peak band hand their energy to one coherent carrier wave, the
-    // wave the shore wash times its run-up from.
-    private const float CoherentKh = 0.4f;
-    private const float IncoherentKh = 1.2f;
-    private const float BandInner = 0.5f;
-    private const float BandOuter = 1.0f;
-
-    /// <summary>Share of the peak band the carrier takes at most: the rest keeps its random phases, so surf stays irregular.</summary>
-    private const float MaxCoherence = 0.75f;
-
-    /// <summary>
-    /// Individual-wave breaking: the coherent surf wave grows as it shoals until its height reaches this × depth, then
-    /// breaks and is held there. (The rest of the spectrum keeps the significant-height cap, γ = 0.55.)
-    /// </summary>
-    public const float WaveBreakingGamma = 0.78f;
-
-    /// <summary>
-    /// Sets: the surf wave's height is modulated by a group envelope that travels with its crests (phase GroupRatio × the
-    /// carrier's spatial phase − GroupRatio ω t, so a set every 1 / GroupRatio waves), with mean square 1 so the energy is
-    /// unchanged. Set waves stand about 1.5× the mean and break further out; the waves between them are small. A narrow
-    /// band beats into long groups, so GroupRatio is twice the dominant band's relative bandwidth (a set every 8 waves for
-    /// a wind sea, every 10 for a 5%-wide groundswell), within these bounds.
-    /// </summary>
-    private const float MinGroupRatio = 1f / 20f;
-    private const float MaxGroupRatio = 1f / 4f;
-    private const float GroupDepth = 0.7f;
-
-    /// <summary>Carrier plus its bound harmonics (2nd, 3rd), and the crest peaking they give: s from H/h over [from, full].</summary>
-    private const int CarrierSlots = 3;
-    private const float MaxSharpness = 0.55f;
-    private const float SharpFrom = 0.1f;
-    private const float SharpFull = 0.45f;
-    private readonly float[] _band = new float[MaxComponents];
-    private float _carrierRef;
-    private float _carrierK0;
     private float _carrierOmega;
     private float _carrierPhase;
     private float _groupPhase;
-    private float _carrierEnergy;
-    private const float MinCothKh = 0.1f;
-
-    /// <summary>Depth-limited swell: every component scaled by min(1, this × depth / Hs) (ocean_common.glsl swellCap).</summary>
-    public const float DepthCapGamma = 0.55f;
     private float _breakerHeight;
-
-    /// <summary>Layer B coastal maps; null = open ocean everywhere. Set on the main thread between ticks.</summary>
-    public CoastalField? Coastal { get; set; }
-
-    /// <summary>The field <see cref="Coastal"/> replaced, while it fades out; null = fade from the open ocean.</summary>
-    public CoastalField? CoastalPrevious { get; set; }
-
-    /// <summary>0..1 weight of <see cref="Coastal"/> against <see cref="CoastalPrevious"/>.</summary>
-    public float CoastalFade { get; set; } = 1f;
-
-    /// <summary>
-    /// Peak angular frequency of the target spectrum's dominant band (rad/s): the groundswell's when it dominates, else the
-    /// wind sea's; 0 when calm. The surf carrier follows it.
-    /// </summary>
-    public float PeakOmega => (float)_to.CarrierOmega;
-
-    /// <summary>Direction the dominant band travels toward (radians): the one the coastal maps are solved for.</summary>
-    public float DominantDirection => _to.CarrierDirection;
-
-    /// <summary>Sets: one every 1 / this waves (see <see cref="GroupEnvelope"/>), from the dominant band's bandwidth.</summary>
-    public float GroupRatio { get; private set; } = 2f * (float)WaveSet.WindSeaBandwidth;
-
-    /// <summary>
-    /// Coastal terms of each field at (x, z): the current one and, while a rebuild fades in, the one it replaces (past a
-    /// near field its far field, and open ocean where neither has anything). Returns 0 for open ocean, 1 for the current field only, 2 when the surface must
-    /// be evaluated with both and blended by <see cref="CoastalFade"/>. Blending the fields' phase lags instead sweeps the
-    /// phase by their difference (tens of radians after a big seabed change) over the fade, and the waves run backwards.
-    /// </summary>
-    private int SampleFields(float x, float z, ref CoastalSample current, ref CoastalSample previous)
-    {
-        if (Coastal is null)
-            return 0;
-
-        var hasCurrent = Coastal.SampleWithFar(x, z, ref current);
-        if (CoastalFade >= 1f)
-            return hasCurrent ? 1 : 0;
-
-        var hasPrevious = CoastalPrevious?.SampleWithFar(x, z, ref previous) ?? false;
-        if (!hasCurrent && !hasPrevious)
-            return 0;
-
-        if (!hasCurrent)
-            current.SetDeep();
-
-        if (!hasPrevious)
-            previous.SetDeep();
-
-        return 2;
-    }
-
-    /// <summary>Direction the fading-out field was solved for (the current one's when fading in from the open ocean).</summary>
-    private float PreviousDirection => CoastalPrevious?.Direction ?? Coastal!.Direction;
-
-    /// <summary>Depth and amplitudes crossfaded between the fields (no phase): enough for the surf state.</summary>
-    private bool SampleCoastal(float x, float z, ref CoastalSample s)
-    {
-        var current = Coastal;
-        if (current is null)
-            return false;
-
-        var hasCurrent = current.SampleWithFar(x, z, ref s);
-
-        if (CoastalFade >= 1f)
-            return hasCurrent;
-
-        // No previous field (the first build) fades in from the open ocean.
-        var old = new CoastalSample();
-        var hasOld = CoastalPrevious?.SampleWithFar(x, z, ref old) ?? false;
-
-        if (!hasCurrent && !hasOld)
-            return false;
-
-        if (!hasCurrent)
-            s.SetDeep();
-
-        if (!hasOld)
-            old.SetDeep();
-
-        s.LerpFrom(old, CoastalFade);
-        return true;
-    }
-
-    /// <summary>Swell variance (m²) per coastal reference frequency, for the per-sample breaking cap.</summary>
-    public ReadOnlySpan<float> RefEnergy => _refEnergy;
-
-    /// <summary>Variance of the Gerstner trace, Σ ½(|c|·k)², per coastal reference frequency (deep water, after the choppiness clamp).</summary>
-    public ReadOnlySpan<float> RefChop => _refChop;
-
-    /// <summary>Lowest and highest coastal reference any component interpolates between this tick.</summary>
-    public int RefMin { get; private set; }
-
-    public int RefMax { get; private set; } = 1;
+    private double _spreadNormFor = double.NaN;
+    private double _spreadNorm;
 
     public OceanSwell(ulong seed)
     {
         _seed = seed;
     }
+
+    /// <summary>Direction the dominant band travels toward (radians): the surf carrier's.</summary>
+    public float DominantDirection => _to.CarrierDirection;
+
+    /// <summary>Sets: one every 1 / this waves, from the dominant band's bandwidth.</summary>
+    public float GroupRatio { get; private set; } = 2f * (float)WaveSet.WindSeaBandwidth;
 
     public double Time { get; private set; }
 
@@ -217,9 +106,6 @@ public sealed class OceanSwell
 
     /// <summary>Effective spectrum for GPU detail, blended with the same weight as the CPU components.</summary>
     public SpectrumState GpuSpectrum { get; private set; }
-
-    private double _spreadNormFor = double.NaN;
-    private double _spreadNorm;
 
     /// <summary>
     /// Queues a wind change. The spectrum crossfades over <see cref="BlendSeconds"/>; never snaps.
@@ -296,11 +182,7 @@ public sealed class OceanSwell
 
         _paddedCount = (_count + Lanes - 1) / Lanes * Lanes;
         for (var i = _count; i < _paddedCount; i++)
-        {
-            _kx[i] = _kz[i] = _phase[i] = 0f;
-            _a[i] = _akx[i] = _akz[i] = _cx[i] = _cz[i] = _awx[i] = _awz[i] = _aw[i] = _omega[i] = _ref[i] = 0f;
-            _coth[i] = 1f;
-        }
+            _kx[i] = _kz[i] = _phase[i] = _a[i] = _akx[i] = _akz[i] = _cx[i] = _cz[i] = _awx[i] = _awz[i] = _aw[i] = _omega[i] = 0f;
 
         var steepness = 0.0;
         var energy = 0.0;
@@ -324,56 +206,54 @@ public sealed class OceanSwell
             _cz[i] *= choppiness;
         }
 
-        PrepareCoastalRefs();
+        PrepareCarrier();
     }
 
-    /// <summary>Per-reference swell variance and Gerstner trace variance, and the reference range the components use.</summary>
-    private void PrepareCoastalRefs()
+    /// <summary>The surf carrier this tick: phase −ω t, the set phase, and its breaker height.</summary>
+    private void PrepareCarrier()
     {
-        Array.Clear(_refEnergy);
-        Array.Clear(_refChop);
-        RefMin = CoastalField.RefCount - 2;
-        RefMax = 0;
-
-        for (var i = 0; i < _count; i++)
-        {
-            var j = (int)_ref[i];
-            var t = _ref[i] - j;
-            var variance = 0.5f * _a[i] * _a[i];
-            var steepness = 0.5f * (_cx[i] * _cx[i] + _cz[i] * _cz[i]) * (_kx[i] * _kx[i] + _kz[i] * _kz[i]);
-
-            _refEnergy[j] += (1f - t) * variance;
-            _refEnergy[j + 1] += t * variance;
-            _refChop[j] += (1f - t) * steepness;
-            _refChop[j + 1] += t * steepness;
-            RefMin = Math.Min(RefMin, j);
-            RefMax = Math.Max(RefMax, j + 1);
-        }
-
-        if (RefMax < RefMin)
-            (RefMin, RefMax) = (0, 1);
-
-        // Carrier: the peak frequency, phase −ω t (crest where k₀ d̂·x + δψ − ω t ≡ 0).
-        var omega = PeakOmega;
+        var omega = (float)_to.CarrierOmega;
         _carrierOmega = omega;
-        _carrierRef = CoastalField.RefCoord(Math.Max(omega, 1e-3f));
-        _carrierK0 = omega * omega / 9.81f;
         var phase = -(double)omega * Time;
         _carrierPhase = (float)(phase - Math.Floor(phase / Math.Tau) * Math.Tau);
         GroupRatio = Math.Clamp(2f * (float)_to.CarrierBandwidth, MinGroupRatio, MaxGroupRatio);
         var group = phase * GroupRatio;
         _groupPhase = (float)(group - Math.Floor(group / Math.Tau) * Math.Tau);
-        _carrierEnergy = 0f;
 
-        for (var i = 0; i < _paddedCount; i++)
+        if (omega <= 0f)
         {
-            _band[i] = i < _count && omega > 0f ? 1f - Smooth((MathF.Abs(_ref[i] - _carrierRef) - BandInner) / (BandOuter - BandInner)) : 0f;
-            _carrierEnergy += i < _count ? _a[i] * _a[i] * _band[i] : 0f;
+            _breakerHeight = 0f;
+            return;
         }
 
-        // Komar and Gaylord (1972): H_b = 0.39 g^0.2 (T H0²)^0.4, H0 the coherent surf wave's deep-water height.
-        var h0 = 2f * MathF.Sqrt(MaxCoherence * _carrierEnergy);
-        _breakerHeight = omega > 0f ? 0.39f * MathF.Pow(9.81f, 0.2f) * MathF.Pow(MathF.Tau / omega * h0 * h0, 0.4f) : 0f;
+        var energy = 0f;
+        for (var i = 0; i < _count; i++)
+        {
+            var band = 1f - Smooth((MathF.Abs(MathF.Log(_omega[i] / omega)) - BandInner) / (BandOuter - BandInner));
+            energy += _a[i] * _a[i] * band;
+        }
+
+        // Komar and Gaylord (1972): H_b = 0.39 g^0.2 (T H0²)^0.4, H0 the carrier's deep-water height.
+        var h0 = 2f * MathF.Sqrt(CarrierShare * energy);
+        _breakerHeight = 0.39f * MathF.Pow(9.81f, 0.2f) * MathF.Pow(MathF.Tau / omega * h0 * h0, 0.4f);
+    }
+
+    private static float Smooth(float t)
+    {
+        t = Math.Clamp(t, 0f, 1f);
+        return t * t * (3f - 2f * t);
+    }
+
+    /// <summary>
+    /// The surf carrier for the GPU at <paramref name="renderTime"/>: (ω, phase, set group ratio, set group phase).
+    /// </summary>
+    public System.Numerics.Vector4 GpuCarrier(double renderTime)
+    {
+        var phase = _carrierPhase - _carrierOmega * (renderTime - Time);
+        phase -= Math.Floor(phase / Math.Tau) * Math.Tau;
+        var group = _groupPhase - _carrierOmega * GroupRatio * (renderTime - Time);
+        group -= Math.Floor(group / Math.Tau) * Math.Tau;
+        return new System.Numerics.Vector4(_carrierOmega, (float)phase, GroupRatio, (float)group);
     }
 
     /// <summary>
@@ -385,50 +265,6 @@ public sealed class OceanSwell
         var (dirZ, dirX) = MathF.SinCos(DominantDirection);
         return new System.Numerics.Vector4(dirX, dirZ, swash ? _breakerHeight : 0f, SignificantWaveHeight);
     }
-
-    /// <summary>Depth cap at a rest position: 1 without a depth source.</summary>
-    private float Cap(IShoreDepth? shore, float x0, float z0)
-    {
-        if (shore is null || SignificantWaveHeight <= 1e-4f)
-            return 1f;
-
-        return Math.Clamp(DepthCapGamma * shore.Depth(x0, z0) / SignificantWaveHeight, 0f, 1f);
-    }
-
-    private static float Smooth(float t)
-    {
-        t = Math.Clamp(t, 0f, 1f);
-        return t * t * (3f - 2f * t);
-    }
-
-    /// <summary>
-    /// Share of the peak band carried coherently at local carrier k·h: 0 offshore (k h ≥ 1.2), <see cref="MaxCoherence"/>
-    /// in the surf (≤ 0.4).
-    /// </summary>
-    public static float Coherence(float kh) => MaxCoherence * (1f - Smooth((kh - CoherentKh) / (IncoherentKh - CoherentKh)));
-
-    /// <summary>
-    /// The carrier for the GPU: (k₀, reference coordinate, phase at <paramref name="renderTime"/>, peak-band energy Σ a²)
-    /// and (choppiness, ω, group phase at <paramref name="renderTime"/>, group ratio). Mirrors <see cref="CoastalWaves"/>.
-    /// </summary>
-    public (System.Numerics.Vector4 Carrier, System.Numerics.Vector4 Chop) GpuCarrier(double renderTime)
-    {
-        var phase = _carrierPhase - _carrierOmega * (renderTime - Time);
-        phase -= Math.Floor(phase / Math.Tau) * Math.Tau;
-        var group = _groupPhase - _carrierOmega * GroupRatio * (renderTime - Time);
-        group -= Math.Floor(group / Math.Tau) * Math.Tau;
-        return (new System.Numerics.Vector4(_carrierK0, _carrierRef, (float)phase, _carrierEnergy), new System.Numerics.Vector4(Choppiness, _carrierOmega, (float)group, GroupRatio));
-    }
-
-    /// <summary>The set envelope's time phase this tick (−GroupRatio ω t); see <see cref="GroupEnvelope"/>.</summary>
-    public float GroupPhase => _groupPhase;
-
-    /// <summary>
-    /// Set envelope at a point whose carrier spatial phase (k₀ d̂·x + δψ) is <paramref name="spatial"/>, for the group
-    /// time phase <paramref name="group"/>: (1 + m cos φ) / √(1 + m²/2), mean square 1.
-    /// </summary>
-    public float GroupEnvelope(float spatial, float group) =>
-        (1f + GroupDepth * MathF.Cos(GroupRatio * spatial + group)) / MathF.Sqrt(1f + 0.5f * GroupDepth * GroupDepth);
 
     private void UpdateGpuSpectrum(float t)
     {
@@ -487,8 +323,6 @@ public sealed class OceanSwell
             _omega[i] = omega;
             _awx[i] = aw * set.DirX[j] * set.Coth[j];
             _awz[i] = aw * set.DirZ[j] * set.Coth[j];
-            _coth[i] = set.Coth[j];
-            _ref[i] = CoastalField.RefCoord(omega);
         }
     }
 
@@ -514,53 +348,25 @@ public sealed class OceanSwell
                 Cx = _cx[i],
                 Cz = _cz[i],
                 Omega = _omega[i],
-                RefCoord = _ref[i],
             };
         }
 
         return count;
     }
 
-    /// <summary>
-    /// Surface position of the water particle whose rest position is (x0, z0); <paramref name="shore"/> applies the depth cap.
-    /// </summary>
+    /// <summary>Surface position of the water particle whose rest position is (x0, z0).</summary>
     public float3 SurfacePoint(float x0, float z0, IShoreDepth? shore = null)
     {
-        var current = new CoastalSample();
-        var previous = new CoastalSample();
-        var fields = SampleFields(x0, z0, ref current, ref previous);
-        if (fields == 0)
-            return PointOf(DeepWaves(), x0, z0, Cap(shore, x0, z0));
-
-        Span<float> scratch = stackalloc float[ScratchArrays * CoastalPadded];
-        var point = PointOf(CoastalWaves(Coastal!.Direction, x0, z0, current, scratch), x0, z0, 1f);
-        return fields == 2 ? float3.Lerp(PointOf(CoastalWaves(PreviousDirection, x0, z0, previous, scratch), x0, z0, 1f), point, CoastalFade) : point;
-    }
-
-    private float3 PointOf(in Waves waves, float x0, float z0, float cap)
-    {
-        SumDisplacement(waves, x0, z0, out var dx, out var dz);
-        return new float3(x0 + cap * dx, cap * SumHeight(waves, x0, z0), z0 + cap * dz);
+        var cap = Cap(shore, x0, z0);
+        SumDisplacement(x0, z0, out var dx, out var dz);
+        return new float3(x0 + cap * dx, cap * SumHeight(x0, z0), z0 + cap * dz);
     }
 
     /// <summary>Water surface height at world (x, z).</summary>
     public float SampleHeight(float x, float z, IShoreDepth? shore = null)
     {
-        var current = new CoastalSample();
-        var previous = new CoastalSample();
-        var fields = SampleFields(x, z, ref current, ref previous);
-        if (fields == 0)
-            return HeightOf(DeepWaves(), x, z, shore);
-
-        Span<float> scratch = stackalloc float[ScratchArrays * CoastalPadded];
-        var height = HeightOf(CoastalWaves(Coastal!.Direction, x, z, current, scratch), x, z, null);
-        return fields == 2 ? float.Lerp(HeightOf(CoastalWaves(PreviousDirection, x, z, previous, scratch), x, z, null), height, CoastalFade) : height;
-    }
-
-    private float HeightOf(in Waves waves, float x, float z, IShoreDepth? shore)
-    {
-        var cap = Invert(waves, x, z, shore, out var x0, out var z0);
-        return cap * SumHeight(waves, x0, z0);
+        var cap = Invert(x, z, shore, out var x0, out var z0);
+        return cap * SumHeight(x0, z0);
     }
 
     public float3 SampleNormal(float x, float z, IShoreDepth? shore = null) => Sample(x, z, shore).Normal;
@@ -574,37 +380,13 @@ public sealed class OceanSwell
     }
 
     /// <summary>Height, normal, orbital velocity and Jacobian at world (x, z).</summary>
-    public WaveSample Sample(float x, float z, IShoreDepth? shore = null)
-    {
-        var current = new CoastalSample();
-        var previous = new CoastalSample();
-        var fields = SampleFields(x, z, ref current, ref previous);
-        if (fields == 0)
-            return SampleOf(DeepWaves(), x, z, shore);
-
-        Span<float> scratch = stackalloc float[ScratchArrays * CoastalPadded];
-        var now = SampleOf(CoastalWaves(Coastal!.Direction, x, z, current, scratch), x, z, null);
-        if (fields == 1)
-            return now;
-
-        var before = SampleOf(CoastalWaves(PreviousDirection, x, z, previous, scratch), x, z, null);
-        var t = CoastalFade;
-        return new WaveSample
-        {
-            Height = float.Lerp(before.Height, now.Height, t),
-            Normal = float3.Normalize(float3.Lerp(before.Normal, now.Normal, t)),
-            Velocity = float3.Lerp(before.Velocity, now.Velocity, t),
-            Jacobian = float.Lerp(before.Jacobian, now.Jacobian, t),
-        };
-    }
-
     // Fully optimised from its first call: few callers sample the whole wave, so tiered compilation left it in its slow
     // early tiers and promoted it on whichever tick crossed the threshold (10 samples took 13 ms on first use, against
     // 0.05 ms once promoted).
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-    private WaveSample SampleOf(in Waves w, float x, float z, IShoreDepth? shore)
+    public WaveSample Sample(float x, float z, IShoreDepth? shore = null)
     {
-        var cap = Invert(w, x, z, shore, out var x0, out var z0);
+        var cap = Invert(x, z, shore, out var x0, out var z0);
 
         var vx = Vector256.Create(x0);
         var vz = Vector256.Create(z0);
@@ -618,24 +400,24 @@ public sealed class OceanSwell
         var uz = Vector256<float>.Zero;
         var uy = Vector256<float>.Zero;
 
-        for (var i = 0; i < w.Padded; i += Lanes)
+        for (var i = 0; i < _paddedCount; i += Lanes)
         {
-            var kx = Load(w.Kx, i);
-            var kz = Load(w.Kz, i);
-            var theta = Vector256.FusedMultiplyAdd(kx, vx, Vector256.FusedMultiplyAdd(kz, vz, Load(w.Phase, i)));
+            var kx = Load(_kx, i);
+            var kz = Load(_kz, i);
+            var theta = Vector256.FusedMultiplyAdd(kx, vx, Vector256.FusedMultiplyAdd(kz, vz, Load(_phase, i)));
             var (sin, cos) = Vector256.SinCos(theta);
-            var cx = Load(w.Cx, i);
-            var cz = Load(w.Cz, i);
+            var cx = Load(_cx, i);
+            var cz = Load(_cz, i);
 
-            height = Vector256.FusedMultiplyAdd(Load(w.A, i), cos, height);
-            hx = Vector256.FusedMultiplyAdd(Load(w.Akx, i), sin, hx);
-            hz = Vector256.FusedMultiplyAdd(Load(w.Akz, i), sin, hz);
+            height = Vector256.FusedMultiplyAdd(Load(_a, i), cos, height);
+            hx = Vector256.FusedMultiplyAdd(Load(_akx, i), sin, hx);
+            hz = Vector256.FusedMultiplyAdd(Load(_akz, i), sin, hz);
             jxx = Vector256.FusedMultiplyAdd(cx * kx, cos, jxx);
             jzz = Vector256.FusedMultiplyAdd(cz * kz, cos, jzz);
             jxz = Vector256.FusedMultiplyAdd(cx * kz, cos, jxz);
-            ux = Vector256.FusedMultiplyAdd(Load(w.Awx, i), cos, ux);
-            uz = Vector256.FusedMultiplyAdd(Load(w.Awz, i), cos, uz);
-            uy = Vector256.FusedMultiplyAdd(Load(w.Aw, i), sin, uy);
+            ux = Vector256.FusedMultiplyAdd(Load(_awx, i), cos, ux);
+            uz = Vector256.FusedMultiplyAdd(Load(_awz, i), cos, uz);
+            uy = Vector256.FusedMultiplyAdd(Load(_aw, i), sin, uy);
         }
 
         var slopeX = -cap * Vector256.Sum(hx);
@@ -659,202 +441,18 @@ public sealed class OceanSwell
             Jacobian = dxx * dzz - dxz * dxz,
         };
     }
-    /// <summary>Per-component terms a sample sums over: the cached open-ocean ones, or coastal ones for one point.</summary>
-    private ref struct Waves
+
+    /// <summary>Depth cap at a rest position: 1 without a depth source.</summary>
+    private float Cap(IShoreDepth? shore, float x0, float z0)
     {
-        /// <summary>Loop length: the components padded to whole SIMD lanes (coastal sets add the carrier).</summary>
-        public int Padded;
-        public Span<float> Kx;
-        public Span<float> Kz;
-        public Span<float> Phase;
-        public Span<float> A;
-        public Span<float> Akx;
-        public Span<float> Akz;
-        public Span<float> Cx;
-        public Span<float> Cz;
-        public Span<float> Aw;
-        public Span<float> Awx;
-        public Span<float> Awz;
-    }
+        if (shore is null || SignificantWaveHeight <= 1e-4f)
+            return 1f;
 
-    private Waves DeepWaves() => new()
-    {
-        Padded = _paddedCount,
-        Kx = _kx,
-        Kz = _kz,
-        Phase = _phase,
-        A = _a,
-        Akx = _akx,
-        Akz = _akz,
-        Cx = _cx,
-        Cz = _cz,
-        Aw = _aw,
-        Awx = _awx,
-        Awz = _awz,
-    };
-
-    /// <summary>
-    /// Coastal terms at (px, pz): phase lag and its gradient (local wavevector), amplitude factor, breaking cap,
-    /// displacement along the local direction, and a per-sample steepness clamp. The lag is linearised about (px, pz) so
-    /// the Gerstner inversion can reuse it; the GPU evaluates it exactly at each rest position.
-    /// </summary>
-    private Waves CoastalWaves(float direction, float px, float pz, in CoastalSample s, Span<float> scratch)
-    {
-        var n = CoastalPadded;
-        scratch.Clear();
-        var w = new Waves
-        {
-            Padded = n,
-            Kx = scratch.Slice(0 * n, n),
-            Kz = scratch.Slice(1 * n, n),
-            Phase = scratch.Slice(2 * n, n),
-            A = scratch.Slice(3 * n, n),
-            Akx = scratch.Slice(4 * n, n),
-            Akz = scratch.Slice(5 * n, n),
-            Cx = scratch.Slice(6 * n, n),
-            Cz = scratch.Slice(7 * n, n),
-            Aw = scratch.Slice(8 * n, n),
-            Awx = scratch.Slice(9 * n, n),
-            Awz = scratch.Slice(10 * n, n),
-        };
-
-        var (cap, chopScale) = CoastalLimits(s, direction);
-        var depth = MathF.Max(s.Depth, 0f);
-
-        // Carrier at its reference frequency; coherence from its local wavenumber (|k₀ d̂ + ∇δψ|, the eikonal's k(h)) × depth.
-        var (dirZ, dirX) = MathF.SinCos(direction);
-        var jc = (int)_carrierRef;
-        var tc = _carrierRef - jc;
-        var lagC = float.Lerp(s.Lag[jc], s.Lag[jc + 1], tc);
-        var lxC = float.Lerp(s.LagX[jc], s.LagX[jc + 1], tc);
-        var lzC = float.Lerp(s.LagZ[jc], s.LagZ[jc + 1], tc);
-        var shoalC = float.Lerp(s.Amp[jc], s.Amp[jc + 1], tc);
-        var kxC = _carrierK0 * dirX + lxC;
-        var kzC = _carrierK0 * dirZ + lzC;
-        var kC = MathF.Max(MathF.Sqrt(kxC * kxC + kzC * kzC), 1e-6f);
-
-        // Coherence from k(h) h, continuous in depth: the lag map's gradient steps at every texel line.
-        var coherence = _carrierEnergy > 0f ? Coherence(Jonswap.WaveNumberApprox(_carrierOmega, depth) * depth) : 0f;
-
-        for (var i = 0; i < _count; i++)
-        {
-            var j = (int)_ref[i];
-            var t = _ref[i] - j;
-            var lag = float.Lerp(s.Lag[j], s.Lag[j + 1], t);
-            var lx = float.Lerp(s.LagX[j], s.LagX[j + 1], t);
-            var lz = float.Lerp(s.LagZ[j], s.LagZ[j + 1], t);
-            var amp = float.Lerp(s.Amp[j], s.Amp[j + 1], t) * cap * MathF.Sqrt(1f - coherence * _band[i]);
-
-            var kx = _kx[i] + lx;
-            var kz = _kz[i] + lz;
-            var k = MathF.Max(MathF.Sqrt(kx * kx + kz * kz), 1e-6f);
-            var a = _a[i] * amp;
-            var chop = MathF.Sqrt(_cx[i] * _cx[i] + _cz[i] * _cz[i]) * amp * chopScale;
-            var aw = a * _omega[i];
-            var coth = 1f / MathF.Tanh(MathF.Max(k * depth, MinCothKh));
-
-            w.Kx[i] = kx;
-            w.Kz[i] = kz;
-            w.Phase[i] = _phase[i] + lag - lx * px - lz * pz;
-            w.A[i] = a;
-            w.Akx[i] = a * kx;
-            w.Akz[i] = a * kz;
-            w.Cx[i] = chop * kx / k;
-            w.Cz[i] = chop * kz / k;
-            w.Aw[i] = aw;
-            w.Awx[i] = aw * coth * kx / k;
-            w.Awz[i] = aw * coth * kz / k;
-        }
-
-        if (coherence > 0f)
-        {
-            var envelope = GroupEnvelope(_carrierK0 * (dirX * px + dirZ * pz) + lagC, _groupPhase);
-            var (unbroken, capC) = CarrierBreaking(shoalC * envelope, coherence, depth);
-            var phase = _carrierPhase + lagC - lxC * px - lzC * pz;
-
-            var a = 0.5f * unbroken * capC;
-            var chop = a * Choppiness * chopScale;
-
-            // Shoaling peaks the carrier: bound harmonics (1, s, s²), normalised to its energy, all in phase at the crest.
-            var sharp = Sharpness(2f * a, depth);
-            var norm = a / MathF.Sqrt(1f + sharp * sharp * (1f + sharp * sharp));
-            var an = norm;
-
-            for (var h = 1; h <= CarrierSlots; h++, an *= sharp)
-            {
-                var c = _count + h - 1;
-                var kx = h * kxC;
-                var kz = h * kzC;
-                var aw = an * h * _carrierOmega;
-                var coth = 1f / MathF.Tanh(MathF.Max(h * kC * depth, MinCothKh));
-
-                w.Kx[c] = kx;
-                w.Kz[c] = kz;
-                w.Phase[c] = h * phase;
-                w.A[c] = an;
-                w.Akx[c] = an * kx;
-                w.Akz[c] = an * kz;
-                w.Cx[c] = h == 1 ? chop * kxC / kC : 0f;
-                w.Cz[c] = h == 1 ? chop * kzC / kC : 0f;
-                w.Aw[c] = aw;
-                w.Awx[c] = aw * coth * kxC / kC;
-                w.Awz[c] = aw * coth * kzC / kC;
-            }
-        }
-
-        return w;
-    }
-
-    /// <summary>
-    /// The coherent surf wave's unbroken height (crest to trough, from its share of the peak band and the shoaling factor
-    /// at the carrier frequency, times the set envelope when given) and its breaking cap min(1, γ_wave h / H). The surface draws H × cap, so the wave
-    /// grows until it breaks.
-    /// </summary>
-    public (float Height, float Cap) CarrierBreaking(float shoaling, float coherence, float depth)
-    {
-        var height = 2f * MathF.Sqrt(coherence * _carrierEnergy) * shoaling;
-        return (height, height > 1e-4f ? Math.Clamp(WaveBreakingGamma * MathF.Max(depth, 0f) / height, 0f, 1f) : 1f);
-    }
-
-    /// <summary>
-    /// Crest peaking s of the surf carrier from its height over the depth: 0 while it is small for the water, rising to
-    /// <see cref="MaxSharpness"/> as it nears breaking (H/h toward γ), so crests stand taller and troughs flatten as it shoals.
-    /// </summary>
-    public static float Sharpness(float height, float depth) =>
-        MaxSharpness * Smooth((height / MathF.Max(depth, 0.1f) - SharpFrom) / (SharpFull - SharpFrom));
-
-    /// <summary>Component slots of a coastal wave set: the components plus the carrier and its harmonics, padded to whole SIMD lanes.</summary>
-    private int CoastalPadded => (_count + CarrierSlots + Lanes - 1) / Lanes * Lanes;
-
-    /// <summary>
-    /// Over the references in use: the breaking cap min(1, γ h / Hs) from the shoaled spectrum, and the choppiness scale
-    /// that keeps the rms of the shoaled, shortened Gerstner trace under <see cref="MaxRmsSteepness"/>, as the open sea's
-    /// clamp does, so the two agree where a field fades out. Mirrored in ocean_common.glsl.
-    /// </summary>
-    private (float Cap, float ChopScale) CoastalLimits(in CoastalSample s, float direction)
-    {
-        var (dirZ, dirX) = MathF.SinCos(direction);
-        var variance = 0f;
-        var steepness = 0f;
-
-        for (var j = RefMin; j <= RefMax; j++)
-        {
-            var k0 = CoastalField.RefK0(j);
-            var kx = k0 * dirX + s.LagX[j];
-            var kz = k0 * dirZ + s.LagZ[j];
-            var amp2 = s.Amp[j] * s.Amp[j];
-            variance += _refEnergy[j] * amp2;
-            steepness += _refChop[j] * amp2 * (kx * kx + kz * kz) / (k0 * k0);
-        }
-
-        var hs = 4f * MathF.Sqrt(variance);
-        var cap = hs > 1e-4f ? Math.Clamp(CoastalField.BreakingGamma * s.Depth / hs, 0f, 1f) : 1f;
-        steepness = MathF.Sqrt(steepness) * cap;
-        return (cap, steepness > MaxRmsSteepness ? MaxRmsSteepness / steepness : 1f);
+        return Math.Clamp(DepthCapGamma * shore.Depth(x0, z0) / SignificantWaveHeight, 0f, 1f);
     }
 
     /// <summary>The rest position under world (x, z), with the depth cap there (it scales the displacement too).</summary>
-    private float Invert(in Waves waves, float x, float z, IShoreDepth? shore, out float x0, out float z0)
+    private float Invert(float x, float z, IShoreDepth? shore, out float x0, out float z0)
     {
         x0 = x;
         z0 = z;
@@ -865,7 +463,7 @@ public sealed class OceanSwell
 
         for (var i = 0; i < InversionIterations; i++)
         {
-            SumDisplacement(waves, x0, z0, out var dx, out var dz);
+            SumDisplacement(x0, z0, out var dx, out var dz);
             x0 = x - cap * dx;
             z0 = z - cap * dz;
             cap = Cap(shore, x0, z0);
@@ -874,34 +472,34 @@ public sealed class OceanSwell
         return cap;
     }
 
-    private float SumHeight(in Waves w, float x0, float z0)
+    private float SumHeight(float x0, float z0)
     {
         var vx = Vector256.Create(x0);
         var vz = Vector256.Create(z0);
         var height = Vector256<float>.Zero;
 
-        for (var i = 0; i < w.Padded; i += Lanes)
+        for (var i = 0; i < _paddedCount; i += Lanes)
         {
-            var theta = Vector256.FusedMultiplyAdd(Load(w.Kx, i), vx, Vector256.FusedMultiplyAdd(Load(w.Kz, i), vz, Load(w.Phase, i)));
-            height = Vector256.FusedMultiplyAdd(Load(w.A, i), Vector256.Cos(theta), height);
+            var theta = Vector256.FusedMultiplyAdd(Load(_kx, i), vx, Vector256.FusedMultiplyAdd(Load(_kz, i), vz, Load(_phase, i)));
+            height = Vector256.FusedMultiplyAdd(Load(_a, i), Vector256.Cos(theta), height);
         }
 
         return Vector256.Sum(height);
     }
 
-    private void SumDisplacement(in Waves w, float x0, float z0, out float dx, out float dz)
+    private void SumDisplacement(float x0, float z0, out float dx, out float dz)
     {
         var vx = Vector256.Create(x0);
         var vz = Vector256.Create(z0);
         var sx = Vector256<float>.Zero;
         var sz = Vector256<float>.Zero;
 
-        for (var i = 0; i < w.Padded; i += Lanes)
+        for (var i = 0; i < _paddedCount; i += Lanes)
         {
-            var theta = Vector256.FusedMultiplyAdd(Load(w.Kx, i), vx, Vector256.FusedMultiplyAdd(Load(w.Kz, i), vz, Load(w.Phase, i)));
+            var theta = Vector256.FusedMultiplyAdd(Load(_kx, i), vx, Vector256.FusedMultiplyAdd(Load(_kz, i), vz, Load(_phase, i)));
             var sin = Vector256.Sin(theta);
-            sx = Vector256.FusedMultiplyAdd(Load(w.Cx, i), sin, sx);
-            sz = Vector256.FusedMultiplyAdd(Load(w.Cz, i), sin, sz);
+            sx = Vector256.FusedMultiplyAdd(Load(_cx, i), sin, sx);
+            sz = Vector256.FusedMultiplyAdd(Load(_cz, i), sin, sz);
         }
 
         dx = -Vector256.Sum(sx);
@@ -909,8 +507,8 @@ public sealed class OceanSwell
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Vector256<float> Load(Span<float> span, int index) =>
-        Vector256.LoadUnsafe(ref MemoryMarshal.GetReference(span), (nuint)index);
+    private static Vector256<float> Load(float[] array, int index) =>
+        Vector256.LoadUnsafe(ref MemoryMarshal.GetArrayDataReference(array), (nuint)index);
 }
 
 public struct WaveSample
@@ -924,9 +522,9 @@ public struct WaveSample
 }
 
 /// <summary>
-/// std140-compatible wave component: (kx, kz, phase, amplitude), (cx, cz, omega, coastal ref coord).
+/// std140-compatible wave component: (kx, kz, phase, amplitude), (cx, cz, omega, unused).
 /// </summary>
-[StructLayout(LayoutKind.Sequential)]
+[StructLayout(LayoutKind.Sequential, Size = 32)]
 public struct GpuWave
 {
     public float Kx;
@@ -936,9 +534,6 @@ public struct GpuWave
     public float Cx;
     public float Cz;
     public float Omega;
-
-    /// <summary>Fractional coastal reference index (<see cref="CoastalField.RefCoord"/>).</summary>
-    public float RefCoord;
 }
 
 public struct SpectrumState

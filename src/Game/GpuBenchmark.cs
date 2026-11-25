@@ -5,7 +5,7 @@ namespace BrutalGame;
 
 /// <summary>
 /// --bench: vsync off, so the GPU runs flat out at stable clocks. After the world settles and a warmup, alternates a
-/// feature (layer B coastal maps) on and off in short blocks, so clock drift hits both sides equally, then logs the
+/// feature (the shore wash) on and off in short blocks, so clock drift hits both sides equally, then logs the
 /// median and mean of every GPU scope per side and closes the window.
 /// </summary>
 public sealed class GpuBenchmark
@@ -40,7 +40,7 @@ public sealed class GpuBenchmark
     public bool FeatureOn => _block < 0 || (_block & 1) == 0;
 
     /// <summary>Once per frame, after the GPU timer has collected the previous results.</summary>
-    /// <param name="ready">The world has settled (terrain streamed, coastal maps built).</param>
+    /// <param name="ready">The world has settled (terrain streamed).</param>
     public void Update(double time, bool ready)
     {
         if (Done)

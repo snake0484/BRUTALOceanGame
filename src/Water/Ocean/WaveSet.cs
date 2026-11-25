@@ -40,7 +40,7 @@ internal sealed class WaveSet
 
     /// <summary>
     /// The groundswell dominates once its height is at least half the wind sea's: long-period swell shoals more and
-    /// carries the surf, so it is the band the surf carrier, the coastal maps and the sets follow.
+    /// carries the surf, so it is the band the surf carrier and the sets follow.
     /// </summary>
     public bool SwellDominant => SwellEnergy > 0.0 && SwellEnergy >= SwellDominance * WindSeaEnergy;
 

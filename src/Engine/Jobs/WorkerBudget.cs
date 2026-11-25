@@ -13,7 +13,7 @@ public static class WorkerBudget
     /// <summary>Work the main thread waits on (the water step, Jolt's physics step): every core but the main thread's and one spare.</summary>
     public static readonly int Tick = Math.Max(1, Cores - 2);
 
-    /// <summary>All background runners together (streaming, coastal maps).</summary>
+    /// <summary>All background runners together.</summary>
     public static readonly int Background = Math.Max(2, Cores - 2);
 
     /// <summary>Terrain streaming, the bulk of the background work: half the budget.</summary>

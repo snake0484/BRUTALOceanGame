@@ -249,8 +249,8 @@ public sealed class OceanSwellTests(ITestOutputHelper output)
     }
 
     /// <summary>
-    /// The surf carrier and the coastal maps follow the dominant band: the groundswell once its height is half the wind
-    /// sea's or more, else the wind sea, whatever the swell's direction.
+    /// The surf carrier follows the dominant band: the groundswell once its height is half the wind sea's or more, else
+    /// the wind sea, whatever the swell's direction.
     /// </summary>
     [Fact]
     public void Carrier_FollowsTheDominantBand()
@@ -263,6 +263,26 @@ public sealed class OceanSwellTests(ITestOutputHelper output)
         Assert.Equal(-0.4f, swellDominant.DominantDirection);
         Assert.True(windDominant.PeakPeriod < 13f, $"wind sea peak {windDominant.PeakPeriod} s");
         Assert.Equal(1f, windDominant.DominantDirection);
+    }
+
+    /// <summary>
+    /// The shore wash's breaker height is Komar and Gaylord's, 0.39 g^0.2 (T H0²)^0.4, from the surf carrier: a narrow
+    /// groundswell is nearly all peak band, so H0 = 2 √(0.75 Σa²) with Σa² = Hs² / 8. It travels the swell's way.
+    /// </summary>
+    [Fact]
+    public void Shore_BreakerHeightFromTheCarrier()
+    {
+        var swell = Create(7, new SwellParams { WindSpeed = 0f, SwellHeight = 1.5f, SwellPeriod = 14f, SwellDirection = 0.6f });
+        var shore = swell.GpuShore(true);
+        var h0 = 2f * MathF.Sqrt(0.75f * 1.5f * 1.5f / 8f);
+        var expected = 0.39f * MathF.Pow(9.81f, 0.2f) * MathF.Pow(14f * h0 * h0, 0.4f);
+
+        output.WriteLine($"breaker height {shore.Z:F3} m, expected {expected:F3} m for the whole band");
+        Assert.InRange(shore.Z, 0.9f * expected, 1.001f * expected);
+        Assert.Equal(MathF.Cos(0.6f), shore.X, 1e-5f);
+        Assert.Equal(MathF.Sin(0.6f), shore.Y, 1e-5f);
+        Assert.Equal(swell.SignificantWaveHeight, shore.W);
+        Assert.Equal(0f, swell.GpuShore(false).Z);
     }
 
     /// <summary>Sets come every 1 / (2 × bandwidth) waves of the dominant band: 8 for a wind sea, longer for narrower swell.</summary>

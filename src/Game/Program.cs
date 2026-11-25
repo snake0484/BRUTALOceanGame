@@ -11,7 +11,6 @@ float[] swell = [1.2f, 13f, 0f];
 var foamDebug = false;
 var editTest = false;
 var hideUi = false;
-var coastal = true;
 var benchSeconds = 0.0;
 var flyTest = false;
 
@@ -62,8 +61,6 @@ for (var i = 0; i < args.Length; i++)
     }
     else if (args[i] == "--fly-test")
         flyTest = true;
-    else if (args[i] == "--no-coastal")
-        coastal = false;
     else if (args[i] == "--cam" && i + 5 < args.Length)
     {
         camera = new float[5];
@@ -72,5 +69,5 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
-using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, coastal, benchSeconds, flyTest, swell, weather ?? true, weatherOffset, renderScale);
+using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, flyTest, swell, weather ?? true, weatherOffset, renderScale);
 app.Run();
