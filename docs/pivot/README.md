@@ -72,6 +72,17 @@ Each ends with a measured exit check (details in review.md).
 | M7 | Orbit, warp, the moon. | Two players reach the moon; orbit elements unchanged across frame transitions. |
 | M8 | Walking inside a moving ship: grid bubble, `GridVolume`, door proxies, plating gravity and the inertial dampener. Then rooms, damage, hull LOD. | |
 
+### Carry-overs from M0 (2026-11-25)
+
+M0 landed on `space-pivot` (2f70258..1df5d87). Review items left for the milestone that replaces the island placeholder:
+
+- **M2b shore depth:** the GPU swell has no depth cap past the ~1 km bathymetry window (no far field since layer B was cut); the CPU cap costs ~0.56 us per sample with no edits and ~3.3 us with 1000 edits (`TerrainShoreDepth` rebuilds the island set and scans every edit). The planet `IShoreDepth` must bin edits and cache the generator.
+- **M2 protected shores (D30):** `ShoreGuard` refuses whole digs within 16 m of ground below sea + 2 m. planets.md specifies `ShoreProtectHeight` 6 m, clamping removal to the generated surface, letting players remove what they placed, and a per-chunk column mask instead of ~800 generator calls per big brush.
+- **M2 pit rule:** CPU uses one voxel below sea level, the GPU uses 2^lod m at coarser LODs; base both on the generated sea mask (planets.md).
+- **M4 networking:** the swell carrier phase is now integrated per tick (no snapping), which makes it history-dependent; give it a closed form or put it in the sim snapshot before late join.
+- **Debug paths:** OceanPanel and GameApp still write swell wind straight into the sim; route through sim commands. Refused digs have no feedback (show the count, then the D30 band overlay).
+- **Docs:** docs/ocean-gpu-contract.md's Frame UBO section is stale.
+
 ## Open questions
 
 Decisions so far are logged in [decisions.md](decisions.md) (D9-D37) and in the Decided table above. Remaining open questions live in each doc's own list.
