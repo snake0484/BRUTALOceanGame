@@ -8,6 +8,7 @@ namespace BrutalGame.Plans;
 /// - Rotation: the smallest snap triple naming the same rotation.
 /// - Unused fields: Param is zero for every v1 shape; a cylinder's half Z equals its radius.
 /// - Material table: only entries some brush uses, deduplicated, in order of first use; brush indices remapped.
+/// - Mesh table: the same for meshes (deduplicated by content); a mesh brush's half extents are its mesh's extent.
 /// Brush order and ids are design (evaluation order, identity) and are kept.
 /// </summary>
 public static class PlanCanonical
@@ -20,6 +21,14 @@ public static class PlanCanonical
         {
             brush.Rotation = BrushRotation.Canonical(brush.Rotation);
 
+            if (brush.Shape == BrushShape.Mesh)
+            {
+                if (brush.Param < doc.Meshes.Count)
+                    (brush.HalfX, brush.HalfY, brush.HalfZ) = doc.Meshes[brush.Param].HalfUnits();
+
+                continue;
+            }
+
             if (!BrushGeometry.IsSupported(brush.Shape))
                 continue;
 
@@ -30,6 +39,40 @@ public static class PlanCanonical
         }
 
         CompactMaterials(doc);
+        CompactMeshes(doc);
+    }
+
+    private static void CompactMeshes(PlanDocument doc)
+    {
+        var old = doc.Meshes;
+        var remap = new int[old.Count];
+        Array.Fill(remap, -1);
+        var table = new List<HullMesh>(old.Count);
+
+        foreach (ref var brush in doc.Brushes.AsSpan())
+        {
+            if (brush.Shape != BrushShape.Mesh || brush.Param >= old.Count)
+                continue;
+
+            if (remap[brush.Param] < 0)
+            {
+                var mesh = old[brush.Param];
+                var existing = table.FindIndex(m => m.ContentEquals(mesh));
+
+                if (existing < 0)
+                {
+                    existing = table.Count;
+                    table.Add(mesh);
+                }
+
+                remap[brush.Param] = existing;
+            }
+
+            brush.Param = (ushort)remap[brush.Param];
+        }
+
+        old.Clear();
+        old.AddRange(table);
     }
 
     private static void CompactMaterials(PlanDocument doc)

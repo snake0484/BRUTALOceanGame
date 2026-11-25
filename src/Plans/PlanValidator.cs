@@ -22,6 +22,11 @@ public enum IssueCode : ushort
     OutOfBounds,
     BrickOverfull,
     NoSolid,
+    TooManyMeshes,
+    MeshIndex,
+    MeshBounds,
+    MeshInvalid,
+    MeshBudget,
 }
 
 public readonly record struct ValidationIssue(Severity Severity, IssueCode Code, ElementRef Element, int Value);
@@ -87,6 +92,29 @@ public static class PlanValidator
             return;
         }
 
+        if (doc.Meshes.Count > PlanLimits.MaxMeshes)
+        {
+            log.Add(Severity.Error, IssueCode.TooManyMeshes, default, doc.Meshes.Count);
+            return;
+        }
+
+        var meshValid = new bool[doc.Meshes.Count];
+        var meshVertices = 0;
+
+        for (var m = 0; m < doc.Meshes.Count; m++)
+        {
+            var mesh = doc.Meshes[m];
+            meshVertices += mesh.Vertices.Length;
+            var issue = MeshValidator.ValidateCached(mesh, out var where);
+            meshValid[m] = issue == MeshIssue.None;
+
+            if (!meshValid[m])
+                log.Add(Severity.Error, IssueCode.MeshInvalid, new ElementRef(ElementKind.Mesh, (uint)m), ((int)issue << 24) | (where & 0xFFFFFF));
+        }
+
+        if (meshVertices > PlanLimits.MaxMeshVertices)
+            log.Add(Severity.Error, IssueCode.MeshBudget, default, meshVertices);
+
         for (var m = 0; m < doc.Materials.Count; m++)
         {
             if (catalog is not null && !catalog.TryGet(doc.Materials[m], out _))
@@ -106,7 +134,21 @@ public static class PlanValidator
             else if (!ids.Add(brush.Id))
                 log.Add(Severity.Error, IssueCode.DuplicateId, element);
 
-            if (!BrushGeometry.IsSupported(brush.Shape))
+            if (brush.Shape == BrushShape.Mesh)
+            {
+                if (brush.Param >= doc.Meshes.Count)
+                {
+                    log.Add(Severity.Error, IssueCode.MeshIndex, element, brush.Param);
+                    inBounds = false;
+                    continue;
+                }
+
+                var (hx, hy, hz) = doc.Meshes[brush.Param].HalfUnits();
+
+                if (brush.HalfX < hx || brush.HalfY < hy || brush.HalfZ < hz)
+                    log.Add(Severity.Error, IssueCode.MeshBounds, element, brush.Param);
+            }
+            else if (!BrushGeometry.IsSupported(brush.Shape))
             {
                 log.Add(Severity.Error, IssueCode.UnsupportedShape, element, (int)brush.Shape);
                 inBounds = false;
@@ -134,7 +176,7 @@ public static class PlanValidator
                 continue;
             }
 
-            var thinnest = brush.Shape == BrushShape.Cylinder ? Math.Min(brush.HalfX, brush.HalfY) : Math.Min(brush.HalfX, Math.Min(brush.HalfY, brush.HalfZ));
+            var thinnest = brush.Shape == BrushShape.Mesh ? PlanLimits.MinHalfUnits : brush.Shape == BrushShape.Cylinder ? Math.Min(brush.HalfX, brush.HalfY) : Math.Min(brush.HalfX, Math.Min(brush.HalfY, brush.HalfZ));
 
             if (thinnest < PlanLimits.MinHalfUnits)
                 log.Add(Severity.Error, IssueCode.ExtentTooSmall, element, thinnest);

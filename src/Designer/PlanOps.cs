@@ -3,12 +3,13 @@ using BrutalGame.Ships;
 
 namespace BrutalGame.Designer;
 
-public enum OpKind : byte { InsertBrush, RemoveBrush, ModifyBrush, AddMaterial, RemoveMaterial }
+public enum OpKind : byte { InsertBrush, RemoveBrush, ModifyBrush, AddMaterial, RemoveMaterial, AddMesh, RemoveMesh, SetMesh }
 
 /// <summary>
 /// One invertible edit, a brush-list diff (ship-hulls "undo = brush list diffs"). Insert and Remove carry the brush and
 /// its list index; Modify carries before and after; AddMaterial / RemoveMaterial append or drop the table's last entry
-/// (<see cref="Value"/> = DefId). Blittable, so a log of them is one array.
+/// (<see cref="Value"/> = DefId). Mesh ops (round 5) carry immutable mesh snapshots: AddMesh / RemoveMesh append or drop
+/// the mesh table's last entry, SetMesh replaces entry <see cref="Index"/> (one op per modelling step).
 /// </summary>
 public struct PlanOp
 {
@@ -17,6 +18,12 @@ public struct PlanOp
     public uint Value;
     public HullBrush Before;
     public HullBrush After;
+    public HullMesh? MeshBefore;
+    public HullMesh? MeshAfter;
+
+    public static PlanOp AddMesh(int index, HullMesh mesh) => new() { Kind = OpKind.AddMesh, Index = index, MeshAfter = mesh };
+
+    public static PlanOp SetMesh(int index, HullMesh before, HullMesh after) => new() { Kind = OpKind.SetMesh, Index = index, MeshBefore = before, MeshAfter = after };
 
     public static PlanOp Insert(int index, in HullBrush brush) => new() { Kind = OpKind.InsertBrush, Index = index, After = brush };
 
@@ -32,7 +39,10 @@ public struct PlanOp
         OpKind.RemoveBrush => Insert(Index, Before),
         OpKind.ModifyBrush => Modify(Index, After, Before),
         OpKind.AddMaterial => this with { Kind = OpKind.RemoveMaterial },
-        _ => this with { Kind = OpKind.AddMaterial },
+        OpKind.RemoveMaterial => this with { Kind = OpKind.AddMaterial },
+        OpKind.AddMesh => new PlanOp { Kind = OpKind.RemoveMesh, Index = Index, MeshBefore = MeshAfter },
+        OpKind.RemoveMesh => new PlanOp { Kind = OpKind.AddMesh, Index = Index, MeshAfter = MeshBefore },
+        _ => SetMesh(Index, MeshAfter!, MeshBefore!),
     };
 
     /// <summary>Applies to <paramref name="doc"/>; refuses an op whose recorded state does not match (a corrupt log).</summary>
@@ -62,6 +72,18 @@ public struct PlanOp
             case OpKind.RemoveMaterial:
                 Expect(Index == doc.Materials.Count - 1 && doc.Materials[Index].Value == Value);
                 doc.Materials.RemoveAt(Index);
+                break;
+            case OpKind.AddMesh:
+                Expect(Index == doc.Meshes.Count);
+                doc.Meshes.Add(MeshAfter!);
+                break;
+            case OpKind.RemoveMesh:
+                Expect(Index == doc.Meshes.Count - 1 && ReferenceEquals(doc.Meshes[Index], MeshBefore));
+                doc.Meshes.RemoveAt(Index);
+                break;
+            case OpKind.SetMesh:
+                Expect(ReferenceEquals(doc.Meshes[Index], MeshBefore));
+                doc.Meshes[Index] = MeshAfter!;
                 break;
         }
     }

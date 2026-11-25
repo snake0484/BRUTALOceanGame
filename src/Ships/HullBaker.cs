@@ -21,11 +21,14 @@ public sealed class HullBaker : IDisposable
     private Dictionary<BrickKey, HullBrick> _next = new();
     private readonly List<HullBrick> _bricks = new();
     private readonly List<HullBrick> _work = new();
+    private readonly List<ulong> _meshHashes = new();
     private HullBrush[] _brushes = new HullBrush[64];
     private int _brushCount;
     private byte[] _hashScratch = new byte[256];
     private int[] _densities = [];
+    private readonly List<PreparedMesh?> _meshes = new();
     private HullBrush[]? _pending;
+    private HullMesh[]? _pendingMeshes;
     private int[]? _pendingDensities;
     private long _startTicks;
     private long _lastFinish;
@@ -66,20 +69,29 @@ public sealed class HullBaker : IDisposable
 
     public int TriangleCount { get; private set; }
 
+    /// <summary>Dual contouring (sharp) by default; surface nets for comparison. Applies to the next bake.</summary>
+    public HullMesher Mesher = HullMesher.DualContouring;
+
+    /// <summary>Main-thread time preparing mesh brushes (subdivision, BVH) for the last bake; cached by mesh hash.</summary>
+    public float LastPrepareMs { get; private set; }
+
+    public void Start(ReadOnlySpan<HullBrush> brushes, ReadOnlySpan<int> densities) => Start(brushes, [], densities);
+
     /// <summary>
-    /// Bakes <paramref name="brushes"/>; <paramref name="densities"/> is kg/m³ per plan material index (mass only).
-    /// If a bake is running, this one waits for it.
+    /// Bakes <paramref name="brushes"/>; mesh brushes index <paramref name="meshes"/> by Param; <paramref name="densities"/>
+    /// is kg/m³ per plan material index (mass only). If a bake is running, this one waits for it.
     /// </summary>
-    public void Start(ReadOnlySpan<HullBrush> brushes, ReadOnlySpan<int> densities)
+    public void Start(ReadOnlySpan<HullBrush> brushes, IReadOnlyList<HullMesh> meshes, ReadOnlySpan<int> densities)
     {
         if (_running)
         {
             _pending = brushes.ToArray();
+            _pendingMeshes = meshes.ToArray();
             _pendingDensities = densities.ToArray();
             return;
         }
 
-        Begin(brushes, densities);
+        Begin(brushes, meshes, densities);
     }
 
     /// <summary>Main thread, each frame: finishes a completed bake and starts a waiting one. True when results changed.</summary>
@@ -93,10 +105,12 @@ public sealed class HullBaker : IDisposable
         if (_pending is not null)
         {
             var brushes = _pending;
+            var meshes = _pendingMeshes!;
             var densities = _pendingDensities!;
             _pending = null;
+            _pendingMeshes = null;
             _pendingDensities = null;
-            Begin(brushes, densities);
+            Begin(brushes, meshes, densities);
         }
 
         return true;
@@ -114,10 +128,20 @@ public sealed class HullBaker : IDisposable
         }
     }
 
-    private void Begin(ReadOnlySpan<HullBrush> brushes, ReadOnlySpan<int> densities)
+    private void Begin(ReadOnlySpan<HullBrush> brushes, IReadOnlyList<HullMesh> meshes, ReadOnlySpan<int> densities)
     {
         _startTicks = Stopwatch.GetTimestamp();
         _lastFinish = _startTicks;
+        _meshes.Clear();
+        _meshHashes.Clear();
+
+        foreach (var mesh in meshes)
+        {
+            _meshes.Add(mesh is null ? null : MeshCache.Get(mesh));
+            _meshHashes.Add(mesh?.MeshHash ?? 0);
+        }
+
+        LastPrepareMs = (float)Stopwatch.GetElapsedTime(_startTicks).TotalMilliseconds;
 
         if (_brushes.Length < brushes.Length)
             _brushes = new HullBrush[Math.Max(brushes.Length, _brushes.Length * 2)];
@@ -133,7 +157,7 @@ public sealed class HullBaker : IDisposable
         for (var b = 0; b < _bins.BrickCount; b++)
         {
             var key = _bins.Keys[b];
-            var hash = InputHash(key, _bins.Brushes(b));
+            var hash = InputHash(key, _bins.Brushes(b)) ^ (ulong)Mesher;
 
             if (_current.TryGetValue(key, out var old) && old.InputHash == hash)
             {
@@ -218,13 +242,19 @@ public sealed class HullBaker : IDisposable
         MemoryMarshal.Write(span[4..], key.Z);
         var offset = 6;
 
+        var meshSeed = 0UL;
+
         foreach (var index in binned)
         {
-            MemoryMarshal.Write(span[offset..], _brushes[index]);
+            ref readonly var brush = ref _brushes[index];
+            MemoryMarshal.Write(span[offset..], brush);
             offset += HullBrush.SizeInBytes;
+
+            if (brush.Shape == BrushShape.Mesh && brush.Param < _meshHashes.Count)
+                meshSeed = meshSeed * 31 + _meshHashes[brush.Param];
         }
 
-        return XxHash64.Hash(span);
+        return XxHash64.Hash(span, meshSeed);
     }
 
     private void RunWorker(HullBrickBaker baker)
@@ -240,7 +270,8 @@ public sealed class HullBaker : IDisposable
 
             var brick = _work[index];
             var slot = BinIndex(brick.Key);
-            baker.Bake(brick.Key, brushes, _bins.Brushes(slot), brick);
+            baker.Mesher = Mesher;
+            baker.Bake(brick.Key, brushes, _bins.Brushes(slot), _meshes, brick);
         }
 
         var now = Stopwatch.GetTimestamp();
