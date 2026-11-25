@@ -439,6 +439,7 @@ public sealed class GameApp : IDisposable
         _imgui.NewFrame();
         _profiler.Draw();
         _renderer.PipelineStats.Enabled = _profiler.Open && _profiler.PipelineStatsOn;
+        _terrainRenderer.StatsEnabled = _profiler.Open || _terrainPanel.Open || _orbitTest is not null;
         _oceanPanel.Draw();
         _terrainPanel.Draw();
         _weatherPanel.Draw(CameraXZ);

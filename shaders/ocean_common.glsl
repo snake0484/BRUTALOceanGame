@@ -15,8 +15,8 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 waterScatter;
     vec4 cascadeL;       // xyz = patch size L per cascade (m), w = cascade count
     vec4 cascadeKLo;     // xyz = band low |k| per cascade, w = persistent foam strength
-    vec4 cascadeAnchorX; // xyz = frac(camera x / L) per cascade (cascadeUv), w = camera x in the sea frame (foamLace)
-    vec4 cascadeAnchorZ; // xyz = frac(camera z / L) per cascade, w = camera z in the sea frame
+    vec4 cascadeAnchorX; // xyz = frac(camera x / L) per cascade (cascadeUv), w = camera x in the sea frame mod the lace period (foamLace)
+    vec4 cascadeAnchorZ; // xyz = frac(camera z / L) per cascade, w = camera z in the sea frame mod the lace period
     vec4 depthRect;      // xy = depth map origin relative to the camera, z = world size, w = depth outside the map
     vec4 carrier;        // surf carrier (OceanSwell.GpuCarrier): x = omega, y = phase, z = set group ratio (a set every 1 / this waves), w = set group phase
     vec4 shore;          // xy = carrier travel direction, z = its breaker height (0 = no shore wash), w = open swell Hs

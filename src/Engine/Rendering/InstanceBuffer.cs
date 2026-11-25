@@ -21,25 +21,32 @@ public struct InstanceRecord
 }
 
 /// <summary>
-/// The per-draw instance records shared by terrain and hull draws: a persistently mapped storage buffer with one region
-/// per frame in flight, bound as set 1, binding 0. A draw reads its record at gl_InstanceIndex, so it passes the
-/// record's index as firstInstance. Main thread only. Per frame: <see cref="BeginFrame"/> after Renderer.BeginFrame,
-/// then renderers <see cref="Add"/> records (or <see cref="Reserve"/> them for a compute pass to write) and bind <see cref="Set"/>.
+/// The per-draw instance records, bound as set 1, binding 0; a draw reads its record at gl_InstanceIndex, so it passes
+/// the record's index as firstInstance. Two stores, one region each per frame in flight: records the CPU writes
+/// (<see cref="Add"/>, <see cref="Set"/>) stay in a persistently mapped host-visible buffer, VRAM under ReBAR; records a
+/// compute pass writes (<see cref="Reserve"/>, <see cref="GpuSet"/>) are device-local, never crossing PCIe. Main thread
+/// only. Per frame: <see cref="BeginFrame"/> after Renderer.BeginFrame, then renderers add or reserve records and bind
+/// the matching set.
 /// </summary>
 public sealed unsafe class InstanceBuffer : IDisposable
 {
     public const int Capacity = 16384;
+    public const int GpuCapacity = 8192;
 
-    // 16384 * 32 B = 512 KiB a frame, a multiple of 256 so per-frame offsets meet storage buffer alignment.
+    // 32 B records: 512 KiB and 256 KiB a frame, multiples of 256 so per-frame offsets meet storage buffer alignment.
     private const int FrameBytes = Capacity * 32;
+    private const int GpuFrameBytes = GpuCapacity * 32;
 
     private readonly Device _device;
     private readonly GpuBuffer _buffer;
+    private readonly GpuBuffer _gpuBuffer;
     private readonly VkDescriptorPool _pool;
     private readonly VkDescriptorSet[] _sets = new VkDescriptorSet[Renderer.FramesInFlight];
+    private readonly VkDescriptorSet[] _gpuSets = new VkDescriptorSet[Renderer.FramesInFlight];
     private InstanceRecord* _records;
     private int _frame;
     private int _count;
+    private int _gpuCount;
 
     public InstanceBuffer(Renderer renderer)
     {
@@ -49,17 +56,22 @@ public sealed unsafe class InstanceBuffer : IDisposable
         var context = renderer.Context;
         _device = context.Device;
         _buffer = new GpuBuffer(context, FrameBytes * Renderer.FramesInFlight, VkBufferUsageFlags.StorageBufferBit, true);
+        _gpuBuffer = new GpuBuffer(context, GpuFrameBytes * Renderer.FramesInFlight, VkBufferUsageFlags.StorageBufferBit, false);
         SetLayout = CreateSetLayout();
         _pool = CreatePool();
-        CreateSets();
+        CreateSets(_sets, _buffer, FrameBytes);
+        CreateSets(_gpuSets, _gpuBuffer, GpuFrameBytes);
         BeginFrame(0);
     }
 
     /// <summary>Set 1 of every pipeline that reads instance records.</summary>
     public VkDescriptorSetLayout SetLayout { get; }
 
-    /// <summary>This frame's records.</summary>
+    /// <summary>This frame's CPU-written records.</summary>
     public VkDescriptorSet Set => _sets[_frame];
+
+    /// <summary>This frame's GPU-written records.</summary>
+    public VkDescriptorSet GpuSet => _gpuSets[_frame];
 
     public int Count => _count;
 
@@ -68,6 +80,7 @@ public sealed unsafe class InstanceBuffer : IDisposable
     {
         _frame = frameIndex;
         _count = 0;
+        _gpuCount = 0;
         _records = (InstanceRecord*)((byte*)_buffer.Mapped + frameIndex * FrameBytes);
     }
 
@@ -84,14 +97,14 @@ public sealed unsafe class InstanceBuffer : IDisposable
         return _count++;
     }
 
-    /// <summary>Reserves <paramref name="count"/> records for the GPU to write this frame. Returns the first index, or -1 when full.</summary>
+    /// <summary>Reserves <paramref name="count"/> device-local records (<see cref="GpuSet"/>) for a compute pass to write this frame. Returns the first index, or -1 when full.</summary>
     public int Reserve(int count)
     {
-        if (_count + count > Capacity)
+        if (_gpuCount + count > GpuCapacity)
             return -1;
 
-        var first = _count;
-        _count += count;
+        var first = _gpuCount;
+        _gpuCount += count;
         return first;
     }
 
@@ -110,15 +123,15 @@ public sealed unsafe class InstanceBuffer : IDisposable
 
     private VkDescriptorPool CreatePool()
     {
-        var size = new VkDescriptorPoolSize { Type = VkDescriptorType.StorageBuffer, DescriptorCount = Renderer.FramesInFlight };
+        var size = new VkDescriptorPoolSize { Type = VkDescriptorType.StorageBuffer, DescriptorCount = 2 * Renderer.FramesInFlight };
 
         return _device.CreateDescriptorPool(
-            new VkDescriptorPoolCreateInfo { MaxSets = Renderer.FramesInFlight, PoolSizeCount = 1, PoolSizes = &size },
+            new VkDescriptorPoolCreateInfo { MaxSets = 2 * Renderer.FramesInFlight, PoolSizeCount = 1, PoolSizes = &size },
             null
         );
     }
 
-    private void CreateSets()
+    private void CreateSets(VkDescriptorSet[] sets, GpuBuffer buffer, int frameBytes)
     {
         var layouts = stackalloc VkDescriptorSetLayout[Renderer.FramesInFlight];
 
@@ -132,23 +145,23 @@ public sealed unsafe class InstanceBuffer : IDisposable
                 DescriptorSetCount = Renderer.FramesInFlight,
                 SetLayouts = layouts,
             },
-            _sets
+            sets
         );
 
         for (var i = 0; i < Renderer.FramesInFlight; i++)
         {
             var info = new VkDescriptorBufferInfo
             {
-                Buffer = _buffer.Handle,
-                Offset = (ByteSize64)(i * FrameBytes),
-                Range = (ByteSize64)FrameBytes,
+                Buffer = buffer.Handle,
+                Offset = (ByteSize64)(i * frameBytes),
+                Range = (ByteSize64)frameBytes,
             };
 
             _device.UpdateDescriptorSets(
                 [
                     new VkWriteDescriptorSet
                     {
-                        DstSet = _sets[i],
+                        DstSet = sets[i],
                         DstBinding = 0,
                         DescriptorCount = 1,
                         DescriptorType = VkDescriptorType.StorageBuffer,
@@ -166,6 +179,7 @@ public sealed unsafe class InstanceBuffer : IDisposable
         _device.WaitIdle();
         _device.DestroyDescriptorPool(_pool, null);
         _device.DestroyDescriptorSetLayout(SetLayout, null);
+        _gpuBuffer.Dispose();
         _buffer.Dispose();
     }
 }

@@ -5,7 +5,8 @@ using Brutal.VulkanApi.Vma;
 namespace BrutalGame.Engine.Rendering;
 
 /// <summary>
-/// VMA sub-allocated buffer. Host-visible buffers stay persistently mapped.
+/// VMA sub-allocated buffer. Host-visible buffers stay persistently mapped: write-combined for the host to write, or
+/// cached where the device has it for the host to read back (<c>hostRead</c>).
 /// </summary>
 public sealed unsafe class GpuBuffer : IDisposable
 {
@@ -15,8 +16,9 @@ public sealed unsafe class GpuBuffer : IDisposable
     private readonly VmaAllocator _allocator;
     private readonly VmaAllocation _allocation;
 
-    public GpuBuffer(VulkanContext context, int size, VkBufferUsageFlags usage, bool hostVisible)
+    public GpuBuffer(VulkanContext context, int size, VkBufferUsageFlags usage, bool hostVisible, bool hostRead = false)
     {
+        hostVisible |= hostRead;
         _allocator = context.Allocator;
         Size = size;
 
@@ -31,8 +33,9 @@ public sealed unsafe class GpuBuffer : IDisposable
             ? new VmaAllocationCreateInfo
             {
                 Usage = VmaMemoryUsage.Auto,
-                Flags = VmaAllocationCreateFlags.HostAccessSequentialWriteBit | VmaAllocationCreateFlags.MappedBit,
+                Flags = (hostRead ? VmaAllocationCreateFlags.HostAccessRandomBit : VmaAllocationCreateFlags.HostAccessSequentialWriteBit) | VmaAllocationCreateFlags.MappedBit,
                 RequiredFlags = VkMemoryPropertyFlags.HostVisibleBit | VkMemoryPropertyFlags.HostCoherentBit,
+                PreferredFlags = hostRead ? VkMemoryPropertyFlags.HostCachedBit : default,
             }
             : new VmaAllocationCreateInfo { Usage = VmaMemoryUsage.AutoPreferDevice };
 

@@ -94,6 +94,9 @@ public sealed unsafe class OceanRenderer : IDisposable
     /// </summary>
     private const double TimeWrap = 3000.0;
 
+    /// <summary>The foam lace's period (m): water_shading.glsl LACE_PERIOD cells over LACE_SCALE cells a metre.</summary>
+    private const double LacePeriod = 256.0 / 1.4;
+
     private readonly OceanFft _fft;
     // Surf foam left behind (ocean_surf_foam.comp): one float per cell of the depth map's 512² grid, GPU only, shared by
     // all frames; cleared when the depth map re-centres.
@@ -537,16 +540,17 @@ public sealed unsafe class OceanRenderer : IDisposable
 
     /// <summary>
     /// Per cascade, the camera's position in its tile, frac(camera / L), in double: the shader samples a cascade at
-    /// x / L + this (x camera-relative), so texture coordinates stay small anywhere in the world. W carries the camera
-    /// in the sea frame for the foam lace's noise, which has no period to wrap at.
+    /// x / L + this (x camera-relative), so texture coordinates stay small anywhere in the world. W is the camera modulo
+    /// the foam lace's period (<see cref="LacePeriod"/>), wrapped the same way.
     /// </summary>
     private static (Vector4 X, Vector4 Z) CascadeAnchors(Vector4 sizes, double3 camera)
     {
         static float Frac(double v) => (float)(v - Math.Floor(v));
+        static float Wrap(double v) => (float)(v - LacePeriod * Math.Floor(v / LacePeriod));
 
         return (
-            new Vector4(Frac(camera.X / sizes.X), Frac(camera.X / sizes.Y), Frac(camera.X / sizes.Z), (float)camera.X),
-            new Vector4(Frac(camera.Z / sizes.X), Frac(camera.Z / sizes.Y), Frac(camera.Z / sizes.Z), (float)camera.Z));
+            new Vector4(Frac(camera.X / sizes.X), Frac(camera.X / sizes.Y), Frac(camera.X / sizes.Z), Wrap(camera.X)),
+            new Vector4(Frac(camera.Z / sizes.X), Frac(camera.Z / sizes.Y), Frac(camera.Z / sizes.Z), Wrap(camera.Z)));
     }
 
     private static void Barrier(CommandBuffer commands, VkPipelineStageFlags srcStage, VkAccessFlags srcAccess, VkPipelineStageFlags dstStage, VkAccessFlags dstAccess) =>

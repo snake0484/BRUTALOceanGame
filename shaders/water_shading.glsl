@@ -1,12 +1,14 @@
 // Water shading for the ocean surface (ocean.frag): the body by depth, sky reflection, sun, foam lace, tonemap and fog.
 // Needs a uniform block named frame with cameraPos (w = time), sunDir (w = intensity), skyZenith, skyHorizon (w = fog
-// density), waterDeep, waterScatter and cascadeAnchorX/Z (w = camera in the sea frame). Fragment stage only (fwidth).
+// density), waterDeep, waterScatter and cascadeAnchorX/Z (w = camera in the sea frame mod LACE_PERIOD / LACE_SCALE).
+// Fragment stage only (fwidth).
 #ifndef WATER_SHADING_GLSL
 #define WATER_SHADING_GLSL
 
 #ifndef WATER_NOISE_GLSL
 #define WATER_NOISE_GLSL
 const float LACE_WRAP = 600.0;  // seconds: foam texture clocks wrap so noise coordinates stay small
+const float NOISE_CELLS = 128.0; // valueNoise repeats every this many cells (lace: LACE_PERIOD)
 
 float hash12(vec2 p)
 {
@@ -15,12 +17,14 @@ float hash12(vec2 p)
     return fract((p3.x + p3.y) * p3.z);
 }
 
+// Value noise on a lattice wrapped every NOISE_CELLS, so a field built from it can have a period to wrap positions at.
 float valueNoise(vec2 p)
 {
-    vec2 i = floor(p);
+    vec2 i = mod(floor(p), NOISE_CELLS);
+    vec2 j = mod(i + 1.0, NOISE_CELLS);
     vec2 f = fract(p);
     vec2 u = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash12(i), hash12(i + vec2(1.0, 0.0)), u.x), mix(hash12(i + vec2(0.0, 1.0)), hash12(i + 1.0), u.x), u.y);
+    return mix(mix(hash12(i), hash12(vec2(j.x, i.y)), u.x), mix(hash12(vec2(i.x, j.y)), hash12(j), u.x), u.y);
 }
 #endif
 
@@ -70,21 +74,24 @@ vec3 acesFit(vec3 x)
 }
 
 const float LACE_SCALE = 1.4;      // lace cells per metre
+const float LACE_PERIOD = 2.0 * NOISE_CELLS; // lace cells: lace() repeats over this (OceanRenderer.LacePeriod = this / LACE_SCALE m)
 const float LACE_CALM = 0.35;      // churn rate of foam left lying on the water ...
 const float LACE_ROLLER = 1.6;     // ... and of fresh whitewater in a breaking crest
 
 // Ridged noise, high along a network of veins between cells: the shape of foam lace on broken water. Time t churns it:
 // the domain warp and the fine bubbles drift, so the veins wriggle, break and re-form in place instead of sliding.
+// Periodic in p over LACE_PERIOD: the warp's lattice is at half scale and the finer octaves' grids are integer matrices.
 float lace(vec2 p, float t)
 {
-    // Each octave on its own rotated grid, so the veins don't line up with the noise lattice into squares.
-    const mat2 turnB = mat2(0.6, 0.8, -0.8, 0.6);
-    const mat2 turnC = mat2(-0.28, 0.96, -0.96, -0.28);
+    // Each octave on its own rotated grid (45 and 108 degrees, x2.83 and x6.32), so the veins don't line up with the
+    // noise lattice into squares.
+    const mat2 turnB = mat2(2.0, 2.0, -2.0, 2.0);
+    const mat2 turnC = mat2(-2.0, 6.0, -6.0, -2.0);
     vec2 drift = vec2(0.21, -0.17) * t;
     vec2 w = p + 0.5 * vec2(valueNoise(p * 0.5 + 5.2 + drift), valueNoise(p * 0.5 + 9.7 - drift.yx));
     float a = 1.0 - abs(2.0 * valueNoise(w + 0.3 * drift.yx) - 1.0);
-    float b = 1.0 - abs(2.0 * valueNoise(turnB * w * 2.7 + 13.1 + 1.7 * drift) - 1.0);
-    float c = 1.0 - abs(2.0 * valueNoise(turnC * w * 6.3 + 41.7 + vec2(0.9, 0.6) * t) - 1.0);
+    float b = 1.0 - abs(2.0 * valueNoise(turnB * w + 13.1 + 1.7 * drift) - 1.0);
+    float c = 1.0 - abs(2.0 * valueNoise(turnC * w + 41.7 + vec2(0.9, 0.6) * t) - 1.0);
     return 0.5 * a * a + 0.3 * b * b + 0.2 * c * c;
 }
 

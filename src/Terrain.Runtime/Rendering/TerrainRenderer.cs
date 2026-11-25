@@ -14,10 +14,11 @@ namespace BrutalGame.Terrain.Runtime.Rendering;
 
 /// <summary>
 /// Draws terrain chunks from one device-local vertex arena and one index arena with one indirect draw (review C8, P4):
-/// a GPU chunk table mirrors the live slots, and a compute pass frustum-culls it into instance records and
+/// a GPU chunk table mirrors the live slots, and a compute pass frustum-culls it into device-local instance records and
 /// VkDrawIndexedIndirectCommands. Uploads (meshes and table records) go through a host-visible staging ring and are
-/// copied before the main pass. Main thread only. Per frame: Upload/Free (any time), RecordUploads (after BeginFrame),
-/// Cull (after InstanceBuffer.BeginFrame, outside a pass), Draw (in the pass).
+/// copied before the main pass. The host never reads GPU-written memory in the frame loop: draw stats are copied to a
+/// small readback buffer only while <see cref="StatsEnabled"/>. Main thread only. Per frame: Upload/Free (any time),
+/// RecordUploads (after BeginFrame), Cull (after InstanceBuffer.BeginFrame, outside a pass), Draw (in the pass).
 /// </summary>
 public sealed unsafe class TerrainRenderer : IDisposable
 {
@@ -45,8 +46,9 @@ public sealed unsafe class TerrainRenderer : IDisposable
     /// <summary>Past this the camera's whole-chunk cast nears int range; no terrain is visible from that far anyway.</summary>
     private const double MaxCameraMetres = (1 << 24) * ChunkMetres;
 
-    // Per frame in flight: a 16 B header (draw count, index total) then one VkDrawIndexedIndirectCommand per slot.
+    // Per frame in flight, device-local: a 16 B header (draw count, index total) then one VkDrawIndexedIndirectCommand per slot.
     private const int DrawHeaderBytes = 16;
+    private const int StatsBytes = 8;
     private const int DrawCommandStride = 20;
     private const int DrawRegionBytes = (DrawHeaderBytes + MaxHandles * DrawCommandStride + UniformAlignment - 1) / UniformAlignment * UniformAlignment;
     private const int CullGroupSize = 64;
@@ -60,6 +62,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
     private readonly GpuBuffer _chunkTable;
     private readonly GpuBuffer _draws;
     private readonly GpuBuffer _cullUniforms;
+    private readonly GpuBuffer _statsReadback;
     private readonly InstanceBuffer _instances;
     private readonly bool _indirectCount;
     private readonly RangeAllocator _vertexRanges;
@@ -82,6 +85,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
     private readonly VkBufferCopy[] _indexCopies = new VkBufferCopy[MaxUploadsPerFrame];
     private readonly int[] _dirty = new int[MaxHandles];
     private readonly VkBufferCopy[] _tableCopies = new VkBufferCopy[MaxHandles];
+    private readonly StatsState[] _stats = new StatsState[Renderer.FramesInFlight];
 
     private int _freeHandleCount;
     private int _liveCount;
@@ -108,6 +112,13 @@ public sealed unsafe class TerrainRenderer : IDisposable
         public int LiveIndex;
         public bool Used;
         public bool Dirty;
+    }
+
+    private enum StatsState : byte
+    {
+        None,
+        Copied,
+        NothingDrawn,
     }
 
     private struct PendingFree
@@ -181,11 +192,14 @@ public sealed unsafe class TerrainRenderer : IDisposable
         _staging = new GpuBuffer(context, StagingRegionBytes * StagingRegions, VkBufferUsageFlags.TransferSrcBit, true);
         _uniforms = new GpuBuffer(context, UniformStride * Renderer.FramesInFlight, VkBufferUsageFlags.UniformBufferBit, true);
         _chunkTable = new GpuBuffer(context, MaxHandles * ChunkStride, VkBufferUsageFlags.StorageBufferBit | VkBufferUsageFlags.TransferDstBit, false);
-        _draws = new GpuBuffer(context, DrawRegionBytes * Renderer.FramesInFlight, VkBufferUsageFlags.StorageBufferBit | VkBufferUsageFlags.IndirectBufferBit, true);
+        _draws = new GpuBuffer(
+            context,
+            DrawRegionBytes * Renderer.FramesInFlight,
+            VkBufferUsageFlags.StorageBufferBit | VkBufferUsageFlags.IndirectBufferBit | VkBufferUsageFlags.TransferDstBit | VkBufferUsageFlags.TransferSrcBit,
+            false
+        );
         _cullUniforms = new GpuBuffer(context, UniformAlignment * Renderer.FramesInFlight, VkBufferUsageFlags.UniformBufferBit, true);
-
-        for (var i = 0; i < Renderer.FramesInFlight; i++)
-            new Span<byte>((byte*)_draws.Mapped + i * DrawRegionBytes, DrawHeaderBytes).Clear();
+        _statsReadback = new GpuBuffer(context, StatsBytes * Renderer.FramesInFlight, VkBufferUsageFlags.TransferDstBit, false, hostRead: true);
 
         for (var i = 0; i < MaxHandles; i++)
             _freeHandles[i] = MaxHandles - 1 - i;
@@ -209,7 +223,10 @@ public sealed unsafe class TerrainRenderer : IDisposable
 
     public int ChunkCount => _liveCount;
 
-    /// <summary>Chunks the GPU cull drew, read back once the frame's fence has signalled (frames in flight behind).</summary>
+    /// <summary>Copy the GPU cull's draw count and index total back for <see cref="DrawnLastFrame"/> (a stats panel is open).</summary>
+    public bool StatsEnabled { get; set; }
+
+    /// <summary>Chunks the GPU cull drew, read once the frame's fence has signalled (frames in flight behind); held while stats are off.</summary>
     public int DrawnLastFrame { get; private set; }
 
     public int TrianglesLastFrame { get; private set; }
@@ -345,13 +362,18 @@ public sealed unsafe class TerrainRenderer : IDisposable
     }
 
     /// <summary>
-    /// Call once per submitted frame, after Renderer.BeginFrame and before <see cref="Cull"/>. Records staged mesh and
-    /// chunk table copies plus a transfer -> vertex input and compute barrier, and releases deferred frees.
+    /// Call once per submitted frame, after Renderer.BeginFrame and before <see cref="Cull"/>. Zeroes this frame's draw
+    /// counters, records staged mesh and chunk table copies plus one transfer -> vertex input and compute barrier, and
+    /// releases deferred frees.
     /// </summary>
     public void RecordUploads(CommandBuffer commands, int frameIndex)
     {
         ReleaseDeferred();
         var tableCopies = StageTable();
+
+        // The region's last reader finished before BeginFrame's fence wait. Filled here, at the frame's start, so the
+        // barrier below covers it with the uploads instead of draining the pipeline before the cull.
+        commands.FillBuffer(_draws.Handle, (ByteSize64)((long)frameIndex * DrawRegionBytes), (ByteSize64)(long)DrawHeaderBytes, 0);
 
         if (_copyCount > 0)
         {
@@ -366,23 +388,13 @@ public sealed unsafe class TerrainRenderer : IDisposable
             commands.CopyBuffer(_staging.Handle, _chunkTable.Handle, new ReadOnlySpan<VkBufferCopy>(_tableCopies, 0, tableCopies));
         }
 
-        if (_copyCount > 0 || tableCopies > 0)
-        {
-            commands.PipelineBarrier(
-                VkPipelineStageFlags.TransferBit,
-                VkPipelineStageFlags.VertexInputBit | VkPipelineStageFlags.ComputeShaderBit,
-                VkDependencyFlags.None,
-                [
-                    new VkMemoryBarrier
-                    {
-                        SrcAccessMask = VkAccessFlags.TransferWriteBit,
-                        DstAccessMask = VkAccessFlags.VertexAttributeReadBit | VkAccessFlags.IndexReadBit | VkAccessFlags.ShaderReadBit,
-                    },
-                ],
-                [],
-                []
-            );
-        }
+        Barrier(
+            commands,
+            VkPipelineStageFlags.TransferBit,
+            VkAccessFlags.TransferWriteBit,
+            VkPipelineStageFlags.VertexInputBit | VkPipelineStageFlags.ComputeShaderBit,
+            VkAccessFlags.VertexAttributeReadBit | VkAccessFlags.IndexReadBit | VkAccessFlags.ShaderReadBit | VkAccessFlags.ShaderWriteBit
+        );
 
         _tableHighWater = _highWater;
         _copyCount = 0;
@@ -462,13 +474,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
     public void Cull(CommandBuffer commands, int frameIndex, in Matrix4x4 viewProj, double3 camera, doubleQuat rotation)
     {
         var start = Stopwatch.GetTimestamp();
-
-        // This region's last cull finished before BeginFrame's fence wait; host writes are visible at submit.
-        var header = (uint*)((byte*)_draws.Mapped + frameIndex * DrawRegionBytes);
-        DrawnLastFrame = (int)header[0];
-        TrianglesLastFrame = (int)(header[1] / 3);
-        header[0] = 0;
-        header[1] = 0;
+        ReadStats(frameIndex);
         _drawSlots = 0;
 
         var inRange = Math.Abs(camera.X) < MaxCameraMetres && Math.Abs(camera.Y) < MaxCameraMetres && Math.Abs(camera.Z) < MaxCameraMetres;
@@ -476,29 +482,60 @@ public sealed unsafe class TerrainRenderer : IDisposable
 
         if (first >= 0)
         {
+            // Counters zeroed by RecordUploads.
+            var region = (long)frameIndex * DrawRegionBytes;
             WriteCullUniforms(frameIndex, viewProj, camera, rotation, first);
             commands.BindPipeline(VkPipelineBindPoint.Compute, _cullPipeline);
-            commands.BindDescriptorSets(VkPipelineBindPoint.Compute, _cullLayout, 0, [_cullSets[frameIndex], _instances.Set], []);
+            commands.BindDescriptorSets(VkPipelineBindPoint.Compute, _cullLayout, 0, [_cullSets[frameIndex], _instances.GpuSet], []);
             commands.Dispatch((_tableHighWater + CullGroupSize - 1) / CullGroupSize, 1, 1);
-            commands.PipelineBarrier(
+            Barrier(
+                commands,
                 VkPipelineStageFlags.ComputeShaderBit,
-                VkPipelineStageFlags.DrawIndirectBit | VkPipelineStageFlags.VertexShaderBit | VkPipelineStageFlags.HostBit,
-                VkDependencyFlags.None,
-                [
-                    new VkMemoryBarrier
-                    {
-                        SrcAccessMask = VkAccessFlags.ShaderWriteBit,
-                        DstAccessMask = VkAccessFlags.IndirectCommandReadBit | VkAccessFlags.ShaderReadBit | VkAccessFlags.HostReadBit,
-                    },
-                ],
-                [],
-                []
+                VkAccessFlags.ShaderWriteBit,
+                VkPipelineStageFlags.DrawIndirectBit | VkPipelineStageFlags.VertexShaderBit | VkPipelineStageFlags.TransferBit,
+                VkAccessFlags.IndirectCommandReadBit | VkAccessFlags.ShaderReadBit | VkAccessFlags.TransferReadBit
             );
             _drawSlots = _tableHighWater;
+
+            if (StatsEnabled)
+                CopyStats(commands, frameIndex, region);
+        }
+        else if (StatsEnabled)
+        {
+            _stats[frameIndex] = StatsState.NothingDrawn;
         }
 
         _cullTicks = Stopwatch.GetTimestamp() - start;
     }
+
+    // The stats this region's last frame copied back: its fence has signalled (BeginFrame), so they are complete.
+    private void ReadStats(int frameIndex)
+    {
+        var state = _stats[frameIndex];
+        _stats[frameIndex] = StatsState.None;
+
+        if (state == StatsState.None)
+            return;
+
+        var stats = (uint*)((byte*)_statsReadback.Mapped + frameIndex * StatsBytes);
+        var copied = state == StatsState.Copied;
+        DrawnLastFrame = copied ? (int)stats[0] : 0;
+        TrianglesLastFrame = copied ? (int)(stats[1] / 3) : 0;
+    }
+
+    private void CopyStats(CommandBuffer commands, int frameIndex, long region)
+    {
+        commands.CopyBuffer(
+            _draws.Handle,
+            _statsReadback.Handle,
+            [new VkBufferCopy { SrcOffset = (ByteSize64)region, DstOffset = (ByteSize64)(long)(frameIndex * StatsBytes), Size = (ByteSize64)(long)StatsBytes }]
+        );
+        Barrier(commands, VkPipelineStageFlags.TransferBit, VkAccessFlags.TransferWriteBit, VkPipelineStageFlags.HostBit, VkAccessFlags.HostReadBit);
+        _stats[frameIndex] = StatsState.Copied;
+    }
+
+    private static void Barrier(CommandBuffer commands, VkPipelineStageFlags srcStage, VkAccessFlags srcAccess, VkPipelineStageFlags dstStage, VkAccessFlags dstAccess) =>
+        commands.PipelineBarrier(srcStage, dstStage, VkDependencyFlags.None, [new VkMemoryBarrier { SrcAccessMask = srcAccess, DstAccessMask = dstAccess }], [], []);
 
     private void WriteCullUniforms(int frameIndex, in Matrix4x4 viewProj, double3 camera, doubleQuat rotation, int firstInstance)
     {
@@ -544,7 +581,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
             uniforms->SkyHorizon = new Vector4(lighting.SkyHorizon, lighting.FogDensity);
 
             commands.BindPipeline(VkPipelineBindPoint.Graphics, _pipeline);
-            commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex], _instances.Set], []);
+            commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex], _instances.GpuSet], []);
             commands.BindVertexBuffers(0, [_vertexArena.Handle], [(ByteSize64)0]);
             commands.BindIndexBuffer(_indexArena.Handle, (ByteSize64)0, VkIndexType.UInt32);
             commands.SetViewport(0, [new VkViewport { Width = extent.Width, Height = extent.Height, MaxDepth = 1f }]);
@@ -865,6 +902,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
         _device.DestroyDescriptorSetLayout(_setLayout, null);
         _device.DestroyDescriptorSetLayout(_cullSetLayout, null);
 
+        _statsReadback.Dispose();
         _cullUniforms.Dispose();
         _draws.Dispose();
         _chunkTable.Dispose();
