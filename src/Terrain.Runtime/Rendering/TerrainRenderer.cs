@@ -508,6 +508,14 @@ public sealed unsafe class TerrainRenderer : IDisposable
         _cullTicks = Stopwatch.GetTimestamp() - start;
     }
 
+    /// <summary>The terrain is not drawn this frame (camera outside the body's view): nothing is culled, so the stats read zero.</summary>
+    public void Skip(int frameIndex)
+    {
+        _stats[frameIndex] = StatsState.None;
+        DrawnLastFrame = 0;
+        TrianglesLastFrame = 0;
+    }
+
     // The stats this region's last frame copied back: its fence has signalled (BeginFrame), so they are complete.
     private void ReadStats(int frameIndex)
     {

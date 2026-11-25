@@ -230,7 +230,7 @@ public sealed class GameApp : IDisposable
                 var extent = _renderer.Extent;
                 var output = _renderer.OutputExtent;
                 var aspect = output.Width / (float)output.Height;
-                var renderTime = _swell.Time + _sim.Clock.Alpha * _sim.Clock.TickSeconds;
+                var renderTime = _sim.RenderTime;
                 var gpu = _renderer.GpuTimer;
                 var pipe = _renderer.PipelineStats;
                 var viewProj = _camera.ViewProjection(aspect);
@@ -267,6 +267,10 @@ public sealed class GameApp : IDisposable
                     gpu.Begin(commands, _terrainCullScope);
                     _terrainRenderer.Cull(commands, _renderer.FrameIndex, viewProj, terrainCamera, terrainAxes);
                     gpu.End(commands, _terrainCullScope);
+                }
+                else
+                {
+                    _terrainRenderer.Skip(_renderer.FrameIndex);
                 }
 
                 _renderer.BeginOpaquePass(commands);

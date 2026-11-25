@@ -122,7 +122,7 @@ public class SimBoundaryTests
 
         Assert.Equal(60, sim.Clock.TickIndex);
         Assert.Equal(1.0, sim.Clock.SimTime, 9);
-        Assert.Equal(59.0 / 60.0, sim.Ocean.Swell.Time, 9);
+        Assert.Equal(sim.Clock.SimTime, sim.Ocean.Swell.Time, 9); // swell, physics and frames all describe the step's end
         Assert.True(sim.Physics.GetPosition(ball).Y < 50f - 4f);
         Assert.True(float.IsFinite(sim.Ocean.SampleHeight(0f, 0f)));
     }

@@ -117,8 +117,8 @@ public sealed class SimWorld : IDisposable
     public void QueueEdit(in BrushOp op) => _pending.Add(new EditCommand(_clock.TickIndex, op));
 
     /// <summary>
-    /// Steps the sim from <c>TickIndex dt</c> to <c>(TickIndex + 1) dt</c>. Convention: when it returns, physics and the frame
-    /// poses both describe <see cref="FixedClock.SimTime"/> with the incremented <see cref="FixedClock.TickIndex"/>, so rails
+    /// Steps the sim from <c>TickIndex dt</c> to <c>(TickIndex + 1) dt</c>. Convention: when it returns, physics, the swell and the frame
+    /// poses all describe <see cref="FixedClock.SimTime"/> with the incremented <see cref="FixedClock.TickIndex"/>, so rails
     /// and spin are written for the step's end before the physics step runs (<c>Celestial.Tick == TickIndex</c>).
     /// </summary>
     public void Tick()
@@ -131,7 +131,7 @@ public sealed class SimWorld : IDisposable
         Physics.Step((float)dt);
 
         var start = Stopwatch.GetTimestamp();
-        Ocean.Swell.SetTime(_clock.TickIndex * dt);
+        Ocean.Swell.SetTime((_clock.TickIndex + 1) * dt);
         LastSwellMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
 
         _clock.TickIndex++;
