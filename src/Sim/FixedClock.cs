@@ -1,4 +1,4 @@
-namespace BrutalGame.Engine.Time;
+namespace BrutalGame.Sim;
 
 /// <summary>
 /// Fixed-step simulation clock. Sim time is derived from tick index so it stays deterministic.

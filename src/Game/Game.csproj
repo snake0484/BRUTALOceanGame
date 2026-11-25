@@ -23,7 +23,8 @@
   <ItemGroup>
     <ProjectReference Include="..\Engine\Engine.csproj" />
     <ProjectReference Include="..\Debug\Debug.csproj" />
-    <ProjectReference Include="..\Water\Water.csproj" />
+    <ProjectReference Include="..\Sim\Sim.csproj" />
+    <ProjectReference Include="..\Water.Rendering\Water.Rendering.csproj" />
     <ProjectReference Include="..\Terrain.Runtime\Terrain.Runtime.csproj" />
     <ProjectReference Include="..\Weather\Weather.csproj" />
   </ItemGroup>

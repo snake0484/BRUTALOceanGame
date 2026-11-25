@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>BrutalGame.Sim</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Physics\Physics.csproj" />
+    <ProjectReference Include="..\Terrain\Terrain.csproj" />
+    <ProjectReference Include="..\Water\Water.csproj" />
+  </ItemGroup>
+</Project>

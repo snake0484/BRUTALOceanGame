@@ -6,7 +6,7 @@ using BrutalGame.Engine.Jobs;
 using BrutalGame.Engine.Rendering;
 using BrutalGame.Engine.Scene;
 using BrutalGame.Engine.Time;
-using BrutalGame.Physics;
+using BrutalGame.Sim;
 using BrutalGame.Terrain.Runtime;
 using BrutalGame.Terrain.Runtime.Rendering;
 using BrutalGame.Water.Ocean;
@@ -17,7 +17,6 @@ namespace BrutalGame;
 
 public sealed class GameApp : IDisposable
 {
-    private const int TickRate = 60;
     private const int TimingSamples = 256;
     private const string Title = "BRUTALGame";
 #if DEBUG
@@ -31,10 +30,8 @@ public sealed class GameApp : IDisposable
     private readonly Renderer _renderer;
     private readonly ImGuiLayer _imgui;
     private readonly ProfilerPanel _profiler;
-    private readonly OceanSwell _swell = new(seed: 1);
-    private readonly TerrainShoreDepth _shoreDepth = new();
-    private readonly OceanSurface _surface;
-    private int _shoreOps = -1;
+    private readonly SimWorld _sim = new(seed: 1, WorkerBudget.Tick);
+    private readonly OceanSwell _swell;
     private readonly OceanPanel _oceanPanel;
     private readonly WeatherSystem _weather;
     private readonly WeatherPanel _weatherPanel;
@@ -46,10 +43,8 @@ public sealed class GameApp : IDisposable
     private readonly TerrainWorld _terrain;
     private readonly BathymetryTexture _bathymetry;
     private readonly TerrainPanel _terrainPanel;
-    private readonly PhysicsWorld _physics = new(workerThreads: WorkerBudget.Tick);
     private readonly TerrainBrush _brush;
     private readonly EditTest? _editTest;
-    private FixedClock _clock = new(TickRate);
     private readonly int _oceanScope;
     private readonly GpuBenchmark? _bench;
     private readonly FlyTest? _flyTest;
@@ -87,6 +82,7 @@ public sealed class GameApp : IDisposable
         });
         _window.OnKey += OnKey;
 
+        _swell = _sim.Ocean.Swell;
         _renderer = new Renderer(_window, _stats, Validation, vsync: benchSeconds <= 0.0, renderScale);
         _imgui = new ImGuiLayer(_window, _renderer);
 
@@ -100,19 +96,18 @@ public sealed class GameApp : IDisposable
         _weather = new WeatherSystem(new WeatherClimate(), weatherOffset * 60.0, CameraXZ);
         _swell.SetWind(weather ? _weather.WithWind(wind) : wind);
         _oceanFft = new OceanFft(_renderer) { DebugView = foamDebug };
-        _surface = new OceanSurface(_swell, _shoreDepth);
-        _oceanPanel = new OceanPanel(_surface, _oceanFft);
+        _oceanPanel = new OceanPanel(_sim.Ocean, _oceanFft);
         _weatherPanel = new WeatherPanel(_weather.Map) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset };
         _terrainRenderer = new TerrainRenderer(_renderer);
-        _terrain = new TerrainWorld(_terrainRenderer, _physics);
+        _terrain = new TerrainWorld(_terrainRenderer, _sim.Physics);
 
         // Without --cam, 55 m off the west beach, 28 m up, looking at it.
         if (camera is null)
             _camera.Position = new System.Numerics.Vector3(Coastline.WestX(_terrain.Params, 0f) - 55f, 28f, 0f);
 
-        _brush = new TerrainBrush(_terrain, _physics, _camera);
-        _editTest = editTest ? new EditTest(_terrain, _physics, _brush, _camera) : null;
-        _terrainPanel = new TerrainPanel(_terrain, _terrainRenderer, _physics);
+        _brush = new TerrainBrush(_terrain, _sim.Physics, _camera);
+        _editTest = editTest ? new EditTest(_terrain, _sim.Physics, _brush, _camera) : null;
+        _terrainPanel = new TerrainPanel(_terrain, _terrainRenderer, _sim.Physics);
         _bathymetry = new BathymetryTexture(_renderer);
         _ocean = new OceanRenderer(_renderer, _oceanFft, _bathymetry.View, _bathymetry.Sampler);
         _flyTest = flyTest ? new FlyTest(_camera, _terrain, _bathymetry) : null;
@@ -182,15 +177,15 @@ public sealed class GameApp : IDisposable
             RunTicks(frameSeconds);
             _sections.Ticks = Lap(ref mark);
             _camera.Update(_window, (float)frameSeconds, _imgui.WantCaptureMouse, _imgui.WantCaptureKeyboard);
-            _flyTest?.Fly(_clock.SimTime, WorldReady);
+            _flyTest?.Fly(_sim.Clock.SimTime, WorldReady);
 
             var terrainStart = Stopwatch.GetTimestamp();
             mark = terrainStart;
             _brush.Update(_window, (float)frameSeconds, _imgui.WantCaptureMouse);
-            _editTest?.Update(_clock.SimTime);
+            _editTest?.Update(_sim.Clock.SimTime);
             _terrainPanel.BrushRadius = _brush.Radius;
             _terrain.Update(_camera.Position);
-            SnapshotShoreDepth();
+            _sim.SnapshotTerrain(_terrain.Params, _terrain.Ops);
             _sections.Terrain = Lap(ref mark);
             UpdateWeather();
             UpdateBench();
@@ -204,7 +199,7 @@ public sealed class GameApp : IDisposable
                 var extent = _renderer.Extent;
                 var output = _renderer.OutputExtent;
                 var aspect = output.Width / (float)output.Height;
-                var renderTime = _swell.Time + _clock.Alpha * _clock.TickSeconds;
+                var renderTime = _swell.Time + _sim.Clock.Alpha * _sim.Clock.TickSeconds;
                 var gpu = _renderer.GpuTimer;
                 var pipe = _renderer.PipelineStats;
                 var viewProj = _camera.ViewProjection(aspect);
@@ -225,7 +220,7 @@ public sealed class GameApp : IDisposable
                 _ocean.Prepare(_renderer.FrameIndex, _swell, renderTime, viewProj, _camera.Position, _bathymetry.Rect);
                 _sections.Prepare = Lap(ref mark);
                 gpu.Begin(commands, _oceanComputeScope);
-                _ocean.RecordCompute(commands, _renderer.FrameIndex, (float)frameSeconds, _clock.TickIndex);
+                _ocean.RecordCompute(commands, _renderer.FrameIndex, (float)frameSeconds, _sim.Clock.TickIndex);
                 gpu.End(commands, _oceanComputeScope);
 
                 _renderer.BeginOpaquePass(commands);
@@ -260,7 +255,7 @@ public sealed class GameApp : IDisposable
             _sections.Record = _stats.Record.Last;
             _sections.Present = _stats.Present.Last;
             _sections.GpuWait = _stats.GpuWait.Last;
-            _flyTest?.Record(_clock.SimTime, _sections);
+            _flyTest?.Record(_sim.Clock.SimTime, _sections);
 
             if (_flyTest is { Done: true })
                 _window.ShouldClose = true;
@@ -273,16 +268,6 @@ public sealed class GameApp : IDisposable
         _weather.Update(CameraXZ, _swell, _ocean, _clearSky, _weatherPanel.DriveOcean, _weatherPanel.DriveSky);
         var horizon = _ocean.SkyHorizon;
         _renderer.ClearColor = new float4(horizon.X, horizon.Y, horizon.Z, 1f);
-    }
-
-    /// <summary>The surface's depth cap reads the analytic terrain plus edits; re-snapshot when an edit lands (between ticks).</summary>
-    private void SnapshotShoreDepth()
-    {
-        if (_terrain.Ops.Count == _shoreOps)
-            return;
-
-        _shoreDepth.Snapshot(_terrain.Params, _terrain.Ops);
-        _shoreOps = _terrain.Ops.Count;
     }
 
     private bool WorldReady => _terrain.LoadedChunks > 0 && _terrain.PendingJobs == 0;
@@ -300,31 +285,22 @@ public sealed class GameApp : IDisposable
 
     private void RunTicks(double frameSeconds)
     {
-        var ticks = _clock.Advance(frameSeconds);
+        var ticks = _sim.Advance(frameSeconds);
         for (var i = 0; i < ticks; i++)
         {
             var tickStart = Stopwatch.GetTimestamp();
-            Tick(_clock.TickIndex, _clock.TickSeconds);
-            _clock.TickIndex++;
+            _weather.Tick(_sim.Clock.SimTime + _weatherPanel.TimeOffset, CameraXZ);
+            _weatherPanel.TickMs.Record((float)Stopwatch.GetElapsedTime(tickStart).TotalMilliseconds);
+
+            _sim.Tick();
+            _oceanPanel.PrepareMs.Record(_sim.LastSwellMs);
             _stats.Tick.Record((float)Stopwatch.GetElapsedTime(tickStart).TotalMilliseconds);
         }
 
+        ref readonly var clock = ref _sim.Clock;
         _stats.TicksThisFrame = ticks;
-        _stats.TickIndex = _clock.TickIndex;
-        _stats.SimTime = _clock.SimTime;
-    }
-
-    private void Tick(long tickIndex, double dt)
-    {
-        _physics.Step((float)dt);
-
-        var start = Stopwatch.GetTimestamp();
-        _weather.Tick(tickIndex * dt + _weatherPanel.TimeOffset, CameraXZ);
-        _weatherPanel.TickMs.Record((float)Stopwatch.GetElapsedTime(start).TotalMilliseconds);
-
-        start = Stopwatch.GetTimestamp();
-        _swell.SetTime(tickIndex * dt);
-        _oceanPanel.PrepareMs.Record((float)Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+        _stats.TickIndex = clock.TickIndex;
+        _stats.SimTime = clock.SimTime;
     }
 
     private SceneLighting SceneLightingFromOcean() => new()
@@ -383,7 +359,7 @@ public sealed class GameApp : IDisposable
         _renderer.WaitIdle();
         _terrain.Dispose();
         _terrainRenderer.Dispose();
-        _physics.Dispose();
+        _sim.Dispose();
         _ocean.Dispose();
         _bathymetry.Dispose();
         _oceanFft.Dispose();

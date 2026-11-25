@@ -1,14 +1,14 @@
 using BrutalGame.Terrain;
 using BrutalGame.Water.Ocean;
 
-namespace BrutalGame;
+namespace BrutalGame.Sim;
 
 /// <summary>
 /// Water depth from the analytic terrain surface plus a snapshot of the brush edits (spheres cut into or added onto the
 /// column top), for the surface's depth cap. Unlike the streamed bathymetry it is the same at every LOD and needs no
 /// camera, so the CPU never reads the camera window (docs/pivot/review.md C7).
 /// </summary>
-public sealed class TerrainShoreDepth : IShoreDepth
+internal sealed class TerrainShoreDepth : IShoreDepth
 {
     private BrushOp[] _ops = new BrushOp[64];
     private int _opCount;
