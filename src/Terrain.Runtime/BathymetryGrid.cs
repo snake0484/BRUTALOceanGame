@@ -410,17 +410,6 @@ public sealed class BathymetryGrid
     /// <summary>Bumped on every rebuild.</summary>
     public int Version { get; private set; }
 
-    public bool IsSea(float x, float z)
-    {
-        var gx = (int)MathF.Floor((x - Origin.X) / CellSize);
-        var gz = (int)MathF.Floor((z - Origin.Y) / CellSize);
-
-        if ((uint)gx >= Resolution || (uint)gz >= Resolution)
-            return true;
-
-        return _sea[gx + gz * Resolution] != SeaState.Dry;
-    }
-
     public float SampleDepth(float x, float z)
     {
         var gx = (int)MathF.Floor((x - Origin.X) / CellSize);

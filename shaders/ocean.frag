@@ -2,9 +2,6 @@
 #extension GL_GOOGLE_include_directive : require
 // Ocean surface fragment shader: normal and foam from the CPU band plus FFT detail, shaded by ocean_shading.glsl.
 
-#define WATER_FOG_SET 0
-#define WATER_FOG_BINDING 9
-#define WATER_SSR_SET 1
 #include "ocean_common.glsl"
 #include "ocean_shading.glsl"
 #include "rain_ripples.glsl"
@@ -96,28 +93,19 @@ void main()
         return;
     }
 
-    float through;
-    vec3 colour = shadeWater(vWorldPos, N, max(waterDepth(vRestXZ), 0.0), thickness, foam, through);
+    vec3 colour = shadeWater(vWorldPos, N, max(waterDepth(vRestXZ), 0.0), thickness, foam);
 
-    // The terrain shows through the water: near the camera by the fog march's transmittance to the bed (through, already
-    // less the reflection's and foam's shares; the colour holds the far field's estimate of the sand), and where the march hands over to the far
-    // field (or with the fog off) thin open water is see-through (SHEET_OPAQUE): the share of the pixel that is neither
-    // the sky's reflection, foam nor the water body (which builds up over the first SHEET_OPAQUE of thickness). Either
-    // way the terrain is darkened to WET_SAND as wet sand is; the blend is straight alpha, so that share is taken off
-    // the alpha. Opaque at distance, where the fog has the pixel anyway.
-    vec3 toEye = frame.cameraPos.xyz - vWorldPos;
-    float eyeDist = length(toEye);
-    float aerial = exp(-eyeDist * frame.skyHorizon.w);
-    float thin = 0.0;
+    // The terrain shows through thin open water (SHEET_OPAQUE): the share of the pixel that is neither the sky's
+    // reflection, foam nor the water body (which builds up over the first SHEET_OPAQUE of thickness). The terrain is
+    // darkened to WET_SAND as wet sand is; the blend is straight alpha, so that share is taken off the alpha. Opaque at
+    // distance, where the fog has the pixel anyway.
     if (thickness < SHEET_OPAQUE)
     {
+        vec3 toEye = frame.cameraPos.xyz - vWorldPos;
+        float eyeDist = length(toEye);
         float Fv = fresnelSchlick(max(dot(N, toEye / max(eyeDist, 1e-4)), 0.0));
-        thin = (1.0 - Fv) * (1.0 - smoothstep(0.0, SHEET_OPAQUE, thickness)) * (1.0 - foam) * aerial * (1.0 - gFogNear);
-    }
+        float see = (1.0 - Fv) * (1.0 - smoothstep(0.0, SHEET_OPAQUE, thickness)) * (1.0 - foam) * exp(-eyeDist * frame.skyHorizon.w);
 
-    float see = max(through * aerial, thin);
-    if (see > 0.0)
-    {
         float alphaOpen = 1.0 - see * WET_SAND;
         colour *= (1.0 - see) / alphaOpen;
         alpha = alphaOpen * waterline;

@@ -35,9 +35,6 @@ public sealed unsafe class TerrainRenderer : IDisposable
 
     private readonly Device _device;
     private readonly PipelineCache _pipelines;
-
-    /// <summary>The water fog an underwater camera sees the ground through (water_fog.glsl, bindings 1 and 2).</summary>
-    private readonly WaterFogVolume _fog;
     private readonly GpuBuffer _vertexArena;
     private readonly GpuBuffer _indexArena;
     private readonly GpuBuffer _staging;
@@ -98,10 +95,8 @@ public sealed unsafe class TerrainRenderer : IDisposable
         public Vector4 SkyHorizon;
     }
 
-    public TerrainRenderer(Renderer renderer, WaterFogVolume fog)
+    public TerrainRenderer(Renderer renderer)
     {
-        _fog = fog;
-
         if (sizeof(PackedTerrainVertex) != VertexStride)
             throw new InvalidOperationException($"PackedTerrainVertex is {sizeof(PackedTerrainVertex)} bytes, expected {VertexStride}.");
 
@@ -391,23 +386,17 @@ public sealed unsafe class TerrainRenderer : IDisposable
                 DescriptorCount = 1,
                 StageFlags = VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit,
             },
-            new() { Binding = 1, DescriptorType = VkDescriptorType.UniformBuffer, DescriptorCount = 1, StageFlags = VkShaderStageFlags.FragmentBit },
-            new() { Binding = 2, DescriptorType = VkDescriptorType.CombinedImageSampler, DescriptorCount = 1, StageFlags = VkShaderStageFlags.FragmentBit },
         };
 
-        return _device.CreateDescriptorSetLayout(new VkDescriptorSetLayoutCreateInfo { BindingCount = 3, Bindings = bindings }, null);
+        return _device.CreateDescriptorSetLayout(new VkDescriptorSetLayoutCreateInfo { BindingCount = 1, Bindings = bindings }, null);
     }
 
     private VkDescriptorPool CreatePool()
     {
-        var sizes = stackalloc VkDescriptorPoolSize[]
-        {
-            new() { Type = VkDescriptorType.UniformBuffer, DescriptorCount = 2 * Renderer.FramesInFlight },
-            new() { Type = VkDescriptorType.CombinedImageSampler, DescriptorCount = Renderer.FramesInFlight },
-        };
+        var size = new VkDescriptorPoolSize { Type = VkDescriptorType.UniformBuffer, DescriptorCount = Renderer.FramesInFlight };
 
         return _device.CreateDescriptorPool(
-            new VkDescriptorPoolCreateInfo { MaxSets = Renderer.FramesInFlight, PoolSizeCount = 2, PoolSizes = sizes },
+            new VkDescriptorPoolCreateInfo { MaxSets = Renderer.FramesInFlight, PoolSizeCount = 1, PoolSizes = &size },
             null
         );
     }
@@ -437,13 +426,6 @@ public sealed unsafe class TerrainRenderer : IDisposable
                 Offset = (ByteSize64)(i * UniformStride),
                 Range = (ByteSize64)sizeof(FrameUniforms),
             };
-            var fogInfo = new VkDescriptorBufferInfo
-            {
-                Buffer = _fog.UniformBuffer,
-                Offset = (ByteSize64)_fog.UniformOffset(i),
-                Range = (ByteSize64)WaterFogVolume.UniformBytes,
-            };
-            var fogVolume = new VkDescriptorImageInfo { Sampler = _fog.Sampler, ImageView = _fog.View, ImageLayout = VkImageLayout.ShaderReadOnlyOptimal };
 
             _device.UpdateDescriptorSets(
                 [
@@ -454,22 +436,6 @@ public sealed unsafe class TerrainRenderer : IDisposable
                         DescriptorCount = 1,
                         DescriptorType = VkDescriptorType.UniformBuffer,
                         BufferInfo = &info,
-                    },
-                    new VkWriteDescriptorSet
-                    {
-                        DstSet = _sets[i],
-                        DstBinding = 1,
-                        DescriptorCount = 1,
-                        DescriptorType = VkDescriptorType.UniformBuffer,
-                        BufferInfo = &fogInfo,
-                    },
-                    new VkWriteDescriptorSet
-                    {
-                        DstSet = _sets[i],
-                        DstBinding = 2,
-                        DescriptorCount = 1,
-                        DescriptorType = VkDescriptorType.CombinedImageSampler,
-                        ImageInfo = &fogVolume,
                     },
                 ],
                 []

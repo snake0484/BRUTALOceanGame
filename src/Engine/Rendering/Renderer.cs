@@ -10,9 +10,8 @@ namespace BrutalGame.Engine.Rendering;
 /// <summary>
 /// Frame loop: wait, acquire, record an opaque pass (cleared) and a water pass over it into the offscreen
 /// <see cref="SceneTarget"/> at the render scale, bring that to the swapchain image (copied at scale 1, else a bilinear
-/// blit), draw the UI over it at native resolution, submit, present. Between the scene passes the frame's colour and depth
-/// are left readable by transfer (ScreenReflections copies both for the water to sample). The scene passes are
-/// compatible: pipelines are made against <see cref="RenderPass"/> and drawn in either; the UI's against <see cref="UiPass"/>.
+/// blit), draw the UI over it at native resolution, submit, present. The scene passes are compatible: pipelines are made
+/// against <see cref="RenderPass"/> and drawn in either; the UI's against <see cref="UiPass"/>.
 /// </summary>
 public sealed unsafe class Renderer : IDisposable
 {
@@ -112,12 +111,6 @@ public sealed unsafe class Renderer : IDisposable
     /// <summary>The swapchain's size: the UI draws at this.</summary>
     public VkExtent2D OutputExtent => Swapchain.Extent;
 
-    /// <summary>The scene colour: in TRANSFER_SRC between <see cref="EndOpaquePass"/> and <see cref="BeginWaterPass"/>.</summary>
-    public VkImage ColourImage => _scene.Colour;
-
-    /// <summary>The scene depth: in TRANSFER_SRC between <see cref="EndOpaquePass"/> and <see cref="BeginWaterPass"/>.</summary>
-    public VkImage DepthImage => _scene.Depth;
-
     private static VkExtent2D ScaledExtent(VkExtent2D extent, float scale) => new()
     {
         Width = Math.Max(1, (int)MathF.Round(extent.Width * scale)),
@@ -125,8 +118,8 @@ public sealed unsafe class Renderer : IDisposable
     };
 
     /// <summary>
-    /// The opaque pass clears both attachments and leaves both in TRANSFER_SRC; the water pass loads them from there and
-    /// leaves the colour in TRANSFER_SRC for the swapchain. Same formats and samples, so the two are compatible.
+    /// The opaque pass clears both attachments and leaves them as attachments; the water pass loads them and leaves the
+    /// colour in TRANSFER_SRC for the swapchain. Same formats and samples, so the two are compatible.
     /// </summary>
     private VkRenderPass CreateRenderPass(VkFormat format, bool opaque)
     {
@@ -141,8 +134,8 @@ public sealed unsafe class Renderer : IDisposable
                 StoreOp = VkAttachmentStoreOp.Store,
                 StencilLoadOp = VkAttachmentLoadOp.DontCare,
                 StencilStoreOp = VkAttachmentStoreOp.DontCare,
-                InitialLayout = opaque ? VkImageLayout.Undefined : VkImageLayout.TransferSrcOptimal,
-                FinalLayout = VkImageLayout.TransferSrcOptimal,
+                InitialLayout = opaque ? VkImageLayout.Undefined : VkImageLayout.ColorAttachmentOptimal,
+                FinalLayout = opaque ? VkImageLayout.ColorAttachmentOptimal : VkImageLayout.TransferSrcOptimal,
             },
             new VkAttachmentDescription
             {
@@ -152,8 +145,8 @@ public sealed unsafe class Renderer : IDisposable
                 StoreOp = opaque ? VkAttachmentStoreOp.Store : VkAttachmentStoreOp.DontCare,
                 StencilLoadOp = VkAttachmentLoadOp.DontCare,
                 StencilStoreOp = VkAttachmentStoreOp.DontCare,
-                InitialLayout = opaque ? VkImageLayout.Undefined : VkImageLayout.TransferSrcOptimal,
-                FinalLayout = opaque ? VkImageLayout.TransferSrcOptimal : VkImageLayout.DepthStencilAttachmentOptimal,
+                InitialLayout = opaque ? VkImageLayout.Undefined : VkImageLayout.DepthStencilAttachmentOptimal,
+                FinalLayout = VkImageLayout.DepthStencilAttachmentOptimal,
             },
         };
 
@@ -177,8 +170,8 @@ public sealed unsafe class Renderer : IDisposable
         const VkAccessFlags reads = VkAccessFlags.ColorAttachmentReadBit | VkAccessFlags.DepthStencilAttachmentReadBit;
 
         // Identical in both passes, as render pass compatibility requires. Into the pass: the previous frame's writes and
-        // its copy to the swapchain (the shared images are cleared), or the opaque pass and the copies out of it. Out of
-        // the pass: the colour and depth copied for reflections, or the colour copied to the swapchain.
+        // its copy to the swapchain (the shared images are cleared), or the opaque pass. Out of the pass: the colour copied
+        // to the swapchain.
         var dependencies = stackalloc VkSubpassDependency[]
         {
             new VkSubpassDependency
@@ -372,7 +365,7 @@ public sealed unsafe class Renderer : IDisposable
         );
     }
 
-    /// <summary>Closes the opaque pass: <see cref="ColourImage"/> and <see cref="DepthImage"/> are left in TRANSFER_SRC.</summary>
+    /// <summary>Closes the opaque pass; <see cref="BeginWaterPass"/> draws over it.</summary>
     public void EndOpaquePass(CommandBuffer commands) => commands.EndRenderPass();
 
     /// <summary>Opens the water pass over the opaque one (water, rain); <see cref="BeginUiPass"/> closes it.</summary>

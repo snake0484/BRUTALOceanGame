@@ -32,8 +32,6 @@ public sealed unsafe class SceneTarget : IDisposable
 
     public VkImage Colour => _colour;
 
-    public VkImage Depth => _depth;
-
     public VkFramebuffer Framebuffer { get; private set; }
 
     /// <summary>New images at <paramref name="extent"/>. The caller has waited for the device.</summary>
@@ -42,7 +40,7 @@ public sealed unsafe class SceneTarget : IDisposable
         Destroy();
         Extent = extent;
         _colourView = CreateImage(_colourFormat, VkImageUsageFlags.ColorAttachmentBit | VkImageUsageFlags.TransferSrcBit, VkImageAspectFlags.ColorBit, out _colour, out _colourAllocation);
-        _depthView = CreateImage(Swapchain.DepthFormat, VkImageUsageFlags.DepthStencilAttachmentBit | VkImageUsageFlags.TransferSrcBit, VkImageAspectFlags.DepthBit, out _depth, out _depthAllocation);
+        _depthView = CreateImage(Swapchain.DepthFormat, VkImageUsageFlags.DepthStencilAttachmentBit, VkImageAspectFlags.DepthBit, out _depth, out _depthAllocation);
 
         var attachments = stackalloc VkImageView[] { _colourView, _depthView };
         Framebuffer = _context.Device.CreateFramebuffer(

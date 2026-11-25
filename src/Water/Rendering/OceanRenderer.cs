@@ -146,15 +146,7 @@ public sealed unsafe class OceanRenderer : IDisposable
 
     /// <summary>Where rain can't reach (rain_cover.glsl): no rings under cover, and the rain pipelines read it through this set.</summary>
     private const int RainCoverBinding = 4 + SampledMaps;
-
-    /// <summary>The water fog the body is marched through (water_fog.glsl): its uniforms and its volume.</summary>
-    private const int FogUniformBinding = 5 + SampledMaps;
-    private const int FogVolumeBinding = 6 + SampledMaps;
-    private readonly WaterFogVolume _fog;
-
-    /// <summary>The opaque scene copied for the surface's reflections (water_ssr.glsl, set 1).</summary>
-    private readonly ScreenReflections _reflections;
-    private const int Bindings = 7 + SampledMaps;
+    private const int Bindings = 5 + SampledMaps;
     private readonly RainCover _rainCover;
     private readonly VmaAllocator _allocator;
     private readonly VkImage _carrierAtlas;
@@ -179,11 +171,9 @@ public sealed unsafe class OceanRenderer : IDisposable
     private readonly VkSampler _depthSampler;
 
     /// <param name="depthView">Signed depth map (BathymetryTexture), in SHADER_READ_ONLY_OPTIMAL.</param>
-    public OceanRenderer(Renderer renderer, OceanFft fft, VkImageView depthView, VkSampler depthSampler, RainCover rainCover, WaterFogVolume fog, ScreenReflections reflections)
+    public OceanRenderer(Renderer renderer, OceanFft fft, VkImageView depthView, VkSampler depthSampler, RainCover rainCover)
     {
         _rainCover = rainCover;
-        _fog = fog;
-        _reflections = reflections;
         _fft = fft;
         _depthView = depthView;
         _depthSampler = depthSampler;
@@ -222,7 +212,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         [
             new VkPushConstantRange { StageFlags = PushStages, Size = (ByteSize32)PushConstantSize },
         ];
-        _layout = _device.CreatePipelineLayout([_setLayout, reflections.SetLayout], push, null);
+        _layout = _device.CreatePipelineLayout([_setLayout], push, null);
         _pipeline = CreatePipeline(renderer.RenderPass, "ocean.vert", "ocean.frag");
         _surfFoamUpdate = CreateComputePipeline("ocean_surf_foam.comp");
         _carrierAtlasUpdate = CreateComputePipeline("ocean_carrier_atlas.comp");
@@ -455,22 +445,6 @@ public sealed unsafe class OceanRenderer : IDisposable
             StageFlags = stages,
         };
 
-        bindings[FogUniformBinding] = new VkDescriptorSetLayoutBinding
-        {
-            Binding = FogUniformBinding,
-            DescriptorType = VkDescriptorType.UniformBuffer,
-            DescriptorCount = 1,
-            StageFlags = VkShaderStageFlags.FragmentBit,
-        };
-
-        bindings[FogVolumeBinding] = new VkDescriptorSetLayoutBinding
-        {
-            Binding = FogVolumeBinding,
-            DescriptorType = VkDescriptorType.CombinedImageSampler,
-            DescriptorCount = 1,
-            StageFlags = VkShaderStageFlags.FragmentBit,
-        };
-
         return _device.CreateDescriptorSetLayout(
             new VkDescriptorSetLayoutCreateInfo { BindingCount = Bindings, Bindings = bindings },
             null
@@ -481,8 +455,8 @@ public sealed unsafe class OceanRenderer : IDisposable
     {
         var sizes = stackalloc VkDescriptorPoolSize[]
         {
-            new() { Type = VkDescriptorType.UniformBuffer, DescriptorCount = 2 * Renderer.FramesInFlight },
-            new() { Type = VkDescriptorType.CombinedImageSampler, DescriptorCount = Renderer.FramesInFlight * (SampledMaps + 1) },
+            new() { Type = VkDescriptorType.UniformBuffer, DescriptorCount = Renderer.FramesInFlight },
+            new() { Type = VkDescriptorType.CombinedImageSampler, DescriptorCount = Renderer.FramesInFlight * SampledMaps },
             new() { Type = VkDescriptorType.StorageBuffer, DescriptorCount = Renderer.FramesInFlight * (CoastalSlots + 2) },
             new() { Type = VkDescriptorType.StorageImage, DescriptorCount = Renderer.FramesInFlight },
         };
@@ -590,31 +564,6 @@ public sealed unsafe class OceanRenderer : IDisposable
                 DescriptorCount = 1,
                 DescriptorType = VkDescriptorType.StorageBuffer,
                 BufferInfo = &cover,
-            };
-
-            var fogInfo = new VkDescriptorBufferInfo
-            {
-                Buffer = _fog.UniformBuffer,
-                Offset = (ByteSize64)_fog.UniformOffset(i),
-                Range = (ByteSize64)WaterFogVolume.UniformBytes,
-            };
-            writes[FogUniformBinding] = new VkWriteDescriptorSet
-            {
-                DstSet = _sets[i],
-                DstBinding = FogUniformBinding,
-                DescriptorCount = 1,
-                DescriptorType = VkDescriptorType.UniformBuffer,
-                BufferInfo = &fogInfo,
-            };
-
-            var fogVolume = new VkDescriptorImageInfo { Sampler = _fog.Sampler, ImageView = _fog.View, ImageLayout = VkImageLayout.ShaderReadOnlyOptimal };
-            writes[FogVolumeBinding] = new VkWriteDescriptorSet
-            {
-                DstSet = _sets[i],
-                DstBinding = FogVolumeBinding,
-                DescriptorCount = 1,
-                DescriptorType = VkDescriptorType.CombinedImageSampler,
-                ImageInfo = &fogVolume,
             };
 
             _device.UpdateDescriptorSets(writes, []);
@@ -791,7 +740,7 @@ public sealed unsafe class OceanRenderer : IDisposable
     public void Record(CommandBuffer commands, int frameIndex, VkExtent2D extent, Vector3 cameraPos)
     {
         commands.BindPipeline(VkPipelineBindPoint.Graphics, _pipeline);
-        commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex], _reflections.Set(frameIndex)], []);
+        commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex]], []);
         commands.BindIndexBuffer(_buffer.Handle, (ByteSize64)0, VkIndexType.UInt16);
         commands.SetViewport(0, [new VkViewport { Width = extent.Width, Height = extent.Height, MaxDepth = 1f }]);
         commands.SetScissor(0, [new VkRect2D { Extent = extent }]);
