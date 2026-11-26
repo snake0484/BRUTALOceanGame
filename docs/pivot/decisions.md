@@ -62,7 +62,7 @@ Already recorded earlier in this round: 1 g on 1000 km planets; realistic planet
 - D39 Hull damage can leak atmosphere.
 - D40 Airlocks are needed.
 - D41 More advanced ships can use AIR BARRIERS: a small particle shield across an opening that keeps air in the room; it needs constant power.
-- D42 EMERGENCY SHIELDS may exist that stop breaches from leaking. (Design: ship-atmosphere.md, pending.)
+- D42 EMERGENCY SHIELDS may exist that stop breaches from leaking. (Design: ship-atmosphere.md.)
 
 ## AI ships and crew (2026-11-26)
 - D43 The game has AI ships.
