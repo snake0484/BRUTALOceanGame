@@ -93,18 +93,23 @@ public sealed class HullBaker : IDisposable
     /// Bakes <paramref name="brushes"/>; mesh brushes index <paramref name="meshes"/> by Param; <paramref name="densities"/>
     /// is kg/m³ per plan material index (mass only). If a bake is running, this one waits for it.
     /// </summary>
-    public void Start(ReadOnlySpan<HullBrush> brushes, IReadOnlyList<HullMesh> meshes, ReadOnlySpan<int> densities)
+    public void Start(ReadOnlySpan<HullBrush> brushes, IReadOnlyList<HullMesh> meshes, ReadOnlySpan<int> densities, HullLayering? layering = null)
     {
         if (_running)
         {
             _pending = brushes.ToArray();
             _pendingMeshes = meshes.ToArray();
             _pendingDensities = densities.ToArray();
+            _pendingLayering = layering?.Clone();
             return;
         }
 
-        Begin(brushes, meshes, densities);
+        Begin(brushes, meshes, densities, layering?.Clone());
     }
+
+    private HullLayering? _pendingLayering;
+    private LayerContext? _layers;
+    private ulong _layerHash;
 
     /// <summary>Main thread, each frame: finishes a completed bake and starts a waiting one. True when results changed.</summary>
     public bool Poll()
@@ -119,10 +124,12 @@ public sealed class HullBaker : IDisposable
             var brushes = _pending;
             var meshes = _pendingMeshes!;
             var densities = _pendingDensities!;
+            var layering = _pendingLayering;
             _pending = null;
             _pendingMeshes = null;
             _pendingDensities = null;
-            Begin(brushes, meshes, densities);
+            _pendingLayering = null;
+            Begin(brushes, meshes, densities, layering);
         }
 
         return true;
@@ -140,8 +147,12 @@ public sealed class HullBaker : IDisposable
         }
     }
 
-    private void Begin(ReadOnlySpan<HullBrush> brushes, IReadOnlyList<HullMesh> meshes, ReadOnlySpan<int> densities)
+    private void Begin(ReadOnlySpan<HullBrush> brushes, IReadOnlyList<HullMesh> meshes, ReadOnlySpan<int> densities, HullLayering? layering)
     {
+        _layers = layering is { Stacks.Count: > 0 } ? new LayerContext(layering) : null;
+        _layerHash = _layers is null ? 0UL : layering!.Hash();
+        _bins.RoomReach = _layers?.RoomWall ?? 0.0;
+        _bins.ComponentReach = _layers?.ComponentWall ?? 0.0;
         _startTicks = Stopwatch.GetTimestamp();
         _lastFinish = _startTicks;
         _meshes.Clear();
@@ -171,7 +182,7 @@ public sealed class HullBaker : IDisposable
         {
             var key = _bins.Keys[b];
             var mode = _exactBrush[b] >= 0 ? 1UL + (ulong)_grow[b] : 0UL;
-            var hash = InputHash(key, _bins.Brushes(b)) ^ (ulong)Mesher ^ (mode * 0x9E3779B97F4A7C15UL);
+            var hash = InputHash(key, _bins.Brushes(b)) ^ (ulong)Mesher ^ (mode * 0x9E3779B97F4A7C15UL) ^ _layerHash;
 
             if (_current.TryGetValue(key, out var old) && old.InputHash == hash)
             {
@@ -272,7 +283,7 @@ public sealed class HullBaker : IDisposable
                 ref readonly var brush = ref _brushes[binned[0]];
                 var drawable = BrushGeometry.IsSupported(brush.Shape) || (brush.Shape == BrushShape.Mesh && brush.Param < _meshes.Count && _meshes[brush.Param] is not null);
 
-                if (brush.Op == BrushOp.Add && drawable)
+                if (brush.Op == BrushOp.Add && drawable && (_layers is null || BrushRoles.Of(brush) == BrushRole.Skin))
                 {
                     _exactBrush[b] = 0;
                     exactCount++;
@@ -357,7 +368,7 @@ public sealed class HullBaker : IDisposable
             var brick = _work[index];
             var slot = BinIndex(brick.Key);
             baker.Mesher = Mesher;
-            baker.Bake(brick.Key, brushes, _bins.Brushes(slot), _meshes, brick, _exactBrush[slot], _grow[slot]);
+            baker.Bake(brick.Key, brushes, _bins.Brushes(slot), _meshes, brick, _exactBrush[slot], _grow[slot], _layers);
         }
 
         var now = Stopwatch.GetTimestamp();

@@ -71,6 +71,29 @@ public sealed class HullBrickBaker : IHermiteField
     private Brush[] _brushes = new Brush[16];
     private Vector3d _origin;
 
+    // Layered hulls: float fields per role, the brush winning each, and what term set each sample's density.
+    private const float Far = 1e3f;
+    private readonly float[] _skin = new float[N];
+    private readonly float[] _rooms = new float[N];
+    private readonly float[] _comps = new float[N];
+    private readonly float[] _panels = new float[N];
+    private readonly ushort[] _skinWin = new ushort[N];
+    private readonly ushort[] _roomWin = new ushort[N];
+    private readonly ushort[] _compWin = new ushort[N];
+    private readonly ushort[] _panelWin = new ushort[N];
+    private readonly byte[] _panelMat = new byte[N];
+    private readonly byte[] _paint = new byte[N];
+    private readonly Term[] _term = new Term[N];
+    private readonly int[][] _cells = [new int[ChunkConstants.Padded], new int[ChunkConstants.Padded], new int[ChunkConstants.Padded]];
+    private LayerContext? _layers;
+    private Sink _sink;
+    private bool _skipOuter;
+
+    private enum Sink : byte { Legacy, Skin, Room, Component, Panel }
+
+    /// <summary>What decided a layered sample's density: the surface it lies on, for materials and Hermite data.</summary>
+    private enum Term : byte { Void, OuterSkin, InnerSkin, RoomSurface, RoomWall, ComponentSurface, ComponentWall, Panel }
+
     /// <summary>A binned brush ready to evaluate: Rᵀ rows (local = Rᵀ · (p − position)), R columns, half, mesh.</summary>
     private struct Brush
     {
@@ -83,6 +106,10 @@ public sealed class HullBrickBaker : IHermiteField
         public byte Material;
         public PreparedMesh? Mesh;
         public HullBrush Source;
+        public BrushRole Role;
+
+        /// <summary>+1 where the brush's inside is solid, -1 where it is cut away (Subtract, rooms, components).</summary>
+        public float Sign;
     }
 
     public HullMesher Mesher = HullMesher.DualContouring;
@@ -92,32 +119,40 @@ public sealed class HullBrickBaker : IHermiteField
     /// clipped to the brick; -1 meshes the grid. <paramref name="grow"/> bits 0-2 grow the clip box one cell down X, Y, Z
     /// (toward grid-meshed neighbours, so the two surfaces overlap rather than leave a crack).
     /// </param>
-    public void Bake(BrickKey key, ReadOnlySpan<HullBrush> brushes, ReadOnlySpan<int> binned, IReadOnlyList<PreparedMesh?> meshes, HullBrick result, int exact = -1, int grow = 0)
+    public void Bake(BrickKey key, ReadOnlySpan<HullBrush> brushes, ReadOnlySpan<int> binned, IReadOnlyList<PreparedMesh?> meshes, HullBrick result, int exact = -1, int grow = 0, LayerContext? layers = null)
     {
         var start = Stopwatch.GetTimestamp();
         _chunk.Density.AsSpan().Fill(sbyte.MaxValue);
         _chunk.Material.AsSpan().Fill(0);
         _winner.AsSpan().Clear();
         _origin = new Vector3d(key.X * (double)HullBins.BrickMetres, key.Y * (double)HullBins.BrickMetres, key.Z * (double)HullBins.BrickMetres);
+        _layers = layers;
 
         if (_brushes.Length < binned.Length)
             _brushes = new Brush[Math.Max(binned.Length, _brushes.Length * 2)];
+
+        if (layers is not null)
+            ClearLayerFields();
 
         for (var k = 0; k < binned.Length; k++)
         {
             Prepare(ref _brushes[k], brushes[binned[k]], meshes);
             ref readonly var b = ref _brushes[k];
+            var band = SinkFor(b);
 
             if (b.Shape == BrushShape.Mesh)
             {
                 if (b.Mesh is not null)
-                    ApplyMesh(k);
+                    ApplyMesh(k, band);
             }
             else if (BrushGeometry.IsSupported(b.Shape))
             {
-                ApplyPrimitive(k);
+                ApplyPrimitive(k, band);
             }
         }
+
+        if (layers is not null)
+            Compose(layers);
 
         result.Key = key;
         Occupancy(key, result);
@@ -127,6 +162,14 @@ public sealed class HullBrickBaker : IHermiteField
 
         if (exact >= 0)
         {
+            // A layered exact brick still has its inner layer surface: dual contour everything but the outer skin first.
+            if (layers is not null && _chunk.HasSurface)
+            {
+                _skipOuter = true;
+                _dualContour.Mesh(_chunk, _mesh, HullBins.CellMetres, this);
+                _skipOuter = false;
+            }
+
             ref readonly var b = ref _brushes[exact];
             const double cell = HullBins.CellMetres;
             var min = new Vector3d((grow & 1) != 0 ? -cell : 0.0, (grow & 2) != 0 ? -cell : 0.0, (grow & 4) != 0 ? -cell : 0.0);
@@ -163,6 +206,30 @@ public sealed class HullBrickBaker : IHermiteField
         b.Op = source.Op;
         b.Material = source.Material;
         b.Mesh = source.Shape == BrushShape.Mesh && source.Param < meshes.Count ? meshes[source.Param] : null;
+        b.Role = _layers is null ? BrushRole.Skin : BrushRoles.Of(source);
+        b.Sign = b.Role is BrushRole.Room or BrushRole.Component || (b.Role == BrushRole.Skin && source.Op == BrushOp.Subtract) ? -1f : 1f;
+    }
+
+    /// <summary>Sets where the next brush's field goes and returns its band: how far from its surface its value matters.</summary>
+    private double SinkFor(in Brush b)
+    {
+        var layers = _layers;
+
+        if (layers is null)
+        {
+            _sink = Sink.Legacy;
+            return b.Shape == BrushShape.Mesh ? MeshBand : 127.0 / DensityPerMetre;
+        }
+
+        (_sink, var band) = b.Role switch
+        {
+            BrushRole.Room => (Sink.Room, layers.RoomWall + 1.0),
+            BrushRole.Component => (Sink.Component, layers.ComponentWall + 1.0),
+            BrushRole.Panel => (Sink.Panel, 1.0),
+            _ => (Sink.Skin, layers.MaxDepth + 1.0),
+        };
+
+        return band;
     }
 
     /// <summary>Sample (x, y, z) relative to the brush position, in double then float.</summary>
@@ -188,11 +255,11 @@ public sealed class HullBrickBaker : IHermiteField
         return x0 <= x1 && y0 <= y1 && z0 <= z1;
     }
 
-    private void ApplyPrimitive(int k)
+    private void ApplyPrimitive(int k, double band)
     {
         ref readonly var b = ref _brushes[k];
 
-        if (!Range(b.Source, 127.0 / DensityPerMetre, out var x0, out var y0, out var z0, out var x1, out var y1, out var z1))
+        if (!Range(b.Source, band, out var x0, out var y0, out var z0, out var x1, out var y1, out var z1))
             return;
 
         for (var z = z0; z <= z1; z++)
@@ -204,27 +271,27 @@ public sealed class HullBrickBaker : IHermiteField
                 for (var x = x0; x <= x1; x++, i++)
                 {
                     var local = ToLocal(b, Relative(b, x, y, z));
-                    Combine(i, k, Quantise(BrushGeometry.Distance(b.Shape, local, b.Half) * DensityPerMetre));
+                    Put(i, k, BrushGeometry.Distance(b.Shape, local, b.Half));
                 }
             }
         }
     }
 
-    private void ApplyMesh(int k)
+    private void ApplyMesh(int k, double bandMetres)
     {
         ref readonly var b = ref _brushes[k];
         var mesh = b.Mesh!;
+        var meshBand = (float)bandMetres;
 
-        if (!Range(b.Source, MeshBand + HullBins.CellMetres, out var x0, out var y0, out var z0, out var x1, out var y1, out var z1))
+        if (!Range(b.Source, meshBand + HullBins.CellMetres, out var x0, out var y0, out var z0, out var x1, out var y1, out var z1))
             return;
 
-        MarkNearSamples(b, mesh, x0, y0, z0, x1, y1, z1);
+        MarkNearSamples(b, mesh, x0, y0, z0, x1, y1, z1, meshBand);
 
         // Ray direction: the brick's +X in brush-local axes. Origins start past the mesh's bounding sphere.
         var dir = new Vector3d(b.T0.X, b.T1.X, b.T2.X);
         var far = Vector3.Max(Vector3.Abs(mesh.Min), Vector3.Abs(mesh.Max));
         var radius = far.Length() + 1.0;
-        var qFar = Quantise(MeshBand * DensityPerMetre);
 
         for (var z = z0; z <= z1; z++)
         {
@@ -233,7 +300,7 @@ public sealed class HullBrickBaker : IHermiteField
                 var first = ToLocal(b, Relative(b, x0, y, z));
                 var lastLocal = ToLocal(b, Relative(b, x1, y, z));
 
-                if (!SegmentNearBox(first, lastLocal, mesh.Min, mesh.Max, MeshBand))
+                if (!SegmentNearBox(first, lastLocal, mesh.Min, mesh.Max, meshBand))
                     continue;
 
                 var lead = new Vector3d(first.X, first.Y, first.Z).Length() + radius;
@@ -252,19 +319,8 @@ public sealed class HullBrickBaker : IHermiteField
                         h++;
 
                     var inside = (h & 1) != 0;
-                    sbyte q;
-
-                    if (_near[i] != 0)
-                    {
-                        var d = mesh.Distance(ToLocal(b, Relative(b, x, y, z)), MeshBand);
-                        q = Quantise((inside ? -d : d) * DensityPerMetre);
-                    }
-                    else
-                    {
-                        q = inside ? (sbyte)-qFar : qFar;
-                    }
-
-                    Combine(i, k, q);
+                    var d = _near[i] != 0 ? mesh.Distance(ToLocal(b, Relative(b, x, y, z)), meshBand) : meshBand;
+                    Put(i, k, inside ? -d : d);
                 }
             }
         }
@@ -276,7 +332,7 @@ public sealed class HullBrickBaker : IHermiteField
     }
 
     /// <summary>Marks samples within the band of any triangle near the brick (triangle bounds in sample space, ± band).</summary>
-    private void MarkNearSamples(in Brush b, PreparedMesh mesh, int x0, int y0, int z0, int x1, int y1, int z1)
+    private void MarkNearSamples(in Brush b, PreparedMesh mesh, int x0, int y0, int z0, int x1, int y1, int z1, float meshBand)
     {
         var lo = new Vector3(float.MaxValue);
         var hi = new Vector3(float.MinValue);
@@ -289,8 +345,8 @@ public sealed class HullBrickBaker : IHermiteField
         }
 
         _triangles.Clear();
-        mesh.Overlapping(lo - new Vector3(MeshBand), hi + new Vector3(MeshBand), _triangles);
-        const float band = MeshBand / HullBins.CellMetres;
+        mesh.Overlapping(lo - new Vector3(meshBand), hi + new Vector3(meshBand), _triangles);
+        var band = meshBand / HullBins.CellMetres;
         var offset = new Vector3((float)(b.Position.X - _origin.X), (float)(b.Position.Y - _origin.Y), (float)(b.Position.Z - _origin.Z)) / HullBins.CellMetres;
 
         foreach (var t in _triangles)
@@ -329,6 +385,152 @@ public sealed class HullBrickBaker : IHermiteField
         var lo = Vector3.Min(a, b);
         var hi = Vector3.Max(a, b);
         return lo.X <= max.X + band && lo.Y <= max.Y + band && lo.Z <= max.Z + band && hi.X >= min.X - band && hi.Y >= min.Y - band && hi.Z >= min.Z - band;
+    }
+
+    /// <summary>A brush's signed distance at sample <paramref name="i"/>, into the legacy density or its layered field.</summary>
+    private void Put(int i, int k, float d)
+    {
+        var win = (ushort)(k + 1);
+
+        switch (_sink)
+        {
+            case Sink.Legacy:
+                Combine(i, k, Quantise(d * DensityPerMetre));
+                break;
+            case Sink.Skin:
+                ref readonly var b = ref _brushes[k];
+
+                switch (b.Source.Op)
+                {
+                    case BrushOp.Add when d < _skin[i]:
+                        (_skin[i], _skinWin[i]) = (d, win);
+                        break;
+                    case BrushOp.Subtract when -d > _skin[i]:
+                        (_skin[i], _skinWin[i]) = (-d, win);
+                        break;
+                    case BrushOp.Intersect when d > _skin[i]:
+                        (_skin[i], _skinWin[i]) = (d, win);
+                        break;
+                    case BrushOp.Paint when d < 0f:
+                        _paint[i] = (byte)(b.Material + 1);
+                        break;
+                }
+
+                break;
+            case Sink.Room when d < _rooms[i]:
+                (_rooms[i], _roomWin[i]) = (d, win);
+                break;
+            case Sink.Component when d < _comps[i]:
+                (_comps[i], _compWin[i]) = (d, win);
+                break;
+            case Sink.Panel when d < _panels[i]:
+                (_panels[i], _panelWin[i], _panelMat[i]) = (d, win, _brushes[k].Material);
+                break;
+        }
+    }
+
+    private void ClearLayerFields()
+    {
+        _skin.AsSpan().Fill(Far);
+        _rooms.AsSpan().Fill(Far);
+        _comps.AsSpan().Fill(Far);
+        _panels.AsSpan().Fill(Far);
+        _skinWin.AsSpan().Clear();
+        _roomWin.AsSpan().Clear();
+        _compWin.AsSpan().Clear();
+        _panelWin.AsSpan().Clear();
+        _paint.AsSpan().Clear();
+        _term.AsSpan().Clear();
+    }
+
+    /// <summary>
+    /// The layered solid per sample: the skin's shell (from the skin inward to the section's stack depth), the rooms' and
+    /// components' walls (from their surface outward to their stack's depth, inside the skin), minus the rooms and
+    /// components themselves, plus panels. Materials come from the layer at that depth; the term that set the density
+    /// is kept for dual contouring.
+    /// </summary>
+    private void Compose(LayerContext layers)
+    {
+        var d = _chunk.Density;
+        var m = _chunk.Material;
+
+        for (var axis = 0; axis < 3; axis++)
+        {
+            var origin = axis == 0 ? _origin.X : axis == 1 ? _origin.Y : _origin.Z;
+
+            for (var s = 0; s < ChunkConstants.Padded; s++)
+                _cells[axis][s] = HullLayering.Cell(layers.Cuts[axis], origin + (s - 1) * (double)HullBins.CellMetres);
+        }
+
+        var wr = layers.RoomWall;
+        var wk = layers.ComponentWall;
+
+        for (var z = -1; z <= HullBins.BrickCells; z++)
+        {
+            for (var y = -1; y <= HullBins.BrickCells; y++)
+            {
+                var i = ChunkConstants.Index(-1, y, z);
+
+                for (var x = -1; x <= HullBins.BrickCells; x++, i++)
+                {
+                    var section = HullLayering.SectionId(layers.Cuts, _cells[0][x + 1], _cells[1][y + 1], _cells[2][z + 1]);
+                    var stack = layers.Stacks[layers.SectionStack[section]];
+                    var depthLimit = layers.Totals[layers.SectionStack[section]];
+
+                    var s = _skin[i];
+                    var shellOuter = s;
+                    var shellInner = -s - depthLimit;
+                    var shell = MathF.Max(shellOuter, shellInner);
+
+                    var r = _rooms[i];
+                    var k = _comps[i];
+                    var wallR = MathF.Max(-r, r - wr);
+                    var wallK = MathF.Max(-k, k - wk);
+                    var inner = MathF.Max(MathF.Min(wallR, wallK), s);
+                    var solid = MathF.Min(shell, inner);
+                    solid = MathF.Max(solid, MathF.Max(-r, -k));
+                    var value = MathF.Min(solid, _panels[i]);
+
+                    Term term;
+                    byte material;
+
+                    if (_panels[i] <= solid)
+                    {
+                        term = Term.Panel;
+                        material = _panelMat[i];
+                    }
+                    else if (solid == -r && -r >= MathF.Min(shell, inner))
+                    {
+                        term = Term.RoomSurface;
+                        material = layers.RoomLayers.MaterialAt(0);
+                    }
+                    else if (solid == -k && -k >= MathF.Min(shell, inner))
+                    {
+                        term = Term.ComponentSurface;
+                        material = layers.ComponentLayers.MaterialAt(0);
+                    }
+                    else if (shell <= inner)
+                    {
+                        term = shellOuter >= shellInner ? Term.OuterSkin : Term.InnerSkin;
+                        material = _paint[i] != 0 ? (byte)(_paint[i] - 1) : stack.MaterialAt(Math.Max(0f, -s));
+                    }
+                    else if (wallR <= wallK)
+                    {
+                        term = Term.RoomWall;
+                        material = layers.RoomLayers.MaterialAt(Math.Max(0f, r));
+                    }
+                    else
+                    {
+                        term = Term.ComponentWall;
+                        material = layers.ComponentLayers.MaterialAt(Math.Max(0f, k));
+                    }
+
+                    d[i] = Quantise(value * DensityPerMetre);
+                    m[i] = material;
+                    _term[i] = term;
+                }
+            }
+        }
     }
 
     /// <summary>Combines a brush's quantised value at sample <paramref name="i"/> by its op; the brush that sets the density wins it.</summary>
@@ -392,6 +594,25 @@ public sealed class HullBrickBaker : IHermiteField
         normal = DensityGradient(x, y, z, axis, linear);
         shade = normal;
 
+        if (_layers is not null)
+        {
+            // The solid end's term names the surface; only surfaces that are a brush's own get exact Hermite data.
+            var solidEnd = densityA < 0 ? i : j;
+            var k = _term[solidEnd] switch
+            {
+                Term.OuterSkin => _skinWin[solidEnd] - 1,
+                Term.RoomSurface => _roomWin[solidEnd] - 1,
+                Term.ComponentSurface => _compWin[solidEnd] - 1,
+                Term.Panel => _panelWin[solidEnd] - 1,
+                _ => -1,
+            };
+
+            if (k >= 0 && Crossing(k, x, y, z, axis, out var tk, out var nk, out var sk))
+                (t, normal, shade) = (tk, nk, sk);
+
+            return;
+        }
+
         var best = float.MaxValue;
         Span<int> candidates = [_winner[i] - 1, _winner[j] - 1];
 
@@ -410,6 +631,17 @@ public sealed class HullBrickBaker : IHermiteField
                 shade = sk;
             }
         }
+    }
+
+    /// <summary>In a layered exact brick, the outer skin is drawn from the brush's polygons: leave its quads out.</summary>
+    public bool Skip(int x, int y, int z, int axis, bool solidA)
+    {
+        if (!_skipOuter)
+            return false;
+
+        var i = ChunkConstants.Index(x, y, z);
+        var solidEnd = solidA ? i : i + (axis == 0 ? 1 : axis == 1 ? P : PP);
+        return _term[solidEnd] == Term.OuterSkin;
     }
 
     /// <summary>Fallback normal: central differences of the density at the crossing, toward air.</summary>
@@ -439,7 +671,7 @@ public sealed class HullBrickBaker : IHermiteField
         var pa = Relative(b, x, y, z);
         var la = ToLocal(b, pa);
         var lb = ToLocal(b, pa + step);
-        var sign = b.Op == BrushOp.Subtract ? -1f : 1f;
+        var sign = b.Sign;
 
         if (b.Shape == BrushShape.Mesh)
         {

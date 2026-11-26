@@ -11,6 +11,9 @@ namespace BrutalGame.Ships;
 public interface IHermiteField
 {
     void Edge(int x, int y, int z, int axis, int densityA, int densityB, out float t, out Vector3 normal, out Vector3 shade);
+
+    /// <summary>True to leave out the quad around this edge (a surface drawn some other way, e.g. an exact skin).</summary>
+    bool Skip(int x, int y, int z, int axis, bool solidA);
 }
 
 /// <summary>
@@ -95,13 +98,13 @@ public sealed class HullDualContour
                     var solid = (mask & 1) != 0;
                     var indices = output.Indices;
 
-                    if (((mask ^ (mask >> 1)) & 1) != 0)
+                    if (((mask ^ (mask >> 1)) & 1) != 0 && !field.Skip(x, y, z, 0, solid))
                         indexCount = Quad(indices, indexCount, output.Vertices, cv[i - P - PP], cv[i - PP], cv[i], cv[i - P], solid);
 
-                    if (((mask ^ (mask >> 2)) & 1) != 0)
+                    if (((mask ^ (mask >> 2)) & 1) != 0 && !field.Skip(x, y, z, 1, solid))
                         indexCount = Quad(indices, indexCount, output.Vertices, cv[i - 1 - PP], cv[i - 1], cv[i], cv[i - PP], solid);
 
-                    if (((mask ^ (mask >> 4)) & 1) != 0)
+                    if (((mask ^ (mask >> 4)) & 1) != 0 && !field.Skip(x, y, z, 2, solid))
                         indexCount = Quad(indices, indexCount, output.Vertices, cv[i - 1 - P], cv[i - P], cv[i], cv[i - 1], solid);
                 }
             }

@@ -6,8 +6,9 @@ public enum BrushShape : byte { Box, Wedge, Cylinder, Capsule, Sphere, Cone, Pri
 
 public enum BrushOp : byte { Add, Subtract, Paint, Intersect }
 
+/// <summary>Bits 6-7 hold the brush's role in a layered hull (<see cref="BrushRole"/>): skin, room, component or panel.</summary>
 [Flags]
-public enum BrushFlags : byte { None = 0, Interior = 1, NoCollide = 2, Damage = 4, Mirrored = 8, Inset = 16, BlowOut = 32 }
+public enum BrushFlags : byte { None = 0, Interior = 1, NoCollide = 2, Damage = 4, Mirrored = 8, Inset = 16, BlowOut = 32, RoleRoom = 64, RoleComponent = 128 }
 
 /// <summary>
 /// Wire and save brush, blittable, little endian, 34 B (docs/pivot/ship-hulls.md). Order in the list is evaluation order.

@@ -45,6 +45,10 @@ public sealed class HullBins
     /// <summary>The most brushes binned to one brick.</summary>
     public int MaxPerBrick { get; private set; }
 
+    /// <summary>Extra reach (metres) for room and component brushes of a layered hull: their walls extend outward.</summary>
+    public double RoomReach;
+    public double ComponentReach;
+
     public void Build(ReadOnlySpan<HullBrush> brushes)
     {
         _slots.Clear();
@@ -56,7 +60,7 @@ public sealed class HullBins
             if (brushes[i].Op != BrushOp.Add)
                 continue;
 
-            Range(brushes[i], out var x0, out var y0, out var z0, out var x1, out var y1, out var z1);
+            Range(brushes[i], out var x0, out var y0, out var z0, out var x1, out var y1, out var z1, Extra(brushes[i]));
 
             for (var z = z0; z <= z1; z++)
                 for (var y = y0; y <= y1; y++)
@@ -97,16 +101,24 @@ public sealed class HullBins
     }
 
     /// <summary>Inclusive brick range a brush's bounds plus <see cref="Reach"/> overlap.</summary>
-    public static void Range(in HullBrush brush, out int x0, out int y0, out int z0, out int x1, out int y1, out int z1)
+    public static void Range(in HullBrush brush, out int x0, out int y0, out int z0, out int x1, out int y1, out int z1, double extra = 0.0)
     {
         BrushGeometry.Bounds(brush, out var min, out var max);
-        x0 = BrickOf(min.X - Reach);
-        y0 = BrickOf(min.Y - Reach);
-        z0 = BrickOf(min.Z - Reach);
-        x1 = BrickOf(max.X + Reach);
-        y1 = BrickOf(max.Y + Reach);
-        z1 = BrickOf(max.Z + Reach);
+        var reach = Reach + extra;
+        x0 = BrickOf(min.X - reach);
+        y0 = BrickOf(min.Y - reach);
+        z0 = BrickOf(min.Z - reach);
+        x1 = BrickOf(max.X + reach);
+        y1 = BrickOf(max.Y + reach);
+        z1 = BrickOf(max.Z + reach);
     }
+
+    private double Extra(in HullBrush brush) => BrushRoles.Of(brush) switch
+    {
+        BrushRole.Room => RoomReach,
+        BrushRole.Component => ComponentReach,
+        _ => 0.0,
+    };
 
     private static int BrickOf(double metres) => (int)Math.Floor(metres / BrickMetres);
 
@@ -127,7 +139,7 @@ public sealed class HullBins
     {
         for (var i = 0; i < brushes.Length; i++)
         {
-            Range(brushes[i], out var x0, out var y0, out var z0, out var x1, out var y1, out var z1);
+            Range(brushes[i], out var x0, out var y0, out var z0, out var x1, out var y1, out var z1, Extra(brushes[i]));
 
             for (var z = z0; z <= z1; z++)
                 for (var y = y0; y <= y1; y++)

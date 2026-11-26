@@ -27,6 +27,12 @@ public enum IssueCode : ushort
     MeshBounds,
     MeshInvalid,
     MeshBudget,
+    LayerStacks,
+    LayerThickness,
+    LayerMaterial,
+    LayerRefs,
+    LayerCuts,
+    RoleWithoutLayers,
 }
 
 public readonly record struct ValidationIssue(Severity Severity, IssueCode Code, ElementRef Element, int Value);
@@ -65,7 +71,42 @@ public sealed class ValidationLog
 /// </summary>
 public static class PlanValidator
 {
-    private const BrushFlags AllowedFlags = BrushFlags.Interior | BrushFlags.NoCollide | BrushFlags.Mirrored;
+    private const BrushFlags AllowedFlags = BrushFlags.Interior | BrushFlags.NoCollide | BrushFlags.Mirrored | BrushRoles.Mask;
+
+    /// <summary>Stacks: 1..16, each 1..16 layers of known materials, 0.25..8 m in total; stack references in range; ≤ 64 cuts.</summary>
+    private static void ValidateLayers(PlanDocument doc, ValidationLog log)
+    {
+        var layers = doc.Layers;
+
+        if (layers is null)
+            return;
+
+        if (layers.Stacks.Count is 0 or > HullLayering.MaxStacks)
+        {
+            log.Add(Severity.Error, IssueCode.LayerStacks, default, layers.Stacks.Count);
+            return;
+        }
+
+        for (var s = 0; s < layers.Stacks.Count; s++)
+        {
+            var stack = layers.Stacks[s];
+            var mm = stack.Layers.Sum(l => l.ThicknessMm);
+
+            if (stack.Layers.Count is 0 or > HullLayering.MaxLayers || mm < HullLayering.MinStackMm || mm > HullLayering.MaxStackMm || stack.Layers.Any(l => l.ThicknessMm == 0))
+                log.Add(Severity.Error, IssueCode.LayerThickness, default, s);
+
+            if (stack.Layers.Any(l => l.Material >= doc.Materials.Count))
+                log.Add(Severity.Error, IssueCode.LayerMaterial, default, s);
+        }
+
+        var count = layers.Stacks.Count;
+
+        if (layers.DefaultStack >= count || layers.RoomStack >= count || layers.ComponentStack >= count || layers.Assignments.Any(a => a.Stack >= count))
+            log.Add(Severity.Error, IssueCode.LayerRefs, default);
+
+        if (layers.Cuts.Count > HullLayering.MaxCuts || layers.Cuts.Any(c => c.Axis > 2 || Math.Abs(c.Position * HullBrush.MetresPerPositionUnit) > PlanLimits.MaxReachMetres))
+            log.Add(Severity.Error, IssueCode.LayerCuts, default, layers.Cuts.Count);
+    }
 
     /// <param name="catalog">Known materials; null skips the check (a file opened without data).</param>
     public static void Validate(PlanDocument doc, ValidationLog log, HullMaterialCatalog? catalog = null, HullBins? bins = null)
@@ -121,6 +162,7 @@ public static class PlanValidator
                 log.Add(Severity.Error, IssueCode.UnknownMaterial, new ElementRef(ElementKind.Material, (uint)m), (int)doc.Materials[m].Value);
         }
 
+        ValidateLayers(doc, log);
         var ids = new HashSet<uint>(brushes.Length);
         var inBounds = true;
         var anyAdd = false;
@@ -162,6 +204,9 @@ public static class PlanValidator
 
             if ((brush.Flags & ~AllowedFlags) != 0)
                 log.Add(Severity.Error, IssueCode.UnsupportedFlags, element, (int)brush.Flags);
+
+            if (BrushRoles.Of(brush) != BrushRole.Skin && doc.Layers is null)
+                log.Add(Severity.Error, IssueCode.RoleWithoutLayers, element, (int)BrushRoles.Of(brush));
 
             if (brush.Bevel != 0)
                 log.Add(Severity.Error, IssueCode.BevelUnsupported, element, brush.Bevel);
