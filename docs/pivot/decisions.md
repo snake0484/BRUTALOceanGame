@@ -74,3 +74,28 @@ Already recorded earlier in this round: 1 g on 1000 km planets; realistic planet
 - D49 People can surrender.
 - D50 Prepare for 200 hulls actually rendered at once. Far ships are simplified further and become data unless they get into a fight.
 - D51 Max crew is 100 per ship. If needed, crew on other floors or outside the player's room are simplified.
+
+## Round 6 (2026-11-26)
+- D52 Building: sessions and agents doing implementation work may build and test.
+- D53 The pilot DOES matter to an AI ship. Pilots differ: flying styles and/or a skill level.
+- D54 Factions fight wars outside the players' view, but things are mostly stable.
+- D55 Ships get shields too, of three kinds: PARTICLE shields, ENERGY shields and GRAVITY shields.
+- D56 A combat and sensors design is wanted (weapon stats, sensor kinds and ranges).
+- D57 A factions and law design is wanted (fines, crime status, stolen hulls, sieges, land).
+- D58 Warp exits used as a weapon: planetary or city shielding may prevent the damage; doing it is definitely illegal.
+- D59 Hull damage has all three forms: holes, dents and deformation.
+- D60 No sea-water flooding of ships. Terrain around water is solid.
+- D61 Air barriers have no size cap.
+- D62 Emergency shield hold time depends on breach size; the shield feeds from a battery.
+- D63 Emergency shields do NOT stop bodies.
+- D64 EVA suits are restrictive, so crews are not in them by default; suit lockers sit around airlocks, hangars and crew rooms for changing.
+- D65 Air is used at real rates.
+- D66 Warp space is treated as real space (a holed ship is not sealed by warp; breaches vent).
+- D67 No weld minigame. Welding takes a set time; unskilled welders make poor-quality welds.
+- D68 No fleet discount. Fleets generally use their faction's ships.
+- D69 The standalone designer is bundled with the game.
+- D70 Construction time of about 70 minutes solo for a 15 m ship with basic tools is the right order of magnitude.
+- D71 Wiring has two media: power and data. A data cable can be split to all inputs and outputs but is one-way.
+- D72 Other parties may heat, wedge or shoot a rock with people in its caves; injuring or killing players or NPCs that way is illegal.
+- D73 Replenishment events are modest (nothing dramatic): things like asteroid captures.
+- D74 Tunnelling vehicles and cave drills are allowed but regulated. Factions control most planets, so you need to own the land or otherwise have approval.
