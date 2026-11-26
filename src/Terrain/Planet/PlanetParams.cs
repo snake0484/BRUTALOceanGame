@@ -16,7 +16,7 @@ public readonly record struct PlanetMaterials(VoxelMaterial Surface, VoxelMateri
 /// </summary>
 public readonly record struct PlanetParams
 {
-    public const uint CurrentGeneratorVersion = 1;
+    public const uint CurrentGeneratorVersion = 2;
 
     public ulong Seed { get; init; }
     public uint GeneratorVersion { get; init; }
@@ -44,11 +44,17 @@ public readonly record struct PlanetParams
     /// <summary>m/s² at Radius.</summary>
     public double SurfaceGravity { get; init; }
 
-    /// <summary>Continent mask offset: higher is more land.</summary>
-    public float LandBias { get; init; }
+    /// <summary>The planet kind (data/planets/kinds) and the seed its parameter ranges draw from.</summary>
+    public string KindId { get; init; }
+    public ulong KindSeed { get; init; }
 
-    /// <summary>Ridge height on the continent interiors (m).</summary>
-    public float MountainHeight { get; init; }
+    /// <summary>Content hash of the compiled kind: joins <see cref="GeneratorVersion"/> wherever peers must agree on the terrain.</summary>
+    public ulong ProgramHash { get; init; }
+
+    /// <summary>Spin axis in the planet frame (latitude masks); unit Y by default.</summary>
+    public double AxisX { get; init; }
+    public double AxisY { get; init; }
+    public double AxisZ { get; init; }
 
     public PlanetMaterials Materials { get; init; }
 
@@ -60,32 +66,45 @@ public readonly record struct PlanetParams
     /// <summary>Body i's seed in a system (planets.md "Seeding").</summary>
     public static ulong BodySeed(ulong systemSeed, int bodyIndex) => SplitMix(systemSeed + (ulong)bodyIndex);
 
-    /// <summary>A rocky 1 g body of <paramref name="radius"/> from its seed.</summary>
-    public static PlanetParams Generate(ulong seed, double radius, double surfaceGravity = 9.80665, bool ocean = true)
+    /// <summary>A rocky 1 g body of <paramref name="radius"/> from its seed, of a planet kind (the v1 recipe by default).</summary>
+    public static PlanetParams Generate(ulong seed, double radius, double surfaceGravity = 9.80665, bool ocean = true, string? kind = null, ulong? kindSeed = null)
     {
+        var recipe = PlanetKinds.Get(kind ?? PlanetKinds.Legacy);
         var state = seed;
         var sea = Math.Round(Next(ref state) * 300.0 - 150.0);
-        var land = (float)(Next(ref state) * 0.14 - 0.08);
-        var mountains = (float)(3500.0 + Next(ref state) * 2000.0);
+        Next(ref state);
+        Next(ref state);
         var desert = Next(ref state) < 0.2;
 
-        return new PlanetParams
+        var p = new PlanetParams
         {
             Seed = seed,
             GeneratorVersion = CurrentGeneratorVersion,
             Radius = radius,
-            SeaRadius = ocean ? radius + sea : double.NaN,
-            MinHeight = -8000f,
-            MaxHeight = 9000f,
+            SeaRadius = ocean && recipe.SeaPresent ? radius + sea : double.NaN,
+            MinHeight = recipe.ReliefMin,
+            MaxHeight = recipe.ReliefMax,
             DigDepth = 2000f,
             HeatOnsetDepth = 800f,
             HeatExcessK = 900f,
             ShoreProtectHeight = 6f,
             SurfaceGravity = surfaceGravity,
-            LandBias = land,
-            MountainHeight = mountains,
-            Materials = desert ? PlanetMaterials.Desert : PlanetMaterials.Temperate,
+            KindId = recipe.Id,
+            KindSeed = kindSeed ?? seed,
+            AxisY = 1.0,
+            Materials = recipe.MaterialSet ?? (desert ? PlanetMaterials.Desert : PlanetMaterials.Temperate),
         };
+
+        return p with { ProgramHash = PlanetKindCompiler.Compile(recipe, p).ContentHash };
+    }
+
+    /// <summary>The v1 recipe's seeded continent offset and ridge height (compat "v1").</summary>
+    internal static void LegacyDraws(ulong seed, out float landBias, out float mountainHeight)
+    {
+        var state = seed;
+        Next(ref state);
+        landBias = (float)(Next(ref state) * 0.14 - 0.08);
+        mountainHeight = (float)(3500.0 + Next(ref state) * 2000.0);
     }
 
     private static ulong SplitMix(ulong z)

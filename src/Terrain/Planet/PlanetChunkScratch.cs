@@ -30,7 +30,10 @@ public sealed class PlanetChunkScratch
     internal int WindowCount;
     internal float[] Heights = new float[MaxFaces * InitialPoints];
     internal float[] Inv = new float[MaxFaces * InitialPoints];
-    internal float[] Coarse = new float[MaxFaces * 3 * 256];
+
+    /// <summary>One window's evaluator rows: datum positions and (channels + temporaries) × points, for the lattice and its coarse grid.</summary>
+    internal double[] PointX = [], PointY = [], PointZ = [], CoarseX = [], CoarseY = [], CoarseZ = [];
+    internal float[] Rows = [], CoarseRows = [], Slots = [];
     internal double[] AxisG = new double[MaxFaces * 2 * 128];
     internal double[] AxisSlope = new double[MaxFaces * 2 * 128];
 
@@ -47,13 +50,26 @@ public sealed class PlanetChunkScratch
         public int InvBase;
 
         /// <summary>Coarse lattice (every 8th point) under the heights.</summary>
-        public int CI0, CJ0, CW, CH, CBase;
+        public int CI0, CJ0, CW, CH;
 
         /// <summary>Per-axis gnomonic coordinate and dg/dt over the height range: u at AxisBase, v at AxisBase + HW.</summary>
         public int AxisBase;
     }
 
     public bool IsProtected(int index) => (Protected[index >> 6] & (1UL << index)) != 0;
+
+    internal void EnsureRows(PlanetKindProgram program, int points, int coarsePoints)
+    {
+        Ensure(ref PointX, points);
+        Ensure(ref PointY, points);
+        Ensure(ref PointZ, points);
+        Ensure(ref CoarseX, coarsePoints);
+        Ensure(ref CoarseY, coarsePoints);
+        Ensure(ref CoarseZ, coarsePoints);
+        Ensure(ref Rows, program.Rows * points);
+        Ensure(ref CoarseRows, program.Rows * coarsePoints);
+        Ensure(ref Slots, Math.Max(program.MaxCoarseSlots, 1) * coarsePoints);
+    }
 
     internal static void Ensure<T>(ref T[] array, int length)
     {

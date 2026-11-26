@@ -1,0 +1,13 @@
+{
+  "id": "legacy-rolling",
+  "schema": 1,
+  "compat": "v1",
+  "relief": { "minM": -8000, "maxM": 9000 },
+  "sea": { "present": true },
+  "layers": [
+    { "name": "continent", "type": "fbm", "lambdaR": 1.25, "octaves": 5, "amplitude": 1.0, "gain": 0.5, "normalize": true },
+    { "name": "ridge", "type": "ridged", "lambdaR": 0.25, "octaves": 3, "amplitude": 1.0, "gain": 0.5, "normalize": true },
+    { "name": "detail", "type": "fbm", "lambdaM": 32768, "octaves": 15, "amplitudeM": 450, "gain": 0.574 },
+    { "name": "compose", "type": "legacy", "continent": "continent", "ridge": "ridge", "detail": "detail" }
+  ]
+}

@@ -170,7 +170,9 @@ public sealed class PlanetTests(ITestOutputHelper output)
     public void OctavesAreBandLimitedPerLod()
     {
         var surface = Generator.Surface;
-        Assert.Equal(PlanetSurface.Octaves, surface.OctaveCount(0));
+        var octaves = surface.Wavelengths.Length;
+        Assert.Equal(23, octaves);
+        Assert.Equal(octaves, surface.OctaveCount(0));
 
         for (var lod = 0; lod <= PlanetGenerator.MaxLod; lod++)
         {
@@ -178,7 +180,7 @@ public sealed class PlanetTests(ITestOutputHelper output)
             var expected = 0;
             var skipped = 0f;
 
-            for (var i = 0; i < PlanetSurface.Octaves; i++)
+            for (var i = 0; i < octaves; i++)
             {
                 if (surface.Wavelengths[i] >= min)
                     expected++;
@@ -200,8 +202,8 @@ public sealed class PlanetTests(ITestOutputHelper output)
             }
         }
 
-        Assert.Equal(2f, surface.Wavelengths[PlanetSurface.Octaves - 1]);
-        Assert.Equal(PlanetSurface.Octaves - 1, surface.OctaveCount(1));
+        Assert.Equal(2f, surface.Wavelengths[octaves - 1]);
+        Assert.Equal(octaves - 1, surface.OctaveCount(1));
     }
 
     [Fact]

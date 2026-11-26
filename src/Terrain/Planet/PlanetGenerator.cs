@@ -5,9 +5,10 @@ namespace BrutalGame.Terrain;
 /// <summary>
 /// Fills planet chunks (planets.md "Generation"): cartesian voxels in the rotating planet frame, density = generated
 /// height − radial altitude. Heights live on a cube-sphere lattice per LOD (cell ≤ 1 voxel), so every voxel's density is a
-/// pure function of its planet-frame position and LOD: neighbours agree bit for bit on their shared aprons. Octaves of
-/// 256 voxels and longer come from every 8th lattice point, interpolated; shorter ones down to 2 voxels per point; the
-/// radial altitude is exact (double sqrt per voxel, review X1). Thread-safe; allocation-free with a warmed scratch.
+/// pure function of its planet-frame position and LOD: neighbours agree bit for bit on their shared aprons. The heights
+/// come from the body's planet kind (<see cref="PlanetKindProgram"/>): octaves of 256 voxels and longer on every 8th
+/// lattice point, interpolated; shorter ones down to 2 voxels per point; the radial altitude is exact (double sqrt per
+/// voxel, review X1). Thread-safe; allocation-free with a warmed scratch.
 /// </summary>
 public sealed class PlanetGenerator
 {
@@ -122,7 +123,7 @@ public sealed class PlanetGenerator
             return false;
 
         var angle = Math.Asin(Math.Min(1.0, reach / r)) + LatticePadCells * CellAngle(0);
-        Surface.Bounds(cx / r, cy / r, cz / r, angle, out var lo, out var hi);
+        Surface.Bounds(cx / r, cy / r, cz / r, angle, 0, 0, out var lo, out var hi);
         var top = r + reach - _radius;
         var bottom = r - reach - _radius;
 
@@ -230,7 +231,6 @@ public sealed class PlanetGenerator
         scratch.WindowCount = 0;
         var heights = 0;
         var inv = 0;
-        var coarse = 0;
         var axis = 0;
 
         for (var face = 0; face < CubeLattice.Faces; face++)
@@ -257,17 +257,14 @@ public sealed class PlanetGenerator
             w.CH = (w.HJ0 + w.HH - 1 + CoarseStep - 1) / CoarseStep - w.CJ0 + 1;
             w.HBase = heights;
             w.InvBase = inv;
-            w.CBase = coarse;
             w.AxisBase = axis;
             heights += w.HW * w.HH;
             inv += (w.I1 - w.I0 + 1) * (w.J1 - w.J0 + 1);
-            coarse += 3 * w.CW * w.CH;
             axis += w.HW + w.HH;
         }
 
         PlanetChunkScratch.Ensure(ref scratch.Heights, heights);
         PlanetChunkScratch.Ensure(ref scratch.Inv, inv);
-        PlanetChunkScratch.Ensure(ref scratch.Coarse, coarse);
         PlanetChunkScratch.Ensure(ref scratch.AxisG, axis);
         PlanetChunkScratch.Ensure(ref scratch.AxisSlope, axis);
     }
@@ -305,14 +302,16 @@ public sealed class PlanetGenerator
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static double LatticeT(int i, int n) => -1.0 + 2.0 * i / n;
 
+    /// <summary>
+    /// Runs the kind's program over each window's lattice points: the coarse grid (every 8th point) first, then every
+    /// point, a row of channels at a time; then the slope normalisation from central differences of the heights.
+    /// </summary>
     private void EvaluateWindows(PlanetChunkScratch scratch, int lod, int n, out float hMin, out float hMax, out float invLow)
     {
-        var minWavelength = PlanetSurface.MinWavelength(lod);
-        var coarseWavelength = CoarseWavelengthVoxels * (1 << lod);
+        var program = Surface.Program;
         var metric = _radius * 2.0 / n;
         var heights = scratch.Heights;
         var invs = scratch.Inv;
-        var coarse = scratch.Coarse;
         var axisG = scratch.AxisG;
         var axisSlope = scratch.AxisSlope;
         hMin = float.MaxValue;
@@ -322,6 +321,9 @@ public sealed class PlanetGenerator
         for (var wi = 0; wi < scratch.WindowCount; wi++)
         {
             ref readonly var w = ref scratch.Windows[wi];
+            var points = w.HW * w.HH;
+            var coarsePoints = w.CW * w.CH;
+            scratch.EnsureRows(program, points, coarsePoints);
 
             for (var i = 0; i < w.HW; i++)
             {
@@ -345,41 +347,69 @@ public sealed class PlanetGenerator
                 {
                     var gu = CubeLattice.FromT(LatticeT((w.CI0 + ci) * CoarseStep, n));
                     CubeLattice.Direction(w.Face, gu, gv, out var dx, out var dy, out var dz);
-                    float c = 0f, r = 0f, d = 0f;
-                    Surface.Accumulate(dx * _radius, dy * _radius, dz * _radius, coarseWavelength, float.PositiveInfinity, ref c, ref r, ref d);
-                    var k = w.CBase + 3 * (ci + cj * w.CW);
-                    coarse[k] = c;
-                    coarse[k + 1] = r;
-                    coarse[k + 2] = d;
+                    var k = ci + cj * w.CW;
+                    scratch.CoarseX[k] = dx * _radius;
+                    scratch.CoarseY[k] = dy * _radius;
+                    scratch.CoarseZ[k] = dz * _radius;
                 }
             }
+
+            var coarse = new RowSet
+            {
+                X = scratch.CoarseX.AsSpan(0, coarsePoints),
+                Y = scratch.CoarseY.AsSpan(0, coarsePoints),
+                Z = scratch.CoarseZ.AsSpan(0, coarsePoints),
+                Ch = scratch.CoarseRows,
+                Slots = scratch.Slots,
+                Count = coarsePoints,
+                Stride = coarsePoints,
+                Channels = program.ChannelCount,
+                W = w.CW,
+                H = w.CH,
+                SlotStride = coarsePoints,
+                Direct = true,
+            };
+
+            LayerOps.Coarse(program, lod, ref coarse);
 
             for (var j = 0; j < w.HH; j++)
             {
                 var gv = axisG[w.AxisBase + w.HW + j];
-                var lj = w.HJ0 + j;
-                var cj = lj / CoarseStep - w.CJ0;
-                var cj1 = Math.Min(cj + 1, w.CH - 1);
-                var fj = (lj % CoarseStep) * (1f / CoarseStep);
 
                 for (var i = 0; i < w.HW; i++)
                 {
-                    var li = w.HI0 + i;
-                    var ci = li / CoarseStep - w.CI0;
-                    var ci1 = Math.Min(ci + 1, w.CW - 1);
-                    var fi = (li % CoarseStep) * (1f / CoarseStep);
                     CubeLattice.Direction(w.Face, axisG[w.AxisBase + i], gv, out var dx, out var dy, out var dz);
-                    var k00 = w.CBase + 3 * (ci + cj * w.CW);
-                    var k10 = w.CBase + 3 * (ci1 + cj * w.CW);
-                    var k01 = w.CBase + 3 * (ci + cj1 * w.CW);
-                    var k11 = w.CBase + 3 * (ci1 + cj1 * w.CW);
-                    var c = Bilinear(coarse[k00], coarse[k10], coarse[k01], coarse[k11], fi, fj);
-                    var r = Bilinear(coarse[k00 + 1], coarse[k10 + 1], coarse[k01 + 1], coarse[k11 + 1], fi, fj);
-                    var d = Bilinear(coarse[k00 + 2], coarse[k10 + 2], coarse[k01 + 2], coarse[k11 + 2], fi, fj);
-                    Surface.Accumulate(dx * _radius, dy * _radius, dz * _radius, minWavelength, coarseWavelength, ref c, ref r, ref d);
-                    heights[w.HBase + i + j * w.HW] = Surface.Compose(c, r, d);
+                    var k = i + j * w.HW;
+                    scratch.PointX[k] = dx * _radius;
+                    scratch.PointY[k] = dy * _radius;
+                    scratch.PointZ[k] = dz * _radius;
                 }
             }
+
+            var rows = new RowSet
+            {
+                X = scratch.PointX.AsSpan(0, points),
+                Y = scratch.PointY.AsSpan(0, points),
+                Z = scratch.PointZ.AsSpan(0, points),
+                Ch = scratch.Rows,
+                Slots = scratch.Slots,
+                Count = points,
+                Stride = points,
+                Channels = program.ChannelCount,
+                W = w.HW,
+                H = w.HH,
+                I0 = w.HI0,
+                J0 = w.HJ0,
+                CW = w.CW,
+                CH = w.CH,
+                CI0 = w.CI0,
+                CJ0 = w.CJ0,
+                SlotStride = coarsePoints,
+            };
+
+            rows.Row(PlanetKindProgram.Height).Clear();
+            LayerOps.Evaluate(program, lod, ref rows);
+            rows.Row(PlanetKindProgram.Height).CopyTo(heights.AsSpan(w.HBase, points));
 
             var vw = w.I1 - w.I0 + 1;
 

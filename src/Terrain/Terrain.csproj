@@ -6,6 +6,9 @@
     <PackageReference Include="Ahwoo.BRUTAL.Numerics" />
   </ItemGroup>
   <ItemGroup>
+    <EmbeddedResource Include="..\..\data\planets\kinds\*.json" LinkBase="Kinds" />
+  </ItemGroup>
+  <ItemGroup>
     <InternalsVisibleTo Include="Terrain.Tests" />
   </ItemGroup>
 </Project>
