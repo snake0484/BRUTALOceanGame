@@ -3,6 +3,7 @@
     <RootNamespace>BrutalGame.Sim</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="..\Chemistry\Chemistry.csproj" />
     <ProjectReference Include="..\Frames\Frames.csproj" />
     <ProjectReference Include="..\Physics\Physics.csproj" />
     <ProjectReference Include="..\Terrain\Terrain.csproj" />

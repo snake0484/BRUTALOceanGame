@@ -1,0 +1,11 @@
+{
+  "_note": "Ideal gases. cp is a constant mean over 300-3000 K (so flame temperatures land near real ones); hf is the standard enthalpy of formation of the gas at 298 K. Public textbook values.",
+  "species": [
+    { "id": "gas.h2",  "name": "Hydrogen",       "molarMassG": 2.016,  "cpJmolK": 32.0, "hfKJmol": 0.0,    "atoms": { "H": 2 } },
+    { "id": "gas.o2",  "name": "Oxygen",         "molarMassG": 31.999, "cpJmolK": 35.0, "hfKJmol": 0.0,    "atoms": { "O": 2 } },
+    { "id": "gas.n2",  "name": "Nitrogen",       "molarMassG": 28.014, "cpJmolK": 33.0, "hfKJmol": 0.0,    "atoms": { "N": 2 } },
+    { "id": "gas.ch4", "name": "Methane",        "molarMassG": 16.043, "cpJmolK": 60.0, "hfKJmol": -74.8,  "atoms": { "C": 1, "H": 4 } },
+    { "id": "gas.h2o", "name": "Water vapour",   "molarMassG": 18.015, "cpJmolK": 52.0, "hfKJmol": -241.8, "atoms": { "H": 2, "O": 1 } },
+    { "id": "gas.co2", "name": "Carbon dioxide", "molarMassG": 44.010, "cpJmolK": 62.0, "hfKJmol": -393.5, "atoms": { "C": 1, "O": 2 } }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "_note": "Gas-phase reactions. The heat comes from the species' formation enthalpies. A reaction burns where its reactants share a volume within the flammability window (equivalence ratio of the first two reactants) and something lit it: a spark, or the volume above the autoignition temperature. Once lit it holds while the mix stays flammable and the volume stays above the extinction temperature. Rate: extent/s = rate * exp(-activation / (R * max(T, flameK))) * limiting reactant moles.",
+  "reactions": [
+    {
+      "id": "rx.methane.oxygen",
+      "name": "Methane combustion",
+      "reactants": { "gas.ch4": 1, "gas.o2": 2 },
+      "products": { "gas.co2": 1, "gas.h2o": 2 },
+      "equivalenceMin": 0.5, "equivalenceMax": 1.67,
+      "autoignitionK": 853, "extinctionK": 1000, "flameK": 2200,
+      "rate": 4.0e6, "activationKJmol": 120
+    },
+    {
+      "id": "rx.hydrogen.oxygen",
+      "name": "Hydrogen combustion",
+      "reactants": { "gas.h2": 2, "gas.o2": 1 },
+      "products": { "gas.h2o": 2 },
+      "equivalenceMin": 0.1, "equivalenceMax": 7.1,
+      "autoignitionK": 773, "extinctionK": 900, "flameK": 2400,
+      "rate": 8.0e6, "activationKJmol": 100
+    }
+  ]
+}

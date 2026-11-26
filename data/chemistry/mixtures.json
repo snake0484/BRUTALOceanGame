@@ -1,0 +1,9 @@
+{
+  "_note": "Named gas mixtures by mole fraction, for supplies and fills.",
+  "mixtures": [
+    { "id": "mix.air", "name": "Air", "fractions": { "gas.n2": 0.79, "gas.o2": 0.21 } },
+    { "id": "mix.oxygen", "name": "Oxygen", "fractions": { "gas.o2": 1.0 } },
+    { "id": "mix.methane", "name": "Methane", "fractions": { "gas.ch4": 1.0 } },
+    { "id": "mix.hydrogen", "name": "Hydrogen", "fractions": { "gas.h2": 1.0 } }
+  ]
+}

@@ -1,5 +1,6 @@
 ﻿<Solution>
   <Folder Name="/src/">
+    <Project Path="src/Chemistry/Chemistry.csproj" />
     <Project Path="src/Crafting/Crafting.csproj" />
     <Project Path="src/Debug/Debug.csproj" />
     <Project Path="src/Designer/Designer.csproj" />
@@ -22,6 +23,7 @@
     <Project Path="src/Weather/Weather.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Chemistry.Tests/Chemistry.Tests.csproj" />
     <Project Path="tests/Crafting.Tests/Crafting.Tests.csproj" />
     <Project Path="tests/Designer.Tests/Designer.Tests.csproj" />
     <Project Path="tests/Frames.Tests/Frames.Tests.csproj" />

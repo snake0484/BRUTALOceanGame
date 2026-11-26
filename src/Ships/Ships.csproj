@@ -6,6 +6,7 @@
     <PackageReference Include="Ahwoo.BRUTAL.Concurrency" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\Chemistry\Chemistry.csproj" />
     <ProjectReference Include="..\Terrain\Terrain.csproj" />
   </ItemGroup>
 </Project>
