@@ -76,7 +76,7 @@ Each ends with a measured exit check (details in review.md).
 | --- | --- | --- |
 | M0 | Tag `island-final`. Cut water down to the ocean core and shore wash shaders (inventory steps 1-6; the island itself is retired, no A/B on it), carve the `Sim` assembly, file the upstream Jolt asks. | Game starts on a flat placeholder; sim builds without Vulkan. Shore wash is proven on a planet beach in M2b. |
 | M1 | `FrameTree`, rails, double camera with translation-free view, per-draw instance record, GPU-culled indirect terrain draws, ocean time rebasing. | Surface of a smooth 1000 km sphere to 1e8 m with float quantisation error <= ~2e-4 px; terrain draw recording < 0.1 ms. Measured (`--orbit-test` and `--orbit-test inertial`, 1600x900, ~4450 frames each, island terrain GPU-culled and drawn every frame out to the planet's SOI, ~5e7 m, and skipped beyond it): float quantisation jitter max 2.1e-4 px (limit 0.1); smoothness (second difference against poses evaluated analytically at render time) <= 2.4e-12 px, where tick poses would give 1.4 px; GPU marker (fragment readback) vs CPU prediction <= 2.8e-3 px in every decade (the 1/256 px subpixel snap), jitter as drawn <= 4.8e-3 px; impostor surface error <= 1.5e-5 of range; reverse-Z depth ok, no NaN/Inf. Terrain recording 0.024 ms (`--bench`). |
-| M2 | `PlanetGenerator`, shell, horizon pruning, `EditStore`, impostors, focus-body switch. M2b: sea sphere, global `OceanSurface`, shore wash on a planet beach. | Leaves/s and main-thread ms at 30, 300, 3000 m/s; orbit to ground with no holes. |
+| M2 | `PlanetGenerator`, shell, horizon pruning, `EditStore`, impostors, focus-body switch. M2b: sea sphere, global `OceanSurface`, shore wash on a planet beach. | Leaves/s and main-thread ms at 30, 300, 3000 m/s; orbit to ground with no holes. Measured 2026-11-26 at 93ac548 (`--planet-fly`, Release, 8 cores, RTX 4090, 1600x900, two runs, ~2,870 frames a leg; table and what is not met under "Carry-overs from M2"): leaves loaded/s 140 / 1371 / 2164 at 30 / 300 / 3000 m/s and 182 on the 800 km descent; terrain main-thread ms p50 / p95 0.12 / 0.16, 0.13 / 0.76, 0.02-0.11 / 0.23 and 0.05 / 0.12; frame work p50 0.29-0.37 ms. No leaf missing in any frame of any leg on 8 or 6 cores (0 of ~17,200 frames a run). **Not met:** pinned to 4 cores the 3000 m/s leg has a leaf missing in 2651 of 2878 frames, and settled views from 100 to 5 km show LOD seam cracks (up to 581 px a frame), which the hole counter does not see. Shore wash is visible and moving on the spawn beach (`--shore-fly`). `--orbit-test` passes in both variants (jitter <= 2.5e-4 px, GPU against CPU <= 2.8e-3 px), `--moon-test` passes, and Debug runs of all four with validation log nothing. |
 | M3 | `PhysicsRuntime` + `PhysicsScene`, surface bubble with 32 m rebases, `CharacterVirtual` with radial up. | Walk and dig 10 km from spawn; collision chunk memory measured. |
 | M4 | Two players on foot over RakNet, save/load. | Bytes/s per client and reconcile error logged. |
 | M5 | Minimal hull: box/wedge/cylinder brushes, add/subtract, mass, convex exterior, seat/thruster/tank/foot. | 15 m craft built in ~5 min; bake p50/p95 in profiler. |
@@ -186,6 +186,30 @@ Left for later:
 - **Buoyancy:** nothing floats yet; `OceanSurface.Sample` is ready for M3 bodies. The surf carrier is taken from the camera's tile, so swash timing steps when the camera crosses a tile edge (every ~64 km).
 - **Weather on the sphere (D31):** the swell's wind is still sampled in the spawn bubble's plane and applied planet-wide.
 - **Spawn beach:** still the wide flat of step 2; a steeper coast would show the wash better.
+
+### Carry-overs from M2 (2026-11-26)
+
+The exit check, measured at 93ac548 with `--planet-fly` (Release, Ryzen 7 9850X3D with 8 cores and 3 streaming workers, RTX 4090, 1600x900; two runs, the worse number of the two where they differ; each leg starts settled; a hole is a frame where a desired leaf in view, not provably below the horizon or empty, has nothing loaded over it):
+
+| Leg | Leaves loaded/s | Terrain main-thread ms p50 / p95 / p99 / max | Frame work ms p50 / p95 / max | Holes, 8 cores | Holes, 6 cores | Holes, 4 cores |
+| --- | --- | --- | --- | --- | --- | --- |
+| 30 m/s at 30 m AGL | 140 | 0.12 / 0.16 / 0.36 / 4.00 | 0.36 / 0.60 / 4.52 | 0 of 2839 frames | 0 of 2879 | 0 of 2879 |
+| 300 m/s at 100 m | 1371 | 0.13 / 0.76 / 1.38 / 1.99 | 0.37 / 1.04 / 3.54 | 0 of 2874 | 0 of 2879 | 0 of 2879 (1001 leaves/s) |
+| 3000 m/s at 300 m (finest LOD 3) | 2164 | 0.02-0.11 / 0.23 / 0.27 / 0.37 | 0.37 / 0.54 / 1.46 | 0 of 2874 | 0 of 2879 | **2651 of 2878** (1363 leaves/s, up to 4 leaves, LOD 10-11) |
+| Descent 800 km to 30 m in 60 s | 182 | 0.05 / 0.12 / 0.15 / 0.44 | 0.32 / 0.41 / 14.96 | 0 of 8624 | 0 of 8626 | 0 of 8635 |
+
+The 6 and 4 core columns are the same build pinned by process affinity (2 and 1 streaming workers, `WorkerBudget`). No gen-0 collection in any leg. `--orbit-test` passes in the surface and inertial frames (float jitter 2.2e-4 and 2.5e-4 px, GPU marker against CPU 2.8e-3 px, smoothness <= 3.8e-11 px); `--moon-test` passes (15 hole frames above 900 km, all behind the impostor; 0 below). Debug with validation: `--planet-fly`, both `--orbit-test`s, `--shore-fly` and `--moon-test` log no validation message. Shore wash (`--shore-fly`, standing off the spawn beach): the dry sand in a fixed crop of eight frames about 1 s apart shrank from 30.7% to 22.8% as one sheet ran up; ocean GPU p50 0.149 ms standing, 0.111 and 0.096 ms along the waterline at 15 and 150 m/s (vsync on).
+
+Not met, or found while measuring:
+
+- **Seam cracks (exit check not met).** Settled, static views looking inland at pitch -35° show dashed dark lines 1-3 px wide along chunk borders where LODs meet, with the sea colour behind them: 315 px at 100 km, 461 at 50 km, 581 at 20 km, 42 at 5 km, none at 300 km or 1 km (dark outliers against a 9 px median over 1.04 M land pixels). They also show over the sea at 50 km and in the descent captures between about 65 and 3 km. The hole counter counts missing leaves, so it reads 0; the exit check needs a pixel test as well (a test-only probe like the orbit marker, not a readback in the frame loop).
+- **Hole-free at 3000 m/s needs two streaming workers.** One worker loads 1363 leaves/s against the 2164 the leg asks for, and it is the coarse leaves at the horizon (LOD 10-11) that stay missing, below 100 km where no impostor stands behind them. A Debug build on 8 cores (648 leaves/s, selection 12 ms) has holes in 2689 of 2877 frames there (up to 13 leaves, LOD 10-12) and in the last 46 frames of the 300 m/s leg. Minimum spec is not decided; either the load order or the worker budget has to cover a 4-core machine.
+- **Relief not exercised.** Every leg flies over the plain inland of the spawn (a flat horizon in every capture), so leaves/s and arena numbers are for gentle ground.
+- **Allocations.** 20-22 MB in the 30 m/s leg and 4-6 MB in the 300 m/s leg, on all threads (step 2's pooled collision shapes growing); 0 at 3000 m/s where no collision is built.
+- **Spikes.** Frame work reaches 4.5 ms once in the 30 m/s leg in both runs (terrain main-thread max 4.0 and 1.8 ms), and 15 ms once in one descent (1.2 ms in the other).
+- **Day and night.** From orbit the spawn sits at the terminator, so the descent starts nearly black down to about 130 km, yet the ground below 20 km is in full daylight: the ground's sky does not follow the star. Seaward, the sea is dark blue at 100 km, turquoise at 50 km and grey-blue at 20 km, with a pale band at the limb (step 4's "sea's limb").
+- **Foam tiling (M1 carry-over, checked).** From 200 m over the shallows the foam flecks repeat on a visible square grid.
+- The "Left for later" lists of steps 2 to 4 still stand; D30's column mask and the refused-dig feedback (carry-overs from M0) and D29's heat hook were not measured here.
 
 ## Open questions
 
