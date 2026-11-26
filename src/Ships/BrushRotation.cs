@@ -19,6 +19,7 @@ public static class BrushRotation
     private static readonly double[] Cos = new double[Steps];
     private static readonly double[] Sin = new double[Steps];
     private static ushort[]? _canonical;
+    private static Dictionary<RotationKey, ushort>? _byMatrix;
 
     static BrushRotation()
     {
@@ -103,10 +104,20 @@ public static class BrushRotation
         return (_canonical ??= BuildCanonical())[yaw + Steps * (pitch + Steps * roll)];
     }
 
+    /// <summary>The canonical snap index of a rotation matrix (row-major), or false if it is not a 15 degree snap rotation.</summary>
+    public static bool FromMatrix(ReadOnlySpan<double> m, out uint rotation)
+    {
+        _canonical ??= BuildCanonical();
+        var found = _byMatrix!.TryGetValue(new RotationKey(m), out var index);
+        rotation = index;
+        return found;
+    }
+
     private static ushort[] BuildCanonical()
     {
         var map = new ushort[TripleCount];
         var first = new Dictionary<RotationKey, ushort>(TripleCount);
+        _byMatrix = first;
         Span<double> m = stackalloc double[9];
 
         // Roll, pitch, yaw nesting visits encoded values in increasing order, so the first triple seen is the smallest.

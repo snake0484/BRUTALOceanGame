@@ -6,6 +6,8 @@ namespace BrutalGame.Designer;
 /// <summary>
 /// The hull tool's commands, each one undo group of brush-list ops. Brush ids come from the document (monotonic, never
 /// reused, so a redone insert gets its old id back). New and edited brushes are snapped by the session's settings.
+/// With mirror planes on (<see cref="Symmetry"/>), each command also adds, edits or removes the brush's mirror partners
+/// in the same group.
 /// </summary>
 public static class HullCommands
 {
@@ -35,6 +37,9 @@ public static class HullCommands
             brush.Id = s.Doc.AllocateId();
             id = brush.Id;
             s.Apply(PlanOp.Insert(s.Doc.Brushes.Count, brush));
+
+            foreach (var (_, mirrored, mesh) in s.Symmetry.Reflections(s.Doc, brush))
+                PlaceMirror(s, mirrored, mesh, s.Doc.Brushes.Count);
         });
 
         session.Selection.Set(id);
@@ -58,8 +63,55 @@ public static class HullCommands
         if (after == before)
             return false;
 
-        session.Edit(s => s.Apply(PlanOp.Modify(index, before, after)));
+        session.Edit(s => Modify(s, index, after));
         return true;
+    }
+
+    /// <summary>Inside a group: brush <paramref name="index"/> becomes <paramref name="after"/>, its mirror partners its reflections.</summary>
+    public static void Modify(DesignSession s, int index, HullBrush after)
+    {
+        var before = s.Doc.Brushes[index];
+        var partners = s.Symmetry.Partners(s.Doc, before);
+        s.Apply(PlanOp.Modify(index, before, after));
+        var mesh = Symmetry.MeshOf(s.Doc, after);
+
+        foreach (var (mask, partnerId) in partners)
+        {
+            var partnerIndex = s.Doc.Brushes.IndexOf(partnerId);
+            var partner = s.Doc.Brushes[partnerIndex];
+
+            if (!BrushMirror.Mirror(after, mask, mesh, out var mirrored, out _))
+                continue;
+
+            mirrored.Id = partner.Id;
+
+            if (mirrored.Shape == BrushShape.Mesh)
+                mirrored.Param = partner.Param;
+
+            if (mirrored != partner)
+                s.Apply(PlanOp.Modify(partnerIndex, partner, mirrored));
+        }
+    }
+
+    /// <summary>Inserts a reflection as a new brush at <paramref name="index"/>; a mesh reflection reuses an equal mesh entry or adds one.</summary>
+    public static uint PlaceMirror(DesignSession s, HullBrush mirrored, HullMesh? mesh, int index)
+    {
+        if (mirrored.Shape == BrushShape.Mesh && mesh is not null)
+        {
+            var slot = s.Doc.Meshes.FindIndex(m => m.ContentEquals(mesh));
+
+            if (slot < 0)
+            {
+                slot = s.Doc.Meshes.Count;
+                s.Apply(PlanOp.AddMesh(slot, mesh));
+            }
+
+            mirrored.Param = (ushort)slot;
+        }
+
+        mirrored.Id = s.Doc.AllocateId();
+        s.Apply(PlanOp.Insert(index, mirrored));
+        return mirrored.Id;
     }
 
     public static bool SetMaterial(DesignSession session, uint id, DefId material)
@@ -80,7 +132,7 @@ public static class HullCommands
             if (after == before)
                 return;
 
-            s.Apply(PlanOp.Modify(index, before, after));
+            Modify(s, index, after);
             changed = true;
         });
 
@@ -97,14 +149,31 @@ public static class HullCommands
         return SetBrush(session, id, brush, snap: false);
     }
 
-    /// <summary>Removes every selected brush in one group.</summary>
+    /// <summary>Removes every selected brush, and their mirror partners, in one group.</summary>
     public static int DeleteSelected(DesignSession session)
     {
         var removed = 0;
 
         session.Edit(s =>
         {
+            var ids = new List<uint>();
+
             foreach (var id in s.Selection.Ids)
+            {
+                if (!s.TryGetBrush(id, out var brush))
+                    continue;
+
+                if (!ids.Contains(id))
+                    ids.Add(id);
+
+                foreach (var (_, partner) in s.Symmetry.Partners(s.Doc, brush))
+                {
+                    if (!ids.Contains(partner))
+                        ids.Add(partner);
+                }
+            }
+
+            foreach (var id in ids)
             {
                 var index = s.Doc.Brushes.IndexOf(id);
 
@@ -132,11 +201,14 @@ public static class HullCommands
 
         session.Edit(s =>
         {
-            var copy = s.Doc.Brushes[index];
+            var source = s.Doc.Brushes[index];
+            var partners = s.Symmetry.Partners(s.Doc, source);
+            var copy = source;
             copy.Id = s.Doc.AllocateId();
             copy.PosX += Math.Max(s.Snap.PositionStep, HullBrush.PositionUnitsPerMetre);
             copyId = copy.Id;
             s.Apply(PlanOp.Insert(index + 1, copy));
+            MirrorAfterPartners(s, copy, partners);
         });
 
         session.Selection.Set(copyId);
@@ -179,11 +251,25 @@ public static class HullCommands
             inner.HalfY = (ushort)hy;
             inner.HalfZ = (ushort)Math.Max(hz, PlanLimits.MinHalfUnits);
             innerId = inner.Id;
+            var partners = s.Symmetry.Partners(s.Doc, source);
             s.Apply(PlanOp.Insert(index + 1, inner));
+            MirrorAfterPartners(s, inner, partners);
         });
 
         session.Selection.Set(innerId);
         return innerId;
+    }
+
+    /// <summary>Inserts <paramref name="brush"/>'s reflection right after each partner of its source (Duplicate, Hollow).</summary>
+    private static void MirrorAfterPartners(DesignSession s, in HullBrush brush, List<(int Mask, uint Id)> partners)
+    {
+        var mesh = Symmetry.MeshOf(s.Doc, brush);
+
+        foreach (var (mask, partnerId) in partners)
+        {
+            if (BrushMirror.Mirror(brush, mask, mesh, out var mirrored, out var mirroredMesh))
+                PlaceMirror(s, mirrored, mirroredMesh, s.Doc.Brushes.IndexOf(partnerId) + 1);
+        }
     }
 
     /// <summary>Moves a brush one place earlier (-1) or later (+1) in evaluation order.</summary>

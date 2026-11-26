@@ -96,6 +96,7 @@ public static class MeshCommands
 
         session.Edit(s =>
         {
+            var partners = s.Symmetry.Partners(s.Doc, before);
             var slot = s.Doc.Meshes.Count;
             s.Apply(PlanOp.AddMesh(slot, mesh));
             var after = before;
@@ -103,6 +104,28 @@ public static class MeshCommands
             after.Param = (ushort)slot;
             (after.HalfX, after.HalfY, after.HalfZ) = mesh.HalfUnits();
             s.Apply(PlanOp.Modify(index, before, after));
+
+            // Partners become the reflected mesh, placed as the converted brush's reflection.
+            foreach (var (mask, partnerId) in partners)
+            {
+                var partnerIndex = s.Doc.Brushes.IndexOf(partnerId);
+                var partner = s.Doc.Brushes[partnerIndex];
+
+                if (!BrushMirror.Mirror(after, mask, mesh, out var mirrored, out var mirroredMesh) || mirroredMesh is null)
+                    continue;
+
+                var partnerSlot = s.Doc.Meshes.FindIndex(m => m.ContentEquals(mirroredMesh));
+
+                if (partnerSlot < 0)
+                {
+                    partnerSlot = s.Doc.Meshes.Count;
+                    s.Apply(PlanOp.AddMesh(partnerSlot, mirroredMesh));
+                }
+
+                mirrored.Id = partner.Id;
+                mirrored.Param = (ushort)partnerSlot;
+                s.Apply(PlanOp.Modify(partnerIndex, partner, mirrored));
+            }
         });
 
         return true;
@@ -154,26 +177,48 @@ public static class MeshCommands
 
         session.Edit(s =>
         {
-            s.Apply(PlanOp.SetMesh(slot, before, after));
-            var half = after.HalfUnits();
-            var brushes = s.Doc.Brushes;
-
-            for (var i = 0; i < brushes.Count; i++)
+            // Mirror partners with their own (reflected) mesh entry get the reflected edit; shared entries are already edited.
+            foreach (var (mask, partnerId) in s.Symmetry.Partners(s.Doc, brush))
             {
-                var b = brushes[i];
+                s.TryGetBrush(partnerId, out var partner);
 
-                if (b.Shape != BrushShape.Mesh || b.Param != slot)
+                if (partner.Param == slot || partner.Param >= s.Doc.Meshes.Count)
                     continue;
 
-                var refit = b;
-                (refit.HalfX, refit.HalfY, refit.HalfZ) = half;
-
-                if (refit != b)
-                    s.Apply(PlanOp.Modify(i, b, refit));
+                SetSlot(s, partner.Param, BrushMirror.Mirror(after, mask));
             }
+
+            SetSlot(s, slot, after);
         });
 
         return true;
+    }
+
+    /// <summary>Replaces mesh entry <paramref name="slot"/> and refits every brush using it.</summary>
+    private static void SetSlot(DesignSession s, int slot, HullMesh after)
+    {
+        var before = s.Doc.Meshes[slot];
+
+        if (before.ContentEquals(after))
+            return;
+
+        s.Apply(PlanOp.SetMesh(slot, before, after));
+        var half = after.HalfUnits();
+        var brushes = s.Doc.Brushes;
+
+        for (var i = 0; i < brushes.Count; i++)
+        {
+            var b = brushes[i];
+
+            if (b.Shape != BrushShape.Mesh || b.Param != slot)
+                continue;
+
+            var refit = b;
+            (refit.HalfX, refit.HalfY, refit.HalfZ) = half;
+
+            if (refit != b)
+                s.Apply(PlanOp.Modify(i, b, refit));
+        }
     }
 
     public static bool SetLevels(DesignSession session, uint id, int levels, bool mirror = false) =>

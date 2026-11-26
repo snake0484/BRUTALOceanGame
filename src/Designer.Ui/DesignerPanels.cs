@@ -175,6 +175,13 @@ public sealed class DesignerPanels
             ImGui.SameLine();
             ImGui.Text("rotation 15 deg"u8);
 
+            ImGui.SeparatorText("Mirror"u8);
+            ImGui.Checkbox("X (port/starboard)"u8, ref session.Symmetry.X);
+            ImGui.SameLine();
+            ImGui.Checkbox("Y (up/down)"u8, ref session.Symmetry.Y);
+            ImGui.SameLine();
+            ImGui.Checkbox("Z (front/back)"u8, ref session.Symmetry.Z);
+
             ImGui.BeginDisabled(session.Undo.UndoCount == 0);
 
             if (ImGui.Button("Undo"u8))

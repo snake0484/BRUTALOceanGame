@@ -45,6 +45,7 @@ public sealed class DesignSession
     public readonly UndoStack Undo = new();
     public readonly Selection Selection = new();
     public readonly Snap Snap = new();
+    public readonly Symmetry Symmetry = new();
     public Dirty Dirty;
 
     public DesignSession(PlanDocument? doc = null)

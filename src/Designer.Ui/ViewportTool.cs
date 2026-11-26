@@ -56,6 +56,10 @@ public sealed class ViewportTool
     private static readonly uint PickColour = OverlayRenderer.Rgba(255, 150, 40, 255);
     private static readonly uint HoverColour = OverlayRenderer.Rgba(255, 230, 120, 255);
     private static readonly uint[] AxisColours = [OverlayRenderer.Rgba(235, 70, 70), OverlayRenderer.Rgba(90, 220, 90), OverlayRenderer.Rgba(80, 140, 255)];
+    private static readonly uint FrontColour = OverlayRenderer.Rgba(255, 196, 40);
+    private static readonly ImColor8 FrontLabel = new(255, 196, 40, 255);
+    private const double GuideMargin = 2.0;
+    private const double MinGuideHalf = 6.0;
 
     private readonly double[] _matrix = new double[9];
     private readonly List<int> _triangles = new();
@@ -84,6 +88,7 @@ public sealed class ViewportTool
         var mesh = hasPrimary ? MeshCommands.MeshOf(session, primary) : null;
         edit.Sync(primary, mesh);
         var editing = edit.Enabled && mesh is not null;
+        DrawGuides(session, camera, viewport, viewProj, overlay);
 
         foreach (ref readonly var b in session.Doc.Brushes.AsSpan())
         {
@@ -550,6 +555,79 @@ public sealed class ViewportTool
             var picked = selection.Vertices.Contains(v);
             overlay.Cube(MeshPoint(brush, mesh.Vertices[v]), scale * (picked || v == hoverVertex ? 2.5 : 1.5), picked ? PickColour : v == hoverVertex ? HoverColour : CageColour);
         }
+    }
+
+    // ---- guides: front arrow, mirror planes ----
+
+    /// <summary>
+    /// The front arrow (gold, along the ship's front axis, from the origin to past the hull's nose, labelled) and a
+    /// translucent quad per enabled mirror plane, sized to the hull's bounds.
+    /// </summary>
+    private void DrawGuides(DesignSession session, OrbitCamera camera, Vector2 viewport, in Matrix4x4 viewProj, OverlayRenderer overlay)
+    {
+        var (min, max) = HullBounds(session);
+        var front = Math.Max(max.Z, MinGuideHalf) + GuideMargin;
+        var length = Math.Max(4.0, front * 0.35);
+        var tail = new Vector3d(0, 0, front);
+        var neck = new Vector3d(0, 0, front + length * 0.75);
+        var tip = new Vector3d(0, 0, front + length);
+        var width = Math.Max(0.15, length * 0.05);
+        overlay.Ribbon(new Vector3d(0, 0, 0), tail, width * 0.3, OverlayRenderer.WithAlpha(FrontColour, 120));
+        overlay.Ribbon(tail, neck, width, FrontColour);
+        overlay.Cone(neck, tip, width * 2.5, FrontColour);
+
+        // Label just past the tip along the arrow's screen direction, so the cone never covers it.
+        if (camera.Project(tip, viewProj, viewport, out var label) && camera.Project(neck, viewProj, viewport, out var back))
+        {
+            var along = label - back;
+            along = along.LengthSquared() > 1e-6f ? Vector2.Normalize(along) : Vector2.UnitX;
+            var at = label + along * 22f - new Vector2(18f, 7f);
+            ImGui.GetBackgroundDrawList(ImGui.GetMainViewport()).AddText(new float2(at.X, at.Y), FrontLabel, "FRONT"u8);
+        }
+
+        var symmetry = session.Symmetry;
+
+        if (!symmetry.Any)
+            return;
+
+        var hx = Math.Max(Math.Max(-min.X, max.X), MinGuideHalf) + GuideMargin;
+        var hy = Math.Max(Math.Max(-min.Y, max.Y), MinGuideHalf) + GuideMargin;
+        var hz = Math.Max(Math.Max(-min.Z, max.Z), MinGuideHalf) + GuideMargin;
+
+        if (symmetry.X)
+            Plane(overlay, new Vector3d(0, -hy, -hz), new Vector3d(0, hy, -hz), new Vector3d(0, hy, hz), new Vector3d(0, -hy, hz), AxisColours[0]);
+
+        if (symmetry.Y)
+            Plane(overlay, new Vector3d(-hx, 0, -hz), new Vector3d(-hx, 0, hz), new Vector3d(hx, 0, hz), new Vector3d(hx, 0, -hz), AxisColours[1]);
+
+        if (symmetry.Z)
+            Plane(overlay, new Vector3d(-hx, -hy, 0), new Vector3d(hx, -hy, 0), new Vector3d(hx, hy, 0), new Vector3d(-hx, hy, 0), AxisColours[2]);
+    }
+
+    private static void Plane(OverlayRenderer overlay, Vector3d a, Vector3d b, Vector3d c, Vector3d d, uint colour)
+    {
+        var fill = OverlayRenderer.WithAlpha(colour, 28);
+        overlay.Triangle(a, b, c, fill);
+        overlay.Triangle(a, c, d, fill);
+        var edge = OverlayRenderer.WithAlpha(colour, 160);
+        overlay.Line(a, b, edge);
+        overlay.Line(b, c, edge);
+        overlay.Line(c, d, edge);
+        overlay.Line(d, a, edge);
+    }
+
+    private static (Vector3d Min, Vector3d Max) HullBounds(DesignSession session)
+    {
+        double x0 = 0, y0 = 0, z0 = 0, x1 = 0, y1 = 0, z1 = 0;
+
+        foreach (ref readonly var b in session.Doc.Brushes.AsSpan())
+        {
+            BrushGeometry.Bounds(b, out var min, out var max);
+            (x0, y0, z0) = (Math.Min(x0, min.X), Math.Min(y0, min.Y), Math.Min(z0, min.Z));
+            (x1, y1, z1) = (Math.Max(x1, max.X), Math.Max(y1, max.Y), Math.Max(z1, max.Z));
+        }
+
+        return (new Vector3d(x0, y0, z0), new Vector3d(x1, y1, z1));
     }
 
     // ---- brushes, ghosts, gizmos ----
