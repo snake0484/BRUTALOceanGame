@@ -64,8 +64,22 @@ internal static class TestKinds
     }
     """;
 
+    private const string StampsJson = """
+    {
+      "id": "t-stamps", "schema": 1, "relief": { "minM": -6000, "maxM": 6000 }, "sea": { "present": false }, "materials": "barren",
+      "layers": [
+        { "name": "base", "type": "fbm", "out": "h", "lambdaR": 1.0, "octaves": 6, "amplitudeM": 800 },
+        { "name": "impacts", "type": "craters", "radiusM": [128, 16000], "coverage": 0.12, "age": [0.0, 1.0], "complexDiameterM": 8000, "freshOut": "fresh" },
+        { "name": "dunes", "type": "ergs", "cellKm": 120, "presence": 0.6, "radiusKm": [20, 45], "lambdaM": [90, 260], "heightRatio": [0.06, 0.10],
+          "gate": { "alt": [200, -200] } },
+        { "name": "regolith", "type": "fbm", "out": "h", "lambdaM": 32, "octaves": 5, "amplitudeM": 1.2, "scale": { "channel": "fresh" } }
+      ]
+    }
+    """;
+
     static TestKinds()
     {
+        PlanetKinds.Register(PlanetKind.Parse(StampsJson));
         PlanetKinds.Register(PlanetKind.Parse(MountainsJson));
         PlanetKinds.Register(PlanetKind.Parse(MesaJson));
         PlanetKinds.Register(PlanetKind.Parse(SeaJson));
@@ -123,6 +137,7 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
     [InlineData(TestKinds.Mountains)]
     [InlineData(TestKinds.Mesa)]
     [InlineData(TestKinds.Sea)]
+    [InlineData(TestKinds.Stamps)]
     public void ProgramsAreDeterministic(string kind)
     {
         var p = TestKinds.Generator(kind).Params;
@@ -149,6 +164,9 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
     [InlineData(TestKinds.Mesa, 5)]
     [InlineData(TestKinds.Sea, 0)]
     [InlineData(TestKinds.Sea, 3)]
+    [InlineData(TestKinds.Stamps, 0)]
+    [InlineData(TestKinds.Stamps, 4)]
+    [InlineData(TestKinds.Stamps, 8)]
     public void BoundsHoldEverySample(string kind, int minLod)
     {
         var surface = TestKinds.Generator(kind).Surface;
@@ -190,6 +208,9 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
     [InlineData(TestKinds.Mesa, 3)]
     [InlineData(TestKinds.Sea, 0)]
     [InlineData(TestKinds.Sea, 4)]
+    [InlineData(TestKinds.Stamps, 0)]
+    [InlineData(TestKinds.Stamps, 2)]
+    [InlineData(TestKinds.Stamps, 5)]
     public void NeighboursAgreeOnAprons(string kind, int lod)
     {
         var generator = TestKinds.Generator(kind);
@@ -246,6 +267,7 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
     [InlineData(TestKinds.Mountains)]
     [InlineData(TestKinds.Mesa)]
     [InlineData(TestKinds.Sea)]
+    [InlineData(TestKinds.Stamps)]
     public void ShellClassificationMatchesBruteForce(string kind)
     {
         var generator = TestKinds.Generator(kind);
@@ -301,6 +323,64 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
 
         output.WriteLine($"{kind}: {uniform} of {offSurface} nodes 2.25+ chunk sizes off the ground classified uniform");
         Assert.True(uniform * 4 >= offSurface, $"Only {uniform} of {offSurface} off-surface nodes classified uniform");
+    }
+
+    /// <summary>
+    /// A lattice window and a point query see the same stamps: heights from the row evaluator over a window (culled stamp
+    /// list, footprint rectangles) equal the per-point lookup wherever no octave sits on the coarse grid.
+    /// </summary>
+    [Fact]
+    public void StampWindowsMatchPointQueries()
+    {
+        var generator = TestKinds.Generator(TestKinds.Stamps);
+        var program = generator.Surface.Program;
+        var scratch = new PlanetChunkScratch();
+        var random = new Random(47);
+        int craters = 0, dunes = 0;
+
+        foreach (var lod in new[] { 0, 2, 5, 8 })
+        {
+            var n = generator.LatticeN(lod);
+
+            for (var trial = 0; trial < 40; trial++)
+            {
+                const int w = 24, h = 20;
+                var face = random.Next(6);
+                int i0 = random.Next(n - w), j0 = random.Next(n - h);
+                double[] x = new double[w * h], y = new double[w * h], z = new double[w * h];
+                var rows = new float[program.Rows * w * h];
+
+                for (var j = 0; j < h; j++)
+                for (var i = 0; i < w; i++)
+                {
+                    CubeLattice.LatticeDirection(face, i0 + i, j0 + j, n, out var dx, out var dy, out var dz);
+                    (x[i + j * w], y[i + j * w], z[i + j * w]) = (dx * generator.Params.Radius, dy * generator.Params.Radius, dz * generator.Params.Radius);
+                }
+
+                var set = new RowSet { X = x, Y = y, Z = z, Ch = rows, Count = w * h, Stride = w * h, Channels = program.ChannelCount, W = w, H = h, I0 = i0, J0 = j0, Face = face, N = n, Scratch = scratch, Direct = true };
+                var direct = set with { Scratch = null, Ch = new float[rows.Length] };
+
+                for (var layer = 0; layer < program.LayerCount; layer++)
+                {
+                    if (program.Op[layer] is not (LayerOp.Craters or LayerOp.Ergs))
+                        continue;
+
+                    set.Direct = false;
+                    Stamps.Evaluate(program, layer, lod, ref set);
+                    Stamps.Evaluate(program, layer, lod, ref direct);
+                    Assert.True(set.Row(program.Dst[layer]).SequenceEqual(direct.Row(program.Dst[layer])), $"LOD {lod} layer {layer}");
+
+                    foreach (var v in set.Row(program.Dst[layer]))
+                    {
+                        craters += v < -1f ? 1 : 0;
+                        dunes += program.Op[layer] == LayerOp.Ergs && v > 1f ? 1 : 0;
+                    }
+                }
+            }
+        }
+
+        output.WriteLine($"{craters} lattice points in craters, {dunes} on dunes");
+        Assert.True(craters > 1000 && dunes > 100);
     }
 
     /// <summary>The Lipschitz constant the bounds rely on holds for the analytic gradient at 2 × 10⁶ points.</summary>
@@ -404,7 +484,8 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
     [InlineData(TestKinds.Mountains)]
     [InlineData(TestKinds.Mesa)]
     [InlineData(TestKinds.Sea)]
-    public void LodsFollowTheFilteredSurface(string kind) => BandLimit(TestKinds.Generator(kind).Surface, output, 1.5, 6.0);
+    [InlineData(TestKinds.Stamps)]
+    public void LodsFollowTheFilteredSurface(string kind) => BandLimit(TestKinds.Generator(kind).Surface, output, 0.35, 1.5);
 
     internal static void BandLimit(PlanetSurface surface, ITestOutputHelper output, double rmsLimit, double maxLimit)
     {
@@ -453,6 +534,7 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
     [InlineData(TestKinds.Mountains)]
     [InlineData(TestKinds.Mesa)]
     [InlineData(TestKinds.Sea)]
+    [InlineData(TestKinds.Stamps)]
     public void SamplingAndGenerationAreAllocationFree(string kind)
     {
         var generator = TestKinds.Generator(kind);

@@ -405,6 +405,9 @@ public sealed class PlanetGenerator
                 CI0 = w.CI0,
                 CJ0 = w.CJ0,
                 SlotStride = coarsePoints,
+                Scratch = scratch,
+                Face = w.Face,
+                N = n,
             };
 
             rows.Row(PlanetKindProgram.Height).Clear();

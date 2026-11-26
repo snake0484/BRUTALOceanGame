@@ -18,6 +18,10 @@ internal ref struct RowSet
     public int CW, CH, CI0, CJ0, SlotStride;
     public bool Direct;
 
+    /// <summary>A lattice window's face, cells per side and job scratch (stamp list); null scratch for point queries.</summary>
+    public PlanetChunkScratch? Scratch;
+    public int Face, N;
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly Span<float> Row(int channel) => Ch.Slice(channel * Stride, Count);
 
@@ -51,9 +55,12 @@ internal static partial class LayerOps
         }
     }
 
-    public static void Evaluate(PlanetKindProgram p, int lod, ref RowSet r)
+    public static void Evaluate(PlanetKindProgram p, int lod, ref RowSet r) => Evaluate(p, lod, ref r, p.LayerCount);
+
+    /// <param name="layers">Run only the first so many layers (the compiler's calibration of a layer's input).</param>
+    public static void Evaluate(PlanetKindProgram p, int lod, ref RowSet r, int layers)
     {
-        for (var layer = 0; layer < p.LayerCount; layer++)
+        for (var layer = 0; layer < layers; layer++)
         {
             switch (p.Op[layer])
             {

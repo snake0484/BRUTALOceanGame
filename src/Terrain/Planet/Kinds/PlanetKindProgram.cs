@@ -35,14 +35,16 @@ public struct StampClass
 {
     public LayerOp Kind;
     public byte Rotation;
-    public byte Flags;
     public int CellsPerSide;
-    public float RadiusMin, Presence, DepthRatio, RimRatio, Reach, AgeMin, AgeMax;
-    public float Wavelength, HeightRatio;
     public uint Seed;
 
-    public const byte Complex = 1;
-    public const byte Blanket = 2;
+    /// <summary>Radii (m), the chance a cell holds a stamp, the reach in radii and the centre jitter in cells.</summary>
+    public float RadiusMin, RadiusMax, Presence, Reach, Jitter;
+    public float AgeMin, AgeMax, ComplexDiameter;
+
+    /// <summary>The class's deepest bowl and highest rim (ergs: tallest dune) for bounds (m).</summary>
+    public float DepthMax, RimMax;
+    public float LambdaMin, LambdaMax, RatioMin, RatioMax;
 }
 
 /// <summary>
@@ -85,7 +87,7 @@ public sealed class PlanetKindProgram
     /// <summary>[lod × layers + layer]: riser band (terrace: m of input; canyon: share), the layer's fade weight, the mean of skipped shaped octaves.</summary>
     public float[] RiserBand = [], LodWeight = [], RidgeMean = [];
 
-    /// <summary>[lod × classes + class]: 1 full, down to 0 skipped.</summary>
+    /// <summary>[(lod × classes + class) × 2]: the stamp's weight (1 full, 0 skipped; ergs: dune detail against its mean) and the rim's.</summary>
     public float[] ClassWeight = [];
     public ulong[] LayersAtLod = new ulong[Lods];
     public int[] CoarseSlots = new int[Lods];

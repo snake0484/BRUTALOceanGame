@@ -58,7 +58,7 @@ public static class PlanetKindCompiler
         private readonly List<LayerOp> _op = [];
         private readonly List<byte> _dst = [], _srcA = [], _srcB = [], _gate = [], _scale = [], _warp = [], _mode = [];
         private readonly List<ushort> _firstOctave = [], _octaveCount = [], _paramBase = [];
-        private readonly List<float> _band = [];
+        private readonly List<float> _band = [], _slope = [];
         private readonly List<string> _names = [];
         private readonly List<StampClass> _classes = [];
         private readonly Dictionary<string, int> _channels = new(StringComparer.Ordinal) { ["h"] = PlanetKindProgram.Height };
@@ -156,6 +156,7 @@ public static class PlanetKindCompiler
             _octaveCount.Add((ushort)octaves);
             _paramBase.Add((ushort)paramBase);
             _band.Add(band);
+            _slope.Add(TerraceSlope);
             _names.Add(_layer);
             _written.Add(dst);
             return _op.Count - 1;
@@ -296,6 +297,12 @@ public static class PlanetKindCompiler
                     Emit(LayerOp.Combine, NewChannels(Text(layer, "out") ?? _layer, 1), m, mode: LayerMode.Copy);
                     break;
                 }
+                case "craters":
+                    StampLayer(layer, LayerOp.Craters);
+                    break;
+                case "ergs":
+                    StampLayer(layer, LayerOp.Ergs);
+                    break;
                 case "legacy":
                     LegacyLayer(layer);
                     break;
@@ -498,6 +505,116 @@ public static class PlanetKindCompiler
             Emit(LayerOp.Canyon, PlanetKindProgram.Height, field, gate: gate, paramBase: at, band: riser);
         }
 
+        /// <summary>Area share of one class grid at presence 1: mean bowl area over the cell's.</summary>
+        private const double GridCoverage = Math.PI * 0.72 / (Stamps.CellRadii * Stamps.CellRadii);
+        private const float SmallCrater = 500f;
+
+        private void AddClass(LayerOp op, uint seed, StampClass cls, double cellArc)
+        {
+            var n = (int)Math.Floor(2.0 * Stamps.MinArcPerT * p.Radius / cellArc);
+
+            if (n < 2)
+                return;
+
+            var extent = cls.Reach * cls.RadiusMax / (Stamps.MinArcPerT * p.Radius) * (n * 0.5);
+            cls.Kind = op;
+            cls.CellsPerSide = n;
+            cls.Jitter = (float)Math.Max(0.5 - extent - 0.02, 0.0);
+            cls.Rotation = (byte)((_classes.Count * 7 + 3) % Stamps.Rotations);
+            cls.Seed = Noise.Mix(seed + (uint)_classes.Count * OctaveSalt);
+
+            if (extent > 0.48)
+                throw Error("a stamp class does not fit its cell");
+
+            _classes.Add(cls);
+        }
+
+        private void StampLayer(JsonElement layer, LayerOp op)
+        {
+            var first = _classes.Count;
+            var seed = (uint)SplitMix(p.KindSeed ^ Fnv(Encoding.UTF8.GetBytes($"layers.{_layer}.seed")));
+
+            if (op == LayerOp.Craters)
+            {
+                var (rMin, rMax) = Pair(layer, "radiusM");
+                var (ageMin, ageMax) = layer.TryGetProperty("age", out _) ? Pair(layer, "age") : (0f, 1f);
+                var coverage = Num(layer, "coverage", 0.1);
+                var complex = (float)Num(layer, "complexDiameterM", 1e9);
+                var grids = Math.Clamp((int)Math.Ceiling(coverage / (2.0 * GridCoverage)), 1, 3);
+                var presence = (float)Math.Min(coverage / (2.0 * grids * GridCoverage), 1.0);
+                var steps = 0;
+
+                for (var r = rMin; r * 1.2f < rMax; r *= 1.41421356f)
+                    steps++;
+
+                // Large to small: old basins first, young small craters on top.
+                for (var k = steps - 1; k >= 0; k--)
+                {
+                    var lo = rMin;
+
+                    for (var i = 0; i < k; i++)
+                        lo *= 1.41421356f;
+
+                    var hi = lo * 1.41421356f;
+                    var deepest = Stamps.CraterDepth(hi, complex);
+
+                    for (var g = 0; g < grids; g++)
+                    {
+                        AddClass(op, seed, new StampClass
+                        {
+                            RadiusMin = lo, RadiusMax = hi, Presence = presence, Reach = lo < SmallCrater ? Stamps.SmallReach : Stamps.CraterReach,
+                            AgeMin = ageMin, AgeMax = ageMax, ComplexDiameter = complex,
+                            DepthMax = deepest * (1f - 0.7f * ageMin), RimMax = Stamps.RimShare * deepest * (1f - 0.9f * ageMin),
+                        }, Stamps.CellRadii * hi);
+                    }
+                }
+            }
+            else
+            {
+                var cell = Num(layer, "cellKm", 300.0) * 1000.0;
+                var (rMin, rMax) = Pair(layer, "radiusKm");
+                var (lambdaMin, lambdaMax) = Pair(layer, "lambdaM");
+                var (ratioMin, ratioMax) = Pair(layer, "heightRatio");
+                rMax = MathF.Min(rMax * 1000f, (float)(0.4 * cell));
+                rMin = MathF.Min(rMin * 1000f, rMax);
+
+                AddClass(op, seed, new StampClass
+                {
+                    RadiusMin = rMin, RadiusMax = rMax, Presence = (float)Num(layer, "presence", 0.3), Reach = 1f,
+                    LambdaMin = lambdaMin, LambdaMax = lambdaMax, RatioMin = ratioMin, RatioMax = ratioMax, RimMax = lambdaMax * ratioMax,
+                }, cell);
+            }
+
+            var mask = Masks(layer);
+            var sum = Temp();
+            var fresh = op == LayerOp.Craters && Text(layer, "freshOut") is { } name ? NewChannels(name, 1) : None;
+            var at = Push(first, _classes.Count - first);
+
+            if (op == LayerOp.Craters)
+            {
+                float deepest = 1f, highest = 1f, depths = 0f, rims = 0f;
+
+                for (var k = first; k < _classes.Count; k++)
+                {
+                    deepest = MathF.Max(deepest, _classes[k].DepthMax);
+                    highest = MathF.Max(highest, _classes[k].RimMax);
+                    depths += _classes[k].DepthMax;
+                    rims += _classes[k].RimMax;
+                }
+
+                // One crater is left alone; nested ones ease into 1.5 × the deepest (rims: the highest).
+                float top = MathF.Max(rims, highest) + 1f, bottom = -MathF.Max(depths, deepest) - 1f;
+                Push(highest, top, 1.5f * highest, (top - highest) / (0.5f * highest), -deepest, bottom, -1.5f * deepest, (-deepest - bottom) / (0.5f * deepest));
+            }
+
+            Emit(op, sum, b: fresh, paramBase: at);
+
+            if (fresh != None)
+                _written.Add(fresh);
+
+            AddInto(Existing(Text(layer, "out") ?? "h"), sum, mask);
+        }
+
         private void LegacyLayer(JsonElement layer)
         {
             PlanetParams.LegacyDraws(p.Seed, out var land, out var mountains);
@@ -605,12 +722,30 @@ public static class PlanetKindCompiler
             program.RiserBand = new float[PlanetKindProgram.Lods * layers];
             program.LodWeight = new float[PlanetKindProgram.Lods * layers];
             program.RidgeMean = new float[PlanetKindProgram.Lods * layers];
+            program.ClassWeight = new float[PlanetKindProgram.Lods * program.Classes.Length * 2];
             program.MaxCoarseSlots = 0;
 
             for (var lod = 0; lod < PlanetKindProgram.Lods; lod++)
             {
                 var voxel = (float)(1 << lod);
                 var slots = 0;
+
+                for (var k = 0; k < program.Classes.Length; k++)
+                {
+                    ref readonly var cls = ref program.Classes[k];
+                    var at = (lod * program.Classes.Length + k) * 2;
+
+                    // Craters: full from 8 voxels of radius, the rim eased out by 4, the bowl by 2. Dunes: detail eased into its mean from 8 to 4 voxels of wavelength.
+                    if (cls.Kind == LayerOp.Craters)
+                    {
+                        program.ClassWeight[at] = Math.Clamp((cls.RadiusMin / voxel - 2f) / 2f, 0f, 1f);
+                        program.ClassWeight[at + 1] = Math.Clamp((cls.RadiusMin / voxel - 4f) / 4f, 0f, 1f);
+                    }
+                    else
+                    {
+                        program.ClassWeight[at] = Math.Clamp((cls.LambdaMin / voxel - 4f) / 4f, 0f, 1f);
+                    }
+                }
 
                 for (var layer = 0; layer < layers; layer++)
                 {
@@ -620,7 +755,7 @@ public static class PlanetKindCompiler
                     switch (program.Op[layer])
                     {
                         case LayerOp.Terrace:
-                            program.RiserBand[at] = MathF.Max(_band[layer], TerraceSlope * voxel);
+                            program.RiserBand[at] = MathF.Max(_band[layer], _slope[layer] * voxel);
                             continue;
                         case LayerOp.Canyon:
                         {
@@ -676,7 +811,7 @@ public static class PlanetKindCompiler
             var needed = false;
 
             for (var layer = 0; layer < program.LayerCount; layer++)
-                needed |= program.Op[layer] == LayerOp.Canyon || (program.Op[layer] is LayerOp.Ridged or LayerOp.Billow && (program.Mode[layer] & LayerMode.ShapedV1) == 0);
+                needed |= program.Op[layer] is LayerOp.Canyon or LayerOp.Terrace || (program.Op[layer] is LayerOp.Ridged or LayerOp.Billow && (program.Mode[layer] & LayerMode.ShapedV1) == 0);
 
             if (!needed)
                 return;
@@ -740,6 +875,9 @@ public static class PlanetKindCompiler
             BuildLodTables(program);
             var rows = new float[program.Rows * n];
             var set = new RowSet { X = x, Y = y, Z = z, Ch = rows, Count = n, Stride = n, Channels = program.ChannelCount, W = n, H = 1, Direct = true };
+            TerraceSlopes(program, ref set);
+            BuildLodTables(program);
+            set.Row(PlanetKindProgram.Height).Clear();
             LayerOps.Evaluate(program, 0, ref set);
 
             for (var layer = 0; layer < program.LayerCount; layer++)
@@ -770,6 +908,57 @@ public static class PlanetKindCompiler
                 program.Params[pb + 5] = (float)(mean / n);
                 _params[pb + 4] = program.Params[pb + 4];
                 _params[pb + 5] = program.Params[pb + 5];
+            }
+        }
+
+        /// <summary>
+        /// A terrace riser must span a voxel on the ground, so its band in input height grows with the voxel by the
+        /// input's RMS slope: measured here over a 64 m step at the calibration points, on the layers before the terrace.
+        /// </summary>
+        private void TerraceSlopes(PlanetKindProgram program, ref RowSet set)
+        {
+            const double step = 64.0;
+            var n = set.Count;
+            double[] x = new double[n], y = new double[n], z = new double[n];
+            var input = new float[n];
+
+            for (var layer = 0; layer < program.LayerCount; layer++)
+            {
+                if (program.Op[layer] != LayerOp.Terrace)
+                    continue;
+
+                for (var pass = 0; pass < 2; pass++)
+                {
+                    for (var i = 0; i < n; i++)
+                    {
+                        // A tangent step: the cross product with a fixed axis, or another where they are near parallel.
+                        double px = set.X[i], py = set.Y[i], pz = set.Z[i];
+                        double tx = Math.Abs(px) < 0.9 * p.Radius ? 0.0 : -pz, ty = Math.Abs(px) < 0.9 * p.Radius ? pz : 0.0, tz = Math.Abs(px) < 0.9 * p.Radius ? -py : px;
+                        var scale = pass * step / Math.Sqrt(tx * tx + ty * ty + tz * tz);
+                        (px, py, pz) = (px + tx * scale, py + ty * scale, pz + tz * scale);
+                        var l = p.Radius / Math.Sqrt(px * px + py * py + pz * pz);
+                        (x[i], y[i], z[i]) = (px * l, py * l, pz * l);
+                    }
+
+                    var moved = set with { X = x, Y = y, Z = z };
+                    moved.Row(PlanetKindProgram.Height).Clear();
+                    LayerOps.Evaluate(program, 0, ref moved, layer);
+                    ReadOnlySpan<float> h = moved.Row(PlanetKindProgram.Height);
+                    var strata = program.SrcB[layer] == None ? default : (ReadOnlySpan<float>)moved.Row(program.SrcB[layer]);
+
+                    for (var i = 0; i < n; i++)
+                    {
+                        var v = strata.IsEmpty ? h[i] : h[i] + strata[i];
+                        input[i] = pass == 0 ? v : v - input[i];
+                    }
+                }
+
+                var square = 0.0;
+
+                for (var i = 0; i < n; i++)
+                    square += (double)input[i] * input[i];
+
+                _slope[layer] = (float)(Math.Sqrt(square / n) / step);
             }
         }
 
@@ -815,8 +1004,15 @@ public static class PlanetKindCompiler
             hash = Fnv(MemoryMarshal.AsBytes(program.Params.AsSpan()), hash);
             hash = Fnv(MemoryMarshal.AsBytes(program.RiserBand.AsSpan()), hash);
             hash = Fnv(MemoryMarshal.AsBytes(program.LodWeight.AsSpan()), hash);
-            hash = Fnv(MemoryMarshal.AsBytes(program.Classes.AsSpan()), hash);
             hash = Fnv(MemoryMarshal.AsBytes(program.ClassWeight.AsSpan()), hash);
+
+            foreach (ref readonly var c in program.Classes.AsSpan())
+            {
+                Span<float> fields = [(float)c.Kind, c.Rotation, c.CellsPerSide, c.Seed, c.RadiusMin, c.RadiusMax, c.Presence, c.Reach, c.Jitter, c.AgeMin, c.AgeMax,
+                    c.ComplexDiameter, c.DepthMax, c.RimMax, c.LambdaMin, c.LambdaMax, c.RatioMin, c.RatioMax];
+                hash = Fnv(MemoryMarshal.AsBytes(fields), hash);
+            }
+
             Span<double> body = [program.Radius, program.AxisX, program.AxisY, program.AxisZ, program.MinHeight, program.MaxHeight, program.SeaHeight];
             program.ContentHash = Fnv(MemoryMarshal.AsBytes(body), hash);
             return program;

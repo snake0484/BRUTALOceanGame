@@ -31,9 +31,13 @@ public sealed class PlanetChunkScratch
     internal float[] Heights = new float[MaxFaces * InitialPoints];
     internal float[] Inv = new float[MaxFaces * InitialPoints];
 
-    /// <summary>One window's evaluator rows: datum positions and (channels + temporaries) × points, for the lattice and its coarse grid.</summary>
+    /// <summary>One window's evaluator rows: datum positions and (channels + temporaries) Ã— points, for the lattice and its coarse grid.</summary>
     internal double[] PointX = [], PointY = [], PointZ = [], CoarseX = [], CoarseY = [], CoarseZ = [];
     internal float[] Rows = [], CoarseRows = [], Slots = [];
+
+    /// <summary>Stamps that can reach the window being evaluated, in class order.</summary>
+    internal Stamp[] Stamps = new Stamp[64];
+    internal int StampCount;
     internal double[] AxisG = new double[MaxFaces * 2 * 128];
     internal double[] AxisSlope = new double[MaxFaces * 2 * 128];
 

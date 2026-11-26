@@ -12,7 +12,7 @@ public enum NodeClass : byte
 /// at every mip, so selection classifies a node as uniform air or solid with no job and no storage. Each texel holds the
 /// bounds over a cap of twice its level's largest half-diagonal around its centre, so the texel holding a query cap's
 /// centre covers the whole cap; bounds come from <see cref="PlanetSurface.Bounds"/> (rigorous) rounded outward to 1 m.
-/// Two bands (planet-kinds.md ง3): one holds at every LOD, one from LOD <see cref="CoarseBandLod"/> up, where the small
+/// Two bands (planet-kinds.md ยง3): one holds at every LOD, one from LOD <see cref="CoarseBandLod"/> up, where the small
 /// features a kind drops no longer widen it. Small nodes are refined with their own cap and LOD range. Build once at
 /// system load (per face, on jobs); queries are read-only.
 /// </summary>
