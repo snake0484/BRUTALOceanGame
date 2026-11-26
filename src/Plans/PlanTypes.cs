@@ -23,7 +23,7 @@ public readonly record struct DefId(uint Value)
     public override string ToString() => Value.ToString("x8");
 }
 
-public enum ElementKind : byte { Brush, Part, Connection, Route, Placement, Test, Material }
+public enum ElementKind : byte { Brush, Part, Connection, Route, Placement, Test, Material, Mesh }
 
 public readonly record struct ElementRef(ElementKind Kind, uint Id);
 
@@ -37,6 +37,9 @@ public static class PlanLimits
     public const int MaxSections = 8;
     public const int MaxStringBytes = 4096;
     public const int MaxTags = 32;
+    public const int MaxMeshes = 256;
+    public const int MaxMeshVertices = 131072;
+    public const int MaxMeshTriangles = 1 << 20;
 
     /// <summary>Ship extent: every brush's bounds within this many metres of the plan origin on each axis.</summary>
     public const double MaxReachMetres = 500.0;

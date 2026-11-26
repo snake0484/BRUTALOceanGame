@@ -22,14 +22,17 @@ public static class HullPicking
 
         foreach (ref readonly var brush in doc.Brushes.AsSpan())
         {
-            if (!BrushGeometry.IsSupported(brush.Shape) || !BrushRotation.IsValid(brush.Rotation))
+            var mesh = brush.Shape == BrushShape.Mesh && brush.Param < doc.Meshes.Count ? doc.Meshes[brush.Param] : null;
+
+            if ((!BrushGeometry.IsSupported(brush.Shape) && mesh is null) || !BrushRotation.IsValid(brush.Rotation))
                 continue;
 
             BrushRotation.Matrix(brush.Rotation, m);
             var o = ToLocal(m, new Vector3d(origin.X - brush.PositionX, origin.Y - brush.PositionY, origin.Z - brush.PositionZ));
             var d = ToLocal(m, direction);
+            var hitBrush = mesh is not null ? TraceMesh(MeshCache.Get(mesh), o, d, out var t) : Trace(brush.Shape, BrushGeometry.Half(brush), o, d, out t);
 
-            if (Trace(brush.Shape, BrushGeometry.Half(brush), o, d, out var t) && t < distance)
+            if (hitBrush && t < distance)
             {
                 distance = t;
                 hit = brush.Id;
@@ -60,6 +63,17 @@ public static class HullPicking
         along = (b * e - c * d) / denom;
         return true;
     }
+
+    /// <summary>Nearest triangle along the ray within <see cref="MaxRayMetres"/>.</summary>
+    public static bool TraceMesh(PreparedMesh mesh, Vector3d o, Vector3d d, out double t)
+    {
+        var delta = new Vector3d(d.X * MaxRayMetres, d.Y * MaxRayMetres, d.Z * MaxRayMetres);
+        var hit = mesh.FirstHit(o, delta, out t, out _);
+        t *= MaxRayMetres;
+        return hit;
+    }
+
+    public const double MaxRayMetres = 4000.0;
 
     private static bool Trace(BrushShape shape, Vector3 half, Vector3d o, Vector3d d, out double t)
     {

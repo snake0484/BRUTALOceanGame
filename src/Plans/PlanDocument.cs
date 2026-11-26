@@ -87,6 +87,9 @@ public sealed class PlanDocument
     /// <summary>Material table: <see cref="HullBrush.Material"/> indexes it.</summary>
     public readonly List<DefId> Materials = new();
 
+    /// <summary>Mesh table (D11): a <see cref="BrushShape.Mesh"/> brush's Param indexes it; brushes may share entries.</summary>
+    public readonly List<HullMesh> Meshes = new();
+
     public uint AllocateId() => Meta.NextId++;
 
     /// <summary>Index of <paramref name="material"/> in the table, or -1.</summary>
@@ -115,6 +118,7 @@ public sealed class PlanDocument
         };
         copy.Meta.Tags.AddRange(Meta.Tags);
         copy.Materials.AddRange(Materials);
+        copy.Meshes.AddRange(Meshes);
 
         foreach (ref readonly var brush in Brushes.AsSpan())
             copy.Brushes.Add(brush);

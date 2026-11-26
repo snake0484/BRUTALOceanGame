@@ -47,7 +47,7 @@ public enum PlanFormatError
 }
 
 /// <summary>
-/// <c>.bplan</c> format 1 (docs/pivot/ship-design-and-construction.md "File format"): a 36 B header, then sections
+/// <c>.bplan</c> formats 1 and 2 (docs/pivot/ship-design-and-construction.md "File format"): a 36 B header, then sections
 /// <c>u32 tag, u32 rawLen, u32 packedLen, u8 codec, payload</c>. BODY (zlib) holds the canonical design and is the only
 /// hashed section; META (raw) holds name, description, revision, tags, author and the id allocator. Same bytes for
 /// files, saves and the network. Decoding checks every size against <see cref="PlanLimits"/> before inflating.
@@ -55,10 +55,13 @@ public enum PlanFormatError
 /// BODY format 1 (hull levels): <c>u8 class, u8 0, u16 0, u32 materialCount, u32 DefId[materialCount],
 /// u32 brushCount</c>, then the brushes column by column: id deltas (i32), shape, op, flags, material (u8 each),
 /// position X, Y, Z deltas from the previous brush (i32), rotation (u32), half X, Y, Z, bevel, param (u16).
+/// Format 2 appends the mesh table: <c>u32 meshCount</c>, then each <see cref="HullMesh"/>'s canonical bytes. A plan
+/// without meshes is written as format 1, so its bytes and hash do not change.
 /// </summary>
 public static class PlanFormat
 {
     public const ushort Format = 1;
+    public const ushort MeshFormat = 2;
     public const uint BodyTag = 'B' | ('O' << 8) | ('D' << 16) | ((uint)'Y' << 24);
     public const uint MetaTag = 'M' | ('E' << 8) | ('T' << 16) | ((uint)'A' << 24);
     private const int SectionHeaderBytes = 13;
@@ -71,7 +74,12 @@ public static class PlanFormat
     {
         var brushes = doc.Brushes.AsSpan();
         var n = brushes.Length;
-        var bytes = new byte[BodyFixedBytes + doc.Materials.Count * 4 + n * HullBrush.SizeInBytes];
+        var meshBytes = 0;
+
+        foreach (var mesh in doc.Meshes)
+            meshBytes += mesh.ByteSize;
+
+        var bytes = new byte[BodyFixedBytes + doc.Materials.Count * 4 + n * HullBrush.SizeInBytes + (doc.Meshes.Count > 0 ? 4 + meshBytes : 0)];
         var w = new Writer(bytes);
 
         w.U8((byte)doc.Class);
@@ -125,6 +133,14 @@ public static class PlanFormat
         foreach (ref readonly var b in brushes)
             w.U16(b.Param);
 
+        if (doc.Meshes.Count > 0)
+        {
+            w.U32((uint)doc.Meshes.Count);
+
+            foreach (var mesh in doc.Meshes)
+                w.Mesh(mesh);
+        }
+
         return bytes;
     }
 
@@ -142,7 +158,7 @@ public static class PlanFormat
         var w = new Writer(bytes);
 
         w.U32(PlanHeader.MagicValue);
-        w.U16(Format);
+        w.U16(doc.Meshes.Count > 0 ? MeshFormat : Format);
         w.U8((byte)doc.Level);
         w.U8((byte)PlanFlags.None);
         w.U64(XxHash64.Hash(body));
@@ -190,7 +206,7 @@ public static class PlanFormat
         if (header.Magic != PlanHeader.MagicValue)
             return PlanFormatError.BadMagic;
 
-        if (header.Format != Format)
+        if (header.Format is not (Format or MeshFormat))
             return PlanFormatError.UnsupportedFormat;
 
         if (header.Level is not (PlanLevel.Ship or PlanLevel.HullChunk))
@@ -241,7 +257,7 @@ public static class PlanFormat
 
                 body = data;
 
-                if (!DecodeBody(data, doc))
+                if (!DecodeBody(data, doc, header.Format == MeshFormat))
                     return PlanFormatError.BadBody;
             }
             else if (tag == MetaTag)
@@ -269,7 +285,7 @@ public static class PlanFormat
         return PlanFormatError.None;
     }
 
-    private static bool DecodeBody(byte[] bytes, PlanDocument doc)
+    private static bool DecodeBody(byte[] bytes, PlanDocument doc, bool meshes)
     {
         var r = new Reader(bytes);
 
@@ -289,7 +305,7 @@ public static class PlanFormat
             doc.Materials.Add(new DefId(id));
         }
 
-        if (!r.U32(out var count) || count > PlanLimits.MaxBrushes || r.Remaining != count * HullBrush.SizeInBytes)
+        if (!r.U32(out var count) || count > PlanLimits.MaxBrushes || r.Remaining < count * HullBrush.SizeInBytes || (!meshes && r.Remaining != count * HullBrush.SizeInBytes))
             return false;
 
         var n = (int)count;
@@ -348,6 +364,22 @@ public static class PlanFormat
 
         foreach (ref readonly var b in brushes.AsSpan())
             doc.Brushes.Add(b);
+
+        if (meshes)
+        {
+            if (!r.U32(out var meshCount) || meshCount == 0 || meshCount > PlanLimits.MaxMeshes)
+                return false;
+
+            for (var i = 0; i < meshCount; i++)
+            {
+                var mesh = r.Mesh();
+
+                if (mesh is null)
+                    return false;
+
+                doc.Meshes.Add(mesh);
+            }
+        }
 
         return r.Remaining == 0;
     }
@@ -479,6 +511,12 @@ public static class PlanFormat
             _offset += v.Length;
         }
 
+        public void Mesh(HullMesh mesh)
+        {
+            mesh.Write(_bytes[_offset..]);
+            _offset += mesh.ByteSize;
+        }
+
         /// <summary>u16 length + UTF-8; callers clip to <see cref="PlanLimits.MaxStringBytes"/> first.</summary>
         public void String(string s)
         {
@@ -493,6 +531,13 @@ public static class PlanFormat
         private int _offset;
 
         public readonly int Remaining => _bytes.Length - _offset;
+
+        public HullMesh? Mesh()
+        {
+            var mesh = HullMesh.Read(_bytes[_offset..], out var consumed);
+            _offset += consumed;
+            return mesh;
+        }
 
         public bool U8(out byte v)
         {

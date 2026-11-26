@@ -44,7 +44,7 @@ public class PlanValidatorTests
     public void RefusesFeaturesOutsideFormat1()
     {
         var shape = Sample();
-        shape.Brushes[0].Shape = BrushShape.Mesh;
+        shape.Brushes[0].Shape = BrushShape.Sphere;
         AssertRefused(shape, IssueCode.UnsupportedShape);
 
         var op = Sample();

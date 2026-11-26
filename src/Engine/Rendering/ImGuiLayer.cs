@@ -42,11 +42,18 @@ public sealed class ImGuiLayer : IDisposable
 
     public bool WantCaptureMouse => ImGui.GetIO().WantCaptureMouse;
 
-    public void NewFrame()
+    public void NewFrame() => NewFrame(null);
+
+    /// <summary>
+    /// <paramref name="afterPlatform"/> runs between the platform backend and ImGui's own frame start, so input queued
+    /// there (scripted tests) lands after the backend's and wins.
+    /// </summary>
+    public void NewFrame(Action? afterPlatform)
     {
         ImString.SharedStorage.Reset();
         _platform.NewFrame();
         _backend.NewFrame();
+        afterPlatform?.Invoke();
         ImGui.NewFrame();
     }
 

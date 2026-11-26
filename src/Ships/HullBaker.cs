@@ -21,11 +21,17 @@ public sealed class HullBaker : IDisposable
     private Dictionary<BrickKey, HullBrick> _next = new();
     private readonly List<HullBrick> _bricks = new();
     private readonly List<HullBrick> _work = new();
+    private readonly List<ulong> _meshHashes = new();
+    private readonly Dictionary<BrickKey, bool> _exactKeys = new();
+    private int[] _exactBrush = [];
+    private int[] _grow = [];
     private HullBrush[] _brushes = new HullBrush[64];
     private int _brushCount;
     private byte[] _hashScratch = new byte[256];
     private int[] _densities = [];
+    private readonly List<PreparedMesh?> _meshes = new();
     private HullBrush[]? _pending;
+    private HullMesh[]? _pendingMeshes;
     private int[]? _pendingDensities;
     private long _startTicks;
     private long _lastFinish;
@@ -66,20 +72,38 @@ public sealed class HullBaker : IDisposable
 
     public int TriangleCount { get; private set; }
 
+    /// <summary>Dual contouring (sharp) by default; surface nets for comparison. Applies to the next bake.</summary>
+    public HullMesher Mesher = HullMesher.DualContouring;
+
     /// <summary>
-    /// Bakes <paramref name="brushes"/>; <paramref name="densities"/> is kg/m³ per plan material index (mass only).
-    /// If a bake is running, this one waits for it.
+    /// Bricks only one Add brush reaches draw that brush's own polygons instead of the grid mesh (exact where nothing
+    /// cuts or joins it). Mass and occupancy always come from the grid.
     /// </summary>
-    public void Start(ReadOnlySpan<HullBrush> brushes, ReadOnlySpan<int> densities)
+    public bool ExactSurfaces = true;
+
+    /// <summary>Bricks of the last bake drawn from exact brush polygons.</summary>
+    public int ExactBricks { get; private set; }
+
+    /// <summary>Main-thread time preparing mesh brushes (subdivision, BVH) for the last bake; cached by mesh hash.</summary>
+    public float LastPrepareMs { get; private set; }
+
+    public void Start(ReadOnlySpan<HullBrush> brushes, ReadOnlySpan<int> densities) => Start(brushes, [], densities);
+
+    /// <summary>
+    /// Bakes <paramref name="brushes"/>; mesh brushes index <paramref name="meshes"/> by Param; <paramref name="densities"/>
+    /// is kg/m³ per plan material index (mass only). If a bake is running, this one waits for it.
+    /// </summary>
+    public void Start(ReadOnlySpan<HullBrush> brushes, IReadOnlyList<HullMesh> meshes, ReadOnlySpan<int> densities)
     {
         if (_running)
         {
             _pending = brushes.ToArray();
+            _pendingMeshes = meshes.ToArray();
             _pendingDensities = densities.ToArray();
             return;
         }
 
-        Begin(brushes, densities);
+        Begin(brushes, meshes, densities);
     }
 
     /// <summary>Main thread, each frame: finishes a completed bake and starts a waiting one. True when results changed.</summary>
@@ -93,10 +117,12 @@ public sealed class HullBaker : IDisposable
         if (_pending is not null)
         {
             var brushes = _pending;
+            var meshes = _pendingMeshes!;
             var densities = _pendingDensities!;
             _pending = null;
+            _pendingMeshes = null;
             _pendingDensities = null;
-            Begin(brushes, densities);
+            Begin(brushes, meshes, densities);
         }
 
         return true;
@@ -114,10 +140,20 @@ public sealed class HullBaker : IDisposable
         }
     }
 
-    private void Begin(ReadOnlySpan<HullBrush> brushes, ReadOnlySpan<int> densities)
+    private void Begin(ReadOnlySpan<HullBrush> brushes, IReadOnlyList<HullMesh> meshes, ReadOnlySpan<int> densities)
     {
         _startTicks = Stopwatch.GetTimestamp();
         _lastFinish = _startTicks;
+        _meshes.Clear();
+        _meshHashes.Clear();
+
+        foreach (var mesh in meshes)
+        {
+            _meshes.Add(mesh is null ? null : MeshCache.Get(mesh));
+            _meshHashes.Add(mesh?.MeshHash ?? 0);
+        }
+
+        LastPrepareMs = (float)Stopwatch.GetElapsedTime(_startTicks).TotalMilliseconds;
 
         if (_brushes.Length < brushes.Length)
             _brushes = new HullBrush[Math.Max(brushes.Length, _brushes.Length * 2)];
@@ -129,11 +165,13 @@ public sealed class HullBaker : IDisposable
         _next.Clear();
         _work.Clear();
         var reused = 0;
+        Classify();
 
         for (var b = 0; b < _bins.BrickCount; b++)
         {
             var key = _bins.Keys[b];
-            var hash = InputHash(key, _bins.Brushes(b));
+            var mode = _exactBrush[b] >= 0 ? 1UL + (ulong)_grow[b] : 0UL;
+            var hash = InputHash(key, _bins.Brushes(b)) ^ (ulong)Mesher ^ (mode * 0x9E3779B97F4A7C15UL);
 
             if (_current.TryGetValue(key, out var old) && old.InputHash == hash)
             {
@@ -205,6 +243,78 @@ public sealed class HullBaker : IDisposable
         Version++;
     }
 
+    /// <summary>
+    /// Exact bricks: one binned brush, an Add, a primitive or a prepared mesh. Each grows its clip box one cell down an
+    /// axis when a grid-meshed brick lies in the layer below it on that axis (face, edge or corner neighbour): the grid
+    /// mesh of that brick stops about half a cell short of the shared plane.
+    /// </summary>
+    private void Classify()
+    {
+        var count = _bins.BrickCount;
+
+        if (_exactBrush.Length < count)
+        {
+            _exactBrush = new int[Math.Max(count, _exactBrush.Length * 2)];
+            _grow = new int[_exactBrush.Length];
+        }
+
+        _exactKeys.Clear();
+        var exactCount = 0;
+
+        for (var b = 0; b < count; b++)
+        {
+            var binned = _bins.Brushes(b);
+            _exactBrush[b] = -1;
+            _grow[b] = 0;
+
+            if (ExactSurfaces && binned.Length == 1)
+            {
+                ref readonly var brush = ref _brushes[binned[0]];
+                var drawable = BrushGeometry.IsSupported(brush.Shape) || (brush.Shape == BrushShape.Mesh && brush.Param < _meshes.Count && _meshes[brush.Param] is not null);
+
+                if (brush.Op == BrushOp.Add && drawable)
+                {
+                    _exactBrush[b] = 0;
+                    exactCount++;
+                }
+            }
+
+            _exactKeys[_bins.Keys[b]] = _exactBrush[b] >= 0;
+        }
+
+        ExactBricks = exactCount;
+
+        for (var b = 0; b < count; b++)
+        {
+            if (_exactBrush[b] < 0)
+                continue;
+
+            var key = _bins.Keys[b];
+
+            for (var axis = 0; axis < 3; axis++)
+            {
+                for (var du = -1; du <= 1; du++)
+                {
+                    for (var dv = -1; dv <= 1; dv++)
+                    {
+                        var n = Neighbour(key, axis, du, dv);
+
+                        if (_exactKeys.TryGetValue(n, out var exact) && !exact)
+                            _grow[b] |= 1 << axis;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>The brick one below along <paramref name="axis"/>, offset by (du, dv) along the other two axes.</summary>
+    private static BrickKey Neighbour(BrickKey k, int axis, int du, int dv) => axis switch
+    {
+        0 => new BrickKey((short)(k.X - 1), (short)(k.Y + du), (short)(k.Z + dv)),
+        1 => new BrickKey((short)(k.X + du), (short)(k.Y - 1), (short)(k.Z + dv)),
+        _ => new BrickKey((short)(k.X + du), (short)(k.Y + dv), (short)(k.Z - 1)),
+    };
+
     private ulong InputHash(BrickKey key, ReadOnlySpan<int> binned)
     {
         var bytes = 6 + binned.Length * HullBrush.SizeInBytes;
@@ -218,13 +328,19 @@ public sealed class HullBaker : IDisposable
         MemoryMarshal.Write(span[4..], key.Z);
         var offset = 6;
 
+        var meshSeed = 0UL;
+
         foreach (var index in binned)
         {
-            MemoryMarshal.Write(span[offset..], _brushes[index]);
+            ref readonly var brush = ref _brushes[index];
+            MemoryMarshal.Write(span[offset..], brush);
             offset += HullBrush.SizeInBytes;
+
+            if (brush.Shape == BrushShape.Mesh && brush.Param < _meshHashes.Count)
+                meshSeed = meshSeed * 31 + _meshHashes[brush.Param];
         }
 
-        return XxHash64.Hash(span);
+        return XxHash64.Hash(span, meshSeed);
     }
 
     private void RunWorker(HullBrickBaker baker)
@@ -240,7 +356,8 @@ public sealed class HullBaker : IDisposable
 
             var brick = _work[index];
             var slot = BinIndex(brick.Key);
-            baker.Bake(brick.Key, brushes, _bins.Brushes(slot), brick);
+            baker.Mesher = Mesher;
+            baker.Bake(brick.Key, brushes, _bins.Brushes(slot), _meshes, brick, _exactBrush[slot], _grow[slot]);
         }
 
         var now = Stopwatch.GetTimestamp();
