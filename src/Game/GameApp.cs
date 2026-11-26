@@ -685,6 +685,7 @@ public sealed class GameApp : IDisposable
             FogDensity = _ocean.FogDensity * Atmosphere,
             PlanetCentre = PlanetCentre(camera, axes),
             SeaRadius = _sim.Planet.HasSea ? (float)_sim.Planet.SeaRadius : 0f,
+            CameraAboveSea = _sim.Planet.HasSea ? (float)(camera.Length() - _sim.Planet.SeaRadius) : 0f,
             WaterColour = water,
             SeaFillStart = _oceanDrawn ? OceanSurfaceReach : 0f,
             SpaceLook = DetailLadder.SpaceLook(_celestial.FocusAltitude),

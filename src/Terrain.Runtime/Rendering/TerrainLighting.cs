@@ -20,6 +20,12 @@ public struct TerrainLighting
     /// <summary>Sea sphere radius (m); 0 for no sea (no water absorption).</summary>
     public float SeaRadius;
 
+    /// <summary>
+    /// The camera's height above the sea sphere (m), differenced in double: fragments build their depth on it, since a
+    /// float radius at planet scale steps by centimetres.
+    /// </summary>
+    public float CameraAboveSea;
+
     /// <summary>Colour seabeds fade to with depth where no ocean surface is drawn over them.</summary>
     public Vector3 WaterColour;
 

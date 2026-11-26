@@ -14,6 +14,7 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 skyHorizon;  // w = fog density
     vec4 water;       // rgb = seabed fade colour, w = distance past which it applies (no ocean surface there)
     vec4 space;       // x = space look weight (0 ground, 1 orbit), y = atmosphere top radius (0 = none), z = scale height, w = its base radius
+    vec4 sea;         // x = the camera's height above the sea sphere (m), differenced in double on the CPU
 } frame;
 
 #include "atmosphere.glsl"
@@ -64,8 +65,7 @@ void main()
     float intensity = frame.sunDir.w;
     vec3 albedo = PALETTE[min(vMaterial & MATERIAL_MASK, 4u)];
 
-    // Hemispheric ambient about the radial up: zenith above, horizon at the side, dim bounce below. Float radii are
-    // ~1e6 m here, so heights are good to ~0.1 m: plenty for absorption.
+    // Hemispheric ambient about the radial up: zenith above, horizon at the side, dim bounce below.
     vec3 fromCentre = vWorldPos - frame.planet.xyz;
     float radius = length(fromCentre);
     vec3 upDir = fromCentre / radius;
@@ -82,9 +82,14 @@ void main()
     vec3 dir = vWorldPos / dist;
 
     // Light lost through the water column above; past the ocean surface's reach the water's own colour fills in.
+    // A float radius at 1e6 m steps by 6-12 cm, which bands the absorption on a shallow beach: the depth is the camera's
+    // own height above the sea plus |c + p| - |c| in its stable form, (2 c.p + p.p) / (|c + p| + |c|), c the camera from
+    // the centre and p the fragment from the camera.
     if (frame.planet.w > 0.0 && (vMaterial & SEA_COLUMN) != 0u)
     {
-        float depth = max(frame.planet.w - radius, 0.0);
+        vec3 c = -frame.planet.xyz;
+        float rise = (2.0 * dot(c, vWorldPos) + dot(vWorldPos, vWorldPos)) / (radius + length(c));
+        float depth = max(-(frame.sea.x + rise), 0.0);
         vec3 through = exp(-ABSORPTION * depth);
         colour *= through;
 

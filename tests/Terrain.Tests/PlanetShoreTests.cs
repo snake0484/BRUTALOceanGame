@@ -225,6 +225,43 @@ public sealed class PlanetShoreTests(ITestOutputHelper output)
         Assert.Equal(0, job.Mesh.IndexCount);
     }
 
+    /// <summary>
+    /// terrain.frag's depth below the sea in single precision, as the GPU computes it (review F8): the float radius of a
+    /// fragment at 1e6 m steps by centimetres, which banded the absorption on shallow beaches; the camera's height
+    /// (differenced in double) plus the stable difference |c + p| − |c| = (2 c·p + p·p) / (|c + p| + |c|) does not.
+    /// </summary>
+    [Fact]
+    public void ShaderSeaDepth_IsStableInFloat()
+    {
+        var d = Find(-1f, -0.5f);
+        var east = double3.Normalize(double3.Cross(d, Math.Abs(d.Y) < 0.9 ? double3.UnitY : double3.UnitX));
+        var north = double3.Cross(d, east);
+        var camera = d * (SeaRadius + 3.0);
+        var c = new System.Numerics.Vector3((float)camera.X, (float)camera.Y, (float)camera.Z);
+        var cameraAboveSea = (float)(camera.Length() - SeaRadius);
+        var seaRadius = (float)SeaRadius;
+        var random = new Random(11);
+        double naiveWorst = 0.0, stableWorst = 0.0;
+
+        for (var i = 0; i < 20_000; i++)
+        {
+            // Seabed under 0 to 2 m of water within 500 m of the camera: where the absorption's steps show.
+            var ground = double3.Normalize(d * SeaRadius + east * ((random.NextDouble() - 0.5) * 1000.0) + north * ((random.NextDouble() - 0.5) * 1000.0)) * (SeaRadius - 2.0 * random.NextDouble());
+            var exact = SeaRadius - ground.Length();
+            var rel = ground - camera;
+            var p = new System.Numerics.Vector3((float)rel.X, (float)rel.Y, (float)rel.Z);
+            var radius = (p + c).Length();
+            var naive = seaRadius - radius;
+            var stable = -(cameraAboveSea + (2f * System.Numerics.Vector3.Dot(c, p) + System.Numerics.Vector3.Dot(p, p)) / (radius + c.Length()));
+            naiveWorst = Math.Max(naiveWorst, Math.Abs(naive - exact));
+            stableWorst = Math.Max(stableWorst, Math.Abs(stable - exact));
+        }
+
+        output.WriteLine($"depth error over 20000 seabed points: float radius {naiveWorst * 100.0:F2} cm, stable form {stableWorst * 100.0:F3} cm");
+        Assert.True(naiveWorst > 0.02, $"the float radius was the problem ({naiveWorst} m)");
+        Assert.True(stableWorst < 0.002, $"stable form off by {stableWorst} m");
+    }
+
     /// <summary>Readers on other threads see consistent lists while the one writer files edits and the index grows.</summary>
     [Fact]
     public void Readers_AreSafeWhileEditsAreFiled()
