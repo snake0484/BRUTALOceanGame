@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "id": "ExoticOre",
+  "name": "Exotic ore",
+  "densityKgM3": 2800,
+  "hardness": 0.7,
+  "placeable": false,
+  "tint": "#6B3FA0",
+  "yields": {
+    "item": "em",
+    "purityFrom": "deposit",
+    "purityRange": [
+      0.0,
+      0.3
+    ]
+  }
+}

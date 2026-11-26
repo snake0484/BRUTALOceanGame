@@ -14,6 +14,7 @@ Already recorded earlier in this round: 1 g on 1000 km planets; realistic planet
 - D13 Runaway severity: the reaction chamber is very highly rated; the ENTIRE CORE can be ejected (core ejection is the main counterplay).
 - D14 Multiple warp drives on one ship: their bubbles SUPPORT EACH OTHER; the resulting quality is an average weighted by provided power etc. (not "only one spools").
 - D17 Mid-warp: crew move freely and interact with anything. Engineers can shut down the warp, and many things can cancel it. Components have WIRING (power/data/control), so what can cancel or control the drive depends on the ship's wiring setup (designer feature; cutting wires is a gameplay action).
+  - Narrowed by D71: wiring has two media, power and data. There is no separate control medium.
 
 ## Warp
 - D15 Warp path: a SMOOTH path from start to end that avoids planets (server computes the curve; no manual via points required).
@@ -39,12 +40,13 @@ Already recorded earlier in this round: 1 g on 1000 km planets; realistic planet
 - D26 Tractor beams are considered a WEAPON unless requested. E.g. you are expected to dock your own ship, but a station may tractor you in to dock if you ask for it (consent flag).
   - Applied: a lock or sweep on another party's ship, grid or character without consent writes an `IncidentRecord` of kind `TractorLock`. Consent is a flag on a docking, tow or landing request, for one emitter owner group; it lapses on release, docking, a mouth crossing, or 120 s without a lock. Own and party bodies need none; unowned wrecks and asteroids are not ships. Anti-escape, pull-into-wormhole and combat locks are always hostile; consent never exempts a tunnel strike. Owner: tractor-beams.md (Multiplayer, Permissions).
 - D27 Station sieges: YES; factions would prefer to CAPTURE stations rather than destroy them (capture mechanics matter).
+  - Round 6: factions-and-law.md "Sieges and capture" now owns the rule and replaces the interim knobs below (`CaptureTicks` became a capture clock per station class; the overload grace is `EvacGraceS`).
   - Applied (interim until a factions/law doc): a declared siege is public; it lifts only tractor-delivery zeroing toward besiegers and zone courtesies, and keeps the asteroid ban inside `ProtectRadius`, shields, debris defence, warp's exclusion push, the interdiction ban and incident records. Destruction stays possible but hard (two anchor feeds, 60 s owner `Release`, `AnchorOverload` alarm with a grace window, `StationDrop` incident). Capture: an `Override` held at the station's `CommandCore` for `CaptureTicks` with no defender contesting transfers ownership, anchor authority, gate and catcher keys (`StationCapture`). Owners: rings-and-asteroids.md (Sieges), tractor-beams.md, exotic-matter.md (anchor), ship-design-and-construction.md (`CommandCore`).
 - D28 Tractors without antimatter can only emit gravitons, so they can only PULL (push needs anti-gravitons, i.e. AM). Replaces the "25 % pumped mode".
   - Applied: drive kinds `Graviton` (no AM, Pull only, full rating, 1 W/N bus power), `Reaction` (AM, Pull or Push), `Overdrive` (AM). Without AM, Push, flips and Hold assist are refused and Hold is a pull-only tether. Station debris defence assigns AM-fed emitters only; docking assist without AM is a pull-only tether. Owner: tractor-beams.md.
 - D34 Station SHIELDS against explosions and debris or shrapnel impacts: a capacity and a recharge rate. A big enough hit, or sustained fire, gets through. Replaces "asteroid debris does no hull damage inside protected zones". (rings-and-asteroids.md revision 4, `StationShield`.)
 - D35 Debris that drifts into a protected zone stays REAL. Stations push it back out with tractor beams or mechanical arms, as far as their installed hardware allows; undefended outposts near mining have a real problem. (rings-and-asteroids.md revision 4, `StationDefence`; AM-fed emitters only under D28.)
-- D36 Shattering an asteroid so that it deliberately causes damage is a HOSTILE ACT. Damage traced to a shatter or a thrown rock is attributed to the event's owner and feeds reputation, faction standing, crime status and station response. (One shared server-only `IncidentRecord`, defined in rings-and-asteroids.md until a law doc exists, used by warp.md and tractor-beams.md too.)
+- D36 Shattering an asteroid so that it deliberately causes damage is a HOSTILE ACT. Damage traced to a shatter or a thrown rock is attributed to the event's owner and feeds reputation, faction standing, crime status and station response. (One shared server-only `IncidentRecord`, defined in rings-and-asteroids.md until a law doc exists, used by warp.md and tractor-beams.md too. Round 6: factions-and-law.md is that law doc and owns the record.)
 
 ## Terrain and planets
 - D29 Relief -8 km..+9 km and digging 2 km down: fine. Digging too deep brings extreme heat that damages components until it becomes impractical.
@@ -99,3 +101,16 @@ Already recorded earlier in this round: 1 g on 1000 km planets; realistic planet
 - D72 Other parties may heat, wedge or shoot a rock with people in its caves; injuring or killing players or NPCs that way is illegal.
 - D73 Replenishment events are modest (nothing dramatic): things like asteroid captures.
 - D74 Tunnelling vehicles and cave drills are allowed but regulated. Factions control most planets, so you need to own the land or otherwise have approval.
+
+Round 6 designs: D55, D56 and D59 in combat-and-sensors.md; D54, D57, D58, D68, D72 and D74 in factions-and-law.md; D60-D66 in ship-atmosphere.md; D59 (storage) and D71 (sockets) in ship-hulls.md; D64, D67-D71 in ship-design-and-construction.md; D58, D66 and D71 in warp.md; D72-D74 in rings-and-asteroids.md; D53 in ai-ships-and-crew.md. The r7 consistency pass applied them across the other docs.
+
+## Planets and decoration (2026-11-26)
+- D75 Planets are far too flat. Different KINDS of planet generation are needed; bodies never touch, so each can have its own generator. (Design: planet-kinds.md.)
+- D76 Full 3D terrain features must be possible (caves, arches, overhangs).
+- D77 Terrain decoration (rocks, trees and so on) is generated too. (Design: terrain-decoration.md.)
+- D78 A planet designer tool may be needed: brushes that paint biomes and weight modifiers onto a planet. (Not designed yet. Likely shape: painted low-resolution cube-sphere maps per body that the planet kind's layers read as masks and weights, authored in the designer app shell.)
+- D79 Bring back shore waves (waves rolling in and breaking). Shorelines are fixed (D30), so coastal maps and break lines can be baked once per coast region from the planet function and never rebuilt; adapt the breaker and coastal code from the `island-final` tag. After M2b.
+- D79a Confirmed: shore waves means breaking waves.
+- D80 Volumetric clouds. Each planet has a cloud map that evolves over time. (Not designed yet. Likely shape: coverage and cloud type from the sphere weather library's pressure systems, deterministic from seed + tick so every client agrees; a cloud layer on the planet impostor from orbit, raymarched volumetrics at reduced resolution near the ground, cloud shadows on terrain and sea.)
+- D81 Use open-source textures for the ground. (CC0 sources preferred, e.g. ambientCG and Poly Haven; keep a licence record per texture. Likely shape: triplanar texture arrays in KTX2, one slot per terrain material.)
+- D82 Asset licensing: the game will be sold, so only use assets whose licence allows shipping in a commercial product (CC0, or equally permissive with terms we can meet). Nothing "personal use", "non-commercial", "editorial" or share-alike that would bind the game. Keep a licence record per asset. Applies to textures, models, fonts, audio and code.

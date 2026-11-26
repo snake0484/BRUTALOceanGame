@@ -8,15 +8,17 @@ namespace BrutalGame.Water.Ocean;
 /// <summary>
 /// CPU swell: physics-relevant low band of the ocean, deterministic from seed, wind history and time.
 /// Call <see cref="SetWind"/> when wind changes and <see cref="SetTime"/> once per tick on the main thread.
-/// Sample methods are read-only between SetTime calls and safe to call from jobs. An <see cref="IShoreDepth"/> applies
-/// the depth cap (see <see cref="DepthCapGamma"/>).
+/// Sample methods are read-only between SetTime calls and safe to call from jobs. The components live in an abstract
+/// wave plane (x, z): directions are radians from +x toward +z. <see cref="OceanSurface"/> lays that plane on the sea
+/// sphere, one copy per <see cref="SeaTiles"/> tile (x east, z south), and applies the depth cap
+/// (<see cref="DepthCapGamma"/>).
 /// </summary>
 public sealed class OceanSwell
 {
     public const int MaxComponents = WaveSet.Capacity * 2;
     public const int InversionIterations = 4;
 
-    /// <summary>Depth-limited swell: every component scaled by min(1, this × depth / Hs) (ocean_common.glsl swellCap).</summary>
+    /// <summary>Depth-limited swell: every component scaled by min(1, this × depth / Hs) (ocean_common.glsl oceanAt).</summary>
     public const float DepthCapGamma = 0.55f;
 
     /// <summary>
@@ -340,9 +342,10 @@ public sealed class OceanSwell
     }
 
     /// <summary>
-    /// Writes the active components for the GPU, phase advanced from the last tick to <paramref name="renderTime"/>
-    /// in double precision so the GPU low band matches CPU sampling at that time, and rebased by k·origin so the GPU's
-    /// rest positions are relative to (<paramref name="originX"/>, <paramref name="originZ"/>). Returns the count written.
+    /// Writes the active components for the GPU (wavevector, amplitude, chop, ω; in the wave plane's axes), and each one's
+    /// phase at <paramref name="renderTime"/> rebased by k·origin in double, so the GPU's rest positions are relative to
+    /// (<paramref name="originX"/>, <paramref name="originZ"/>) and its low band matches CPU sampling at that time.
+    /// Returns the count written.
     /// </summary>
     public int CopyGpuWaves(Span<GpuWave> destination, double renderTime, double originX = 0.0, double originZ = 0.0)
     {
@@ -351,13 +354,11 @@ public sealed class OceanSwell
 
         for (var i = 0; i < count; i++)
         {
-            var phase = _phase[i] - _omega[i] * dt + _kx[i] * originX + _kz[i] * originZ;
-            phase -= Math.Floor(phase / Math.Tau) * Math.Tau;
             destination[i] = new GpuWave
             {
                 Kx = _kx[i],
                 Kz = _kz[i],
-                Phase = (float)phase,
+                Phase = GpuPhase(i, dt, originX, originZ),
                 Amplitude = _a[i],
                 Cx = _cx[i],
                 Cz = _cz[i],
@@ -368,48 +369,86 @@ public sealed class OceanSwell
         return count;
     }
 
-    /// <summary>Surface position of the water particle whose rest position is (x0, z0).</summary>
-    public float3 SurfacePoint(float x0, float z0, IShoreDepth? shore = null)
+    /// <summary>
+    /// The phases alone, for another origin of the same components (a neighbouring sea tile's plane): every
+    /// <paramref name="stride"/>th float from <paramref name="offset"/>. Returns the count written.
+    /// </summary>
+    public int CopyGpuPhases(Span<float> destination, int offset, int stride, double renderTime, double originX, double originZ)
     {
-        var cap = Cap(shore, x0, z0);
-        SumDisplacement(x0, z0, out var dx, out var dz);
-        return new float3(x0 + cap * dx, cap * SumHeight(x0, z0), z0 + cap * dz);
+        var count = Math.Min(_count, (destination.Length - offset + stride - 1) / stride);
+        var dt = renderTime - Time;
+
+        for (var i = 0; i < count; i++)
+            destination[offset + i * stride] = GpuPhase(i, dt, originX, originZ);
+
+        return count;
     }
 
-    /// <summary>Water surface height at world (x, z).</summary>
-    public float SampleHeight(float x, float z, IShoreDepth? shore = null)
+    private float GpuPhase(int i, double dt, double originX, double originZ)
     {
-        var cap = Invert(x, z, shore, out var x0, out var z0);
-        return cap * SumHeight(x0, z0);
+        var phase = _phase[i] - _omega[i] * dt + _kx[i] * originX + _kz[i] * originZ;
+        return (float)(phase - Math.Floor(phase / Math.Tau) * Math.Tau);
     }
 
-    public float3 SampleNormal(float x, float z, IShoreDepth? shore = null) => Sample(x, z, shore).Normal;
-
-    public float3 SampleVelocity(float x, float z, IShoreDepth? shore = null) => Sample(x, z, shore).Velocity;
-
-    public void SampleHeights(ReadOnlySpan<float2> positions, Span<float> heights, IShoreDepth? shore = null)
+    /// <summary>Surface position of the open swell's water particle whose rest position is (x0, z0) in the wave plane.</summary>
+    public float3 SurfacePoint(float x0, float z0)
     {
-        for (var i = 0; i < positions.Length; i++)
-            heights[i] = SampleHeight(positions[i].X, positions[i].Y, shore);
+        SumDisplacement(x0, z0, 0f, out var dx, out var dz);
+        return new float3(x0 + dx, SumHeight(x0, z0, 0f), z0 + dz);
     }
 
-    /// <summary>Height, normal, orbital velocity and Jacobian at world (x, z).</summary>
+    /// <summary>The open swell's surface height at (x, z) of the wave plane.</summary>
+    public float SampleHeight(float x, float z)
+    {
+        Invert(x, z, out var x0, out var z0);
+        return SumHeight(x0, z0, 0f);
+    }
+
+    /// <summary>The open swell's height, normal, orbital velocity and Jacobian at (x, z) of the wave plane (y up).</summary>
+    public WaveSample Sample(float x, float z)
+    {
+        Invert(x, z, out var x0, out var z0);
+        Sum(x0, z0, 0f, out var s);
+        return s.ToSample(1f);
+    }
+
+    /// <summary>The rest position under (x, z).</summary>
+    private void Invert(float x, float z, out float x0, out float z0)
+    {
+        x0 = x;
+        z0 = z;
+
+        if (Choppiness <= 0f)
+            return;
+
+        for (var i = 0; i < InversionIterations; i++)
+        {
+            SumDisplacement(x0, z0, 0f, out var dx, out var dz);
+            x0 = x - dx;
+            z0 = z - dz;
+        }
+    }
+
+    /// <summary>
+    /// Every component's sums at a rest position, <paramref name="lead"/> seconds past <see cref="Time"/>.
+    /// </summary>
     // Fully optimised from its first call: few callers sample the whole wave, so tiered compilation left it in its slow
     // early tiers and promoted it on whichever tick crossed the threshold (10 samples took 13 ms on first use, against
     // 0.05 ms once promoted).
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-    public WaveSample Sample(float x, float z, IShoreDepth? shore = null)
+    internal void Sum(float x0, float z0, float lead, out SwellSums sums)
     {
-        var cap = Invert(x, z, shore, out var x0, out var z0);
-
         var vx = Vector256.Create(x0);
         var vz = Vector256.Create(z0);
+        var back = Vector256.Create(-lead);
         var height = Vector256<float>.Zero;
         var hx = Vector256<float>.Zero;
         var hz = Vector256<float>.Zero;
         var jxx = Vector256<float>.Zero;
         var jzz = Vector256<float>.Zero;
         var jxz = Vector256<float>.Zero;
+        var dx = Vector256<float>.Zero;
+        var dz = Vector256<float>.Zero;
         var ux = Vector256<float>.Zero;
         var uz = Vector256<float>.Zero;
         var uy = Vector256<float>.Zero;
@@ -418,7 +457,8 @@ public sealed class OceanSwell
         {
             var kx = Load(_kx, i);
             var kz = Load(_kz, i);
-            var theta = Vector256.FusedMultiplyAdd(kx, vx, Vector256.FusedMultiplyAdd(kz, vz, Load(_phase, i)));
+            var phase = Vector256.FusedMultiplyAdd(Load(_omega, i), back, Load(_phase, i));
+            var theta = Vector256.FusedMultiplyAdd(kx, vx, Vector256.FusedMultiplyAdd(kz, vz, phase));
             var (sin, cos) = Vector256.SinCos(theta);
             var cx = Load(_cx, i);
             var cz = Load(_cz, i);
@@ -429,88 +469,58 @@ public sealed class OceanSwell
             jxx = Vector256.FusedMultiplyAdd(cx * kx, cos, jxx);
             jzz = Vector256.FusedMultiplyAdd(cz * kz, cos, jzz);
             jxz = Vector256.FusedMultiplyAdd(cx * kz, cos, jxz);
+            dx = Vector256.FusedMultiplyAdd(cx, sin, dx);
+            dz = Vector256.FusedMultiplyAdd(cz, sin, dz);
             ux = Vector256.FusedMultiplyAdd(Load(_awx, i), cos, ux);
             uz = Vector256.FusedMultiplyAdd(Load(_awz, i), cos, uz);
             uy = Vector256.FusedMultiplyAdd(Load(_aw, i), sin, uy);
         }
 
-        var slopeX = -cap * Vector256.Sum(hx);
-        var slopeZ = -cap * Vector256.Sum(hz);
-        var dxx = 1f - cap * Vector256.Sum(jxx);
-        var dzz = 1f - cap * Vector256.Sum(jzz);
-        var dxz = -cap * Vector256.Sum(jxz);
-
-        // Tangents Tx = (dxx, slopeX, dxz), Tz = (dxz, slopeZ, dzz); normal = Tz × Tx.
-        var normal = new float3(
-            slopeZ * dxz - dzz * slopeX,
-            dzz * dxx - dxz * dxz,
-            dxz * slopeX - slopeZ * dxx
-        );
-
-        return new WaveSample
+        sums = new SwellSums
         {
-            Height = cap * Vector256.Sum(height),
-            Normal = float3.Normalize(normal),
-            Velocity = cap * new float3(Vector256.Sum(ux), Vector256.Sum(uy), Vector256.Sum(uz)),
-            Jacobian = dxx * dzz - dxz * dxz,
+            Height = Vector256.Sum(height),
+            Hx = Vector256.Sum(hx),
+            Hz = Vector256.Sum(hz),
+            Jxx = Vector256.Sum(jxx),
+            Jzz = Vector256.Sum(jzz),
+            Jxz = Vector256.Sum(jxz),
+            Dx = -Vector256.Sum(dx),
+            Dz = -Vector256.Sum(dz),
+            Ux = Vector256.Sum(ux),
+            Uy = Vector256.Sum(uy),
+            Uz = Vector256.Sum(uz),
         };
     }
 
-    /// <summary>Depth cap at a rest position: 1 without a depth source.</summary>
-    private float Cap(IShoreDepth? shore, float x0, float z0)
-    {
-        if (shore is null || SignificantWaveHeight <= 1e-4f)
-            return 1f;
-
-        return Math.Clamp(DepthCapGamma * shore.Depth(x0, z0) / SignificantWaveHeight, 0f, 1f);
-    }
-
-    /// <summary>The rest position under world (x, z), with the depth cap there (it scales the displacement too).</summary>
-    private float Invert(float x, float z, IShoreDepth? shore, out float x0, out float z0)
-    {
-        x0 = x;
-        z0 = z;
-        var cap = Cap(shore, x0, z0);
-
-        if (Choppiness <= 0f)
-            return cap;
-
-        for (var i = 0; i < InversionIterations; i++)
-        {
-            SumDisplacement(x0, z0, out var dx, out var dz);
-            x0 = x - cap * dx;
-            z0 = z - cap * dz;
-            cap = Cap(shore, x0, z0);
-        }
-
-        return cap;
-    }
-
-    private float SumHeight(float x0, float z0)
+    internal float SumHeight(float x0, float z0, float lead)
     {
         var vx = Vector256.Create(x0);
         var vz = Vector256.Create(z0);
+        var back = Vector256.Create(-lead);
         var height = Vector256<float>.Zero;
 
         for (var i = 0; i < _paddedCount; i += Lanes)
         {
-            var theta = Vector256.FusedMultiplyAdd(Load(_kx, i), vx, Vector256.FusedMultiplyAdd(Load(_kz, i), vz, Load(_phase, i)));
+            var phase = Vector256.FusedMultiplyAdd(Load(_omega, i), back, Load(_phase, i));
+            var theta = Vector256.FusedMultiplyAdd(Load(_kx, i), vx, Vector256.FusedMultiplyAdd(Load(_kz, i), vz, phase));
             height = Vector256.FusedMultiplyAdd(Load(_a, i), Vector256.Cos(theta), height);
         }
 
         return Vector256.Sum(height);
     }
 
-    private void SumDisplacement(float x0, float z0, out float dx, out float dz)
+    internal void SumDisplacement(float x0, float z0, float lead, out float dx, out float dz)
     {
         var vx = Vector256.Create(x0);
         var vz = Vector256.Create(z0);
+        var back = Vector256.Create(-lead);
         var sx = Vector256<float>.Zero;
         var sz = Vector256<float>.Zero;
 
         for (var i = 0; i < _paddedCount; i += Lanes)
         {
-            var theta = Vector256.FusedMultiplyAdd(Load(_kx, i), vx, Vector256.FusedMultiplyAdd(Load(_kz, i), vz, Load(_phase, i)));
+            var phase = Vector256.FusedMultiplyAdd(Load(_omega, i), back, Load(_phase, i));
+            var theta = Vector256.FusedMultiplyAdd(Load(_kx, i), vx, Vector256.FusedMultiplyAdd(Load(_kz, i), vz, phase));
             var sin = Vector256.Sin(theta);
             sx = Vector256.FusedMultiplyAdd(Load(_cx, i), sin, sx);
             sz = Vector256.FusedMultiplyAdd(Load(_cz, i), sin, sz);
@@ -523,6 +533,66 @@ public sealed class OceanSwell
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static Vector256<float> Load(float[] array, int index) =>
         Vector256.LoadUnsafe(ref MemoryMarshal.GetArrayDataReference(array), (nuint)index);
+}
+
+/// <summary>
+/// The swell's raw sums at a rest position, in the wave plane's axes (x, z; y up): height, Σ a k sin (the slope is its
+/// negative), the chop's Jacobian sums, the chop displacement and the orbital velocity.
+/// </summary>
+internal struct SwellSums
+{
+    public float Height;
+    public float Hx, Hz;
+    public float Jxx, Jzz, Jxz;
+    public float Dx, Dz;
+    public float Ux, Uy, Uz;
+
+    /// <summary>Adds <paramref name="s"/> weighted by <paramref name="w"/>, its plane vectors turned by the 2 × 2 matrix a (taken as a rotation).</summary>
+    public void Add(in SwellSums s, float w, float a11, float a12, float a21, float a22)
+    {
+        Height += w * s.Height;
+        Uy += w * s.Uy;
+        Hx += w * (a11 * s.Hx + a12 * s.Hz);
+        Hz += w * (a21 * s.Hx + a22 * s.Hz);
+        Dx += w * (a11 * s.Dx + a12 * s.Dz);
+        Dz += w * (a21 * s.Dx + a22 * s.Dz);
+        Ux += w * (a11 * s.Ux + a12 * s.Uz);
+        Uz += w * (a21 * s.Ux + a22 * s.Uz);
+
+        // A j Aᵀ for the symmetric j.
+        var m11 = a11 * s.Jxx + a12 * s.Jxz;
+        var m12 = a11 * s.Jxz + a12 * s.Jzz;
+        var m21 = a21 * s.Jxx + a22 * s.Jxz;
+        var m22 = a21 * s.Jxz + a22 * s.Jzz;
+        Jxx += w * (m11 * a11 + m12 * a12);
+        Jxz += w * (m11 * a21 + m12 * a22);
+        Jzz += w * (m21 * a21 + m22 * a22);
+    }
+
+    /// <summary>The sample in the plane's axes with every component scaled by <paramref name="cap"/>.</summary>
+    public readonly WaveSample ToSample(float cap)
+    {
+        var slopeX = -cap * Hx;
+        var slopeZ = -cap * Hz;
+        var dxx = 1f - cap * Jxx;
+        var dzz = 1f - cap * Jzz;
+        var dxz = -cap * Jxz;
+
+        // Tangents Tx = (dxx, slopeX, dxz), Tz = (dxz, slopeZ, dzz); normal = Tz × Tx.
+        var normal = new float3(
+            slopeZ * dxz - dzz * slopeX,
+            dzz * dxx - dxz * dxz,
+            dxz * slopeX - slopeZ * dxx
+        );
+
+        return new WaveSample
+        {
+            Height = cap * Height,
+            Normal = float3.Normalize(normal),
+            Velocity = cap * new float3(Ux, Uy, Uz),
+            Jacobian = dxx * dzz - dxz * dxz,
+        };
+    }
 }
 
 public struct WaveSample

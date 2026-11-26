@@ -15,7 +15,7 @@ public class RakNetSessionTests(ITestOutputHelper output)
     public void TwoClients_ExchangeSnapshotsOverLocalhost()
     {
         var port = (ushort)(41000 + Environment.ProcessId % 2000);
-        using var sim = new SimWorld(seed: 3, workerThreads: 1, new TerrainParams());
+        using var sim = new SimWorld(seed: 3, workerThreads: 1);
         using var serverTransport = RakNetTransport.Listen(port, 4);
         var server = new NetServer(sim, serverTransport);
         var planet = sim.Celestial[1];

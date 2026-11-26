@@ -81,7 +81,9 @@ Cut to the ocean only (`docs/pivot/inventory.md`). Kept: analytic swell, GPU FFT
 - Every peer bakes it: 0.25 m SDF bricks > dual contouring mesh, coarse occupancy (rooms, connectivity), mass moments, convex exterior collision.
 - The server is authoritative for mass, rooms, splits and collision.
 - Components (thrusters, seats, tanks, doors…) attach to the hull; player-made ones are a modelled housing plus a function core. Prefabs are saved blueprints keyed by content hash.
-- Each ship is a Jolt compound body; damage adds subtract brushes; disconnected pieces split into new bodies.
+- Each ship is a Jolt compound body. Damage has three forms: holes (subtract brushes), dents (displacement records) and deformation (plastic hinges on the structure graph); disconnected pieces split into new bodies (`docs/pivot/combat-and-sensors.md`).
+- Hulls can also use closed mesh brushes (full mesh editing) inside the CSG list, so they stay cuttable. Wiring has two media: power and one-way, splittable data.
+- Interiors hold air per room (`docs/pivot/ship-atmosphere.md`); ships can carry particle, energy and gravity shields.
 
 ## Networking
 

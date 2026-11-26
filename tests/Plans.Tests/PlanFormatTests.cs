@@ -147,7 +147,7 @@ public class PlanFormatTests
         Assert.Equal(PlanFormatError.BadMagic, Decode(magic));
 
         var format = (byte[])bytes.Clone();
-        format[4] = 2;
+        format[4] = 3;
         Assert.Equal(PlanFormatError.UnsupportedFormat, Decode(format));
 
         var level = (byte[])bytes.Clone();

@@ -10,6 +10,9 @@ public readonly record struct EditOp(long X, long Y, long Z, float Radius, Brush
     public const double UnitsPerMetre = 1024.0;
     public const double Unit = 1.0 / UnitsPerMetre;
 
+    /// <summary>Distance in voxels beyond the radius that still changes the clamped SDF (±127 / DensityScale).</summary>
+    public const float Falloff = 127f / ChunkConstants.DensityScale;
+
     /// <summary>Bytes in the stored form.</summary>
     public const int StoredSize = 3 * sizeof(long) + sizeof(float) + 2 + sizeof(uint) + sizeof(ushort);
 
@@ -26,7 +29,7 @@ public readonly record struct EditOp(long X, long Y, long Z, float Radius, Brush
     }
 
     /// <summary>Reach in metres for chunks of the given voxel size.</summary>
-    public float ReachAt(double voxelSize) => Radius + BrushOp.Falloff * (float)voxelSize;
+    public float ReachAt(double voxelSize) => Radius + Falloff * (float)voxelSize;
 
     public void Write(BinaryWriter writer)
     {
@@ -92,7 +95,7 @@ public static class PlanetEditor
         var ly = (float)((cy - coord.Y * size) / s);
         var lz = (float)((cz - coord.Z * size) / s);
         var radius = (float)(op.Radius / s);
-        var reach = radius + BrushOp.Falloff;
+        var reach = radius + EditOp.Falloff;
 
         var x0 = Math.Max(-1, (int)MathF.Floor(lx - reach));
         var y0 = Math.Max(-1, (int)MathF.Floor(ly - reach));

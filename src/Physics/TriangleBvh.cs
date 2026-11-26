@@ -3,8 +3,10 @@ using System.Numerics;
 namespace BrutalGame.Physics;
 
 /// <summary>
-/// Managed BVH over an indexed triangle mesh, used for ray casts. Immutable after build, so safe to query from any thread.
-/// Exists because the shipped Jolt native library does not export any NarrowPhaseQuery / Shape ray cast entry points.
+/// Managed BVH over an indexed triangle mesh, used for ray casts. Rebuilt in place by <see cref="Build"/> (its arrays
+/// only grow, so a warmed instance builds without allocating); read-only between builds, so safe to query from any
+/// thread then. Exists because the shipped Jolt native library does not export any NarrowPhaseQuery / Shape ray cast
+/// entry points.
 /// </summary>
 internal sealed class TriangleBvh
 {
@@ -21,46 +23,64 @@ internal sealed class TriangleBvh
         public int Count;
     }
 
-    readonly Vector3[] _vertices;
-    readonly int[] _indices;
-    readonly Node[] _nodes;
+    Vector3[] _vertices = [];
+    int[] _indices = [];
+    Node[] _nodes = new Node[1];
+    Vector3[] _centroids = [];
+    int[] _order = [];
+    float[] _keys = [];
+    int _triangleCount;
+    int _nodeCount;
 
     public Vector3 Min => _nodes[0].Min;
     public Vector3 Max => _nodes[0].Max;
-    public int TriangleCount => _indices.Length / 3;
+    public int TriangleCount => _triangleCount;
     public long MemoryBytes => _vertices.Length * 12L + _indices.Length * 4L + _nodes.Length * 32L;
 
-    public TriangleBvh(ReadOnlySpan<Vector3> vertices, ReadOnlySpan<uint> indices)
+    public TriangleBvh()
+    {
+    }
+
+    public TriangleBvh(ReadOnlySpan<Vector3> vertices, ReadOnlySpan<uint> indices) => Build(vertices, indices);
+
+    public void Build(ReadOnlySpan<Vector3> vertices, ReadOnlySpan<uint> indices)
     {
         int triCount = indices.Length / 3;
-        var centroids = new Vector3[triCount];
-        var order = new int[triCount];
+        Grow(ref _centroids, triCount);
+        Grow(ref _order, triCount);
+        Grow(ref _keys, triCount);
+        Grow(ref _vertices, vertices.Length);
+        Grow(ref _indices, triCount * 3);
+        Grow(ref _nodes, 2 * triCount / 3 + 2);
 
         for (int i = 0; i < triCount; i++)
         {
-            centroids[i] = (vertices[(int)indices[i * 3]] + vertices[(int)indices[i * 3 + 1]] + vertices[(int)indices[i * 3 + 2]]) * (1f / 3f);
-            order[i] = i;
+            _centroids[i] = (vertices[(int)indices[i * 3]] + vertices[(int)indices[i * 3 + 1]] + vertices[(int)indices[i * 3 + 2]]) * (1f / 3f);
+            _order[i] = i;
         }
 
-        var nodes = new List<Node>(triCount / LeafSize * 2 + 1) { default };
-        var keys = new float[triCount];
-        Build(nodes, 0, 0, triCount, vertices, indices, centroids, order, keys);
-
-        _vertices = vertices.ToArray();
-        _indices = new int[triCount * 3];
+        _triangleCount = triCount;
+        _nodeCount = 1;
+        BuildNode(0, 0, triCount, vertices, indices);
+        vertices.CopyTo(_vertices);
 
         for (int i = 0; i < triCount; i++)
         {
-            int src = order[i] * 3;
+            int src = _order[i] * 3;
             _indices[i * 3] = (int)indices[src];
             _indices[i * 3 + 1] = (int)indices[src + 1];
             _indices[i * 3 + 2] = (int)indices[src + 2];
         }
-
-        _nodes = nodes.ToArray();
     }
 
-    static void Build(List<Node> nodes, int nodeIndex, int start, int count, ReadOnlySpan<Vector3> vertices, ReadOnlySpan<uint> indices, Vector3[] centroids, int[] order, float[] keys)
+    /// <summary>Grows with headroom, so a pooled instance settles after a growth or two.</summary>
+    static void Grow<T>(ref T[] array, int length)
+    {
+        if (array.Length < length)
+            array = new T[Math.Max(length + length / 2, array.Length * 2)];
+    }
+
+    void BuildNode(int nodeIndex, int start, int count, ReadOnlySpan<Vector3> vertices, ReadOnlySpan<uint> indices)
     {
         var min = new Vector3(float.MaxValue);
         var max = new Vector3(float.MinValue);
@@ -69,7 +89,7 @@ internal sealed class TriangleBvh
 
         for (int i = start; i < start + count; i++)
         {
-            int t = order[i] * 3;
+            int t = _order[i] * 3;
 
             for (int k = 0; k < 3; k++)
             {
@@ -78,13 +98,13 @@ internal sealed class TriangleBvh
                 max = Vector3.Max(max, v);
             }
 
-            cMin = Vector3.Min(cMin, centroids[order[i]]);
-            cMax = Vector3.Max(cMax, centroids[order[i]]);
+            cMin = Vector3.Min(cMin, _centroids[_order[i]]);
+            cMax = Vector3.Max(cMax, _centroids[_order[i]]);
         }
 
         if (count <= LeafSize)
         {
-            nodes[nodeIndex] = new Node { Min = min, Max = max, Start = start, Count = count };
+            _nodes[nodeIndex] = new Node { Min = min, Max = max, Start = start, Count = count };
             return;
         }
 
@@ -92,18 +112,21 @@ internal sealed class TriangleBvh
         int axis = extent.X >= extent.Y && extent.X >= extent.Z ? 0 : extent.Y >= extent.Z ? 1 : 2;
 
         for (int i = start; i < start + count; i++)
-            keys[i] = centroids[order[i]][axis];
+            _keys[i] = _centroids[_order[i]][axis];
 
-        Array.Sort(keys, order, start, count);
+        Array.Sort(_keys, _order, start, count);
 
-        int left = nodes.Count;
-        nodes.Add(default);
-        nodes.Add(default);
-        nodes[nodeIndex] = new Node { Min = min, Max = max, Start = left, Count = 0 };
+        int left = _nodeCount;
+        _nodeCount += 2;
+
+        if (_nodes.Length < _nodeCount)
+            Array.Resize(ref _nodes, _nodes.Length * 2);
+
+        _nodes[nodeIndex] = new Node { Min = min, Max = max, Start = left, Count = 0 };
 
         int half = count / 2;
-        Build(nodes, left, start, half, vertices, indices, centroids, order, keys);
-        Build(nodes, left + 1, start + half, count - half, vertices, indices, centroids, order, keys);
+        BuildNode(left, start, half, vertices, indices);
+        BuildNode(left + 1, start + half, count - half, vertices, indices);
     }
 
     public static Vector3 InverseDirection(Vector3 dir) => new(1f / SafeComponent(dir.X), 1f / SafeComponent(dir.Y), 1f / SafeComponent(dir.Z));

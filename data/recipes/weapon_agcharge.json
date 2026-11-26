@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "id": "weapon.agcharge.1kg",
+  "kind": "Fixed",
+  "station": "fc.assembler",
+  "timeS": 120,
+  "inputs": [
+    {
+      "family": "em",
+      "minPurity": 0.15,
+      "contentKg": 1.0
+    },
+    {
+      "item": "am.cell",
+      "amG": 5
+    },
+    {
+      "item": "part.ag_casing.s",
+      "count": 1
+    }
+  ],
+  "outputs": [
+    {
+      "item": "weapon.agcharge",
+      "count": 1
+    }
+  ]
+}

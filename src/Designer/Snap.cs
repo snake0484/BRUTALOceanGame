@@ -44,6 +44,15 @@ public sealed class Snap
         if (!Enabled)
             return brush;
 
+        // A mesh brush's half extents are its mesh's bounds: only its origin snaps.
+        if (brush.Shape == BrushShape.Mesh)
+        {
+            brush.PosX = SnapPosition(brush.PosX);
+            brush.PosY = SnapPosition(brush.PosY);
+            brush.PosZ = SnapPosition(brush.PosZ);
+            return brush;
+        }
+
         brush.HalfX = SnapHalf(brush.HalfX);
         brush.HalfY = SnapHalf(brush.HalfY);
         brush.HalfZ = SnapHalf(brush.HalfZ);

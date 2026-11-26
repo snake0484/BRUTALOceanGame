@@ -40,6 +40,8 @@ public sealed class DesignerApp : IDisposable
     private readonly DesignerPanels _panels;
     private readonly DesignStats _stats = new();
     private readonly ViewportTool _tool = new();
+    private readonly MeshEditState _meshEdit = new();
+    private readonly OverlayRenderer _overlay;
     private readonly OrbitCamera _camera = new();
     private readonly SceneLighting _lighting;
     private readonly int _closeAfterFrames;
@@ -48,7 +50,8 @@ public sealed class DesignerApp : IDisposable
     private int _uploadedBake;
     private int _frames;
 
-    public DesignerApp(string dataFolder, string? load, bool demo, string? saveOnExit, int closeAfterFrames)
+    /// <param name="view">Optional camera after framing: yaw and pitch in degrees, distance in metres.</param>
+    public DesignerApp(string dataFolder, string? load, bool demo, bool demoMesh, string? saveOnExit, int closeAfterFrames, double[]? view = null, string? script = null)
     {
         _catalog = HullMaterialCatalog.Load(dataFolder);
         _panels = new DesignerPanels(_catalog);
@@ -64,6 +67,7 @@ public sealed class DesignerApp : IDisposable
         _renderer = new Renderer(_window, _frameStats, Validation, vsync: true) { ClearColor = new float4(0.11f, 0.12f, 0.14f, 1f) };
         _imgui = new ImGuiLayer(_window, _renderer);
         _hull = new HullRenderer(_renderer);
+        _overlay = new OverlayRenderer(_renderer);
         _lighting = new SceneLighting
         {
             SunDirection = Vector3.Normalize(new Vector3(0.45f, 0.8f, 0.35f)),
@@ -75,10 +79,42 @@ public sealed class DesignerApp : IDisposable
 
         if (load is not null)
             Open(load);
-        else if (demo)
-            Demo();
+        else if (demo || demoMesh)
+            Demo(demoMesh);
+
+        if (view is not null)
+        {
+            _camera.Yaw = view[0] * Math.PI / 180.0;
+            _camera.Pitch = view[1] * Math.PI / 180.0;
+            _camera.Distance = view[2];
+        }
 
         _window.OnKey += OnKey;
+
+        if (script is not null)
+            _script = new InputScript(script, ScriptKey);
+    }
+
+    private readonly InputScript? _script;
+
+    private void ScriptKey(string name)
+    {
+        var ctrl = name.StartsWith("ctrl+", StringComparison.Ordinal);
+        var key = (ctrl ? name[5..] : name) switch
+        {
+            "tab" => GlfwKey.Tab,
+            "delete" => GlfwKey.Delete,
+            "1" => GlfwKey.Number1,
+            "2" => GlfwKey.Number2,
+            "3" => GlfwKey.Number3,
+            "z" => GlfwKey.Z,
+            "y" => GlfwKey.Y,
+            "d" => GlfwKey.D,
+            "f" => GlfwKey.F,
+            _ => GlfwKey.Unknown,
+        };
+
+        HandleKey(key, ctrl);
     }
 
     public void Run()
@@ -128,7 +164,7 @@ public sealed class DesignerApp : IDisposable
         var copy = doc.Clone();
         PlanCanonical.Canonicalise(copy);
         _stats.Hash = PlanFormat.HashBody(copy);
-        _baker.Start(doc.Brushes.AsSpan(), _catalog.Densities(doc));
+        _baker.Start(doc.Brushes.AsSpan(), doc.Meshes, _catalog.Densities(doc));
         UpdatePalette(doc);
     }
 
@@ -150,8 +186,10 @@ public sealed class DesignerApp : IDisposable
         _stats.Rebaked = _baker.LastRebaked;
         _stats.Reused = _baker.LastReused;
         _stats.MaxBrushesPerBrick = _baker.MaxBrushesPerBrick;
+        _stats.PrepareMs = _baker.LastPrepareMs;
+        _stats.ExactBricks = _baker.ExactBricks;
         var com = _baker.Mass.CentreOfMass;
-        Console.WriteLine($"bake {_baker.Version}: {_stats.Bricks} bricks ({_stats.Rebaked} rebaked, {_stats.Reused} reused), {_stats.Triangles} tris, {_stats.BakeMs:F2} ms wall, {_stats.BakeCpuMs:F2} ms cpu; mass {_baker.Mass.MassKg:F1} kg, volume {_baker.Mass.VolumeM3:F3} m3, CoM ({com.X:F3}, {com.Y:F3}, {com.Z:F3}); hash {_stats.Hash}");
+        Console.WriteLine($"bake {_baker.Version}: {_stats.Bricks} bricks ({_stats.ExactBricks} exact, {_stats.Rebaked} rebaked, {_stats.Reused} reused), {_stats.Triangles} tris, {_stats.BakeMs:F2} ms wall, {_stats.BakeCpuMs:F2} ms cpu, mesh prep {_stats.PrepareMs:F2} ms; mass {_baker.Mass.MassKg:F1} kg, volume {_baker.Mass.VolumeM3:F3} m3, CoM ({com.X:F3}, {com.Y:F3}, {com.Z:F3}); hash {_stats.Hash}");
     }
 
     private void UpdatePalette(PlanDocument doc)
@@ -175,17 +213,22 @@ public sealed class DesignerApp : IDisposable
 
     private void BuildUi()
     {
-        _imgui.NewFrame();
+        _imgui.NewFrame(_script is null ? null : _script.Inject);
+
+        if (_script is { Quit: true })
+            _window.ShouldClose = true;
+
         var io = ImGui.GetIO();
         var output = _renderer.OutputExtent;
         var viewport = new Vector2(output.Width, output.Height);
         UpdateCamera(io, viewport.Y);
         _panels.PlaceAt = _camera.Target;
-        _panels.Draw(_session, _stats);
+        _panels.Draw(_session, _stats, _meshEdit);
         HandleFiles();
 
         var viewProj = _camera.ViewProjection(viewport.X / Math.Max(1f, viewport.Y));
-        _tool.Update(_session, _camera, viewport, viewProj, !io.WantCaptureMouse);
+        _overlay.Begin(_camera.Position);
+        _tool.Update(_session, _meshEdit, _camera, viewport, viewProj, !io.WantCaptureMouse, _overlay);
         _imgui.EndFrame();
     }
 
@@ -219,6 +262,7 @@ public sealed class DesignerApp : IDisposable
         _hull.Record(commands, _renderer.FrameIndex, extent, viewProj, _camera.Position, _lighting);
         _renderer.EndOpaquePass(commands);
         _renderer.BeginWaterPass(commands);
+        _overlay.Record(commands, _renderer.FrameIndex, extent, viewProj);
         _renderer.BeginUiPass(commands);
         _imgui.Draw(commands);
         _renderer.EndFrame();
@@ -298,10 +342,15 @@ public sealed class DesignerApp : IDisposable
         FrameHull();
     }
 
-    private void Demo()
+    private void Demo(bool mesh)
     {
         var all = _catalog.All;
-        SampleHulls.HollowBoxWithCylinder(_session, all[0].Id, all[Math.Min(2, all.Count - 1)].Id);
+
+        if (mesh)
+            SampleHulls.MeshHull(_session, all[0].Id, all[Math.Min(2, all.Count - 1)].Id);
+        else
+            SampleHulls.HollowBoxWithCylinder(_session, all[0].Id, all[Math.Min(2, all.Count - 1)].Id);
+
         _session.MarkSaved("");
         FrameHull();
     }
@@ -329,11 +378,17 @@ public sealed class DesignerApp : IDisposable
 
     private void OnKey(GlfwWindow window, GlfwKey key, int scancode, GlfwKeyAction action, GlfwModifier mods)
     {
-        if (action == GlfwKeyAction.Release || _imgui.WantCaptureKeyboard)
+        if (action != GlfwKeyAction.Press && !(action == GlfwKeyAction.Repeat && (mods & GlfwModifier.Control) != 0))
             return;
 
-        var ctrl = (mods & GlfwModifier.Control) != 0;
+        if (_imgui.WantCaptureKeyboard)
+            return;
 
+        HandleKey(key, (mods & GlfwModifier.Control) != 0);
+    }
+
+    private void HandleKey(GlfwKey key, bool ctrl)
+    {
         if (ctrl && key == GlfwKey.Z)
             _session.UndoLast();
         else if (ctrl && key == GlfwKey.Y)
@@ -342,10 +397,14 @@ public sealed class DesignerApp : IDisposable
             HullCommands.Duplicate(_session, _session.Selection.Primary);
         else if (ctrl && key == GlfwKey.S)
             Save(_session.Path.Length > 0 ? _session.Path : _panels.PathText);
-        else if (key == GlfwKey.Delete && action == GlfwKeyAction.Press)
+        else if (key == GlfwKey.Delete)
             HullCommands.DeleteSelected(_session);
-        else if (key == GlfwKey.F && action == GlfwKeyAction.Press)
+        else if (key == GlfwKey.F)
             FrameHull();
+        else if (key == GlfwKey.Tab)
+            _meshEdit.Enabled = !_meshEdit.Enabled;
+        else if (key is GlfwKey.Number1 or GlfwKey.Number2 or GlfwKey.Number3)
+            _meshEdit.Selection.Mode = key == GlfwKey.Number1 ? Mesh.MeshSelectMode.Vertex : key == GlfwKey.Number2 ? Mesh.MeshSelectMode.Edge : Mesh.MeshSelectMode.Face;
     }
 
     public void Dispose()
@@ -355,6 +414,7 @@ public sealed class DesignerApp : IDisposable
         _renderer.WaitIdle();
         _baker.Dispose();
         _hull.Dispose();
+        _overlay.Dispose();
         _imgui.Dispose();
         _renderer.Dispose();
         _window.Dispose();

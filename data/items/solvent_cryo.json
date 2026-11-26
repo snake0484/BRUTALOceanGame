@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "id": "solvent.cryo",
+  "name": "Cryo-solvent",
+  "family": "fluid",
+  "densityKgM3": 1100,
+  "refCostPerKg": 0.05,
+  "recipe": {
+    "station": "fc.chem_plant",
+    "timeSPerKg": 4,
+    "powerW": 50000.0,
+    "inputs": [
+      {
+        "item": "ice",
+        "kg": 0.8
+      },
+      {
+        "item": "propellant.hydrogen",
+        "kg": 0.2
+      }
+    ]
+  }
+}

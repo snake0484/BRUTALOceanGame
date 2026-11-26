@@ -57,7 +57,8 @@ internal static partial class Program
             {
                 if (options.Edit && !edited && log.JoinedSeconds(now) > 2.0)
                 {
-                    client.RequestEdit(new BrushOp(new Vector3(400f, 20f, 37.5f), 3f, BrushMode.Place, VoxelMaterial.Rock));
+                    var at = client.Owned.Position;
+                    client.RequestEdit(EditOp.At(at.X, at.Y - 10.0, at.Z, 3f, BrushMode.Place, VoxelMaterial.Rock));
                     edited = true;
                 }
 

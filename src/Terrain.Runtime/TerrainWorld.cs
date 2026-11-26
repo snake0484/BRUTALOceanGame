@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Numerics;
-using System.Runtime.InteropServices;
 using Brutal.Concurrency.Jobs;
+using Brutal.Numerics;
 using BrutalGame.Engine.Jobs;
 using BrutalGame.Physics;
 using BrutalGame.Terrain.Runtime.Rendering;
@@ -9,153 +9,278 @@ using BrutalGame.Terrain.Runtime.Rendering;
 namespace BrutalGame.Terrain.Runtime;
 
 /// <summary>
-/// Streams an octree of chunks around the camera (docs/terrain-lod.md): fine voxels near, coarse voxels far.
-/// Jobs generate + replay edits + mesh (+ collision for LOD 0); the main thread uploads, swaps LODs without holes,
-/// and rebuilds bathymetry. Never waits on the job system; one batch is in flight at a time.
+/// Streams the focus body's octree of chunks around the camera (planets.md "Streaming at flight speeds"), in the body's
+/// rotating frame with its centre at the origin: leaf selection runs on its own job (<see cref="PlanetLeafSelector"/>),
+/// chunk jobs generate + replay edits + mesh (+ collision for LOD-0 leaves in a ring round the camera), and the main
+/// thread uploads and swaps LODs without holes. Never waits on the job system; one chunk batch is in flight at a time.
+/// Collision bodies sit in the physics world's bubble (<see cref="PhysicsBubble"/>), for the one body that has it; their
+/// shapes are pooled. Every rocky body's height bounds are built at load; <see cref="SetFocus"/> moves the octree to another
+/// body (or none, past the impostor switch) once nothing is in flight, freeing the old body's leaves at once: the switch
+/// happens where neither octree is drawn. Each body keeps its own edit replica.
 /// </summary>
 public sealed class TerrainWorld : IDisposable
 {
-    public const int MaxLod = 4;
-    public const float SplitFactor = 3f;
-    public const int RootRadius = 2;
-    public const float WorldMinY = ChunkConstants.MinChunkY * ChunkConstants.Size;
-    public const float WorldMaxY = (ChunkConstants.MaxChunkY + 1) * ChunkConstants.Size;
     public const int MaxJobsPerBatch = 96;
+
+    /// <summary>LOD-0 leaves whose centre lies within this distance (m) of the camera get collision.</summary>
+    public const double CollisionRadius = 128.0;
+
     private const int JobPoolSize = MaxJobsPerBatch;
-    private const int MaxLodCount = MaxLod + 1;
+    private const int ShapePoolSize = 192;
 
-    /// <summary>
-    /// LOD-0 chunks within this many chunks of the camera get collision. Kept small because the current Jolt package
-    /// lacks native MeshShape, and the triangle-compound fallback costs ~300 bytes per triangle.
-    /// </summary>
-    public int CollisionRadius = 4;
+    /// <summary>With the arenas full, at most this many uncovered leaves are freed per frame.</summary>
+    private const int MaxForcedRetires = 32;
 
-    public readonly BathymetryGrid Bathymetry = new();
-    public readonly TerrainParams Params;
+    /// <summary>Reselect once the camera has moved this share of the finest leaf's size.</summary>
+    private const double ReselectShare = 0.25;
+
+    /// <summary>The speed bias steps back to a finer LOD only once 1/this of the speed would allow it.</summary>
+    private const double SpeedLodHysteresis = 0.7;
+
+    /// <summary>Horizon pruning keeps nodes this far (m) past the horizon, plus <see cref="HorizonLeadSeconds"/> of travel, so they load before they can show.</summary>
+    private const double HorizonMargin = 2000.0;
+    private const double HorizonLeadSeconds = 2.0;
+
+    private static readonly long RetireBudget = Stopwatch.Frequency / 2000;
 
     private readonly TerrainRenderer _renderer;
     private readonly PhysicsWorld _physics;
     private readonly JobScheduler _scheduler;
+    private readonly JobScheduler _selectScheduler;
+    private readonly Body[] _bodies;
+    private readonly SelectJob _selectJob = new();
     private readonly Stack<ChunkJob> _pool = new(JobPoolSize);
     private readonly List<ChunkJob> _inFlight = new(JobPoolSize);
     private readonly List<ChunkJob> _awaitingUpload = new(JobPoolSize);
-    private readonly Dictionary<ChunkCoord, ChunkRecord> _chunks = new(8192);
+    private readonly Dictionary<ulong, ChunkRecord> _chunks = new(8192);
     private readonly Stack<ChunkRecord> _recordPool = new(8192);
-    private readonly HashSet<ChunkCoord> _desired = new(8192);
-    private readonly List<ChunkCoord> _desiredOrder = new(8192);
-
-    /// <summary>Each desired leaf's priority (distance in its own voxels), parallel to <see cref="_desiredOrder"/> and sorted with it.</summary>
-    private readonly List<float> _desiredKeys = new(8192);
+    private readonly Stack<StaticMeshShape> _shapes = new(ShapePoolSize);
     private readonly List<ChunkCoord> _scratch = new(8192);
-    private static readonly long RetireBudget = Stopwatch.Frequency / 2000;
-    private int _retireCursor;
     private readonly List<ChunkCoord> _dirty = new(256);
-    private readonly List<BrushOp> _ops = new(1024);
-    private readonly int[] _leavesPerLod = new int[MaxLodCount];
-    private Vector3 _camera;
+    private readonly List<EditOp> _pendingOps = new(64);
+    private readonly HashSet<ulong> _readyAncestors = new(16384);
+    private readonly int[] _holeLods = new int[PlanetLeafSelector.MaxLeafLod + 1];
+    private LeafSet _desired = new();
+    private Body? _body;
+    private int _focus = -1;
+    private int _requestedFocus;
+    private int _retireCursor;
+    private double3 _camera;
+    private double _speed;
+    private double3 _selectedAt;
     private ChunkCoord _cameraChunk = new(int.MinValue, 0, 0);
-    private bool _bathymetryDirty;
-    private bool _bathymetryUrgent;
-
-    // Partial bathymetry rebuilds: footprints of leaves added or retired since the last rebuild, and the strips a re-centre
-    // moves in. An edit re-merges just the few cells it touched. A rebuild runs in bands of rows under a per-frame budget,
-    // so a big one (the first, or many streaming changes) spreads over a few frames instead of stalling one.
-    private const int MaxBathymetryRegions = 16;
-    private const int BandRows = 16;
-    private static readonly long BathymetryBudget = Stopwatch.Frequency / 1000;
-    private readonly List<BathymetryGrid.Region> _bathymetryRegions = new(MaxBathymetryRegions);
-    private readonly List<BathymetryGrid.Region> _rebuildQueue = new(MaxBathymetryRegions + 4);
-    private int _rebuildRow;
-    private double _rebuildMs;
-    private bool _bathymetryFull = true;
-    private long _lastBathymetryRebuild;
-    private static readonly long BathymetryInterval = Stopwatch.Frequency / 4;
+    private bool _selecting;
+    private bool _reselect = true;
+    private bool _starved;
+    private int _minLod;
     private int _batchJobs;
     private long _batchStart;
     private long _frame;
 
     private sealed class ChunkRecord
     {
+        public ChunkCoord Coord;
         public int MeshHandle = -1;
         public BodyHandle Body;
+        public StaticMeshShape? Shape;
         public bool Ready;
         public bool InFlight;
         public bool Dirty;
         public bool HasGeometry;
-        public bool HasSeaLayer;
-
-        /// <summary>Any column has a surface top; leaves that are all air or all rock add nothing to the bathymetry.</summary>
-        public bool HasTops;
         public long ReadyFrame;
-        public readonly float[] ColumnTops = new float[ChunkJob.Columns];
-        public readonly float[] ColumnBeds = new float[ChunkJob.Columns];
-        public readonly bool[] SeaFlags = new bool[ChunkJob.Columns];
 
         public void Reset()
         {
             MeshHandle = -1;
             Body = default;
+            Shape = null;
             Ready = false;
             InFlight = false;
             Dirty = false;
             HasGeometry = false;
-            HasSeaLayer = false;
         }
     }
 
-    public TerrainWorld(TerrainRenderer renderer, PhysicsWorld physics, in TerrainParams terrain)
+    private sealed class BoundsJob(PlanetHeightBounds bounds, int face) : IJob
     {
-        Params = terrain;
+        public void Run() => bounds.BuildFace(face);
+    }
+
+    /// <summary>One rocky body the octree can stream: generator, height bounds, this client's edit replica and selector.</summary>
+    private sealed class Body
+    {
+        public readonly PlanetGenerator Generator;
+        public readonly PlanetHeightBounds Bounds;
+
+        /// <summary>Written only between selections while this body is the focus.</summary>
+        public readonly EditStore Edits = new();
+        public readonly bool Collision;
+
+        public Body(PlanetGenerator generator, bool collision)
+        {
+            Generator = generator;
+            Bounds = new PlanetHeightBounds(generator);
+            Collision = collision;
+        }
+
+        /// <summary>Made once the bounds are built: its horizon occluder is their lowest ground.</summary>
+        public PlanetLeafSelector Selector { get; private set; } = null!;
+
+        public void BoundsBuilt() => Selector = new PlanetLeafSelector(Bounds, Edits);
+    }
+
+    /// <summary>
+    /// Builds every body's height bounds on the streaming workers (blocks, once at load). Only
+    /// <paramref name="collisionBody"/> gets collision (the physics bubble is on it); <paramref name="focus"/> streams first.
+    /// </summary>
+    public TerrainWorld(TerrainRenderer renderer, PhysicsWorld physics, ReadOnlySpan<PlanetGenerator> bodies, int collisionBody, int focus)
+    {
         _renderer = renderer;
         _physics = physics;
         _scheduler = new JobScheduler((uint)WorkerBudget.Streaming, "Terrain", ThreadPriority.BelowNormal);
+        _selectScheduler = new JobScheduler(1, "TerrainSelect", ThreadPriority.BelowNormal);
+        _bodies = new Body[bodies.Length];
+
+        var start = Stopwatch.GetTimestamp();
+
+        for (var i = 0; i < bodies.Length; i++)
+        {
+            _bodies[i] = new Body(bodies[i], i == collisionBody);
+
+            for (var face = 0; face < CubeLattice.Faces; face++)
+                _scheduler.Queue(new BoundsJob(_bodies[i].Bounds, face), 1);
+        }
+
+        _scheduler.ExecuteJobs();
+        _scheduler.Wait();
+
+        foreach (var body in _bodies)
+            body.BoundsBuilt();
+
+        BoundsMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+        _requestedFocus = focus;
 
         for (var i = 0; i < JobPoolSize; i++)
             _pool.Push(new ChunkJob());
+
+        for (var i = 0; i < ShapePoolSize; i++)
+            _shapes.Push(new StaticMeshShape());
+    }
+
+    /// <summary>Wall time every body's height bounds took to build at load.</summary>
+    public float BoundsMs { get; }
+
+    /// <summary>The body the octree streams (index into the constructor's list), −1 for none.</summary>
+    public int Focus => _focus;
+
+    /// <summary>A focus change waits for the selection and batch in flight.</summary>
+    public bool Switching => _requestedFocus != _focus;
+
+    /// <summary>The focus body's generator; null with no focus.</summary>
+    public PlanetGenerator? Generator => _body?.Generator;
+
+    /// <summary>Focus switches made, since start.</summary>
+    public int FocusSwitches { get; private set; }
+
+    /// <summary>Streams <paramref name="body"/> (−1: none, every leaf freed) from the next <see cref="Update"/> that finds nothing in flight.</summary>
+    public void SetFocus(int body)
+    {
+        if ((uint)(body + 1) > (uint)_bodies.Length)
+            throw new ArgumentOutOfRangeException(nameof(body));
+
+        _requestedFocus = body;
     }
 
     public int LoadedChunks => _chunks.Count;
 
+    /// <summary>Loaded leaves with geometry (renderer slots in use).</summary>
+    public int MeshedChunks => _renderer.ChunkCount;
+
+    /// <summary>Vertex and index arena bytes in use.</summary>
+    public long MeshBytes => _renderer.VertexBytesUsed + _renderer.IndexBytesUsed;
+
+    /// <summary>The last <see cref="CountHoles"/>'s holes per LOD.</summary>
+    public ReadOnlySpan<int> HoleLods => _holeLods;
+
     public int DesiredLeaves => _desired.Count;
 
-    public ReadOnlySpan<int> LeavesPerLod => _leavesPerLod;
+    public ReadOnlySpan<int> LeavesPerLod => _desired.PerLod;
+
+    /// <summary>The speed bias's finest LOD in use.</summary>
+    public int MinLod => _minLod;
 
     public int PendingJobs => _inFlight.Count + _awaitingUpload.Count;
 
     public int DirtyChunks => _dirty.Count;
 
-    public int EditCount => _ops.Count;
+    /// <summary>The focus body's edits, accepted ones included.</summary>
+    public int EditCount => _focus < 0 ? 0 : EditCountOf(_focus);
+
+    /// <summary>Edits this client holds for <paramref name="body"/>, accepted ones included.</summary>
+    public int EditCountOf(int body) => _bodies[body].Edits.Count + (body == _focus ? _pendingOps.Count : 0);
+
+    public int CollisionBodies { get; private set; }
+
+    /// <summary>Leaves loaded for the first time (not re-meshes), since start.</summary>
+    public long LeavesLoaded { get; private set; }
+
+    /// <summary>Chunk jobs finished, since start.</summary>
+    public long JobsCompleted { get; private set; }
 
     /// <summary>Wall time of the last completed batch, and how many chunks it held.</summary>
     public float LastBatchMs { get; private set; }
 
     public int LastBatchChunks { get; private set; }
 
-    public float LastSelectMs { get; private set; }
+    /// <summary>Worker time of the last leaf selection, and the octree nodes it visited.</summary>
+    public float LastSelectMs => _desired.Ms;
 
-    /// <summary>Leaf selections run so far (one per camera chunk change).</summary>
+    public int LastSelectVisits => _desired.Visits;
+
+    /// <summary>Leaf selections swapped in so far.</summary>
     public int Selects { get; private set; }
+
+    /// <summary>Leaves freed before their volume was covered because the renderer's arenas were full (may open a hole).</summary>
+    public long ForcedRetires { get; private set; }
 
     /// <summary>Milliseconds the last retire pass took (part of the stream time in <see cref="LastUpdate"/>).</summary>
     public float LastRetireMs { get; private set; }
 
-    /// <summary>The last bathymetry rebuild covered the whole grid.</summary>
-    public bool LastRebuildFull { get; private set; }
+    /// <summary>Milliseconds of the last <see cref="Update"/>: (selection swap + collision set, uploads, retire + queue).</summary>
+    public (float Select, float Uploads, float Stream) LastUpdate { get; private set; }
 
-    /// <summary>Milliseconds of the last <see cref="Update"/>: (select + collision set, uploads, retire + queue, bathymetry).</summary>
-    public (float Select, float Uploads, float Stream, float Bathymetry) LastUpdate { get; private set; }
+    /// <summary>Nothing left to do: the selection is current and every desired leaf is loaded and ready.</summary>
+    public bool Settled { get; private set; }
 
-    /// <summary>
-    /// Records a brush edit the sim accepted and schedules every loaded leaf it touches (any LOD, apron included) for
-    /// regeneration.
-    /// </summary>
-    public void ApplyBrush(in BrushOp op)
+    /// <summary>Records an edit the sim accepted on <paramref name="body"/>; on the focus body, every loaded leaf it shows on regenerates.</summary>
+    public void ApplyEdit(int body, in EditOp op)
     {
-        _ops.Add(op);
-
-        foreach (var (coord, record) in _chunks)
+        if (body != _focus)
         {
-            if (record.Dirty || !VoxelEditor.Intersects(op, coord))
+            _bodies[body].Edits.Add(op);
+            return;
+        }
+
+        if (_selecting)
+        {
+            _pendingOps.Add(op);
+            return;
+        }
+
+        AddEdit(op);
+    }
+
+    private void AddEdit(in EditOp op)
+    {
+        var edits = _body!.Edits;
+        edits.Add(op);
+        _reselect = true;
+
+        foreach (var record in _chunks.Values)
+        {
+            var coord = record.Coord;
+
+            if (record.Dirty || !EditStore.Applies(op.Radius, coord.Lod, NodeDistance(coord), edits.EditRadius) || !PlanetEditor.Intersects(op, coord))
                 continue;
 
             record.Dirty = true;
@@ -163,20 +288,39 @@ public sealed class TerrainWorld : IDisposable
         }
     }
 
-    public void Update(Vector3 cameraPos)
+    /// <param name="camera">The camera in the focus body's frame (m from its centre).</param>
+    /// <param name="speed">The camera's speed (m/s) for the speed LOD bias.</param>
+    public void Update(double3 camera, double speed)
     {
-        _camera = cameraPos;
+        _camera = camera;
+        _speed = speed;
         _frame++;
 
-        if (Bathymetry.Recenter(cameraPos, out var dx, out var dz))
-            Recentred(dx, dz);
-
         var mark = Stopwatch.GetTimestamp();
-        var cameraChunk = ChunkCoord.FromWorld(cameraPos);
+
+        if (_requestedFocus != _focus && !_selectScheduler.IsExecuting && !_scheduler.IsExecuting)
+            SwitchBody();
+
+        if (_body is null)
+        {
+            Settled = false;
+            LastUpdate = default;
+            return;
+        }
+
+        if (_selecting && !_selectScheduler.IsExecuting)
+            CompleteSelection();
+
+        UpdateMinLod(speed);
+
+        if (!_selecting && NeedsSelection())
+            StartSelection();
+
+        var cameraChunk = ChunkCoord.FromPlanet(camera.X, camera.Y, camera.Z, 0);
+
         if (cameraChunk != _cameraChunk)
         {
             _cameraChunk = cameraChunk;
-            SelectLeaves();
             UpdateCollisionSet();
         }
 
@@ -193,16 +337,14 @@ public sealed class TerrainWorld : IDisposable
             LastRetireMs = Lap(ref mark);
             QueueBatch();
             stream = LastRetireMs + Lap(ref mark);
+            Settled = !_selecting && !_reselect && _batchJobs == 0 && _awaitingUpload.Count == 0 && _desired.Count > 0;
+        }
+        else
+        {
+            Settled = false;
         }
 
-        // Streaming changes are batched at 4 Hz; edits start at once. A started rebuild continues every frame until done.
-        if (_rebuildQueue.Count == 0 && _bathymetryDirty && (_bathymetryUrgent || Stopwatch.GetTimestamp() - _lastBathymetryRebuild > BathymetryInterval))
-            StartRebuild();
-
-        if (_rebuildQueue.Count > 0)
-            ContinueRebuild();
-
-        LastUpdate = (select, uploads, stream, Lap(ref mark));
+        LastUpdate = (select, uploads, stream);
     }
 
     private static float Lap(ref long mark)
@@ -213,58 +355,89 @@ public sealed class TerrainWorld : IDisposable
         return ms;
     }
 
-    private void SelectLeaves()
+    private void UpdateMinLod(double speed)
     {
-        var start = Stopwatch.GetTimestamp();
-        _desired.Clear();
-        _desiredOrder.Clear();
-        _desiredKeys.Clear();
-        Array.Clear(_leavesPerLod);
+        var target = PlanetLeafSelector.SpeedLod(speed);
 
-        var root = ChunkCoord.FromWorld(_camera, MaxLod);
-        var rootSize = ChunkConstants.Size * (1 << MaxLod);
-        var yMin = (int)MathF.Floor(WorldMinY / rootSize);
-        var yMax = (int)MathF.Floor((WorldMaxY - 1f) / rootSize);
-
-        for (var z = -RootRadius; z <= RootRadius; z++)
-            for (var y = yMin; y <= yMax; y++)
-                for (var x = -RootRadius; x <= RootRadius; x++)
-                    Select(new ChunkCoord(root.X + x, y, root.Z + z, MaxLod));
-
-        CollectionsMarshal.AsSpan(_desiredKeys).Sort(CollectionsMarshal.AsSpan(_desiredOrder));
-        LastSelectMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
-        Selects++;
+        if (target > _minLod)
+            _minLod = target;
+        else
+            _minLod = Math.Min(_minLod, PlanetLeafSelector.SpeedLod(speed / SpeedLodHysteresis));
     }
 
-    private void Select(ChunkCoord node)
+    private bool NeedsSelection()
     {
-        var size = ChunkConstants.Size * node.VoxelScale;
-        var origin = node.WorldOrigin;
+        if (_reselect || _minLod != _desired.MinLod)
+            return true;
 
-        if (origin.Y >= WorldMaxY || origin.Y + size <= WorldMinY)
-            return;
+        var threshold = ReselectShare * ChunkConstants.Size * (double)(1 << _desired.FinestLod);
+        var moved = _camera - _selectedAt;
+        return double3.Dot(moved, moved) > threshold * threshold;
+    }
 
-        if (node.Lod > 0 && DistanceToNode(node) < SplitFactor * size)
+    /// <summary>
+    /// Moves the octree to the requested body with nothing in flight: the finished selection and batch are dropped, every
+    /// leaf is freed, and edits accepted during the last selection go into the old body's store.
+    /// </summary>
+    private void SwitchBody()
+    {
+        if (_selecting)
+            CompleteSelection();
+
+        foreach (var job in _inFlight)
+            Recycle(job);
+
+        foreach (var job in _awaitingUpload)
+            Recycle(job);
+
+        foreach (var record in _chunks.Values)
         {
-            var lod = node.Lod - 1;
-            for (var i = 0; i < 8; i++)
-                Select(new ChunkCoord(node.X * 2 + (i & 1), node.Y * 2 + ((i >> 1) & 1), node.Z * 2 + ((i >> 2) & 1), lod));
+            if (record.MeshHandle >= 0)
+                _renderer.Free(record.MeshHandle);
 
-            return;
+            RemoveBody(record);
+            _recordPool.Push(record);
         }
 
-        _desired.Add(node);
-        _desiredOrder.Add(node);
-        _desiredKeys.Add(DistanceToNode(node) / node.VoxelScale);
-        _leavesPerLod[node.Lod]++;
+        _inFlight.Clear();
+        _awaitingUpload.Clear();
+        _chunks.Clear();
+        _dirty.Clear();
+        _desired.Clear();
+        (_batchJobs, _retireCursor) = (0, 0);
+        _focus = _requestedFocus;
+        _body = _focus >= 0 ? _bodies[_focus] : null;
+        _selectJob.Selector = _body?.Selector!;
+        _cameraChunk = new ChunkCoord(int.MinValue, 0, 0);
+        _reselect = true;
+        Settled = false;
+        FocusSwitches++;
     }
 
-    private float DistanceToNode(ChunkCoord node)
+    private void StartSelection()
     {
-        var size = ChunkConstants.Size * node.VoxelScale;
-        var min = node.WorldOrigin;
-        var closest = Vector3.Clamp(_camera, min, min + new Vector3(size));
-        return Vector3.Distance(_camera, closest);
+        _selectJob.Camera = _camera;
+        _selectJob.MinLod = _minLod;
+        _selectJob.HorizonMargin = HorizonMargin + _speed * HorizonLeadSeconds;
+        _selectScheduler.Queue(_selectJob, 1);
+        _selectScheduler.ExecuteJobs();
+        _selectedAt = _camera;
+        _reselect = false;
+        _selecting = true;
+    }
+
+    /// <summary>Swaps the finished selection in, then applies the edits that arrived while it ran.</summary>
+    private void CompleteSelection()
+    {
+        (_desired, _selectJob.Output) = (_selectJob.Output, _desired);
+        _selecting = false;
+        _retireCursor = 0;
+        Selects++;
+
+        foreach (var op in _pendingOps)
+            AddEdit(op);
+
+        _pendingOps.Clear();
     }
 
     private void CollectBatch()
@@ -274,10 +447,11 @@ public sealed class TerrainWorld : IDisposable
 
         LastBatchMs = (float)Stopwatch.GetElapsedTime(_batchStart).TotalMilliseconds;
         LastBatchChunks = _batchJobs;
+        JobsCompleted += _inFlight.Count;
 
         foreach (var job in _inFlight)
         {
-            if (_chunks.TryGetValue(job.Chunk.Coord, out var record))
+            if (_chunks.TryGetValue(job.Chunk.Coord.Key, out var record))
             {
                 record.InFlight = false;
                 _awaitingUpload.Add(job);
@@ -297,106 +471,136 @@ public sealed class TerrainWorld : IDisposable
         for (var i = _awaitingUpload.Count - 1; i >= 0; i--)
         {
             var job = _awaitingUpload[i];
+            var coord = job.Chunk.Coord;
 
-            if (!_chunks.TryGetValue(job.Chunk.Coord, out var record))
+            if (!_chunks.TryGetValue(coord.Key, out var record))
             {
                 _awaitingUpload.RemoveAt(i);
                 Recycle(job);
                 continue;
             }
 
-            var handle = _renderer.Upload(job.Chunk.Coord, job.Mesh);
-            if (handle < 0)
+            // Leaves with no surface take no renderer slot: most of the shell's conservative band is empty.
+            var empty = job.Mesh.IndexCount == 0;
+            var handle = empty ? -1 : _renderer.Upload(coord, job.Mesh);
+
+            if (!empty && handle < 0)
+            {
+                _starved |= handle == TerrainRenderer.UploadNoRoom;
                 continue;
+            }
 
             if (record.MeshHandle >= 0)
                 _renderer.Free(record.MeshHandle);
 
-            if (record.Body.IsValid)
-                _physics.Remove(record.Body);
-
+            RemoveBody(record);
             record.MeshHandle = handle;
-            record.HasGeometry = job.Mesh.IndexCount > 0;
-            record.Body = job.Shape is null ? default : _physics.AddStatic(job.Shape, job.Chunk.Coord.WorldOrigin);
+            record.HasGeometry = !empty;
+
+            if (job.Shape is { IsBuilt: true } shape)
+            {
+                record.Body = _physics.AddStatic(shape, _physics.Bubble.ToLocal(coord.Origin));
+                record.Shape = shape;
+                CollisionBodies++;
+            }
+            else if (job.Shape is not null)
+            {
+                ReturnShape(job.Shape);
+            }
+
             job.Shape = null;
 
-            // A re-meshed leaf only dirties the columns that changed: edits remesh coarse leaves too, whose whole
-            // footprint (up to 512 m) would otherwise force a near-full bathymetry rebuild.
-            if (record.Ready && record.HasSeaLayer == job.HasSeaLayer)
-                MarkBathymetry(job.Chunk.Coord, ChangedColumns(record, job));
-            else
-                MarkBathymetry(job.Chunk.Coord);
+            if (!record.Ready)
+                LeavesLoaded++;
 
-            job.ColumnTops.CopyTo(record.ColumnTops, 0);
-            job.ColumnBeds.CopyTo(record.ColumnBeds, 0);
-            job.SeaFlags.CopyTo(record.SeaFlags, 0);
-            record.HasSeaLayer = job.HasSeaLayer;
-            record.HasTops = false;
-            foreach (var top in record.ColumnTops)
-            {
-                if (float.IsNaN(top))
-                    continue;
-
-                record.HasTops = true;
-                break;
-            }
             record.Ready = true;
             record.ReadyFrame = _frame;
 
-            if (job.HadEdits)
-                _bathymetryUrgent = true;
-
-            if (record.Dirty && !_dirty.Contains(job.Chunk.Coord))
-                _dirty.Add(job.Chunk.Coord);
+            if (record.Dirty && !_dirty.Contains(coord))
+                _dirty.Add(coord);
 
             _awaitingUpload.RemoveAt(i);
             _pool.Push(job);
         }
     }
 
+    private void RemoveBody(ChunkRecord record)
+    {
+        if (!record.Body.IsValid)
+            return;
+
+        _physics.Remove(record.Body);
+        record.Body = default;
+        CollisionBodies--;
+
+        if (record.Shape is null)
+            return;
+
+        ReturnShape(record.Shape);
+        record.Shape = null;
+    }
+
+    private StaticMeshShape RentShape() => _shapes.Count > 0 ? _shapes.Pop() : new StaticMeshShape();
+
+    private void ReturnShape(StaticMeshShape shape)
+    {
+        shape.Release();
+        _shapes.Push(shape);
+    }
+
     private void Recycle(ChunkJob job)
     {
-        job.Shape?.Dispose();
+        if (job.Shape is not null)
+            ReturnShape(job.Shape);
+
         job.Shape = null;
         _pool.Push(job);
     }
 
     /// <summary>
     /// Frees loaded leaves that are no longer desired once whatever replaces their volume is ready, so LOD swaps
-    /// never open holes. Checking that a coarse leaf is covered walks its descendants, so the checks run under a time
-    /// budget and resume where they stopped; a leaf retiring a few frames late just draws a little longer.
+    /// never open holes. Checking that a coarse leaf is covered walks the selection's split nodes, so the checks run under a time
+    /// budget and resume where they stopped; a leaf retiring a few frames late just draws a little longer. If an upload
+    /// found the arenas full, a few uncovered ones are freed too: a brief hole beats a deadlock.
     /// </summary>
     private void Retire()
     {
+        var force = _starved;
+        _starved = false;
         _scratch.Clear();
 
-        foreach (var (coord, record) in _chunks)
+        foreach (var record in _chunks.Values)
         {
-            if (!_desired.Contains(coord) && !record.InFlight && record.Ready)
-                _scratch.Add(coord);
+            if (!_desired.Leaves.Contains(record.Coord.Key) && !record.InFlight && record.Ready)
+                _scratch.Add(record.Coord);
         }
 
         var start = Stopwatch.GetTimestamp();
         var candidates = _scratch.Count;
         var checkedCount = 0;
+        var forced = 0;
 
         for (; checkedCount < candidates && Stopwatch.GetTimestamp() - start < RetireBudget; checkedCount++)
         {
             var coord = _scratch[(_retireCursor + checkedCount) % candidates];
+
             if (!Covered(coord))
-                continue;
+            {
+                if (!force || forced == MaxForcedRetires)
+                    continue;
 
-            _chunks.Remove(coord, out var record);
+                forced++;
+                ForcedRetires++;
+            }
+
+            _chunks.Remove(coord.Key, out var record);
             _renderer.Free(record!.MeshHandle);
-
-            if (record.Body.IsValid)
-                _physics.Remove(record.Body);
+            RemoveBody(record);
 
             if (record.Dirty)
                 _dirty.Remove(coord);
 
             _recordPool.Push(record);
-            MarkBathymetry(coord);
         }
 
         _retireCursor = candidates == 0 ? 0 : (_retireCursor + checkedCount) % candidates;
@@ -404,9 +608,9 @@ public sealed class TerrainWorld : IDisposable
 
     private bool Covered(ChunkCoord coord)
     {
-        for (var ancestor = coord.Parent; ancestor.Lod <= MaxLod; ancestor = ancestor.Parent)
+        for (var ancestor = coord.Parent; ancestor.Lod <= PlanetLeafSelector.MaxLeafLod; ancestor = ancestor.Parent)
         {
-            if (_desired.Contains(ancestor))
+            if (_desired.Leaves.Contains(ancestor.Key))
                 return IsReady(ancestor);
         }
 
@@ -414,27 +618,20 @@ public sealed class TerrainWorld : IDisposable
     }
 
     /// <summary>
-    /// Every desired leaf inside the node's volume is ready. The octree is aligned, so a finer leaf is inside exactly when
-    /// its origin is: one pass over the desired leaves, rather than walking up to 8^lod descendants of a coarse node.
+    /// Every desired leaf inside the node's volume is ready: a walk down the selection's split nodes. A node that is
+    /// neither a leaf nor split is uniform or below the horizon, so it needs nothing.
     /// </summary>
     private bool DescendantsReady(ChunkCoord node)
     {
-        if (_desired.Contains(node))
+        if (_desired.Leaves.Contains(node.Key))
             return IsReady(node);
 
-        var min = node.WorldOrigin;
-        var max = min + new Vector3(ChunkConstants.Size * node.VoxelScale);
+        if (!_desired.Internal.Contains(node.Key))
+            return true;
 
-        foreach (var leaf in _desiredOrder)
+        for (var i = 0; i < 8; i++)
         {
-            if (leaf.Lod >= node.Lod)
-                continue;
-
-            var origin = leaf.WorldOrigin;
-            if (origin.X < min.X || origin.X >= max.X || origin.Y < min.Y || origin.Y >= max.Y || origin.Z < min.Z || origin.Z >= max.Z)
-                continue;
-
-            if (!IsReady(leaf))
+            if (!DescendantsReady(new ChunkCoord(node.X * 2 + (i & 1), node.Y * 2 + ((i >> 1) & 1), node.Z * 2 + ((i >> 2) & 1), node.Lod - 1)))
                 return false;
         }
 
@@ -442,7 +639,7 @@ public sealed class TerrainWorld : IDisposable
     }
 
     /// <summary>Ready and already drawable: the renderer draws an upload from the frame after it was made.</summary>
-    private bool IsReady(ChunkCoord coord) => _chunks.TryGetValue(coord, out var record) && record.Ready && record.ReadyFrame < _frame;
+    private bool IsReady(ChunkCoord coord) => _chunks.TryGetValue(coord.Key, out var record) && record.Ready && record.ReadyFrame < _frame;
 
     private void QueueBatch()
     {
@@ -452,7 +649,7 @@ public sealed class TerrainWorld : IDisposable
         for (var i = _dirty.Count - 1; i >= 0 && _pool.Count > 0 && _batchJobs < MaxJobsPerBatch; i--)
         {
             var coord = _dirty[i];
-            var record = _chunks[coord];
+            var record = _chunks[coord.Key];
 
             if (record.InFlight || !record.Ready)
                 continue;
@@ -463,18 +660,19 @@ public sealed class TerrainWorld : IDisposable
             Queue(coord);
         }
 
-        foreach (var coord in _desiredOrder)
+        foreach (var coord in _desired.Order)
         {
             if (_pool.Count == 0 || _batchJobs == MaxJobsPerBatch)
                 break;
 
-            if (_chunks.ContainsKey(coord))
+            if (_chunks.ContainsKey(coord.Key))
                 continue;
 
             var record = _recordPool.Count > 0 ? _recordPool.Pop() : new ChunkRecord();
             record.Reset();
+            record.Coord = coord;
             record.InFlight = true;
-            _chunks.Add(coord, record);
+            _chunks.Add(coord.Key, record);
             Queue(coord);
         }
 
@@ -489,41 +687,54 @@ public sealed class TerrainWorld : IDisposable
     {
         var job = _pool.Pop();
         job.Chunk.Coord = coord;
-        job.Params = Params;
-        job.SetOps(_ops);
-        job.BuildCollision = InCollisionRange(coord);
-        _scheduler.Queue(job, 1);
+        job.Generator = _body!.Generator;
+        job.GatherOps(_body.Edits, NodeDistance(coord));
+        job.Shape = InCollisionRange(coord) ? RentShape() : null;
+        job.BubbleRotation = _physics.Bubble.PlanetToLocal;
+        _scheduler.Queue(job, 1 + coord.Lod / 4);
         _inFlight.Add(job);
         _batchJobs++;
     }
 
+    private double NodeDistance(ChunkCoord coord)
+    {
+        var size = coord.SizeMetres;
+        var origin = coord.Origin;
+        var dx = Outside(_camera.X, origin.X, origin.X + size);
+        var dy = Outside(_camera.Y, origin.Y, origin.Y + size);
+        var dz = Outside(_camera.Z, origin.Z, origin.Z + size);
+        return Math.Sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    private static double Outside(double v, double lo, double hi) => v < lo ? lo - v : v > hi ? v - hi : 0.0;
+
     private bool InCollisionRange(ChunkCoord coord)
     {
-        if (coord.Lod != 0)
+        if (coord.Lod != 0 || !_body!.Collision)
             return false;
 
-        var dx = coord.X - _cameraChunk.X;
-        var dz = coord.Z - _cameraChunk.Z;
-        return dx * dx + dz * dz <= CollisionRadius * CollisionRadius;
+        var centre = coord.Origin + new double3(0.5 * ChunkConstants.Size);
+        var d = centre - _camera;
+        return double3.Dot(d, d) <= CollisionRadius * CollisionRadius;
     }
 
     /// <summary>
-    /// Drop bodies that left the collision radius, and re-run LOD-0 chunks that entered it
+    /// Drop bodies that left the collision ring, and re-run LOD-0 leaves that entered it
     /// (regenerate + mesh is cheaper than keeping voxels around).
     /// </summary>
     private void UpdateCollisionSet()
     {
-        foreach (var (coord, record) in _chunks)
+        foreach (var record in _chunks.Values)
         {
             if (!record.Ready)
                 continue;
 
+            var coord = record.Coord;
             var inRange = InCollisionRange(coord);
 
             if (!inRange && record.Body.IsValid)
             {
-                _physics.Remove(record.Body);
-                record.Body = default;
+                RemoveBody(record);
             }
             else if (inRange && !record.Body.IsValid && record.HasGeometry && !record.Dirty)
             {
@@ -533,192 +744,88 @@ public sealed class TerrainWorld : IDisposable
         }
     }
 
-    private static bool Same(float a, float b) => a == b || (float.IsNaN(a) && float.IsNaN(b));
-
-    /// <summary>Voxel-column bounds [x0, x1) × [z0, z1) where a re-meshed leaf's tops, beds or sea flags differ from its last ones.</summary>
-    private static (int X0, int Z0, int X1, int Z1) ChangedColumns(ChunkRecord record, ChunkJob job)
-    {
-        const int size = ChunkConstants.Size;
-        var (x0, z0, x1, z1) = (size, size, 0, 0);
-
-        for (var z = 0; z < size; z++)
-        {
-            for (var x = 0; x < size; x++)
-            {
-                var i = x + z * size;
-                var same = Same(record.ColumnTops[i], job.ColumnTops[i]) && Same(record.ColumnBeds[i], job.ColumnBeds[i]) && record.SeaFlags[i] == job.SeaFlags[i];
-                if (same)
-                    continue;
-
-                (x0, z0, x1, z1) = (Math.Min(x0, x), Math.Min(z0, z), Math.Max(x1, x + 1), Math.Max(z1, z + 1));
-            }
-        }
-
-        return (x0, z0, x1, z1);
-    }
-
-    /// <summary>Dirties the cells under voxel columns [x0, x1) × [z0, z1) of a leaf.</summary>
-    private void MarkBathymetry(ChunkCoord coord, (int X0, int Z0, int X1, int Z1) columns)
-    {
-        if (columns.X1 <= columns.X0 || columns.Z1 <= columns.Z0)
-            return;
-
-        var scale = coord.VoxelScale;
-        var origin = coord.WorldOrigin;
-        var o = Bathymetry.Origin;
-        const float cell = BathymetryGrid.CellSize;
-        var region = new BathymetryGrid.Region(
-            Math.Max(0, (int)MathF.Floor((origin.X + columns.X0 * scale - o.X) / cell)),
-            Math.Max(0, (int)MathF.Floor((origin.Z + columns.Z0 * scale - o.Y) / cell)),
-            Math.Min(BathymetryGrid.Resolution, (int)MathF.Ceiling((origin.X + columns.X1 * scale - o.X) / cell)),
-            Math.Min(BathymetryGrid.Resolution, (int)MathF.Ceiling((origin.Z + columns.Z1 * scale - o.Y) / cell)));
-
-        AddBathymetryRegion(region);
-    }
-
-    private void MarkBathymetry(ChunkCoord coord) => AddBathymetryRegion(Bathymetry.CellsOf(coord));
-
-    private void AddBathymetryRegion(BathymetryGrid.Region cells)
-    {
-        _bathymetryDirty = true;
-        if (cells.Empty || _bathymetryFull)
-            return;
-
-        // Merge into a region it overlaps, unless the bounding box would cover far more than the two do (two strips
-        // meeting at a corner would otherwise become the whole grid).
-        for (var i = 0; i < _bathymetryRegions.Count; i++)
-        {
-            var union = _bathymetryRegions[i].Union(cells);
-            if (!_bathymetryRegions[i].Intersects(cells) || union.Area > 5 * (_bathymetryRegions[i].Area + cells.Area) / 4)
-                continue;
-
-            _bathymetryRegions[i] = union;
-            return;
-        }
-
-        if (_bathymetryRegions.Count < MaxBathymetryRegions)
-        {
-            _bathymetryRegions.Add(cells);
-            return;
-        }
-
-        // Too many separate changes: fold them into one bounding region; only half the grid or more is worth a full rebuild.
-        var bounds = cells;
-        foreach (var region in _bathymetryRegions)
-            bounds = bounds.Union(region);
-
-        _bathymetryRegions.Clear();
-        var area = (bounds.X1 - bounds.X0) * (bounds.Z1 - bounds.Z0);
-
-        if (area * 2 >= BathymetryGrid.Resolution * BathymetryGrid.Resolution)
-            _bathymetryFull = true;
-        else
-            _bathymetryRegions.Add(bounds);
-    }
-
     /// <summary>
-    /// The bathymetry grid moved by (dx, dz) cells with its data: pending and in-progress rebuild regions move with it,
-    /// and the strips that came in from outside are rebuilt. A jump of a whole grid or more rebuilds everything.
+    /// Desired leaves that a camera-relative frustum (planet axes, planes as (n, d) with n·p + d ≥ 0 inside) sees, that may
+    /// show something (<see cref="PlanetLeafSelector.ProvablyUnseen"/>), but nothing loaded covers: not ready, no ready
+    /// ancestor and no ready descendant. A test metric, not per-frame game work.
     /// </summary>
-    private void Recentred(int dx, int dz)
+    public int CountHoles(ReadOnlySpan<Vector4> planes)
     {
-        const int n = BathymetryGrid.Resolution;
-        _bathymetryDirty = true;
+        if (_body is null)
+            return 0;
 
-        if (Math.Abs(dx) >= n || Math.Abs(dz) >= n)
+        _readyAncestors.Clear();
+        Array.Clear(_holeLods);
+        var holes = 0;
+        var built = false;
+
+        foreach (var leaf in _desired.Order)
         {
-            _bathymetryFull = true;
-            _bathymetryRegions.Clear();
-            _rebuildQueue.Clear();
-            return;
-        }
-
-        // Unfinished work goes back to pending, moved with the data.
-        if (_rebuildQueue.Count > 0)
-        {
-            var current = _rebuildQueue[0];
-            _rebuildQueue[0] = current with { Z0 = _rebuildRow };
-            foreach (var region in _rebuildQueue)
-                _bathymetryRegions.Add(region);
-
-            _rebuildQueue.Clear();
-        }
-
-        for (var i = _bathymetryRegions.Count - 1; i >= 0; i--)
-        {
-            var moved = _bathymetryRegions[i].Shifted(dx, dz);
-            if (moved.Empty)
-                _bathymetryRegions.RemoveAt(i);
-            else
-                _bathymetryRegions[i] = moved;
-        }
-
-        Span<BathymetryGrid.Region> strips = stackalloc BathymetryGrid.Region[2];
-        var count = BathymetryGrid.Exposed(dx, dz, strips);
-        for (var i = 0; i < count; i++)
-            AddBathymetryRegion(strips[i]);
-    }
-
-    private void StartRebuild()
-    {
-        _bathymetryDirty = false;
-        _bathymetryUrgent = false;
-        _lastBathymetryRebuild = Stopwatch.GetTimestamp();
-        _rebuildMs = 0.0;
-        LastRebuildFull = _bathymetryFull;
-
-        if (_bathymetryFull)
-            _rebuildQueue.Add(BathymetryGrid.Region.All);
-        else
-            _rebuildQueue.AddRange(_bathymetryRegions);
-
-        _bathymetryFull = false;
-        _bathymetryRegions.Clear();
-        _rebuildRow = _rebuildQueue.Count > 0 ? _rebuildQueue[0].Z0 : 0;
-    }
-
-    /// <summary>Re-merges bands of rows until the frame's budget is spent (at least one band); the last band ends the rebuild.</summary>
-    private void ContinueRebuild()
-    {
-        var start = Stopwatch.GetTimestamp();
-
-        do
-        {
-            var region = _rebuildQueue[0];
-            var band = region with { Z0 = _rebuildRow, Z1 = Math.Min(_rebuildRow + BandRows, region.Z1) };
-            Bathymetry.BeginRegion(band);
-            MergeLeaves(band);
-            Bathymetry.EndRegion(band);
-            _rebuildRow = band.Z1;
-
-            if (_rebuildRow >= region.Z1)
-            {
-                _rebuildQueue.RemoveAt(0);
-                _rebuildRow = _rebuildQueue.Count > 0 ? _rebuildQueue[0].Z0 : 0;
-            }
-        }
-        while (_rebuildQueue.Count > 0 && Stopwatch.GetTimestamp() - start < BathymetryBudget);
-
-        _rebuildMs += Stopwatch.GetElapsedTime(start).TotalMilliseconds;
-        if (_rebuildQueue.Count == 0)
-            Bathymetry.EndRebuild(_rebuildMs);
-    }
-
-    private void MergeLeaves(in BathymetryGrid.Region region)
-    {
-        foreach (var (coord, record) in _chunks)
-        {
-            if (!record.Ready || (!record.HasTops && !record.HasSeaLayer))
+            if (IsReady(leaf) || !InFrustum(leaf, planes) || AncestorReady(leaf) || _body.Selector.ProvablyUnseen(leaf, _camera))
                 continue;
 
-            var cells = Bathymetry.CellsOf(coord);
-            if (cells.Intersects(region))
-                Bathymetry.MergeLeaf(coord, record.ColumnTops, record.ColumnBeds, record.SeaFlags, record.HasSeaLayer, region);
+            if (!built)
+            {
+                foreach (var record in _chunks.Values)
+                {
+                    if (!record.Ready)
+                        continue;
+
+                    for (var a = record.Coord; a.Lod <= PlanetLeafSelector.MaxLeafLod; a = a.Parent)
+                    {
+                        if (!_readyAncestors.Add(a.Key))
+                            break;
+                    }
+                }
+
+                built = true;
+            }
+
+            if (_readyAncestors.Contains(leaf.Key))
+                continue;
+
+            holes++;
+            _holeLods[leaf.Lod]++;
+
         }
+
+        return holes;
+    }
+
+    private bool AncestorReady(ChunkCoord leaf)
+    {
+        for (var a = leaf.Parent; a.Lod <= PlanetLeafSelector.MaxLeafLod; a = a.Parent)
+        {
+            if (IsReady(a))
+                return true;
+        }
+
+        return false;
+    }
+
+    private bool InFrustum(ChunkCoord leaf, ReadOnlySpan<Vector4> planes)
+    {
+        var size = leaf.SizeMetres;
+        var margin = 2.0 * leaf.VoxelSize;
+        var lo = leaf.Origin - _camera - new double3(margin);
+        var hi = lo + new double3(size + 2.0 * margin);
+
+        foreach (var p in planes)
+        {
+            var x = p.X >= 0f ? hi.X : lo.X;
+            var y = p.Y >= 0f ? hi.Y : lo.Y;
+            var z = p.Z >= 0f ? hi.Z : lo.Z;
+
+            if (p.X * x + p.Y * y + p.Z * z + p.W < 0.0)
+                return false;
+        }
+
+        return true;
     }
 
     public void Dispose()
     {
+        _selectScheduler.AbortJobs(waitForCompletion: true);
         _scheduler.AbortJobs(waitForCompletion: true);
 
         foreach (var job in _inFlight)
@@ -726,5 +833,11 @@ public sealed class TerrainWorld : IDisposable
 
         foreach (var job in _awaitingUpload)
             Recycle(job);
+
+        foreach (var record in _chunks.Values)
+            RemoveBody(record);
+
+        while (_shapes.Count > 0)
+            _shapes.Pop().Dispose();
     }
 }

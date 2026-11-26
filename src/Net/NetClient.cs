@@ -74,7 +74,7 @@ public sealed class NetClient
     /// <summary>Mirror of the server's entities: <see cref="EntityTable.NetId"/> is the server's id, placements are interpolated (remote) or predicted (owned).</summary>
     public readonly EntityTable Entities;
 
-    public readonly List<BrushOp> Edits = new(256);
+    public readonly List<EditOp> Edits = new(256);
 
     public ClientStats Stats;
 
@@ -120,7 +120,7 @@ public sealed class NetClient
         Interpolate();
     }
 
-    public void RequestEdit(in BrushOp op)
+    public void RequestEdit(in EditOp op)
     {
         var writer = new NetWriter(_send);
         Messages.EditRequest(ref writer, op);

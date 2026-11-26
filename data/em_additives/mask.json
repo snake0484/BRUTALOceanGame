@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "id": "add.mask",
+  "item": {
+    "family": "additive",
+    "densityKgM3": 1800,
+    "refCostPerKg": 2.0,
+    "metastable": null
+  },
+  "effect": {
+    "maskingAdd": 1.0
+  },
+  "tradeOff": {
+    "emMul": 1.5,
+    "vCrossMaxMul": 0.8
+  },
+  "recipe": {
+    "station": "fc.additive_lab",
+    "crude": true,
+    "kind": "Fixed",
+    "timeSPerKg": 1200,
+    "powerW": 5000000.0,
+    "inputs": [
+      {
+        "family": "em",
+        "minPurity": 0.15,
+        "contentKg": 0.5
+      },
+      {
+        "item": "agent.mix",
+        "kg": 0.4
+      }
+    ]
+  }
+}

@@ -88,4 +88,7 @@ public static class BrushGeometry
 }
 
 /// <summary>Double-precision point or extent in ship metres.</summary>
-public readonly record struct Vector3d(double X, double Y, double Z);
+public readonly record struct Vector3d(double X, double Y, double Z)
+{
+    public double Length() => Math.Sqrt(X * X + Y * Y + Z * Z);
+}

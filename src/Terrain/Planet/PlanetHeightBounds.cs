@@ -52,6 +52,20 @@ public sealed class PlanetHeightBounds
         }
     }
 
+    /// <summary>Lowest ground anywhere on the planet (the coarsest level's lowest texel): the horizon occluder's height.</summary>
+    public float GlobalMin
+    {
+        get
+        {
+            var min = (float)Generator.Params.MaxHeight;
+
+            foreach (var lo in _lo[Levels - 1])
+                min = MathF.Min(min, lo);
+
+            return min;
+        }
+    }
+
     /// <summary>Largest query cap (rad) a texel of this level answers.</summary>
     public double Allowance(int level) => _allowance[level];
 
@@ -124,8 +138,12 @@ public sealed class PlanetHeightBounds
     /// Uniform air or solid if every voxel of the node's padded volume is saturated in the generator; else Surface.
     /// Edits are the caller's: a uniform node an op reaches (<see cref="EditStore.Reaches"/>) must still be generated.
     /// </summary>
-    public NodeClass Classify(in ChunkCoord node)
+    public NodeClass Classify(in ChunkCoord node) => Classify(node, out _);
+
+    /// <summary>As <see cref="Classify(in ChunkCoord)"/>; <paramref name="hi"/> is the highest ground the node's cap can hold (MaxHeight if not queried).</summary>
+    public NodeClass Classify(in ChunkCoord node, out float hi)
     {
+        hi = Generator.Params.MaxHeight;
         var lod = node.Lod;
         var s = node.VoxelSize;
         var size = ChunkConstants.Size * s;
@@ -155,7 +173,7 @@ public sealed class PlanetHeightBounds
             return NodeClass.Surface;
 
         var angle = Math.Asin(half / dc) + PlanetGenerator.LatticePadCells * Generator.CellAngle(lod);
-        Query(cx / dc, cy / dc, cz / dc, angle, out var lo, out var hi);
+        Query(cx / dc, cy / dc, cz / dc, angle, out var lo, out hi);
 
         if (wMin > hi + pad)
             return NodeClass.Air;

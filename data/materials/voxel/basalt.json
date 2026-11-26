@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "Basalt",
+  "densityKgM3": 2900,
+  "hardness": 0.6,
+  "placeable": true,
+  "yields": {
+    "item": "rock.flux"
+  }
+}

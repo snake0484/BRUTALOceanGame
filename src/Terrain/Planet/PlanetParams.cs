@@ -5,6 +5,9 @@ public readonly record struct PlanetMaterials(VoxelMaterial Surface, VoxelMateri
     public static PlanetMaterials Temperate => new(VoxelMaterial.Grass, VoxelMaterial.Dirt, VoxelMaterial.Sand, VoxelMaterial.Rock);
 
     public static PlanetMaterials Desert => new(VoxelMaterial.Sand, VoxelMaterial.Sand, VoxelMaterial.Sand, VoxelMaterial.Rock);
+
+    /// <summary>Airless moons: rock over dirt.</summary>
+    public static PlanetMaterials Barren => new(VoxelMaterial.Rock, VoxelMaterial.Dirt, VoxelMaterial.Sand, VoxelMaterial.Rock);
 }
 
 /// <summary>

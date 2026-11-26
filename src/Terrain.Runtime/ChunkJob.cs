@@ -5,149 +5,64 @@ using BrutalGame.Physics;
 namespace BrutalGame.Terrain.Runtime;
 
 /// <summary>
-/// Pooled generate + replay edits + mesh + collision shape + column summary job, at any LOD.
-/// Owns all its scratch so it never allocates after warm-up.
+/// Pooled generate + replay edits + mesh (+ collision shape) job for one planet leaf at any LOD.
+/// Owns all its scratch so it never allocates after warm-up; the collision shape is a pooled one handed in.
 /// </summary>
 internal sealed class ChunkJob : IJob
 {
-    public const int Columns = ChunkConstants.Size * ChunkConstants.Size;
-
     public readonly VoxelChunk Chunk = new();
     public readonly ChunkMesh Mesh = new();
-
-    /// <summary>Per voxel column: world y of the topmost solid surface in this chunk, NaN if all air.</summary>
-    public readonly float[] ColumnTops = new float[Columns];
-
-    /// <summary>
-    /// Per voxel column: world y of the topmost solid surface at or below the voxel just below sea level, NaN if none
-    /// (or the chunk lies wholly above it). Land overhead (an overhang, an arch, a placed rock) is not the seabed.
-    /// </summary>
-    public readonly float[] ColumnBeds = new float[Columns];
-
-    /// <summary>
-    /// Per voxel column: sea, the voxel just below sea level open as generated (the ground lies below sea there) and not
-    /// filled since. A pit dug below sea level stays dry. Only valid when <see cref="HasSeaLayer"/>.
-    /// </summary>
-    public readonly bool[] SeaFlags = new bool[Columns];
-    public bool HasSeaLayer;
+    public readonly PlanetChunkScratch Scratch = new();
 
     private readonly SurfaceNetsMesher _mesher = new();
-    private BrushOp[] _ops = new BrushOp[16];
+    private EditOp[] _ops = new EditOp[16];
     private int _opCount;
     private Vector3[] _positions = new Vector3[4096];
-    public TerrainParams Params;
-    public bool BuildCollision;
+
+    public PlanetGenerator Generator = null!;
+
+    /// <summary>A pooled shape to build collision into (LOD-0 leaves in the collision ring), else null.</summary>
+    public StaticMeshShape? Shape;
+
+    /// <summary>Planet axes to the physics bubble's: collision vertices are built in bubble axes.</summary>
+    public Quaternion BubbleRotation = Quaternion.Identity;
 
     public bool HadEdits => _opCount > 0;
 
-    /// <summary>Built on the worker; ownership passes to the physics world on the main thread.</summary>
-    public StaticMeshShape? Shape;
-
-    /// <summary>Copies the ops that touch this chunk so the worker never reads shared lists.</summary>
-    public void SetOps(List<BrushOp> ops)
-    {
-        _opCount = 0;
-
-        foreach (var op in ops)
-        {
-            if (!VoxelEditor.Intersects(op, Chunk.Coord))
-                continue;
-
-            if (_opCount == _ops.Length)
-                Array.Resize(ref _ops, _ops.Length * 2);
-
-            _ops[_opCount++] = op;
-        }
-    }
+    /// <summary>Main thread, before queueing: copies the ops that show on this leaf so the worker never reads the store.</summary>
+    public void GatherOps(EditStore edits, double distance) => _opCount = edits.Gather(Chunk.Coord, distance, ref _ops);
 
     public void Run()
     {
-        TerrainGenerator.Generate(Chunk, Params);
-        MarkSea();
-        VoxelEditor.Apply(Chunk, _ops.AsSpan(0, _opCount));
+        Generator.Generate(Chunk, Scratch, withMask: _opCount > 0);
+        PlanetEditor.Apply(Chunk, _ops.AsSpan(0, _opCount), Scratch);
         Mesh.Clear();
 
         if (Chunk.HasSurface)
             _mesher.Mesh(Chunk, Mesh);
 
         BuildShape();
-        SummariseColumns();
     }
 
     private void BuildShape()
     {
-        Shape = null;
-        if (!BuildCollision || Mesh.IndexCount == 0)
+        if (Shape is null)
             return;
+
+        if (Mesh.IndexCount == 0)
+        {
+            Shape.Release();
+            return;
+        }
 
         if (_positions.Length < Mesh.VertexCount)
             _positions = new Vector3[Math.Max(Mesh.VertexCount, _positions.Length * 2)];
 
         for (var i = 0; i < Mesh.VertexCount; i++)
-            _positions[i] = Mesh.Vertices[i].Position;
+            _positions[i] = Vector3.Transform(Mesh.Vertices[i].Position, BubbleRotation);
 
         // Skirts are appended after the base surface; collision only needs the surface.
         var surfaceIndices = Mesh.IndexCount - _mesher.LastSkirtTriangles * 3;
-        Shape = StaticMeshShape.Create(_positions.AsSpan(0, Mesh.VertexCount), Mesh.Indices.AsSpan(0, surfaceIndices));
-    }
-
-    /// <summary>The voxel layer just below sea level, whether this chunk holds it, and the generated sea flags there.</summary>
-    private void MarkSea()
-    {
-        const int size = ChunkConstants.Size;
-        var seaY = SeaLayer();
-        HasSeaLayer = seaY >= 0 && seaY < size;
-
-        if (!HasSeaLayer)
-            return;
-
-        for (var z = 0; z < size; z++)
-            for (var x = 0; x < size; x++)
-                SeaFlags[x + z * size] = Chunk.Density[ChunkConstants.Index(x, seaY, z)] >= 0;
-    }
-
-    private int SeaLayer() => (int)MathF.Floor((Params.SeaLevel - Chunk.Coord.WorldOrigin.Y) / Chunk.Coord.VoxelScale - 1e-4f);
-
-    /// <summary>Column tops for bathymetry, beds for the sea, and the sea flags less what edits filled, per voxel column.</summary>
-    private void SummariseColumns()
-    {
-        const int size = ChunkConstants.Size;
-        var seaY = SeaLayer();
-
-        for (var z = 0; z < size; z++)
-        {
-            for (var x = 0; x < size; x++)
-            {
-                var column = x + z * size;
-                var top = SurfaceFrom(x, z, size - 1);
-                ColumnTops[column] = top;
-
-                // Wholly above the sea layer there is no bed; with the sea layer at the top (or above the chunk) the bed
-                // is the top, so only a chunk with sea level part way up scans twice.
-                ColumnBeds[column] = seaY < 0 ? float.NaN : seaY >= size - 1 ? top : SurfaceFrom(x, z, seaY);
-
-                if (HasSeaLayer)
-                    SeaFlags[column] &= Chunk.Density[ChunkConstants.Index(x, seaY, z)] >= 0;
-            }
-        }
-    }
-
-    /// <summary>World y of the topmost solid surface in column (x, z) at voxel <paramref name="fromY"/> or below, NaN if none.</summary>
-    private float SurfaceFrom(int x, int z, int fromY)
-    {
-        var density = Chunk.Density;
-
-        for (var y = fromY; y >= 0; y--)
-        {
-            float below = density[ChunkConstants.Index(x, y, z)];
-            if (below >= 0f)
-                continue;
-
-            float above = density[ChunkConstants.Index(x, y + 1, z)];
-            var fraction = above > 0f ? below / (below - above) : 1f;
-            return Chunk.Coord.WorldOrigin.Y + (y + fraction) * Chunk.Coord.VoxelScale;
-        }
-
-        return float.NaN;
+        Shape.Build(_positions.AsSpan(0, Mesh.VertexCount), Mesh.Indices.AsSpan(0, surfaceIndices));
     }
 }

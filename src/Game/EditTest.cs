@@ -10,9 +10,9 @@ namespace BrutalGame;
 
 /// <summary>
 /// Scripted check for --edit-test: once terrain has loaded, carve craters where the camera looks and drop spheres
-/// onto the terrain, then log where the spheres settled relative to the collision surface.
+/// onto the terrain, then log where the spheres settled relative to the collision surface (physics bubble coordinates).
 /// </summary>
-public sealed class EditTest(SimWorld sim, TerrainWorld world, TerrainBrush brush, FlyCamera camera, IslandFrame island)
+public sealed class EditTest(SimWorld sim, TerrainWorld world, TerrainBrush brush, FlyCamera camera)
 {
     private static readonly LogCategory Log = LogCategory.Make("EditTest");
     private const float DigRadius = 7f;
@@ -23,7 +23,7 @@ public sealed class EditTest(SimWorld sim, TerrainWorld world, TerrainBrush brus
 
     public void Update(double time)
     {
-        if (_stage == 0 && world.LoadedChunks > 0 && world.PendingJobs == 0)
+        if (_stage == 0 && world.Settled && world.CollisionBodies > 0)
         {
             _start = time;
             _stage = 1;
@@ -33,20 +33,21 @@ public sealed class EditTest(SimWorld sim, TerrainWorld world, TerrainBrush brus
         {
             for (var i = 0; i < 3; i++)
             {
-                var hit = sim.Physics.CastRay(island.ToIsland(camera.Position), brush.RayThrough(-0.3f + 0.3f * i, 0.25f, 16f / 9f), 800f);
+                var hit = sim.Physics.CastRay(sim.Bubble.ToLocal(camera.Position), brush.RayThrough(-0.3f + 0.3f * i, 0.25f, 16f / 9f), 800f);
+
                 if (!hit.Hit)
                     continue;
 
-                var dig = new BrushOp(hit.Point, DigRadius, BrushMode.Dig, VoxelMaterial.Air);
+                var dig = brush.At(hit.Point, DigRadius, BrushMode.Dig, VoxelMaterial.Air);
 
-                if (!ShoreGuard.Allows(dig, sim.Terrain))
+                if (sim.Generator.IsFullyProtected(dig))
                 {
                     Log.Info($"refused at {hit.Point}: shore or seabed");
                     continue;
                 }
 
                 sim.QueueEdit(dig);
-                sim.QueueEdit(new BrushOp(hit.Point + new Vector3(0f, 0f, 14f), 4f, BrushMode.Place, VoxelMaterial.Rock));
+                sim.QueueEdit(brush.At(hit.Point + new Vector3(0f, 0f, 14f), 4f, BrushMode.Place, VoxelMaterial.Rock));
                 _spheres.Add((sim.Physics.AddDynamicSphere(hit.Point + new Vector3(0f, 25f, 0f), SphereRadius), hit.Point.Y - DigRadius));
                 Log.Info($"carved at {hit.Point}");
             }
@@ -56,7 +57,7 @@ public sealed class EditTest(SimWorld sim, TerrainWorld world, TerrainBrush brus
 
         if (_stage == 2 && time - _start > 8.0)
         {
-            // A sphere dropped into a crater should rest one radius above the dig sphere's bottom.
+            // A sphere dropped into a crater rests one radius above the dig sphere's bottom, unless the protected band clamped it.
             foreach (var (sphere, floor) in _spheres)
             {
                 var p = sim.Physics.GetPosition(sphere);

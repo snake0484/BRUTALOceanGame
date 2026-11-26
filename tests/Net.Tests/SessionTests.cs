@@ -111,7 +111,8 @@ public class SessionTests(ITestOutputHelper output)
         var inertial = sim.Celestial[1].Inertial;
         Assert.True(PlacementFrames.TryMoveTo(sim.Frames, ref placement, inertial));
 
-        var op = new BrushOp(new Vector3(400f, 20f, 37.5f), 3f, BrushMode.Place, VoxelMaterial.Rock);
+        var above = sim.Bubble.Origin + sim.Bubble.ToPlanetDirection(double3.UnitY) * 3.0;
+        var op = EditOp.At(above.X, above.Y, above.Z + 0.3, 3f, BrushMode.Place, VoxelMaterial.Rock);
         a.RequestEdit(op);
         session.Run(120);
 
@@ -119,8 +120,9 @@ public class SessionTests(ITestOutputHelper output)
         var index = Find(a, sim.Entities.NetId[hopper.Index]);
         Assert.Equal(inertial, a.Entities.Placement[index].Frame);
         Assert.Single(a.Edits);
-        Assert.Equal(Wire.Messages.Quantise(op), a.Edits[0]);
         Assert.Equal(1, sim.Edits.Length);
+        Assert.Equal(op with { Seq = sim.Edits[0].Seq, Author = 0 }, a.Edits[0]);
+        Assert.Equal(sim.Edits[0], a.Edits[0]);
     }
 
     [Fact]
@@ -190,7 +192,7 @@ internal sealed class Session : IDisposable
     public Session(int latencySteps, double loss)
     {
         Network = new LoopbackNetwork(latencySteps, loss, seed: 11);
-        _sim = new SimWorld(seed: 1, workerThreads: 1, new TerrainParams());
+        _sim = new SimWorld(seed: 1, workerThreads: 1);
         _serverTransport = Network.Listen(8);
         Server = new NetServer(_sim, _serverTransport);
         var planet = _sim.Celestial[1];

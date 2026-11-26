@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "id": "add.dilatant",
+  "item": {
+    "family": "additive",
+    "densityKgM3": 2600,
+    "refCostPerKg": 6.0,
+    "metastable": null
+  },
+  "effect": {
+    "maxRadiusMul": 1.25
+  },
+  "tradeOff": {
+    "mX": 1.15,
+    "stableThresholdMul": 1.1667
+  },
+  "recipe": {
+    "station": "fc.additive_lab",
+    "crude": false,
+    "kind": "Fixed",
+    "timeSPerKg": 2400,
+    "powerW": 5000000.0,
+    "inputs": [
+      {
+        "family": "em",
+        "minPurity": 0.85,
+        "contentKg": 0.2
+      },
+      {
+        "item": "metal.heavy",
+        "kg": 0.6
+      }
+    ]
+  }
+}

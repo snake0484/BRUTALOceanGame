@@ -29,7 +29,7 @@ internal static partial class Program
         if (OperatingSystem.IsWindows())
             TimeBeginPeriod(1);
 
-        using var sim = new SimWorld(options.Seed, workerThreads: 2, new TerrainParams());
+        using var sim = new SimWorld(options.Seed, workerThreads: 2);
         using var transport = RakNetTransport.Listen(options.Port, options.MaxPlayers);
         var server = new NetServer(sim, transport);
         var planet = sim.Celestial[1];

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Brutal.Numerics;
 using BrutalGame.Frames;
 using BrutalGame.Physics;
 using BrutalGame.Sim.Entities;
@@ -10,11 +11,13 @@ namespace BrutalGame.Sim;
 
 /// <summary>
 /// The simulation behind the client: the fixed tick, the physics world, the ocean's gameplay queries, the swell's wind
-/// and the terrain edits. It knows no renderer, window or UI, so a headless host can drive it (docs/pivot/review.md,
-/// Missing 1). Main-thread only, like <see cref="PhysicsWorld"/>.
+/// and the planet's terrain edits (and with them the water depth the ocean reads). It knows no renderer, window or UI, so a headless host can drive it
+/// (docs/pivot/review.md, Missing 1). Main-thread only, like <see cref="PhysicsWorld"/>.
 /// <para>
-/// Known M0 gap: terrain collision is still streamed into <see cref="Physics"/> by the client's TerrainWorld around the
-/// camera, so a headless sim has no ground until M2 moves collision streaming behind a sim-owned interest point.
+/// The test system's planet carries the terrain (<see cref="Planet"/>). Physics and the weather plane sit in one surface
+/// bubble at the spawn on its coast (<see cref="Bubble"/>), fixed for now; rebasing is M3. The sea is planet-wide.
+/// Known gap: terrain collision is still streamed into <see cref="Physics"/> by the client's TerrainWorld around the
+/// camera, so a headless sim has no ground until collision streaming moves behind sim-owned anchors (M3).
 /// </para>
 /// </summary>
 public sealed class SimWorld : IDisposable
@@ -25,8 +28,29 @@ public sealed class SimWorld : IDisposable
     public const int WindInterval = TickRate;
 
     public readonly PhysicsWorld Physics;
+
+    /// <summary>The planet's sea: one definition everywhere on it (<see cref="OceanSurface.Sample"/> by planet position and tick).</summary>
     public readonly OceanSurface Ocean;
-    public readonly TerrainParams Terrain;
+
+    /// <summary>The planet's water depth for the ocean: generated ground plus the edits that reach the sea.</summary>
+    public readonly PlanetShore Shore;
+
+    /// <summary>The planet the terrain is on: its index in <see cref="Celestial"/>, params and generator.</summary>
+    public readonly int PlanetIndex;
+    public readonly PlanetParams Planet;
+    public readonly PlanetGenerator Generator;
+
+    /// <summary>Terrain params of every rocky body (planets and moons) by celestial index; null for stars.</summary>
+    public readonly PlanetParams?[] BodyParams;
+
+    /// <summary>Authoritative edits (D32: permanent); Seq stamped here.</summary>
+    public readonly EditStore EditStore = new();
+
+    /// <summary>The surface bubble at the spawn: physics and the weather plane (y up, sea level at y 0 at its origin).</summary>
+    public readonly PhysicsBubble Bubble;
+
+    /// <summary>Seaward along the bubble's +X from the waterline at its origin.</summary>
+    public readonly double3 Seaward;
 
     /// <summary>Frame forest; celestial rails and spin are written into it for the step's end at the start of every tick (see <see cref="Tick"/>).</summary>
     public readonly FrameTree Frames;
@@ -45,28 +69,46 @@ public sealed class SimWorld : IDisposable
     /// <summary>Debug offset (s) of weather time from sim time.</summary>
     public double WeatherTimeOffset;
 
-    private readonly TerrainShoreDepth _shoreDepth;
     private readonly SwellWind? _wind;
     private readonly List<EditCommand> _pending = new(64);
     private FixedClock _clock = new(TickRate);
 
-    private readonly record struct EditCommand(long Tick, BrushOp Op);
+    private readonly record struct EditCommand(long Tick, EditOp Op);
 
-    public SimWorld(ulong seed, int workerThreads, in TerrainParams terrain, WeatherField? weather = null, int entityCapacity = EntityTable.DefaultCapacity)
+    public SimWorld(ulong seed, int workerThreads, WeatherField? weather = null, int entityCapacity = EntityTable.DefaultCapacity)
     {
         Seed = seed;
-        Terrain = terrain;
         Weather = weather;
         Physics = new PhysicsWorld(workerThreads: workerThreads);
         Frames = new FrameTree();
         Celestial = CelestialSystem.CreateTest(Frames, seed, _clock.TickSeconds);
         Entities = new EntityTable(entityCapacity);
-        _shoreDepth = new TerrainShoreDepth(terrain);
-        Ocean = new OceanSurface(new OceanSwell(seed), _shoreDepth);
+        PlanetIndex = FirstPlanet(Celestial);
+        ref readonly var body = ref Celestial[PlanetIndex];
+        Planet = PlanetParams.Generate(PlanetParams.BodySeed(seed, PlanetIndex), body.Radius, body.Mu / (body.Radius * body.Radius));
+        Generator = new PlanetGenerator(Planet);
+        BodyParams = new PlanetParams?[Celestial.Count];
+
+        for (var i = 0; i < Celestial.Count; i++)
+            BodyParams[i] = i == PlanetIndex ? Planet : RockyParams(Celestial, seed, i);
+
+        PlanetSpawn.FindCoast(Generator.Surface, body.SpinAxis, out var coast, out Seaward);
+        var level = Planet.HasSea ? Planet.SeaRadius : Planet.Radius + Generator.Surface.Height(coast.X, coast.Y, coast.Z);
+        Bubble = PhysicsBubble.At(coast * level, Seaward);
+        Physics.SetBubble(Bubble, SceneGravity(body, Bubble.Origin));
+
+        Shore = new PlanetShore(Generator.Surface);
+        var tiles = new SeaTiles(level, body.SpinAxis);
+        Ocean = new OceanSurface(new OceanSwell(seed), tiles, _clock.TickSeconds, new PlanetShoreDepth(Shore));
         UpdateRenderPoses();
 
         if (weather is not null)
-            _wind = new SwellWind(weather);
+        {
+            // The weather plane is the bubble's; the swell's directions are from east toward south.
+            SeaTiles.EastSouth(coast, body.SpinAxis, out var east, out var south);
+            var x = Bubble.ToPlanetDirection(double3.UnitX);
+            _wind = new SwellWind(weather, (float)Math.Atan2(double3.Dot(x, south), double3.Dot(x, east)));
+        }
     }
 
     public ulong Seed { get; }
@@ -76,13 +118,13 @@ public sealed class SimWorld : IDisposable
     /// <summary>Milliseconds the last tick spent moving the swell to its time.</summary>
     public float LastSwellMs { get; private set; }
 
-    /// <summary>Every terrain edit the sim accepted, in tick order.</summary>
-    public ReadOnlySpan<BrushOp> Edits => _shoreDepth.Ops;
+    /// <summary>Every terrain edit the sim accepted, in Seq order.</summary>
+    public ReadOnlySpan<EditOp> Edits => EditStore.Ops;
 
     /// <summary>Bumped on every accepted edit.</summary>
     public int EditVersion { get; private set; }
 
-    /// <summary>Edits refused because they dug into the protected shore and seabed (<see cref="ShoreGuard"/>).</summary>
+    /// <summary>Edits dropped unlogged because every voxel they reach is protected shore, seabed or dig floor (D30).</summary>
     public int RefusedEdits { get; private set; }
 
     /// <summary>Sea wind (m/s, blowing toward) as of the last wind sample; zero without weather.</summary>
@@ -106,8 +148,9 @@ public sealed class SimWorld : IDisposable
     public void UpdateRenderPoses() => Celestial.Evaluate(RenderTick, _clock.Alpha);
 
     /// <summary>
-    /// The groundswell and the wind used when weather doesn't drive it. With weather driving, the sea wind at this tick
-    /// replaces the wind at once (the first wind never blends).
+    /// The groundswell and the wind used when weather doesn't drive it (directions from east toward south, the same over
+    /// the whole planet). With weather driving, the sea wind at this tick replaces the wind at once (the first wind never
+    /// blends).
     /// </summary>
     public void SetSwell(in SwellParams swell)
     {
@@ -122,7 +165,7 @@ public sealed class SimWorld : IDisposable
     }
 
     /// <summary>Queues a brush edit, stamped with the next tick to run; it is checked and applied at that tick's start.</summary>
-    public void QueueEdit(in BrushOp op) => _pending.Add(new EditCommand(_clock.TickIndex, op));
+    public void QueueEdit(in EditOp op) => _pending.Add(new EditCommand(_clock.TickIndex, op));
 
     /// <summary>
     /// Steps the sim from <c>TickIndex dt</c> to <c>(TickIndex + 1) dt</c>. Convention: when it returns, physics, the swell and the frame
@@ -157,13 +200,13 @@ public sealed class SimWorld : IDisposable
             if (command.Tick > _clock.TickIndex)
                 break;
 
-            if (!ShoreGuard.Allows(command.Op, Terrain))
+            if (Generator.IsFullyProtected(command.Op))
             {
                 RefusedEdits++;
                 continue;
             }
 
-            _shoreDepth.Add(command.Op);
+            Shore.Add(EditStore.Add(command.Op with { Seq = 0 }));
             EditVersion++;
         }
 
@@ -198,6 +241,50 @@ public sealed class SimWorld : IDisposable
 
         if (_clock.TickIndex % WindInterval == 0)
             _wind.Update(Ocean.Swell, WeatherTime);
+    }
+
+    private static int FirstPlanet(CelestialSystem celestial)
+    {
+        for (var i = 0; i < celestial.Count; i++)
+        {
+            if (celestial[i].Kind == CelestialKind.Planet)
+                return i;
+        }
+
+        throw new InvalidOperationException("The celestial system has no planet for the terrain.");
+    }
+
+    /// <summary>A moon's terrain: airless and dry, barren rock; null for a star. Planets other than the terrain's get seas.</summary>
+    private static PlanetParams? RockyParams(CelestialSystem celestial, ulong seed, int index)
+    {
+        ref readonly var body = ref celestial[index];
+
+        if (body.Kind is not (CelestialKind.Planet or CelestialKind.Moon))
+            return null;
+
+        var moon = body.Kind == CelestialKind.Moon;
+        var p = PlanetParams.Generate(PlanetParams.BodySeed(seed, index), body.Radius, body.Mu / (body.Radius * body.Radius), ocean: !moon);
+        return moon ? p with { Materials = PlanetMaterials.Barren } : p;
+    }
+
+    /// <summary>
+    /// Scene gravity in the bubble's axes (review C2): g at its origin plus the centrifugal term of the planet's spin.
+    /// Coriolis and the per-body difference from the origin are M3's.
+    /// </summary>
+    private System.Numerics.Vector3 SceneGravity(in CelestialBody body, double3 origin)
+    {
+        var r = origin.Length();
+        var g = -origin * (body.Mu / (r * r * r));
+
+        if (body.DayTicks > 0)
+        {
+            var omega = 2.0 * Math.PI / (body.DayTicks * _clock.TickSeconds);
+            var axial = origin - body.SpinAxis * double3.Dot(origin, body.SpinAxis);
+            g += axial * (omega * omega);
+        }
+
+        var local = doubleQuat.Conjugate(Bubble.Axes) * g;
+        return new System.Numerics.Vector3((float)local.X, (float)local.Y, (float)local.Z);
     }
 
     public void Dispose() => Physics.Dispose();

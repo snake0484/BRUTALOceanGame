@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "id": "am.cell",
+  "name": "Antimatter cell",
+  "family": "am_cell",
+  "densityKgM3": 1200,
+  "unitMassKg": 0.7,
+  "antimatterCapacityG": 10
+}

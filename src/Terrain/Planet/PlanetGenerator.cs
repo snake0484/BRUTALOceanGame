@@ -37,8 +37,8 @@ public sealed class PlanetGenerator
     private const int LatticeMultiple = 1 << (MaxLod + 3);
     private const float SurfaceLayer = 1.5f;
     private const float SubSurfaceLayer = 4f;
-    private const float BeachHeight = 3f;
-    private const float PeakFraction = 0.55f;
+    internal const float BeachHeight = 3f;
+    internal const float PeakFraction = 0.55f;
 
     public readonly PlanetParams Params;
     public readonly PlanetSurface Surface;
@@ -427,6 +427,7 @@ public sealed class PlanetGenerator
         var materials = Params.Materials;
         var rock = (byte)materials.Rock;
         var quant = ChunkConstants.DensityScale / (float)s;
+        var perVoxel = 1f / (float)s;
         var halfN = n * 0.5;
         var hasSea = Surface.HasSea;
         var protect = Surface.ProtectHeight;
@@ -506,7 +507,7 @@ public sealed class PlanetGenerator
                         }
 
                         flags |= 1;
-                        material[vi] = (byte)PickMaterial(-dist, h, inv < SteepInv, hasSea && h <= shore, materials);
+                        material[vi] = (byte)PickMaterial(-dist * perVoxel, h, inv < SteepInv, hasSea && h <= shore, materials);
                     }
                 }
             }
@@ -517,6 +518,7 @@ public sealed class PlanetGenerator
         chunk.Version++;
     }
 
+    /// <param name="depth">Below the surface in voxels: the layers are metres at LOD 0 and stay as many voxels thick at coarser LODs, so a coarse leaf shows the surface material, as the impostor does.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private VoxelMaterial PickMaterial(float depth, float height, bool steep, bool shore, in PlanetMaterials m)
     {

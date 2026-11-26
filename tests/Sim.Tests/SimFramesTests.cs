@@ -8,7 +8,7 @@ public class SimFramesTests
     [Fact]
     public void Tick_LeavesRailsAtTheStepsEnd()
     {
-        using var sim = new SimWorld(seed: 3, workerThreads: 1, new TerrainParams());
+        using var sim = new SimWorld(seed: 3, workerThreads: 1);
         var moon = sim.Celestial[2];
 
         Assert.Equal(0, sim.Clock.TickIndex);
@@ -30,7 +30,7 @@ public class SimFramesTests
     [Fact]
     public void RenderPoses_InterpolateBetweenTheLastTwoTicks()
     {
-        using var sim = new SimWorld(seed: 3, workerThreads: 1, new TerrainParams());
+        using var sim = new SimWorld(seed: 3, workerThreads: 1);
         var moon = sim.Celestial[2];
         var ticks = sim.Advance(5.5 / SimWorld.TickRate);
 

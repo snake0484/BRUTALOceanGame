@@ -1,6 +1,8 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// Ocean surface fragment shader: normal and foam from the CPU band plus FFT detail, shaded by ocean_shading.glsl.
+// Ocean surface fragment shader: normal and foam from the CPU band plus FFT detail, shaded by ocean_shading.glsl in the
+// fragment's own frame on the sea sphere (its up, the true vector to the camera), so the far shell out to the horizon
+// and the water at the camera's feet are lit alike.
 
 #include "ocean_common.glsl"
 #include "ocean_shading.glsl"
@@ -18,15 +20,14 @@ layout(location = 6) in float vSwashEdge;  // 1 at the edge of a swash sheet, 0 
 // and a swash sheet as a glassy film with an edge rather than paint.
 const float SHEET_OPAQUE = 0.6;    // m of water by which the body colour has taken over from the terrain seen through it
 const float SWASH_EDGE_FOAM = 0.7; // lace coverage along the water's edge on the beach (vSwashEdge)
+const float GLITTER_NEAR = 0.3;    // m of pixel footprint from which the waves' slopes start to go unresolved ...
+const float GLITTER_FAR = 3.0;     // ... and by which they all are: the sun's glint is then the sea's glitter path
 
 layout(location = 0) out vec4 outColor;
 
 void main()
 {
-    // Columns cut off from the sea (inland pits below sea level) hold no ocean water.
     float depth = waterDepth(vWorldPos.xz);
-    if (depth < -500.0)
-        discard;
 
     // Water thickness: the surface's height over the ground (depth = sea level − ground, sea level 0), so the edge sits
     // wherever the moving surface meets the beach.
@@ -55,7 +56,17 @@ void main()
                             dxz * p.x - p.y * dxx));
     float J = dxx * dzz - dxz * dxz;
 
-    if (dot(N, frame.cameraPos.xyz - vWorldPos) < 0.0)
+    // The fragment's frame on the sea sphere: up there, and the sea frame's x and z laid tangent to it. The vector to
+    // the camera is the true one (the surface lies seaDrop below the frame's plane).
+    vec2 fromOrigin = frame.planet.xy + vWorldPos.xz;
+    vec3 up = normalize(vec3(fromOrigin.x, frame.planet.w - seaDrop(fromOrigin), fromOrigin.y));
+    vec3 east = normalize(vec3(1.0, 0.0, 0.0) - up * up.x);
+    vec3 south = cross(east, up);
+    vec3 toCamera = vec3(-vWorldPos.x, frame.cameraPos.y - vWorldPos.y + seaDrop(fromOrigin), -vWorldPos.z);
+    vec3 toCam = vec3(dot(toCamera, east), dot(toCamera, up), dot(toCamera, south));
+    vec3 L = vec3(dot(frame.sunDir.xyz, east), dot(frame.sunDir.xyz, up), dot(frame.sunDir.xyz, south));
+
+    if (dot(N, toCam) < 0.0)
         N = -N;
 
     // Whitecaps: the cascades' foam (ocean_fft.comp), seeded on the measured share of the surface for this wind and
@@ -78,7 +89,8 @@ void main()
         return;
     }
 
-    vec3 colour = shadeWater(vWorldPos, N, max(waterDepth(vRestXZ), 0.0), thickness, foam);
+    float unresolved = smoothstep(GLITTER_NEAR, GLITTER_FAR, footprint);
+    vec3 colour = shadeWater(vWorldPos.y, toCam, L, N, max(waterDepth(vRestXZ), 0.0), thickness, foam, unresolved);
 
     // The terrain shows through thin open water (SHEET_OPAQUE): the share of the pixel that is neither the sky's
     // reflection, foam nor the water body (which builds up over the first SHEET_OPAQUE of thickness). The terrain is
@@ -86,9 +98,8 @@ void main()
     // distance, where the fog has the pixel anyway.
     if (thickness < SHEET_OPAQUE)
     {
-        vec3 toEye = frame.cameraPos.xyz - vWorldPos;
-        float eyeDist = length(toEye);
-        float Fv = fresnelSchlick(max(dot(N, toEye / max(eyeDist, 1e-4)), 0.0));
+        float eyeDist = length(toCam);
+        float Fv = fresnelSchlick(max(dot(N, toCam / max(eyeDist, 1e-4)), 0.0));
         float see = (1.0 - Fv) * (1.0 - smoothstep(0.0, SHEET_OPAQUE, thickness)) * (1.0 - foam) * exp(-eyeDist * frame.skyHorizon.w);
 
         float alphaOpen = 1.0 - see * WET_SAND;
@@ -97,5 +108,6 @@ void main()
     }
 
     // Foam keeps thin sheets visible, but fades out with them so films clinging to walls don't read as white shards.
-    outColor = vec4(colour, max(alpha, foam * smoothstep(0.08, 0.35, thickness)));
+    // From altitude the whole surface fades into the terrain's far sea (the impostor's look).
+    outColor = vec4(colour, max(alpha, foam * smoothstep(0.08, 0.35, thickness)) * frame.waterDeep.w);
 }

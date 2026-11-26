@@ -158,7 +158,7 @@ public sealed class NetServer
                 var op = Messages.ReadOp(ref reader);
 
                 if (!reader.Failed && float.IsFinite(op.Radius) && op.Radius is > 0f and <= 16f)
-                    _sim.QueueEdit(op);
+                    _sim.QueueEdit(op with { Seq = 0, Author = (ushort)peer.Slot });
 
                 break;
         }
@@ -436,7 +436,7 @@ public sealed class NetServer
         }
     }
 
-    private void SendEdit(ServerPeer peer, in Terrain.BrushOp op)
+    private void SendEdit(ServerPeer peer, in Terrain.EditOp op)
     {
         var writer = new NetWriter(_event);
         Messages.Edit(ref writer, _sim.Clock.TickIndex, op);

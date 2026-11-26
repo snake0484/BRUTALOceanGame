@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "tickRateHz": 60,
+  "amPerEm": 0.005,
+  "amEnergyJPerKg": 1000000000000000.0,
+  "amProductionJPerKg": 2000000000000000.0,
+  "coreEfficiency": 0.4,
+  "bands": [
+    [
+      "Ore",
+      0
+    ],
+    [
+      "Crude",
+      0.15
+    ],
+    [
+      "Fuel",
+      0.4
+    ],
+    [
+      "Field",
+      0.6
+    ],
+    [
+      "Throat",
+      0.85
+    ],
+    [
+      "Crystal",
+      0.97
+    ]
+  ],
+  "mergeBucket": 0.005,
+  "qMax": 0.995,
+  "deviceGates": [
+    0.17,
+    0.25,
+    0.4,
+    0.6,
+    0.85
+  ],
+  "crystal": {
+    "decayPerDay": 0.01,
+    "floor": 0.96,
+    "shockLoss": 0.02
+  },
+  "additives": {
+    "maxKinds": 2,
+    "maxMassFraction": 0.1,
+    "fullActiveFraction": 0.045,
+    "potencyBucket": 0.05,
+    "labPotency": 0.9,
+    "crudeLabPotency": 0.6,
+    "crudeRateFactor": 0.5
+  }
+}

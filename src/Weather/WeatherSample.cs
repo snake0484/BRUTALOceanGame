@@ -7,7 +7,7 @@ namespace BrutalGame.Weather;
 /// </summary>
 public struct WeatherSample
 {
-    /// <summary>10 m wind (m/s) in XZ, the way it blows toward.</summary>
+    /// <summary>10 m wind (m/s), the way it blows toward: XZ from <see cref="WeatherField"/>, (east, north) from <see cref="SphereWeatherField"/>.</summary>
     public Vector2 Wind;
 
     /// <summary>Cloud cover, 0..1.</summary>
@@ -27,7 +27,7 @@ public struct WeatherSample
 
     public readonly float WindSpeed => Wind.Length();
 
-    /// <summary>Radians the wind blows toward, 0 = +X, π/2 = +Z.</summary>
+    /// <summary>Radians the wind blows toward: 0 = +X (east on a sphere), π/2 = +Z (north).</summary>
     public readonly float WindDirection => MathF.Atan2(Wind.Y, Wind.X);
 
     public static WeatherSample Lerp(in WeatherSample a, in WeatherSample b, float t) => new()

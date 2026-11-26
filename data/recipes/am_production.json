@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "am.production",
+  "kind": "AmProduction",
+  "station": "fc.am_factory",
+  "feed": {
+    "item": "propellant.hydrogen",
+    "kgPerKg": 1.0
+  }
+}

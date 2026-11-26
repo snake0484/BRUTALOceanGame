@@ -1,4 +1,3 @@
-using System.Numerics;
 using Brutal.Numerics;
 using BrutalGame.Sim.Entities;
 using BrutalGame.Terrain;
@@ -117,47 +116,34 @@ public static class Messages
         BodyCodec.WriteState(ref writer, state);
     }
 
-    /// <summary>An accepted edit, its centre at 1/1024 m (review C13), so every peer replays the same op.</summary>
-    public static void Edit(ref NetWriter writer, long tick, in BrushOp op)
+    /// <summary>An accepted edit in its stored form (centre int64 at 1/1024 m, review C13; Seq; author), so every peer replays the same op.</summary>
+    public static void Edit(ref NetWriter writer, long tick, in EditOp op)
     {
         writer.Byte((byte)MessageId.Edit);
         writer.VarUInt((ulong)tick);
         WriteOp(ref writer, op);
     }
 
-    public static void EditRequest(ref NetWriter writer, in BrushOp op)
+    /// <summary>A client's edit; the server stamps Seq and Author.</summary>
+    public static void EditRequest(ref NetWriter writer, in EditOp op)
     {
         writer.Byte((byte)MessageId.EditRequest);
         WriteOp(ref writer, op);
     }
 
-    public static BrushOp ReadOp(ref NetReader reader)
-    {
-        var centre = new long3(reader.VarInt(), reader.VarInt(), reader.VarInt());
-        var radius = reader.Float();
-        var mode = (BrushMode)reader.Byte();
-        var material = (VoxelMaterial)reader.Byte();
-        var metres = NetQuant.Position(centre);
-        return new BrushOp(new Vector3((float)metres.X, (float)metres.Y, (float)metres.Z), radius, mode, material);
-    }
+    public static EditOp ReadOp(ref NetReader reader) => new(
+        reader.Long(), reader.Long(), reader.Long(), reader.Float(),
+        (BrushMode)reader.Byte(), (VoxelMaterial)reader.Byte(), reader.UInt(), reader.UShort());
 
-    /// <summary>The op as every peer sees it after the wire's quantisation.</summary>
-    public static BrushOp Quantise(in BrushOp op)
+    private static void WriteOp(ref NetWriter writer, in EditOp op)
     {
-        Span<byte> scratch = stackalloc byte[48];
-        var writer = new NetWriter(scratch);
-        WriteOp(ref writer, op);
-        var reader = new NetReader(writer.Written);
-        return ReadOp(ref reader);
-    }
-
-    private static void WriteOp(ref NetWriter writer, in BrushOp op)
-    {
-        writer.VarInt(NetQuant.Position(op.Centre.X));
-        writer.VarInt(NetQuant.Position(op.Centre.Y));
-        writer.VarInt(NetQuant.Position(op.Centre.Z));
+        writer.Long(op.X);
+        writer.Long(op.Y);
+        writer.Long(op.Z);
         writer.Float(op.Radius);
         writer.Byte((byte)op.Mode);
         writer.Byte((byte)op.Material);
+        writer.UInt(op.Seq);
+        writer.UShort(op.Author);
     }
 }

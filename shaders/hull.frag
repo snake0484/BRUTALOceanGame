@@ -1,5 +1,8 @@
 #version 450
 // Designer hull: Lambert sun + hemispheric sky + small specular, material colour from the palette, ACES + gamma.
+// Dual contouring shares one vertex per cell, so a vertex on a crease carries the mean of both faces' normals; where the
+// interpolated normal leans more than CREASE_COS from the triangle's own normal the face normal is used: flat faces and
+// hard edges stay hard, curved surfaces stay smooth.
 
 layout(set = 0, binding = 0, std140) uniform Frame {
     mat4 viewProj;
@@ -20,6 +23,7 @@ layout(location = 2) flat in uint vMaterial;
 layout(location = 0) out vec4 outColor;
 
 const vec3 GROUND_BOUNCE = vec3(0.10, 0.09, 0.08);
+const float CREASE_COS = 0.85;
 
 vec3 acesFit(vec3 x)
 {
@@ -28,9 +32,12 @@ vec3 acesFit(vec3 x)
 
 void main()
 {
-    vec3 N = normalize(vNormal);
     vec3 L = frame.sunDir.xyz;
     vec3 V = normalize(-vRelPos);
+    vec3 face = normalize(cross(dFdx(vRelPos), dFdy(vRelPos)));
+    face = dot(face, V) < 0.0 ? -face : face;
+    vec3 N = normalize(vNormal);
+    N = dot(N, face) < CREASE_COS ? face : N;
     float intensity = frame.sunDir.w;
     vec3 albedo = frame.palette[min(vMaterial, 31u)].rgb;
 

@@ -7,10 +7,12 @@
 
 layout(set = 0, binding = 0, std140) uniform Frame {
     mat4 viewProj;
-    vec4 cameraPos;   // (0, camera height above sea level, 0): fragment positions are camera-relative horizontally
+    vec4 planet;      // xyz = planet centre relative to the camera, w = sea radius (0 = no sea)
     vec4 sunDir;      // xyz toward sun, w = intensity
-    vec4 skyZenith;
+    vec4 skyZenith;   // w = the star's intensity in the space look
     vec4 skyHorizon;  // w = fog density
+    vec4 water;       // rgb = seabed fade colour, w = distance past which it applies (no ocean surface there)
+    vec4 space;       // x = space look weight (0 ground, 1 orbit), y = atmosphere top radius (0 = none), z = scale height, w = its base radius
 } frame;
 
 // PackedTerrainVertex.OffsetVoxels * StepsPerVoxel.
@@ -19,7 +21,7 @@ const float POSITION_OFFSET = 16384.0;
 layout(location = 0) in uvec4 inPositionMaterial;
 layout(location = 1) in vec2 inNormalOct;
 
-layout(location = 0) out vec3 vWorldPos; // camera-relative x, z; height above sea level y
+layout(location = 0) out vec3 vWorldPos; // camera-relative, camera frame axes
 layout(location = 1) out vec3 vNormal;
 layout(location = 2) flat out uint vMaterial;
 
@@ -39,7 +41,7 @@ void main()
     Instance chunk = instances[gl_InstanceIndex];
     vec3 local = (vec3(inPositionMaterial.xyz) - POSITION_OFFSET) * chunk.scale;
     vec3 world = chunk.relOrigin + rotateByQuat(chunk.rotation, local);
-    vWorldPos = world + vec3(0.0, frame.cameraPos.y, 0.0);
+    vWorldPos = world;
     vNormal = rotateByQuat(chunk.rotation, decodeOctahedral(inNormalOct));
     vMaterial = inPositionMaterial.w;
     gl_Position = frame.viewProj * vec4(world, 1.0);

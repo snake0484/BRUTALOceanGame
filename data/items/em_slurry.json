@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "id": "em.slurry",
+  "name": "EM slurry",
+  "family": "em_slurry",
+  "densityKgM3": 1600
+}

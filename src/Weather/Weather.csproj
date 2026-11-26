@@ -3,6 +3,9 @@
     <RootNamespace>BrutalGame.Weather</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Ahwoo.BRUTAL.Numerics" />
+  </ItemGroup>
+  <ItemGroup>
     <InternalsVisibleTo Include="Weather.Tests" />
   </ItemGroup>
 </Project>

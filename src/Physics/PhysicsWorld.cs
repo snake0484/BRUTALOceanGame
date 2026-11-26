@@ -67,6 +67,21 @@ public sealed class PhysicsWorld : IDisposable
     bool _disposed;
 
     public int BodyCount => _staticCount + _dynamicCount;
+
+    /// <summary>Where this world sits on its planet; bodies are placed in its local frame (see <see cref="PhysicsBubble"/>).</summary>
+    public PhysicsBubble Bubble { get; private set; } = new(default, doubleQuat.Identity);
+
+    /// <summary>Gravity in the bubble's axes (m/s²).</summary>
+    public Vector3 Gravity { get; private set; } = new(0f, -9.81f, 0f);
+
+    /// <summary>Places the world on a planet. Call before adding bodies: existing bodies are not moved.</summary>
+    public void SetBubble(in PhysicsBubble bubble, Vector3 gravity)
+    {
+        AssertOwner();
+        Bubble = bubble;
+        Gravity = gravity;
+        _system.SetGravity(ToJolt(gravity));
+    }
     public float LastStepMs { get; private set; }
     internal PhysicsUpdateError LastStepError { get; private set; }
     internal int WorkerThreads { get; }

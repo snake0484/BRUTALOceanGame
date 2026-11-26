@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "propellant.hydrogen",
+  "name": "Hydrogen",
+  "family": "volatile",
+  "densityKgM3": 71,
+  "refCostPerKg": 0.01
+}
