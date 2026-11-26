@@ -37,6 +37,8 @@ internal static class Stamps
     private const float PeakHeight = 0.3f;
     private const float ErgCore = 0.6f;
     private const int BoundsBuffer = 48;
+    private const double EnumerateCells = 1.0;
+    private const float RadialSlack = 1e-5f;
 
     /// <summary>Smallest arc (rad) per unit of lattice t over a face: a class cell is never narrower than this × 2 / N.</summary>
     public static readonly double MinArcPerT = MinArcRate();
@@ -142,16 +144,19 @@ internal static class Stamps
     }
 
     /// <summary>
-    /// Bounds over the cap for every LOD in range: each class active in it adds [−deepest, +highest rim] (ergs
-    /// [0, tallest]) of the stamps in reach, or of the class when the cap spans many cells; nothing where none can reach.
+    /// Bounds over the cap for every LOD in range. Each class active in it adds the interval its stamps in reach take
+    /// over the cap's range of distances (a profile is monotone between its floor, rim and reach), with 0 unless one
+    /// stamp's reach holds the whole cap; a class whose cells the cap spans by the dozen adds [−deepest, +highest rim].
     /// The crater knee is monotone, so it maps the summed interval.
     /// </summary>
+    [SkipLocalsInit]
     public static void Bounds(PlanetKindProgram p, int layer, double qx, double qy, double qz, double rho, int minLod, int maxLod, Span<float> lo, Span<float> hi)
     {
         var pb = p.ParamBase[layer];
         int first = (int)p.Params[pb], count = (int)p.Params[pb + 1];
         var dst = p.Dst[layer];
-        var weights = p.ClassWeight.AsSpan(minLod * p.Classes.Length * 2);
+        var fine = p.ClassWeight.AsSpan(minLod * p.Classes.Length * 2);
+        var coarse = p.ClassWeight.AsSpan(maxLod * p.Classes.Length * 2);
         float accLo = 0f, accHi = 0f;
         Span<Stamp> buffer = stackalloc Stamp[BoundsBuffer];
         var inv = 1.0 / Math.Sqrt(qx * qx + qy * qy + qz * qz);
@@ -162,38 +167,53 @@ internal static class Stamps
             ref readonly var cls = ref p.Classes[k];
             var crater = cls.Kind == LayerOp.Craters;
 
-            if (crater && weights[2 * k] == 0f)
+            if (crater && fine[2 * k] == 0f)
                 continue;
 
-            float deepest = cls.DepthMax, highest = cls.RimMax;
             var cell = MinArcPerT * 2.0 / cls.CellsPerSide * p.Radius;
-            var n = rho <= 0.5 * cell ? Collect(p, k, cx, cy, cz, rho, buffer) : -1;
+            var n = rho <= EnumerateCells * cell ? Collect(p, k, cx, cy, cz, rho, buffer) : -1;
 
-            if (n >= 0)
+            if (n < 0)
             {
-                deepest = highest = 0f;
-                var any = false;
-
-                for (var s = 0; s < n; s++)
-                {
-                    ref readonly var stamp = ref buffer[s];
-                    double dx = qx - stamp.Cx, dy = qy - stamp.Cy, dz = qz - stamp.Cz;
-                    var reach = Math.Sqrt(stamp.Reach2) + rho;
-
-                    if (dx * dx + dy * dy + dz * dz >= reach * reach)
-                        continue;
-
-                    any = true;
-                    deepest = MathF.Max(deepest, stamp.Depth);
-                    highest = MathF.Max(highest, crater ? stamp.Rim : stamp.Height);
-                }
-
-                if (!any)
-                    continue;
+                accLo -= cls.DepthMax;
+                accHi += cls.RimMax;
+                continue;
             }
 
-            accLo -= deepest;
-            accHi += highest;
+            float classLo = 0f, classHi = 0f;
+
+            for (var s = 0; s < n; s++)
+            {
+                ref readonly var stamp = ref buffer[s];
+                double dx = qx - stamp.Cx, dy = qy - stamp.Cy, dz = qz - stamp.Cz;
+                var d = Math.Sqrt(dx * dx + dy * dy + dz * dz);
+                var reach = Math.Sqrt(stamp.Reach2);
+
+                if (d >= reach + rho)
+                    continue;
+
+                var xLo = (float)(Math.Max(d - rho, 0.0) / stamp.Radius) * (1f - RadialSlack);
+                var xHi = (float)((d + rho) / stamp.Radius) * (1f + RadialSlack);
+                float sLo, sHi;
+
+                if (crater)
+                    CraterInterval(in stamp, xLo, xHi, coarse[2 * k], fine[2 * k], stamp.Rim * coarse[2 * k + 1], stamp.Rim * fine[2 * k + 1], out sLo, out sHi);
+                else
+                    ErgInterval(in stamp, xLo, xHi, fine[2 * k], out sLo, out sHi);
+
+                // The cap lies inside this stamp's reach, and a class's stamps never overlap: no other reaches it.
+                if (d + rho < reach * (1.0 - RadialSlack))
+                {
+                    (classLo, classHi) = (sLo, sHi);
+                    break;
+                }
+
+                classLo = MathF.Min(classLo, sLo);
+                classHi = MathF.Max(classHi, sHi);
+            }
+
+            accLo += classLo;
+            accHi += classHi;
         }
 
         if (p.Op[layer] == LayerOp.Craters)
@@ -211,6 +231,29 @@ internal static class Stamps
             lo[p.SrcB[layer]] = 0f;
             hi[p.SrcB[layer]] = 1f;
         }
+    }
+
+    /// <summary>A crater's profile × weight over x in [xLo, xHi]: least at an end or on the complex floor, most at an end or the rim.</summary>
+    private static void CraterInterval(in Stamp s, float xLo, float xHi, float allLo, float allHi, float rimLo, float rimHi, out float lo, out float hi)
+    {
+        var least = MathF.Min(CraterProfile(in s, xLo, rimLo), CraterProfile(in s, xHi, rimLo));
+        var most = MathF.Max(CraterProfile(in s, xLo, rimHi), CraterProfile(in s, xHi, rimHi));
+
+        if (xLo <= 1f && xHi >= 1f)
+            most = MathF.Max(most, rimHi);
+
+        if (s.Complex && xLo <= FloorShare && xHi >= PeakShare)
+            least = -s.Depth;
+
+        lo = MathF.Min(least * allLo, least * allHi);
+        hi = MathF.Max(most * allLo, most * allHi);
+    }
+
+    /// <summary>A dune field over x in [xLo, xHi]: its envelope falls with x, the dune runs from trough to crest.</summary>
+    private static void ErgInterval(in Stamp s, float xLo, float xHi, float all, out float lo, out float hi)
+    {
+        lo = s.Height * ErgEnvelope(xHi) * (1f - all) * 0.5f;
+        hi = s.Height * ErgEnvelope(xLo) * (0.5f + 0.5f * all);
     }
 
     /// <summary>The window's bounding cap: unit centre and chord radius (m) over its four corners, the farthest points of a lattice rectangle.</summary>
@@ -436,33 +479,33 @@ internal static class Stamps
             var t = (dx * s.Ax + dy * s.Ay + dz * s.Az) / s.Wavelength;
             var phase = (float)(t - Math.Floor(t));
             var dune = phase < WindwardShare ? phase / WindwardShare : (1f - phase) / (1f - WindwardShare);
-            acc += s.Height * (1f - LayerOps.Smooth01((x - ErgCore) / (1f - ErgCore))) * (all * dune + (1f - all) * 0.5f);
+            acc += s.Height * ErgEnvelope(x) * (all * dune + (1f - all) * 0.5f);
             return;
         }
 
-        var rim = s.Rim * weights[2 * s.Class + 1];
-        float profile;
+        acc += CraterProfile(in s, x, s.Rim * weights[2 * s.Class + 1]) * all;
+        fresh *= 1f - (1f - LayerOps.Smooth01((x - 0.7f) / 0.5f)) * all;
+    }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float ErgEnvelope(float x) => 1f - LayerOps.Smooth01((x - ErgCore) / (1f - ErgCore));
+
+    /// <summary>Crater height over x = distance / radius: bowl or flat floor with a central peak, terraced wall, rim at 1, ejecta to exactly 0 at the reach.</summary>
+    private static float CraterProfile(in Stamp s, float x, float rim)
+    {
         if (x > 1f)
-        {
-            profile = rim / (x * x * x) * (1f - LayerOps.Smooth01((x - 1f) / (s.ReachX - 1f)));
-        }
-        else if (!s.Complex)
-        {
-            profile = (rim + s.Depth) * x * x - s.Depth;
-        }
-        else if (x < FloorShare)
+            return rim / (x * x * x) * (1f - LayerOps.Smooth01((x - 1f) / (s.ReachX - 1f)));
+
+        if (!s.Complex)
+            return (rim + s.Depth) * x * x - s.Depth;
+
+        if (x < FloorShare)
         {
             var peak = MathF.Max(1f - x * x / (PeakShare * PeakShare), 0f);
-            profile = -s.Depth + PeakHeight * s.Depth * peak * peak;
-        }
-        else
-        {
-            profile = -s.Depth + (s.Depth + rim) * (1f - LayerOps.CanyonProfile((x - FloorShare) / (1f - FloorShare), 0f, s.Benches, 0.85f));
+            return -s.Depth + PeakHeight * s.Depth * peak * peak;
         }
 
-        acc += profile * all;
-        fresh *= 1f - (1f - LayerOps.Smooth01((x - 0.7f) / 0.5f)) * all;
+        return -s.Depth + (s.Depth + rim) * (1f - LayerOps.CanyonProfile((x - FloorShare) / (1f - FloorShare), 0f, s.Benches, 0.85f));
     }
 
     /// <summary>16 fixed rotations of the class cubes: orthonormal rows from small integer triples by Gram–Schmidt (sqrt and divide only).</summary>

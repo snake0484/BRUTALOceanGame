@@ -9,6 +9,7 @@ internal static partial class LayerOps
 {
     private const float BoundsSlack = 0.05f;
     private const float RelativeSlack = 2e-5f;
+    private const double SlopeSlack = 1e-4;
 
     /// <param name="rho">Cap radius on the datum sphere (m).</param>
     /// <param name="layers">Run only the first so many layers (the compiler's worst-case sum before the knee).</param>
@@ -39,7 +40,7 @@ internal static partial class LayerOps
                     TerraceBounds(p, layer, minLod, maxLod, lo, hi);
                     break;
                 case LayerOp.Canyon:
-                    CanyonBounds(p, layer, maxLod, lo, hi);
+                    CanyonBounds(p, layer, minLod, maxLod, lo, hi);
                     break;
                 case LayerOp.Mask:
                     MaskBounds(p, layer, qx, qy, qz, rho, lo, hi);
@@ -107,6 +108,7 @@ internal static partial class LayerOps
         int first = p.FirstOctave[layer], count = p.OctaveCount[layer];
         var warp = p.Warp[layer];
         var reach = rho;
+        double upX = qx, upY = qy, upZ = qz;
 
         if (warp != None)
         {
@@ -149,6 +151,11 @@ internal static partial class LayerOps
                     Accumulate(a * (1f - absHi) * (1f - absHi), a * (1f - absLo) * (1f - absLo), o >= endMax, 0f, ref sumLo, ref sumHi);
                 }
 
+                break;
+            }
+            case LayerOp.Fbm when fields == 4:
+            {
+                SlopeBounds(p, layer, qx, qy, qz, upX, upY, upZ, reach, rho, endMin, endMax, out sumLo, out sumHi, out lo[dst + 1], out hi[dst + 1]);
                 break;
             }
             case LayerOp.Fbm:
@@ -226,6 +233,56 @@ internal static partial class LayerOps
 
         lo[dst] = sumLo;
         hi[dst] = sumHi;
+    }
+
+    /// <summary>
+    /// A gradient field over the cap: its value's interval and that of its tangential slope |G|. An octave every LOD
+    /// keeps, whose gradient cannot turn far across the reach, counts at the centre ± its slope's Lipschitz bound; any
+    /// other may add up to its steepest slope. The tangent plane tilts by ρ / R across the cap.
+    /// </summary>
+    private static void SlopeBounds(PlanetKindProgram p, int layer, double qx, double qy, double qz, double upX, double upY, double upZ, double reach, double rho, int endMin, int endMax,
+        out float sumLo, out float sumHi, out float slopeLo, out float slopeHi)
+    {
+        var first = p.FirstOctave[layer];
+        double gx = 0.0, gy = 0.0, gz = 0.0, turn = 0.0, steepest = 0.0;
+        sumLo = sumHi = 0f;
+
+        for (var o = 0; o < endMin; o++)
+        {
+            var f = p.Frequency[first + o];
+            var a = p.Amplitude[first + o];
+            var spread = (float)(Noise.GradientLipschitz * f * reach);
+            var bend = Noise.SlopeLipschitz * f * reach;
+            steepest += a * f * Noise.GradientLipschitz;
+            float nLo = -1f, nHi = 1f;
+
+            if (spread < 1f)
+            {
+                var n = Math.Clamp(Noise.Gradient3(qx * f + p.OffsetX[first + o], qy * f + p.OffsetY[first + o], qz * f + p.OffsetZ[first + o], p.Seed[first + o], out var dx, out var dy, out var dz), -1f, 1f);
+                nLo = MathF.Max(n - spread, -1f);
+                nHi = MathF.Min(n + spread, 1f);
+
+                if (o < endMax && bend < Noise.GradientLipschitz)
+                {
+                    gx += a * f * dx;
+                    gy += a * f * dy;
+                    gz += a * f * dz;
+                    turn += a * f * bend;
+                    Accumulate(a * nLo, a * nHi, false, 0f, ref sumLo, ref sumHi);
+                    continue;
+                }
+            }
+
+            turn += a * f * Noise.GradientLipschitz;
+            Accumulate(a * nLo, a * nHi, o >= endMax, 0f, ref sumLo, ref sumHi);
+        }
+
+        var whole = Math.Sqrt(gx * gx + gy * gy + gz * gz);
+        var radial = (gx * upX + gy * upY + gz * upZ) / Math.Sqrt(upX * upX + upY * upY + upZ * upZ);
+        var tangential = Math.Sqrt(Math.Max(whole * whole - radial * radial, 0.0));
+        turn += 2.0 * whole * rho / p.Radius;
+        slopeLo = (float)(Math.Max(tangential - turn, 0.0) * (1.0 - SlopeSlack));
+        slopeHi = (float)(Math.Min(tangential + turn, steepest) * (1.0 + SlopeSlack));
     }
 
     /// <summary>Adds an octave's interval; one a LOD in range may skip also takes the value it leaves behind (0, or the shaped mean).</summary>
@@ -318,33 +375,56 @@ internal static partial class LayerOps
             return;
         }
 
-        float uLo = vLo + lo[p.SrcB[layer]], uHi = vHi + hi[p.SrcB[layer]];
+        // h + m·(T(u) − u) with u = h + s is (1 − m)·h + m·(T(u) − s), T monotone in u and in the band; the offset is also within half a step.
+        float sLo = lo[p.SrcB[layer]], sHi = hi[p.SrcB[layer]];
+        float uLo = vLo + sLo, uHi = vHi + sHi;
         var maxStep = 0f;
 
         for (var k = 0; k < count; k++)
             maxStep = MathF.Max(maxStep, levels[k + 1] - levels[k]);
 
-        var dLo = MathF.Min(uLo + TerraceAt(levels, beta, bandA, uLo), uLo + TerraceAt(levels, beta, bandB, uLo)) - uHi;
-        var dHi = MathF.Max(uHi + TerraceAt(levels, beta, bandA, uHi), uHi + TerraceAt(levels, beta, bandB, uHi)) - uLo;
-        dLo = Math.Clamp(dLo, -0.5f * maxStep, 0f);
-        dHi = Math.Clamp(dHi, 0f, 0.5f * maxStep);
-        lo[d] = vLo + mHi * dLo;
-        hi[d] = vHi + mHi * dHi;
+        var yLo = MathF.Min(uLo + TerraceAt(levels, beta, bandA, uLo), uLo + TerraceAt(levels, beta, bandB, uLo)) - sHi;
+        var yHi = MathF.Max(uHi + TerraceAt(levels, beta, bandA, uHi), uHi + TerraceAt(levels, beta, bandB, uHi)) - sLo;
+        var least = MathF.Min(vLo + mLo * (yLo - vLo), vLo + mHi * (yLo - vLo));
+        var most = MathF.Max(vHi + mLo * (yHi - vHi), vHi + mHi * (yHi - vHi));
+        lo[d] = MathF.Max(least, vLo - 0.5f * maxStep * mHi);
+        hi[d] = MathF.Min(most, vHi + 0.5f * maxStep * mHi);
     }
 
     /// <summary>Canyon params: half-width, depth, floor, benches, gMin, mean profile, the field's gradient bound.</summary>
     internal const int CanyonParams = 7;
 
-    private static void CanyonBounds(PlanetKindProgram p, int layer, int maxLod, Span<float> lo, Span<float> hi)
+    /// <summary>
+    /// The wall profile falls with |n| / (g·halfWidth) and rises with the riser share, and the cut is linear in the
+    /// LOD's fade weight: the deepest cut takes the least |n| over the steepest slope, the shallowest the reverse.
+    /// </summary>
+    private static void CanyonBounds(PlanetKindProgram p, int layer, int minLod, int maxLod, Span<float> lo, Span<float> hi)
     {
         var pb = p.ParamBase[layer];
         var src = p.SrcA[layer];
-        AbsInterval(lo[src], hi[src], out var absLo, out _);
-        var mHi = p.Gate[layer] == None ? 1f : hi[p.Gate[layer]];
-        var reach = absLo < p.Params[pb] * p.Params[pb + 6] || p.LodWeight[p.At(maxLod, layer)] < 1f;
+        var dst = p.Dst[layer];
+        float halfWidth = p.Params[pb], depth = p.Params[pb + 1], floor = p.Params[pb + 2], benches = p.Params[pb + 3], gMin = p.Params[pb + 4], mean = p.Params[pb + 5];
+        float mLo = 1f, mHi = 1f;
 
-        if (reach && mHi > 0f)
-            lo[p.Dst[layer]] -= p.Params[pb + 1] * mHi;
+        if (p.Gate[layer] != None)
+        {
+            mLo = lo[p.Gate[layer]];
+            mHi = hi[p.Gate[layer]];
+        }
+
+        if (mHi <= 0f)
+            return;
+
+        int fine = p.At(minLod, layer), coarse = p.At(maxLod, layer);
+        AbsInterval(lo[src], hi[src], out var absLo, out var absHi);
+        float gLo = MathF.Max(lo[src + 1], gMin), gHi = MathF.Max(hi[src + 1], gMin);
+        var most = CanyonProfile(absLo / gHi / halfWidth * (1f - RelativeSlack), floor, benches, MathF.Max(p.RiserBand[fine], p.RiserBand[coarse]));
+        var least = CanyonProfile(absHi / gLo / halfWidth * (1f + RelativeSlack), floor, benches, MathF.Min(p.RiserBand[fine], p.RiserBand[coarse]));
+        float wA = p.LodWeight[fine], wB = p.LodWeight[coarse];
+        var deepest = MathF.Max(wA * most + (1f - wA) * mean, wB * most + (1f - wB) * mean);
+        var shallowest = MathF.Min(wA * least + (1f - wA) * mean, wB * least + (1f - wB) * mean);
+        lo[dst] -= depth * mHi * deepest;
+        hi[dst] -= depth * MathF.Max(mLo, 0f) * shallowest;
     }
 
     private static void MaskBounds(PlanetKindProgram p, int layer, double qx, double qy, double qz, double rho, Span<float> lo, Span<float> hi)

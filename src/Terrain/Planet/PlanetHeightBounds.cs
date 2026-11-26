@@ -120,12 +120,17 @@ public sealed class PlanetHeightBounds
     /// <summary>Bounds of H over the cap for every LOD in [<paramref name="minLod"/>, <paramref name="maxLod"/>].</summary>
     public void Query(double dx, double dy, double dz, double angle, int minLod, int maxLod, out float lo, out float hi)
     {
-        if (angle < _allowance[0] * RefineShare)
-        {
+        if (Refines(angle))
             Generator.Surface.Bounds(dx, dy, dz, angle, minLod, maxLod, out lo, out hi);
-            return;
-        }
+        else
+            Lookup(dx, dy, dz, angle, minLod, out lo, out hi);
+    }
 
+    private bool Refines(double angle) => angle < _allowance[0] * RefineShare;
+
+    /// <summary>The pyramid's bounds over the cap: the texel holding its centre, at the finest level whose allowance covers it.</summary>
+    private void Lookup(double dx, double dy, double dz, double angle, int minLod, out float lo, out float hi)
+    {
         var band = minLod >= CoarseBandLod ? 1 : 0;
 
         for (var level = 0; level < Levels; level++)
@@ -200,16 +205,25 @@ public sealed class PlanetHeightBounds
         if (half >= dc || lod > PlanetGenerator.MaxLod)
             return NodeClass.Surface;
 
-        var angle = Math.Asin(half / dc) + PlanetGenerator.LatticePadCells * Generator.CellAngle(lod);
-        Query(cx / dc, cy / dc, cz / dc, angle, Math.Min(wantLod, lod), Math.Max(maxLod, lod), out var lo, out hi);
+        (wantLod, maxLod) = (Math.Min(wantLod, lod), Math.Max(maxLod, lod));
+        var angle = Math.Asin(half / dc) + PlanetGenerator.LatticePadCells * Generator.CellAngle(maxLod);
+        Lookup(cx / dc, cy / dc, cz / dc, angle, wantLod, out var lo, out hi);
+        var cls = Uniform(wMin, wMax, lo, hi, pad);
 
+        if (cls != NodeClass.Surface || !Refines(angle))
+            return cls;
+
+        Generator.Surface.Bounds(cx / dc, cy / dc, cz / dc, angle, wantLod, maxLod, out var bottom, out var top);
+        (lo, hi) = (MathF.Max(lo, bottom), MathF.Min(hi, top));
+        return Uniform(wMin, wMax, lo, hi, pad);
+    }
+
+    private static NodeClass Uniform(double wMin, double wMax, float lo, float hi, float pad)
+    {
         if (wMin > hi + pad)
             return NodeClass.Air;
 
-        if (wMax < lo - pad)
-            return NodeClass.Solid;
-
-        return NodeClass.Surface;
+        return wMax < lo - pad ? NodeClass.Solid : NodeClass.Surface;
     }
 
     private void TexelCentre(int face, int i, int j, int n, out double dx, out double dy, out double dz) =>
