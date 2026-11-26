@@ -702,6 +702,41 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
         Assert.True(surfaces >= 8);
     }
 
+    /// <summary>A point query runs each layer's octaves eight at a time: the same heights and bounds, bit for bit, as octave by octave.</summary>
+    [Theory]
+    [InlineData("legacy-rolling")]
+    [InlineData(TestKinds.Temperate)]
+    [InlineData(TestKinds.Barren)]
+    [InlineData(TestKinds.Desert)]
+    [InlineData(TestKinds.Mountains)]
+    [InlineData(TestKinds.Mesa)]
+    public void PointOctavesMatchScalar(string kind)
+    {
+        var surface = (kind == "legacy-rolling" ? TestPlanet.Generator : TestKinds.Generator(kind)).Surface;
+        var random = new Random(101);
+
+        for (var n = 0; n < 3000; n++)
+        {
+            TestKinds.RandomDirection(random, out var x, out var y, out var z);
+            var lod = n % (PlanetGenerator.MaxLod + 1);
+            var angle = Math.Pow(10.0, -6.0 + 4.0 * random.NextDouble());
+            var vector = surface.Height(x, y, z, lod);
+            surface.Bounds(x, y, z, angle, lod, PlanetGenerator.MaxLod, out var lo, out var hi);
+
+            try
+            {
+                LayerOps.SimdEnabled = false;
+                Assert.Equal(BitConverter.SingleToInt32Bits(surface.Height(x, y, z, lod)), BitConverter.SingleToInt32Bits(vector));
+                surface.Bounds(x, y, z, angle, lod, PlanetGenerator.MaxLod, out var scalarLo, out var scalarHi);
+                Assert.Equal((scalarLo, scalarHi), (lo, hi));
+            }
+            finally
+            {
+                LayerOps.SimdEnabled = true;
+            }
+        }
+    }
+
     [Fact]
     public void WarpThatFoldsIsRejected()
     {

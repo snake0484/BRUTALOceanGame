@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace BrutalGame.Terrain;
 
 /// <summary>
@@ -10,6 +12,7 @@ internal static partial class LayerOps
     private const float BoundsSlack = 0.05f;
     private const float RelativeSlack = 2e-5f;
     private const double SlopeSlack = 1e-4;
+    private const int VectorOctaves = 3;
 
     /// <param name="rho">Cap radius on the datum sphere (m).</param>
     /// <param name="layers">Run only the first so many layers (the compiler's worst-case sum before the knee).</param>
@@ -70,19 +73,55 @@ internal static partial class LayerOps
         hi += BoundsSlack + RelativeSlack * MathF.Abs(hi);
     }
 
-    private static void OctaveInterval(PlanetKindProgram p, int octave, double qx, double qy, double qz, double reach, out float nLo, out float nHi)
+    /// <summary>
+    /// An octave over the reach about q: its value there ± the least of the noise's steepest slope × the distance and
+    /// its slope there × the distance + half the slope's own Lipschitz bound × the distance squared.
+    /// </summary>
+    /// <param name="centre">The layer's octave values at q from <paramref name="first"/>, then their three derivative components; or empty to evaluate this one.</param>
+    private static void OctaveInterval(PlanetKindProgram p, int octave, ReadOnlySpan<float> centre, int first, double qx, double qy, double qz, double reach, out float nLo, out float nHi)
     {
         var f = p.Frequency[octave];
-        var spread = (float)(Noise.GradientLipschitz * f * reach);
+        var across = f * reach;
         nLo = -1f;
         nHi = 1f;
 
-        if (spread >= 1f)
+        if (Noise.GradientLipschitz * across >= 1.0)
             return;
 
-        var n = Math.Clamp(Noise.Gradient3(qx * f + p.OffsetX[octave], qy * f + p.OffsetY[octave], qz * f + p.OffsetZ[octave], p.Seed[octave]), -1f, 1f);
+        float n, gx, gy, gz;
+
+        if (centre.IsEmpty)
+        {
+            n = Math.Clamp(Noise.Gradient3(qx * f + p.OffsetX[octave], qy * f + p.OffsetY[octave], qz * f + p.OffsetZ[octave], p.Seed[octave], out gx, out gy, out gz), -1f, 1f);
+        }
+        else
+        {
+            var count = centre.Length / 4;
+            var k = octave - first;
+            (n, gx, gy, gz) = (centre[k], centre[count + k], centre[2 * count + k], centre[3 * count + k]);
+        }
+
+        var spread = (float)Spread(across, gx, gy, gz);
         nLo = MathF.Max(n - spread, -1f);
         nHi = MathF.Min(n + spread, 1f);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static double Spread(double across, float gx, float gy, float gz)
+    {
+        var slope = Math.Sqrt((double)gx * gx + (double)gy * gy + (double)gz * gz);
+        return Math.Min(Noise.GradientLipschitz * across, (slope + 0.5 * Noise.SlopeLipschitz * across) * across * (1.0 + SlopeSlack));
+    }
+
+    /// <summary>The layer's first octaves and their derivatives at one point, eight at a time; empty without AVX2.</summary>
+    private static ReadOnlySpan<float> Centres(PlanetKindProgram p, int first, int count, double qx, double qy, double qz, Span<float> buffer)
+    {
+        var all = buffer[..(4 * count)];
+
+        return count > 0 && NoiseOctavesSimd(qx, qy, qz, p.Frequency.AsSpan(first, count), p.OffsetX.AsSpan(first, count), p.OffsetY.AsSpan(first, count), p.OffsetZ.AsSpan(first, count), p.Seed.AsSpan(first, count),
+            all[..count], all.Slice(count, count), all.Slice(2 * count, count), all.Slice(3 * count, count))
+            ? all
+            : default;
     }
 
     private static void AbsInterval(float nLo, float nHi, out float absLo, out float absHi)
@@ -91,6 +130,7 @@ internal static partial class LayerOps
         absHi = MathF.Max(MathF.Abs(nLo), MathF.Abs(nHi));
     }
 
+    [SkipLocalsInit]
     private static void NoiseBounds(PlanetKindProgram p, int layer, double qx, double qy, double qz, double rho, int minLod, int maxLod, Span<float> lo, Span<float> hi)
     {
         var dst = p.Dst[layer];
@@ -120,6 +160,14 @@ internal static partial class LayerOps
         }
 
         float sumLo = 0f, sumHi = 0f;
+        Span<float> buffer = stackalloc float[PlanetKindProgram.OctaveCache];
+        var near = 0;
+
+        while (near < endMin && Noise.GradientLipschitz * p.Frequency[first + near * p.Fields(layer)] * reach < 1.0)
+            near++;
+
+        // Octaves too fine to tell across the reach need no value; a couple are as quick one by one.
+        var centre = fields == 4 || near < VectorOctaves ? default : Centres(p, first, near * p.Fields(layer), qx, qy, qz, buffer);
 
         switch (op)
         {
@@ -131,7 +179,7 @@ internal static partial class LayerOps
 
                     for (var o = 0; o < endMin; o++)
                     {
-                        OctaveInterval(p, first + 3 * o + c, qx, qy, qz, reach, out var nLo, out var nHi);
+                        OctaveInterval(p, first + 3 * o + c, centre, first, qx, qy, qz, reach, out var nLo, out var nHi);
                         Accumulate(p.Amplitude[first + 3 * o + c] * nLo, p.Amplitude[first + 3 * o + c] * nHi, o >= endMax, 0f, ref sumLo, ref sumHi);
                     }
 
@@ -145,7 +193,7 @@ internal static partial class LayerOps
             {
                 for (var o = 0; o < endMin; o++)
                 {
-                    OctaveInterval(p, first + o, qx, qy, qz, reach, out var nLo, out var nHi);
+                    OctaveInterval(p, first + o, centre, first, qx, qy, qz, reach, out var nLo, out var nHi);
                     AbsInterval(nLo, nHi, out var absLo, out var absHi);
                     var a = p.Amplitude[first + o];
                     Accumulate(a * (1f - absHi) * (1f - absHi), a * (1f - absLo) * (1f - absLo), o >= endMax, 0f, ref sumLo, ref sumHi);
@@ -162,7 +210,7 @@ internal static partial class LayerOps
             {
                 for (var o = 0; o < endMin; o++)
                 {
-                    OctaveInterval(p, first + o, qx, qy, qz, reach, out var nLo, out var nHi);
+                    OctaveInterval(p, first + o, centre, first, qx, qy, qz, reach, out var nLo, out var nHi);
                     Accumulate(p.Amplitude[first + o] * nLo, p.Amplitude[first + o] * nHi, o >= endMax, 0f, ref sumLo, ref sumHi);
                 }
 
@@ -184,7 +232,7 @@ internal static partial class LayerOps
                         continue;
                     }
 
-                    OctaveInterval(p, first + o, qx, qy, qz, reach, out var nLo, out var nHi);
+                    OctaveInterval(p, first + o, centre, first, qx, qy, qz, reach, out var nLo, out var nHi);
                     AbsInterval(nLo, nHi, out var absLo, out var absHi);
                     var sLo = (1f - absHi) * (1f - absHi) * wLo;
                     var sHi = (1f - absLo) * (1f - absLo) * wHi;
@@ -209,7 +257,7 @@ internal static partial class LayerOps
                         continue;
                     }
 
-                    OctaveInterval(p, first + o, qx, qy, qz, reach, out var nLo, out var nHi);
+                    OctaveInterval(p, first + o, centre, first, qx, qy, qz, reach, out var nLo, out var nHi);
                     AbsInterval(nLo, nHi, out var absLo, out var absHi);
                     var a = p.Amplitude[first + o];
                     Accumulate(a * (2f * absLo - 1f), a * (2f * absHi - 1f), o >= endMax, mean, ref sumLo, ref sumHi);
@@ -221,7 +269,7 @@ internal static partial class LayerOps
             {
                 for (var o = 0; o < endMin; o++)
                 {
-                    OctaveInterval(p, first + o, qx, qy, qz, reach, out var nLo, out var nHi);
+                    OctaveInterval(p, first + o, centre, first, qx, qy, qz, reach, out var nLo, out var nHi);
                     var a = p.Amplitude[first + o];
                     var least = p.OctaveMean[first + o];
                     Accumulate(a * MathF.Min(nLo * least, nLo), a * MathF.Max(nHi * least, nHi), o >= endMax, 0f, ref sumLo, ref sumHi);
@@ -251,14 +299,14 @@ internal static partial class LayerOps
         {
             var f = p.Frequency[first + o];
             var a = p.Amplitude[first + o];
-            var spread = (float)(Noise.GradientLipschitz * f * reach);
             var bend = Noise.SlopeLipschitz * f * reach;
             steepest += a * f * Noise.GradientLipschitz;
             float nLo = -1f, nHi = 1f;
 
-            if (spread < 1f)
+            if (Noise.GradientLipschitz * f * reach < 1.0)
             {
                 var n = Math.Clamp(Noise.Gradient3(qx * f + p.OffsetX[first + o], qy * f + p.OffsetY[first + o], qz * f + p.OffsetZ[first + o], p.Seed[first + o], out var dx, out var dy, out var dz), -1f, 1f);
+                var spread = (float)Spread(f * reach, dx, dy, dz);
                 nLo = MathF.Max(n - spread, -1f);
                 nHi = MathF.Min(n + spread, 1f);
 

@@ -53,6 +53,7 @@ public sealed class PlanetSurface
     public float Height(double dx, double dy, double dz, int lod = 0)
     {
         Span<float> rows = stackalloc float[Program.Rows];
+        Span<float> octaves = stackalloc float[PlanetKindProgram.OctaveCache];
         var x = dx * Radius;
         var y = dy * Radius;
         var z = dz * Radius;
@@ -64,6 +65,7 @@ public sealed class PlanetSurface
             Y = new ReadOnlySpan<double>(in y),
             Z = new ReadOnlySpan<double>(in z),
             Ch = rows,
+            Octaves = octaves,
             Count = 1,
             Stride = 1,
             Channels = Program.ChannelCount,

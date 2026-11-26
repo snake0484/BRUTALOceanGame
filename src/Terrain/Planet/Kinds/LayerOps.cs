@@ -22,6 +22,13 @@ internal ref struct RowSet
     public ReadOnlySpan<int> ColA, ColB, RowA, RowB;
     public ReadOnlySpan<float> ColF, RowF;
 
+    /// <summary>
+    /// A single point's octave cache (<see cref="PlanetKindProgram.OctaveCache"/> floats, or empty): the layer being
+    /// evaluated has its octaves' values, then their three derivative components, from table entry OctaveFirst.
+    /// </summary>
+    public Span<float> Octaves;
+    public int OctaveFirst, OctaveCount;
+
     /// <summary>A lattice window's face, cells per side and job scratch (stamp list); null scratch for point queries.</summary>
     public PlanetChunkScratch? Scratch;
     public int Face, N;
@@ -248,6 +255,8 @@ internal static partial class LayerOps
             return;
         }
 
+        Prefetch(p, layer, end, gradient || p.Op[layer] == LayerOp.Eroded, ref r);
+
         switch (p.Op[layer])
         {
             case LayerOp.Warp:
@@ -366,6 +375,31 @@ internal static partial class LayerOps
         }
     }
 
+    /// <summary>A lone point with an octave cache gets the layer's octaves eight at a time; <see cref="NoiseRows"/> then reads them.</summary>
+    private static void Prefetch(PlanetKindProgram p, int layer, int octaves, bool derivative, ref RowSet r)
+    {
+        r.OctaveCount = 0;
+        var count = octaves * p.Fields(layer);
+
+        if (r.Count != 1 || count == 0 || r.Octaves.Length < 4 * count)
+            return;
+
+        var first = p.FirstOctave[layer];
+        var warp = p.Warp[layer];
+        double x = r.X[0], y = r.Y[0], z = r.Z[0];
+
+        if (warp != None)
+            (x, y, z) = (x + r.Row(warp)[0], y + r.Row(warp + 1)[0], z + r.Row(warp + 2)[0]);
+
+        var o = r.Octaves;
+
+        if (!NoiseOctavesSimd(x, y, z, p.Frequency.AsSpan(first, count), p.OffsetX.AsSpan(first, count), p.OffsetY.AsSpan(first, count), p.OffsetZ.AsSpan(first, count), p.Seed.AsSpan(first, count),
+                o[..count], derivative ? o.Slice(count, count) : default, derivative ? o.Slice(2 * count, count) : default, derivative ? o.Slice(3 * count, count) : default))
+            return;
+
+        (r.OctaveFirst, r.OctaveCount) = (first, count);
+    }
+
     private static void Start(ref RowSet r, Span<float> dst, bool fromCoarse, int slot)
     {
         if (fromCoarse)
@@ -429,6 +463,18 @@ internal static partial class LayerOps
         var seed = p.Seed[octave];
         var warped = warp != None;
         var derivative = !gx.IsEmpty;
+        var cached = octave - r.OctaveFirst;
+
+        if ((uint)cached < (uint)r.OctaveCount)
+        {
+            n[0] = r.Octaves[cached];
+
+            if (derivative)
+                (gx[0], gy[0], gz[0]) = (r.Octaves[r.OctaveCount + cached], r.Octaves[2 * r.OctaveCount + cached], r.Octaves[3 * r.OctaveCount + cached]);
+
+            return;
+        }
+
         ReadOnlySpan<float> wx = warped ? r.Row(warp) : default, wy = warped ? r.Row(warp + 1) : default, wz = warped ? r.Row(warp + 2) : default;
         var start = gate.IsEmpty || !MostlyZero(gate) ? NoiseRowSimd(r.X, r.Y, r.Z, wx, wy, wz, f, ox, oy, oz, seed, n, gx, gy, gz) : 0;
 

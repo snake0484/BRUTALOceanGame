@@ -6,7 +6,8 @@ using System.Runtime.Intrinsics.X86;
 namespace BrutalGame.Terrain;
 
 /// <summary>
-/// The lattice noise eight points at a time (AVX2). Every operation is the scalar one in the same order, with no FMA:
+/// The lattice noise eight lanes at a time (AVX2): eight points of one octave, or eight octaves of one point. Every
+/// operation is the scalar one in the same order, with no FMA:
 /// the cell comes from a double floor split into exact 32-bit halves, the gradients from byte shuffles of the same
 /// table (so a zero component still multiplies), and the float maths lane for lane. Results equal
 /// <see cref="Noise.Gradient3(double, double, double, uint)"/> bit for bit.
@@ -46,7 +47,6 @@ internal static partial class LayerOps
         var warped = !wx.IsEmpty;
         var derivative = !gx.IsEmpty;
         var seeds = Vector256.Create(seed);
-        var one = Vector256.Create(1f);
         ref var rx = ref MemoryMarshal.GetReference(x);
         ref var ry = ref MemoryMarshal.GetReference(y);
         ref var rz = ref MemoryMarshal.GetReference(z);
@@ -64,46 +64,116 @@ internal static partial class LayerOps
                 Offset(ref z0, ref z1, wz, i);
             }
 
-            Axis(x0, x1, f, ox, out var fx, out var cx0, out var cx1);
-            Axis(y0, y1, f, oy, out var fy, out var cy0, out var cy1);
-            Axis(z0, z1, f, oz, out var fz, out var cz0, out var cz1);
-            var hx0 = Avx2.Xor(seeds, Avx2.MultiplyLow(cx0, Vector256.Create(0x8DA6B343u)));
-            var hx1 = Avx2.Xor(seeds, Avx2.MultiplyLow(cx1, Vector256.Create(0x8DA6B343u)));
-            var hy0 = Avx2.MultiplyLow(cy0, Vector256.Create(0xD8163841u));
-            var hy1 = Avx2.MultiplyLow(cy1, Vector256.Create(0xD8163841u));
-            var hz0 = Avx2.MultiplyLow(cz0, Vector256.Create(0xCB1AB31Fu));
-            var hz1 = Avx2.MultiplyLow(cz1, Vector256.Create(0xCB1AB31Fu));
-            var u = Fade(fx);
-            var v = Fade(fy);
-            var w = Fade(fz);
-            Vector256<float> fx1 = Avx.Subtract(fx, one), fy1 = Avx.Subtract(fy, one), fz1 = Avx.Subtract(fz, one);
-            var n000 = Corner(Avx2.Xor(Avx2.Xor(hx0, hy0), hz0), fx, fy, fz, out var ax000, out var ay000, out var az000);
-            var n100 = Corner(Avx2.Xor(Avx2.Xor(hx1, hy0), hz0), fx1, fy, fz, out var ax100, out var ay100, out var az100);
-            var n010 = Corner(Avx2.Xor(Avx2.Xor(hx0, hy1), hz0), fx, fy1, fz, out var ax010, out var ay010, out var az010);
-            var n110 = Corner(Avx2.Xor(Avx2.Xor(hx1, hy1), hz0), fx1, fy1, fz, out var ax110, out var ay110, out var az110);
-            var n001 = Corner(Avx2.Xor(Avx2.Xor(hx0, hy0), hz1), fx, fy, fz1, out var ax001, out var ay001, out var az001);
-            var n101 = Corner(Avx2.Xor(Avx2.Xor(hx1, hy0), hz1), fx1, fy, fz1, out var ax101, out var ay101, out var az101);
-            var n011 = Corner(Avx2.Xor(Avx2.Xor(hx0, hy1), hz1), fx, fy1, fz1, out var ax011, out var ay011, out var az011);
-            var n111 = Corner(Avx2.Xor(Avx2.Xor(hx1, hy1), hz1), fx1, fy1, fz1, out var ax111, out var ay111, out var az111);
-            var a = Lerp(Lerp(n000, n100, u), Lerp(n010, n110, u), v);
-            var b = Lerp(Lerp(n001, n101, u), Lerp(n011, n111, u), v);
-            var value = Lerp(a, b, w);
-            Avx.Min(Avx.Max(value, Vector256.Create(-1f)), one).StoreUnsafe(ref MemoryMarshal.GetReference(n), (nuint)i);
+            Vector256<double> vf = Vector256.Create(f), vx = Vector256.Create(ox), vy = Vector256.Create(oy), vz = Vector256.Create(oz);
+            var value = Lanes(Scaled(x0, vf, vx), Scaled(x1, vf, vx), Scaled(y0, vf, vy), Scaled(y1, vf, vy), Scaled(z0, vf, vz), Scaled(z1, vf, vz), seeds, derivative, out var dx, out var dy, out var dz);
+            value.StoreUnsafe(ref MemoryMarshal.GetReference(n), (nuint)i);
 
             if (!derivative)
                 continue;
 
-            var dx = Avx.Add(Blend(ax000, ax100, ax010, ax110, ax001, ax101, ax011, ax111, u, v, w),
-                Avx.Multiply(FadeSlope(fx, fx1), Lerp(Lerp(Avx.Subtract(n100, n000), Avx.Subtract(n110, n010), v), Lerp(Avx.Subtract(n101, n001), Avx.Subtract(n111, n011), v), w)));
-            var dy = Avx.Add(Blend(ay000, ay100, ay010, ay110, ay001, ay101, ay011, ay111, u, v, w),
-                Avx.Multiply(FadeSlope(fy, fy1), Lerp(Lerp(Avx.Subtract(n010, n000), Avx.Subtract(n110, n100), u), Lerp(Avx.Subtract(n011, n001), Avx.Subtract(n111, n101), u), w)));
-            var dz = Avx.Add(Blend(az000, az100, az010, az110, az001, az101, az011, az111, u, v, w), Avx.Multiply(FadeSlope(fz, fz1), Avx.Subtract(b, a)));
             dx.StoreUnsafe(ref MemoryMarshal.GetReference(gx), (nuint)i);
             dy.StoreUnsafe(ref MemoryMarshal.GetReference(gy), (nuint)i);
             dz.StoreUnsafe(ref MemoryMarshal.GetReference(gz), (nuint)i);
         }
 
         return count;
+    }
+
+    /// <summary>
+    /// One point's octaves, eight at a time (the last lanes padded): the same values as the scalar noise octave by
+    /// octave. False without AVX2, with nothing written.
+    /// </summary>
+    [SkipLocalsInit]
+    private static bool NoiseOctavesSimd(double x, double y, double z, ReadOnlySpan<double> f, ReadOnlySpan<double> ox, ReadOnlySpan<double> oy, ReadOnlySpan<double> oz, ReadOnlySpan<uint> seed,
+        Span<float> n, Span<float> gx, Span<float> gy, Span<float> gz)
+    {
+        if (!SimdEnabled || !Avx2.IsSupported)
+            return false;
+
+        var derivative = !gx.IsEmpty;
+        Span<double> table = stackalloc double[4 * 8];
+        Span<uint> seeds = stackalloc uint[8];
+        Span<float> lanes = stackalloc float[4 * 8];
+        Vector256<double> vx = Vector256.Create(x), vy = Vector256.Create(y), vz = Vector256.Create(z);
+        ref var t = ref MemoryMarshal.GetReference(table);
+
+        for (var i = 0; i < n.Length; i += 8)
+        {
+            var take = Math.Min(8, n.Length - i);
+            table.Clear();
+            seeds.Clear();
+            f.Slice(i, take).CopyTo(table);
+            ox.Slice(i, take).CopyTo(table[8..]);
+            oy.Slice(i, take).CopyTo(table[16..]);
+            oz.Slice(i, take).CopyTo(table[24..]);
+            seed.Slice(i, take).CopyTo(seeds);
+            Vector256<double> f0 = Vector256.LoadUnsafe(ref t), f1 = Vector256.LoadUnsafe(ref t, 4);
+            var value = Lanes(
+                Scaled(vx, f0, Vector256.LoadUnsafe(ref t, 8)), Scaled(vx, f1, Vector256.LoadUnsafe(ref t, 12)),
+                Scaled(vy, f0, Vector256.LoadUnsafe(ref t, 16)), Scaled(vy, f1, Vector256.LoadUnsafe(ref t, 20)),
+                Scaled(vz, f0, Vector256.LoadUnsafe(ref t, 24)), Scaled(vz, f1, Vector256.LoadUnsafe(ref t, 28)),
+                Vector256.LoadUnsafe(ref MemoryMarshal.GetReference(seeds)), derivative, out var dx, out var dy, out var dz);
+            value.CopyTo(lanes);
+            lanes[..take].CopyTo(n[i..]);
+
+            if (!derivative)
+                continue;
+
+            dx.CopyTo(lanes[8..]);
+            dy.CopyTo(lanes[16..]);
+            dz.CopyTo(lanes[24..]);
+            lanes.Slice(8, take).CopyTo(gx[i..]);
+            lanes.Slice(16, take).CopyTo(gy[i..]);
+            lanes.Slice(24, take).CopyTo(gz[i..]);
+        }
+
+        return true;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector256<double> Scaled(Vector256<double> position, Vector256<double> f, Vector256<double> offset) => Avx.Add(Avx.Multiply(position, f), offset);
+
+    /// <summary>Eight lanes of noise at lattice positions (already position × f + offset), clamped to [−1, 1], and the unclamped derivative if asked.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector256<float> Lanes(Vector256<double> px0, Vector256<double> px1, Vector256<double> py0, Vector256<double> py1, Vector256<double> pz0, Vector256<double> pz1,
+        Vector256<uint> seeds, bool derivative, out Vector256<float> dx, out Vector256<float> dy, out Vector256<float> dz)
+    {
+        var one = Vector256.Create(1f);
+        Cells(px0, px1, out var fx, out var cx0, out var cx1);
+        Cells(py0, py1, out var fy, out var cy0, out var cy1);
+        Cells(pz0, pz1, out var fz, out var cz0, out var cz1);
+        var hx0 = Avx2.Xor(seeds, Avx2.MultiplyLow(cx0, Vector256.Create(0x8DA6B343u)));
+        var hx1 = Avx2.Xor(seeds, Avx2.MultiplyLow(cx1, Vector256.Create(0x8DA6B343u)));
+        var hy0 = Avx2.MultiplyLow(cy0, Vector256.Create(0xD8163841u));
+        var hy1 = Avx2.MultiplyLow(cy1, Vector256.Create(0xD8163841u));
+        var hz0 = Avx2.MultiplyLow(cz0, Vector256.Create(0xCB1AB31Fu));
+        var hz1 = Avx2.MultiplyLow(cz1, Vector256.Create(0xCB1AB31Fu));
+        var u = Fade(fx);
+        var v = Fade(fy);
+        var w = Fade(fz);
+        Vector256<float> fx1 = Avx.Subtract(fx, one), fy1 = Avx.Subtract(fy, one), fz1 = Avx.Subtract(fz, one);
+        var n000 = Corner(Avx2.Xor(Avx2.Xor(hx0, hy0), hz0), fx, fy, fz, out var ax000, out var ay000, out var az000);
+        var n100 = Corner(Avx2.Xor(Avx2.Xor(hx1, hy0), hz0), fx1, fy, fz, out var ax100, out var ay100, out var az100);
+        var n010 = Corner(Avx2.Xor(Avx2.Xor(hx0, hy1), hz0), fx, fy1, fz, out var ax010, out var ay010, out var az010);
+        var n110 = Corner(Avx2.Xor(Avx2.Xor(hx1, hy1), hz0), fx1, fy1, fz, out var ax110, out var ay110, out var az110);
+        var n001 = Corner(Avx2.Xor(Avx2.Xor(hx0, hy0), hz1), fx, fy, fz1, out var ax001, out var ay001, out var az001);
+        var n101 = Corner(Avx2.Xor(Avx2.Xor(hx1, hy0), hz1), fx1, fy, fz1, out var ax101, out var ay101, out var az101);
+        var n011 = Corner(Avx2.Xor(Avx2.Xor(hx0, hy1), hz1), fx, fy1, fz1, out var ax011, out var ay011, out var az011);
+        var n111 = Corner(Avx2.Xor(Avx2.Xor(hx1, hy1), hz1), fx1, fy1, fz1, out var ax111, out var ay111, out var az111);
+        var a = Lerp(Lerp(n000, n100, u), Lerp(n010, n110, u), v);
+        var b = Lerp(Lerp(n001, n101, u), Lerp(n011, n111, u), v);
+        var value = Avx.Min(Avx.Max(Lerp(a, b, w), Vector256.Create(-1f)), one);
+        dx = dy = dz = default;
+
+        if (!derivative)
+            return value;
+
+        dx = Avx.Add(Blend(ax000, ax100, ax010, ax110, ax001, ax101, ax011, ax111, u, v, w),
+            Avx.Multiply(FadeSlope(fx, fx1), Lerp(Lerp(Avx.Subtract(n100, n000), Avx.Subtract(n110, n010), v), Lerp(Avx.Subtract(n101, n001), Avx.Subtract(n111, n011), v), w)));
+        dy = Avx.Add(Blend(ay000, ay100, ay010, ay110, ay001, ay101, ay011, ay111, u, v, w),
+            Avx.Multiply(FadeSlope(fy, fy1), Lerp(Lerp(Avx.Subtract(n010, n000), Avx.Subtract(n110, n100), u), Lerp(Avx.Subtract(n011, n001), Avx.Subtract(n111, n101), u), w)));
+        dz = Avx.Add(Blend(az000, az100, az010, az110, az001, az101, az011, az111, u, v, w), Avx.Multiply(FadeSlope(fz, fz1), Avx.Subtract(b, a)));
+        return value;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -114,12 +184,10 @@ internal static partial class LayerOps
         hi = Avx.Add(hi, Avx.ConvertToVector256Double(Vector128.LoadUnsafe(ref r, (nuint)i + 4)));
     }
 
-    /// <summary>position × f + offset per lane: the in-cell fraction as float and the folded cell hashes of the cell and the next.</summary>
+    /// <summary>Per lane of lattice position: the in-cell fraction as float and the folded cell hashes of the cell and the next.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void Axis(Vector256<double> lo, Vector256<double> hi, double f, double offset, out Vector256<float> fraction, out Vector256<uint> cell, out Vector256<uint> next)
+    private static void Cells(Vector256<double> p0, Vector256<double> p1, out Vector256<float> fraction, out Vector256<uint> cell, out Vector256<uint> next)
     {
-        var p0 = Avx.Add(Avx.Multiply(lo, Vector256.Create(f)), Vector256.Create(offset));
-        var p1 = Avx.Add(Avx.Multiply(hi, Vector256.Create(f)), Vector256.Create(offset));
         var f0 = Avx.Floor(p0);
         var f1 = Avx.Floor(p1);
         fraction = Vector256.Create(Avx.ConvertToVector128Single(Avx.Subtract(p0, f0)), Avx.ConvertToVector128Single(Avx.Subtract(p1, f1)));
