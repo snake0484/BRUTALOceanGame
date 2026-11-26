@@ -18,7 +18,7 @@ public static class SampleComponents
     {
         var session = new DesignSession();
         session.Doc.Level = PlanLevel.Component;
-        session.Doc.Meta.Name = "Chemical rocket, 4 kN";
+        session.Doc.Meta.Name = "Chemical rocket, methane-oxygen, 9 kN";
 
         var chamber = ComponentCommands.AddPart(session, PartKind.Chamber, copper, new Vector3d(0, 0, 0));
         var nozzle = ComponentCommands.AddPart(session, PartKind.Nozzle, superalloy, new Vector3d(0, -0.21, 0));

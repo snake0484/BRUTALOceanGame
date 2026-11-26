@@ -8,6 +8,9 @@ public sealed class ExpandedHull
     public HullSolid[] Solids = [];
     public List<HullMesh> Meshes = new();
 
+    /// <summary>How many of <see cref="Solids"/> are the plan's own; the generated ones follow.</summary>
+    public int PlanSolids;
+
     /// <summary>Generated solids (stamps and sweep pieces).</summary>
     public int Generated;
 
@@ -46,7 +49,7 @@ public static class StrokeExpansion
 
     public static ExpandedHull Expand(ReadOnlySpan<HullSolid> solids, IReadOnlyList<HullMesh> meshes, HullBrushSet? set)
     {
-        var result = new ExpandedHull();
+        var result = new ExpandedHull { PlanSolids = solids.Length };
         result.Meshes.AddRange(meshes);
 
         if (set is null || set.Strokes.Count == 0)

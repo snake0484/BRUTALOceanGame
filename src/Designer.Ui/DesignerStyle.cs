@@ -100,6 +100,9 @@ public sealed class DesignerStyle
             [Window][Solids]
             DockId=0x00000008,0
 
+            [Window][Components]
+            DockId=0x00000008,1
+
             [Window][Properties]
             DockId=0x00000005,0
 
@@ -111,6 +114,12 @@ public sealed class DesignerStyle
 
             [Window][Brushes]
             DockId=0x00000005,3
+
+            [Window][Parts]
+            DockId=0x00000005,4
+
+            [Window][Test bench]
+            DockId=0x00000005,5
 
             [Window][Stats]
             DockId=0x00000006,0

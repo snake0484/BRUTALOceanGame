@@ -8,6 +8,8 @@ using BrutalGame.Engine.Jobs;
 using BrutalGame.Engine.Rendering;
 using BrutalGame.Engine.Time;
 using BrutalGame.Plans;
+using BrutalGame.Ships.Components;
+using BrutalGame.Chemistry;
 using BrutalGame.Ships;
 
 namespace BrutalGame.Designer.App;
@@ -36,7 +38,15 @@ public sealed class DesignerApp : IDisposable
     private readonly HullBins _bins = new();
     private readonly HullMaterialCatalog _catalog;
     private readonly FilePlanHost _files = new();
-    private readonly DesignSession _session = new();
+    private DesignSession _session;
+    private readonly DesignSession _shipSession = new();
+    private readonly DesignSession _componentSession = new(new PlanDocument { Level = PlanLevel.Component });
+    private readonly ChemistryData _chemistry;
+    private readonly ComponentWorkspace _componentWorkspace;
+    private readonly PrefabLibrary _library;
+    private readonly PrefabPanel _prefabPanel;
+    private readonly Dictionary<ulong, PrefabShape> _shapes = new();
+    private Workspace _workspace;
     private readonly DesignerPanels _panels;
     private readonly DesignerStyle _style = new();
     private readonly DesignStats _stats = new();
@@ -56,7 +66,13 @@ public sealed class DesignerApp : IDisposable
     public DesignerApp(string dataFolder, string? load, bool demo, bool demoMesh, string? saveOnExit, int closeAfterFrames, double[]? view = null, string? script = null, bool demoLayered = false, string[]? cutaway = null)
     {
         _catalog = HullMaterialCatalog.Load(dataFolder);
+        _chemistry = ChemistryData.Load(dataFolder);
         _panels = new DesignerPanels(_catalog);
+        _session = _shipSession;
+        _componentWorkspace = new ComponentWorkspace(_catalog, _chemistry);
+        _library = new PrefabLibrary(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "BRUTALGame", "Components"));
+        RefreshLibrary();
+        _prefabPanel = new PrefabPanel(_library, Shape);
         _saveOnExit = saveOnExit;
         _closeAfterFrames = closeAfterFrames;
         _baker = new HullBaker(WorkerBudget.Background);
@@ -84,6 +100,20 @@ public sealed class DesignerApp : IDisposable
 
         if (load is not null)
             Open(load);
+        else if (EngineDemo)
+        {
+            OpenComponentCopy(Catalog().First().Prefab);
+
+            if (PlaceEngine)
+            {
+                _panels.Workspace = Workspace.Ship;
+                SwitchWorkspace(Workspace.Ship);
+                Demo(false);
+                ComponentCommands.PlacePrefab(_shipSession, Catalog().First().Prefab, new BrutalGame.Ships.Vector3d(0, 3, -3.85), BrutalGame.Ships.SolidRotation.FromSteps(0, 6, 0));
+                _panels.Workspace = Workspace.Ship;
+                SwitchWorkspace(Workspace.Ship);
+            }
+        }
         else if (demoLayered)
             DemoLayered();
         else if (demo || demoMesh)
@@ -179,19 +209,127 @@ public sealed class DesignerApp : IDisposable
         PlanCanonical.Canonicalise(copy);
         _stats.Hash = PlanFormat.HashBody(copy);
         var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), doc.Meshes, doc.Brushes);
+        var extras = new List<SurfacePolygon>();
+        var solids = new List<HullSolid>(doc.Solids.Count + 16);
+        var palette = new List<DefId>(doc.Materials);
+
+        foreach (ref readonly var s in doc.Solids.AsSpan())
+            solids.Add(s);
+
+        _stats.ComponentsKg = 0;
+
+        if (_workspace == Workspace.Component)
+        {
+            extras.AddRange(_componentWorkspace.Surfaces(_session));
+
+            if (doc.Components is not null)
+            {
+                var own = PrefabShape.Build(doc, Density);
+                _stats.ComponentsKg = own.PartsMassKg;
+            }
+        }
+        else if (doc.Components is not null)
+        {
+            // Placed prefabs: drawn from their own exact surfaces, cut out of the hull by their bounds.
+            for (var i = 0; i < doc.Components.Placements.Count; i++)
+            {
+                var placement = doc.Components.Placements[i];
+
+                if (!doc.Prefabs.TryGetValue(placement.Prefab, out var prefab))
+                    continue;
+
+                var shape = Shape(prefab);
+                var remap = new byte[Math.Max(prefab.Materials.Count, 1)];
+
+                for (var m = 0; m < prefab.Materials.Count; m++)
+                {
+                    var at = palette.IndexOf(prefab.Materials[m]);
+
+                    if (at < 0)
+                    {
+                        at = palette.Count;
+                        palette.Add(prefab.Materials[m]);
+                    }
+
+                    remap[m] = (byte)Math.Min(at, HullRenderer.PaletteSize - 1);
+                }
+
+                shape.Place(placement, m => m < remap.Length ? remap[m] : (byte)0, extras);
+                solids.Add(shape.Cutter(placement, doc.Layers is not null, 0xE0000000u | (uint)i));
+                _stats.ComponentsKg += shape.PartsMassKg;
+            }
+        }
+
         _panels.Strokes.Expanded = expanded;
         _stats.Generated = expanded.Generated;
         _stats.Unstuck = expanded.Unstuck;
         var densities = _catalog.Densities(doc);
         _baker.InnerSurfacesOnly = !_stats.ShowGrid;
-        _baker.Start(doc.Solids.AsSpan(), doc.Meshes, densities, doc.Layers);
+        _baker.Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(solids), doc.Meshes, densities, doc.Layers);
 
         // The drawn surface: exact polygons from the solids plus the brush flair, rebuilt on the job workers.
-        _surfaceBuilder.Start(doc.Solids.AsSpan(), doc.Meshes, doc.Layers is not null, expanded);
+        _surfaceBuilder.Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(solids), doc.Meshes, doc.Layers is not null, expanded, extras);
         _densities = densities;
         _shownGrid = _stats.ShowGrid;
         _surfaceChanged = true;
-        UpdatePalette(doc);
+        UpdatePalette(palette);
+    }
+
+    private int Density(DefId material) => _catalog.TryGet(material, out var m) ? m.DensityKgM3 : 0;
+
+    /// <summary>A prefab's look, bounds and mass, built once per prefab hash.</summary>
+    private PrefabShape Shape(PlanDocument prefab)
+    {
+        var hash = ComponentCommands.PrefabHash(prefab);
+
+        if (!_shapes.TryGetValue(hash, out var shape))
+            _shapes[hash] = shape = PrefabShape.Build(prefab, Density);
+
+        return shape;
+    }
+
+    private List<(string Category, PlanDocument Prefab)> _catalogPrefabs = new();
+
+    /// <summary>The built-in catalog: made in code, so always present and current.</summary>
+    private List<(string Category, PlanDocument Prefab)> Catalog()
+    {
+        if (_catalogPrefabs.Count == 0)
+        {
+            var rocket = SampleComponents.ChemicalRocket(DefId.FromName("mat.part.copper"), DefId.FromName("mat.part.inconel"), DefId.FromName("mat.part.steel"));
+            _catalogPrefabs.Add(("Propulsion", rocket));
+        }
+
+        return _catalogPrefabs;
+    }
+
+    private void RefreshLibrary() => _library.Refresh(Catalog());
+
+    private void SwitchWorkspace(Workspace workspace)
+    {
+        if (workspace == _workspace && ReferenceEquals(_session, workspace == Workspace.Component ? _componentSession : _shipSession))
+            return;
+
+        _workspace = workspace;
+        _session = workspace == Workspace.Component ? _componentSession : _shipSession;
+        _tool.GuideScale = workspace == Workspace.Component ? 0.08 : 1.0;
+        _meshEdit.Enabled = false;
+        _seenVersion = -1;
+        _panels.PathText = _session.Path.Length > 0 ? _session.Path : workspace == Workspace.Component
+            ? Path.Combine(_library.UserFolder, "component." + FilePlanHost.Extension)
+            : Path.Combine(_files.LibraryFolder, "hull." + FilePlanHost.Extension);
+        FrameHull();
+    }
+
+    /// <summary>A prefab opened as a new, unsaved component plan: editing it never changes the original.</summary>
+    private void OpenComponentCopy(PlanDocument prefab)
+    {
+        var copy = prefab.Clone();
+        copy.Level = PlanLevel.Component;
+        _componentSession.Open(copy, "");
+        _panels.Workspace = Workspace.Component;
+        SwitchWorkspace(Workspace.Component);
+        _seenVersion = -1;
+        FrameHull();
     }
 
     private readonly HullSurfaceBuilder _surfaceBuilder;
@@ -269,14 +407,14 @@ public sealed class DesignerApp : IDisposable
         Console.WriteLine($"bake {_baker.Version}: {_stats.Bricks} bricks ({_stats.ExactBricks} exact, {_stats.Rebaked} rebaked, {_stats.Reused} reused), {_stats.Triangles} tris, {_stats.BakeMs:F2} ms wall, {_stats.BakeCpuMs:F2} ms cpu, mesh prep {_stats.PrepareMs:F2} ms; mass {_baker.Mass.MassKg:F1} kg, volume {_baker.Mass.VolumeM3:F3} m3, CoM ({com.X:F3}, {com.Y:F3}, {com.Z:F3}); hash {_stats.Hash}");
     }
 
-    private void UpdatePalette(PlanDocument doc)
+    private void UpdatePalette(IReadOnlyList<DefId> materials)
     {
         Span<Vector3> colours = stackalloc Vector3[HullRenderer.PaletteSize];
         colours.Fill(new Vector3(0.6f));
 
-        for (var i = 0; i < Math.Min(doc.Materials.Count, colours.Length); i++)
+        for (var i = 0; i < Math.Min(materials.Count, colours.Length); i++)
         {
-            if (!_catalog.TryGet(doc.Materials[i], out var material))
+            if (!_catalog.TryGet(materials[i], out var material))
                 continue;
 
             var rgb = material.ColourRgb;
@@ -303,15 +441,35 @@ public sealed class DesignerApp : IDisposable
         _style.Begin(io.DisplaySize.Y, _window.ContentScale.X);
         DesignerStyle.DockSpace();
         _panels.Draw(_session, _stats, _meshEdit);
+
+        if (_workspace == Workspace.Component)
+            _componentWorkspace.DrawPanels(_session);
+        else
+            _prefabPanel.Draw(_session);
+
         _style.End();
+
+        if (_panels.Workspace != _workspace)
+            SwitchWorkspace(_panels.Workspace);
+
+        if (_prefabPanel.OpenRequest is { } open)
+            OpenComponentCopy(open);
+
+        if (_prefabPanel.RefreshRequest)
+            RefreshLibrary();
+
+        _componentWorkspace.Step(Math.Clamp(io.DeltaTime, 0.0, 1.0 / 30.0));
         HandleFiles();
 
         var viewProj = _camera.ViewProjection(viewport.X / Math.Max(1f, viewport.Y));
         var cut = _panels.Cutaway;
         _hull.SetCutaway(cut.Enabled ? cut.Axis : -1, cut.Offset, cut.Flip);
         _overlay.Begin(_camera.Position);
-        var strokeUsedMouse = !_tool.Dragging && _panels.Strokes.Update(_session, _camera, viewport, viewProj, !io.WantCaptureMouse, _overlay);
-        _tool.Update(_session, _meshEdit, _camera, viewport, viewProj, !io.WantCaptureMouse && !strokeUsedMouse, _overlay);
+        var used = !_tool.Dragging && (_workspace == Workspace.Component
+            ? _componentWorkspace.Update(_session, _camera, viewport, viewProj, !io.WantCaptureMouse, _overlay)
+            : _prefabPanel.Update(_session, _camera, viewport, viewProj, !io.WantCaptureMouse, _session.Snap.StepMetres, _overlay));
+        var strokeUsedMouse = !used && !_tool.Dragging && _workspace == Workspace.Ship && _panels.Strokes.Update(_session, _camera, viewport, viewProj, !io.WantCaptureMouse, _overlay);
+        _tool.Update(_session, _meshEdit, _camera, viewport, viewProj, !io.WantCaptureMouse && !strokeUsedMouse && !used, _overlay);
         _imgui.EndFrame();
     }
 
@@ -399,6 +557,9 @@ public sealed class DesignerApp : IDisposable
         {
             var hash = FilePlanHost.Save(_session.Doc, path);
             _session.MarkSaved(path);
+
+            if (_session.Doc.Level == PlanLevel.Component)
+                RefreshLibrary();
             _panels.PathText = path;
             _stats.Message = $"Saved {Path.GetFileName(path)} ({hash})";
             Console.WriteLine($"saved {path}: {_session.Doc.Solids.Count} solids, hash {hash}");
@@ -418,7 +579,11 @@ public sealed class DesignerApp : IDisposable
             return;
         }
 
+        var workspace = doc.Level == PlanLevel.Component ? Workspace.Component : Workspace.Ship;
+        _panels.Workspace = workspace;
+        SwitchWorkspace(workspace);
         _session.Open(doc, path);
+        _seenVersion = -1;
         _panels.PathText = path;
         _stats.Message = $"Opened {Path.GetFileName(path)}";
         Console.WriteLine($"opened {path}: {doc.Solids.Count} solids, hash {PlanFormat.HashBody(doc)}");
@@ -435,6 +600,11 @@ public sealed class DesignerApp : IDisposable
 
     /// <summary>--demo-brushes: the demo hull dressed with brush strokes.</summary>
     public static bool BrushDemo;
+
+    /// <summary>--demo-engine: the catalog rocket open in the component editor; with --place, placed on the demo ship.</summary>
+    public static bool EngineDemo;
+
+    public static bool PlaceEngine;
 
     private void Demo(bool mesh)
     {
@@ -454,11 +624,22 @@ public sealed class DesignerApp : IDisposable
     private void FrameHull()
     {
         var solids = _session.Doc.Solids.AsSpan();
-
-        if (solids.Length == 0)
-            return;
-
         double x0 = double.MaxValue, y0 = double.MaxValue, z0 = double.MaxValue, x1 = double.MinValue, y1 = double.MinValue, z1 = double.MinValue;
+
+        if (_workspace == Workspace.Component)
+        {
+            foreach (var poly in _componentWorkspace.Surfaces(_session))
+            {
+                foreach (var p in poly.Points)
+                {
+                    (x0, y0, z0) = (Math.Min(x0, p.X), Math.Min(y0, p.Y), Math.Min(z0, p.Z));
+                    (x1, y1, z1) = (Math.Max(x1, p.X), Math.Max(y1, p.Y), Math.Max(z1, p.Z));
+                }
+            }
+        }
+
+        if (solids.Length == 0 && x0 > x1)
+            return;
 
         foreach (ref readonly var b in solids)
         {

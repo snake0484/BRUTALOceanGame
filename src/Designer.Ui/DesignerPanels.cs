@@ -8,6 +8,9 @@ namespace BrutalGame.Designer.Ui;
 /// <summary>What the panels ask the host to do this frame (file dialogs and disk live in the host).</summary>
 public enum FileRequest { None, New, Open, Save, SaveAs, OpenPath, SavePath }
 
+/// <summary>Which plan the designer is editing: the ship, or a component (its own plan, made into a prefab by saving it).</summary>
+public enum Workspace { Ship, Component }
+
 /// <summary>Numbers the stats panel shows; the host fills them after each bake and validation.</summary>
 public sealed class DesignStats
 {
@@ -27,6 +30,7 @@ public sealed class DesignStats
     public int SurfacePieces;
     public int SurfaceTriangles;
     public double FlairKg;
+    public double ComponentsKg;
 
     /// <summary>Debug: draw the 0.25 m grid mesh (mass and collision's view of the hull) instead of the exact surface.</summary>
     public bool ShowGrid;
@@ -85,6 +89,9 @@ public sealed class DesignerPanels
 
     public FileRequest Request { get; private set; }
 
+    /// <summary>The workspace the user picked; the host switches plans when it changes.</summary>
+    public Workspace Workspace;
+
     /// <summary>The path field's text (fallback when no file dialog is available).</summary>
     public string PathText
     {
@@ -110,8 +117,11 @@ public sealed class DesignerPanels
         DrawSolidList(session);
         DrawProperties(session, meshEdit);
         _meshPanel.Draw(session, meshEdit);
-        _layersPanel.Draw(session);
-        _brushesPanel.Draw(session, Strokes);
+        if (Workspace == Workspace.Ship)
+        {
+            _layersPanel.Draw(session);
+            _brushesPanel.Draw(session, Strokes);
+        }
         DrawStats(session, stats);
     }
 
@@ -119,6 +129,17 @@ public sealed class DesignerPanels
     {
         if (ImGui.Begin("Designer"u8))
         {
+            if (ImGui.RadioButton("Ship"u8, Workspace == Workspace.Ship))
+                Workspace = Workspace.Ship;
+
+            ImGui.SameLine();
+
+            if (ImGui.RadioButton("Component"u8, Workspace == Workspace.Component))
+                Workspace = Workspace.Component;
+
+            ImGui.SameLine();
+            ImGui.TextDisabled(Workspace == Workspace.Ship ? "placed components stay as they are"u8 : "save to make it a prefab"u8);
+
             var name = session.Path.Length > 0 ? Path.GetFileName(session.Path) : "untitled";
             ImGui.Text($"{name}{(session.Modified ? " *" : "")}  ({session.Doc.Solids.Count} solids)");
 
@@ -394,6 +415,9 @@ public sealed class DesignerPanels
             ImGui.Text($"mesh prepare {stats.PrepareMs:F2} ms (subdivide + BVH, cached by mesh hash)");
 
             ImGui.Text($"surface: {stats.SurfacePieces} exact pieces, {stats.SurfaceTriangles} triangles, {stats.SurfaceMs:F2} ms");
+
+            if (stats.ComponentsKg > 0)
+                ImGui.Text($"components: {stats.ComponentsKg:F1} kg of parts and pipes");
 
             if (stats.Generated > 0 || stats.Unstuck > 0)
                 ImGui.Text($"brushes: {stats.Generated} pieces, {stats.FlairKg:F0} kg, {stats.Unstuck} points off the hull");

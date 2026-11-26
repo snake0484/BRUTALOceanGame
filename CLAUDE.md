@@ -111,7 +111,8 @@ src/
   Engine/          renderer, assets, input, jobs glue
   Terrain/         voxel storage, planet generation, meshing, streaming
   Water/           ocean swell, FFT, shore wash
-  Ships/           blueprints, brushes, bake, mass, rooms, components
+  Ships/           blueprints, solids, bake, mass, rooms, components (parts, pipes)
+  Chemistry/       gases, reactions, flow networks, nozzles (shared by designer and game)
   Net/             transport, replication, interest management
   Crafting/        items, recipes, inventory
   Debug/           ImGui panels, profiling

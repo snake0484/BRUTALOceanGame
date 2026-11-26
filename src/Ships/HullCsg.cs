@@ -175,7 +175,7 @@ public static class HullCsg
 
         if (flair is not null)
         {
-            for (var i = solids.Length; i < flair.Solids.Length; i++)
+            for (var i = flair.PlanSolids; i < flair.Solids.Length; i++)
             {
                 var s = flair.Solids[i];
 

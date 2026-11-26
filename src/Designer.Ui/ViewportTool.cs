@@ -596,15 +596,18 @@ public sealed class ViewportTool
     /// The front arrow (gold, along the ship's front axis, from the origin to past the hull's nose, labelled) and a
     /// translucent quad per enabled mirror plane, sized to the hull's bounds.
     /// </summary>
+    /// <summary>Size of the guides (front arrow, mirror planes) relative to a ship: small for a component.</summary>
+    public double GuideScale = 1.0;
+
     private void DrawGuides(DesignSession session, OrbitCamera camera, Vector2 viewport, in Matrix4x4 viewProj, OverlayRenderer overlay)
     {
         var (min, max) = HullBounds(session);
-        var front = Math.Max(max.Z, MinGuideHalf) + GuideMargin;
-        var length = Math.Max(4.0, front * 0.35);
+        var front = Math.Max(max.Z, MinGuideHalf * GuideScale) + GuideMargin * GuideScale;
+        var length = Math.Max(4.0 * GuideScale, front * 0.35);
         var tail = new Vector3d(0, 0, front);
         var neck = new Vector3d(0, 0, front + length * 0.75);
         var tip = new Vector3d(0, 0, front + length);
-        var width = Math.Max(0.15, length * 0.05);
+        var width = Math.Max(0.15 * GuideScale, length * 0.05);
         overlay.Ribbon(new Vector3d(0, 0, 0), tail, width * 0.3, OverlayRenderer.WithAlpha(FrontColour, 120));
         overlay.Ribbon(tail, neck, width, FrontColour);
         overlay.Cone(neck, tip, width * 2.5, FrontColour);
@@ -619,9 +622,9 @@ public sealed class ViewportTool
         }
 
         var symmetry = session.Symmetry;
-        var hx = Math.Max(Math.Max(-min.X, max.X), MinGuideHalf) + GuideMargin;
-        var hy = Math.Max(Math.Max(-min.Y, max.Y), MinGuideHalf) + GuideMargin;
-        var hz = Math.Max(Math.Max(-min.Z, max.Z), MinGuideHalf) + GuideMargin;
+        var hx = Math.Max(Math.Max(-min.X, max.X), MinGuideHalf * GuideScale) + GuideMargin * GuideScale;
+        var hy = Math.Max(Math.Max(-min.Y, max.Y), MinGuideHalf * GuideScale) + GuideMargin * GuideScale;
+        var hz = Math.Max(Math.Max(-min.Z, max.Z), MinGuideHalf * GuideScale) + GuideMargin * GuideScale;
 
         // Section cuts: outlines in pink across the hull's bounds.
         if (session.Doc.Layers is { } layers)

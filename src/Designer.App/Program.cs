@@ -40,6 +40,10 @@ for (var i = 0; i < args.Length; i++)
         demo = true;
         DesignerApp.BrushDemo = true;
     }
+    else if (args[i] == "--demo-engine")
+        DesignerApp.EngineDemo = true;
+    else if (args[i] == "--place")
+        DesignerApp.PlaceEngine = true;
     else if (args[i] == "--demo-layered")
         demoLayered = true;
     else if (args[i] == "--cutaway" && i + 2 < args.Length)
