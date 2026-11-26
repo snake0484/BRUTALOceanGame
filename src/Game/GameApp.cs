@@ -146,8 +146,18 @@ public sealed partial class GameApp : IDisposable
         _camera.Frame = _planetFrame;
 
         // Without --cam, 55 m out from the spawn's beach, 28 m up, looking at it.
-        if (camera is not null)
+        if (camera is not null && steep)
+        {
+            // --cam with --steep: the altitude and pitch apply over the planet's steepest ground, looking along its rise.
+            SteepGround.Find(_sim.Generator.Surface, out var start, out var heading);
+            var pitch = camera[4] * Math.PI / 180.0;
+            _camera.Position = start * (_sim.Planet.Radius + _sim.Generator.Surface.Height(start.X, start.Y, start.Z) + camera[1]);
+            _camera.LookAlong(heading * Math.Cos(pitch) + start * Math.Sin(pitch));
+        }
+        else if (camera is not null)
+        {
             PlaceCamera(new System.Numerics.Vector3(camera[0], camera[1], camera[2]), camera[3] * MathF.PI / 180f, camera[4] * MathF.PI / 180f);
+        }
         else
             PlaceCamera(new System.Numerics.Vector3(55f, 28f, 0f), MathF.PI, -0.12f);
 

@@ -77,6 +77,7 @@ Each ends with a measured exit check (details in review.md).
 | M0 | Tag `island-final`. Cut water down to the ocean core and shore wash shaders (inventory steps 1-6; the island itself is retired, no A/B on it), carve the `Sim` assembly, file the upstream Jolt asks. | Game starts on a flat placeholder; sim builds without Vulkan. Shore wash is proven on a planet beach in M2b. |
 | M1 | `FrameTree`, rails, double camera with translation-free view, per-draw instance record, GPU-culled indirect terrain draws, ocean time rebasing. | Surface of a smooth 1000 km sphere to 1e8 m with float quantisation error <= ~2e-4 px; terrain draw recording < 0.1 ms. Measured (`--orbit-test` and `--orbit-test inertial`, 1600x900, ~4450 frames each, island terrain GPU-culled and drawn every frame out to the planet's SOI, ~5e7 m, and skipped beyond it): float quantisation jitter max 2.1e-4 px (limit 0.1); smoothness (second difference against poses evaluated analytically at render time) <= 2.4e-12 px, where tick poses would give 1.4 px; GPU marker (fragment readback) vs CPU prediction <= 2.8e-3 px in every decade (the 1/256 px subpixel snap), jitter as drawn <= 4.8e-3 px; impostor surface error <= 1.5e-5 of range; reverse-Z depth ok, no NaN/Inf. Terrain recording 0.024 ms (`--bench`). |
 | M2 | `PlanetGenerator`, shell, horizon pruning, `EditStore`, impostors, focus-body switch. M2b: sea sphere, global `OceanSurface`, shore wash on a planet beach. | Leaves/s and main-thread ms at 30, 300, 3000 m/s; orbit to ground with no holes. Measured 2026-11-26 at 93ac548 (`--planet-fly`, Release, 8 cores, RTX 4090, 1600x900, two runs, ~2,870 frames a leg; table and what is not met under "Carry-overs from M2"): leaves loaded/s 140 / 1371 / 2164 at 30 / 300 / 3000 m/s and 182 on the 800 km descent; terrain main-thread ms p50 / p95 0.12 / 0.16, 0.13 / 0.76, 0.02-0.11 / 0.23 and 0.05 / 0.12; frame work p50 0.29-0.37 ms. No leaf missing in any frame of any leg on 8 or 6 cores (0 of ~17,200 frames a run). At 93ac548 settled views from 100 to 5 km showed LOD seam cracks (up to 581 px a frame), which the hole counter did not see. **Fixed 2026-11-26 at 0b260e7** (skirt flanges, sea mask in terrain shading; details under "Carry-overs from M2"): the new pixel probe (`--seam-test`) counts 0 crack px at 100 / 50 / 20 / 5 km (42 / 43 / 86 / 15 before), `--planet-fly` on 8 cores still has 0 holes in every leg with the hole counter now requiring full cover, and leaves/s are unchanged (140 / 1371 / 2163 / 182). **Still not met:** pinned to 4 cores the 3000 m/s leg had a leaf missing in 2651 of 2878 frames (not re-measured). Shore wash is visible and moving on the spawn beach (`--shore-fly`). `--orbit-test` passes in both variants (jitter <= 2.5e-4 px, GPU against CPU <= 2.8e-3 px), `--moon-test` passes, and Debug runs of all four with validation log nothing. |
+| M2k | Planet kinds, slice 1 ([planet-kinds.md](planet-kinds.md), [brief](briefs/planet-kinds-brief.md)): kinds as data, the generic layer evaluator, crater stamps and ergs, three kinds, row SIMD. | Slope and relief per kind against the brief's targets, lattice ns/point per LOD against 150, no holes over steep ground. Measured 2026-11-26 (tables under "Planet kinds slice 1"): temperate 100 m slope p50 / p90 / p99 8.4 / 26.2 / 41.2 deg (target 9 / 28 / 42; v1 2.1 / 5.5 / 8.5), lattice 131-176 ns/point (v1 recipe 49-61), 0 holes over mountains at 30 / 300 / 3000 m/s, 0 crack px. **Not met:** barren-cratered has late LOD 10-11 leaves at 300 and 3000 m/s; temperate (LOD 2, 6, 8) and desert (LOD 8) are over 150 ns/point, to 176; `Height`, `Bounds`, `Classify` budgets. |
 | M3 | `PhysicsRuntime` + `PhysicsScene`, surface bubble with 32 m rebases, `CharacterVirtual` with radial up. | Walk and dig 10 km from spawn; collision chunk memory measured. |
 | M4 | Two players on foot over RakNet, save/load. | Bytes/s per client and reconcile error logged. |
 | M5 | Minimal hull: box/wedge/cylinder brushes, add/subtract, mass, convex exterior, seat/thruster/tank/foot. | 15 m craft built in ~5 min; bake p50/p95 in profiler. |
@@ -215,6 +216,59 @@ Not met, or found while measuring:
 - **Day and night.** From orbit the spawn sits at the terminator, so the descent starts nearly black down to about 130 km, yet the ground below 20 km is in full daylight: the ground's sky does not follow the star. Seaward, the sea is dark blue at 100 km, turquoise at 50 km and grey-blue at 20 km, with a pale band at the limb (step 4's "sea's limb").
 - **Foam tiling (M1 carry-over, checked).** From 200 m over the shallows the foam flecks repeat on a visible square grid.
 - The "Left for later" lists of steps 2 to 4 still stand; D30's column mask and the refused-dig feedback (carry-overs from M0) and D29's heat hook were not measured here.
+
+### Planet kinds slice 1 (2026-11-26)
+
+Each body runs its own generator recipe: `data/planets/kinds/<id>.json` compiled per body into a `PlanetKindProgram` (`src/Terrain/Planet/Kinds/`) that `PlanetSurface` runs over rows of lattice points. `GeneratorVersion` is 2. The test system's planet is `temperate-continental`, its moon `barren-cratered` (`SimWorld.KindOf`); `legacy-rolling` reproduces v1 heights and chunk bytes bit for bit (golden hashes). Viewer: `--planet-kind <id> [--kind-seed N]` swaps the planet's and moons' kind, `--steep` moves `--planet-fly`, `--seam-test` and `--cam` to the planet's steepest ground.
+
+Layer types: fbm, ridged, billow, eroded, warp (no-fold rule), curve, terrace, canyon, mask, combines, craters, ergs, sea clamp, relief knee. Every layer has an interval form; bounds take a LOD range and `PlanetHeightBounds` holds two bands (all LODs, LOD 3+). The noise's Lipschitz constant went from 14.73 to 3.8 (true supremum 3.75).
+
+Slope and relief over land, 10^5 samples (`KindStatistics`; 1 m roughness is the 1 m slope less the 100 m slope, on ground under 20 deg):
+
+| Kind | 10 km relief p50 / p95 (m) | 100 m slope p50 / p90 / p99 (deg) | Over 30 / 45 deg | 1 m rough |
+| --- | --- | --- | --- | --- |
+| v1 (`legacy-rolling`) | 215 / 489 | 2.1 / 5.5 / 8.5 | 0 / 0 | 9.1 % |
+| temperate, target | 700 / 3,000 | 9 / 28 / 42 | 8 % / 0.8 % | 8 % |
+| temperate, measured | 886 / 3,289 | 8.4 / 26.2 / 41.2 | 6.5 % / 0.39 % | 10.0 % |
+| barren-cratered, target | 800 / 4,000 | 7 / 25 / 40 | 7 % / 0.3 % | 10 % |
+| barren-cratered, measured (400 km moon) | 703 / 2,711 | 6.1 / 24.7 / 41.0 | 5.5 % / 0.54 % | 9.8 % |
+| desert-canyon, target | 500 / 1,800 | 3 / 25 / 70 | 8 % / 4 % | 5 % flats |
+| desert-canyon, measured | 703 / 1,262 | 2.6 / 17.3 / 70.2 | 6.9 % / 5.43 % | 11.0 % flats |
+
+Cost (`KindCost`, Release, one thread, 48 surface leaves on each kind's steepest ground; budget 150 ns/point = 0.30 ms/leaf of lattice with row SIMD, whole leaf 0.7 ms):
+
+| Kind | Lattice ns/point at LOD 0 / 2 / 4 / 6 / 8 / 12, SIMD | Scalar | Whole leaf ms, SIMD | `Height` / `Bounds` / `Classify` (us) | Impostor us/sample |
+| --- | --- | --- | --- | --- | --- |
+| Budget | 150 | 200 at LOD 0, 400 interim | 0.7 | 0.6 / 1 / 0.3 | 0.3 |
+| v1 recipe | 50 / 50 / 49 / 49 / 53 / 61 | 131 / 130 / 129 / 129 / 142 / 170 | 0.35-0.42 (v1 code: 1.01 at LOD 0, 0.64 at LOD 4) | 0.63 / 0.66 / 0.40 | 0.28 |
+| temperate | 146 / 157 / 150 / 176 / 173 / 131 | 347 / 380 / 372 / 494 / 475 / 379 | 0.63-0.95 | 2.18 / 0.98 / 1.17 | 0.17 |
+| barren-cratered | 67 / 64 / 66 / 83 / 100 / 120 | 131 / 120 / 127 / 175 / 220 / 221 | 0.58-0.62 | 1.68 / 1.90 / 2.05 | 0.39 |
+| desert-canyon | 94 / 106 / 133 / 145 / 155 / 110 | 185 / 224 / 339 / 394 / 437 / 292 | 0.53-0.86 | 1.74 / 1.28 / 1.52 | 0.16 |
+
+Flights over steep ground (`--planet-fly --steep`, Release, 8 cores, RTX 4090, 1600x900, ~2,870 frames a leg, planet of 1000 km):
+
+| Kind | Leaves loaded/s at 30 / 300 / 3000 m/s / descent | Holes | Leaves desired / with geometry | Selection ms (worker) |
+| --- | --- | --- | --- | --- |
+| temperate (start on 3,404 m ground) | 374 / 3192 / 2458 / 286 | 0 in every leg | 11,732 / 2,486 | 3.5-9.0 |
+| desert-canyon | 471 / 3167 / 2754 / 340 | 0 in every leg | 10,301 / 2,192 | 4.3-17.8 |
+| barren-cratered | 466 / 3351 / 3440 / 704 | 0 at 30 m/s and on the descent; **1156 of 2876 frames at 300 m/s and 280 of 2867 at 3000 m/s** (1-3 leaves at LOD 10-11) | 12,614 / 2,484 | 13.6-27.5 |
+
+`--seam-test --steep` (temperate, Debug with validation, nothing logged): 0 crack px at 100 / 50 / 20 / 5 km. `--moon-test` passes on the cratered moon (0 holes; its 1024^2 impostor bakes in 3.7 s on one worker). Band limit against box-filtered LOD 0, LOD 1-6: within 0.35 voxel RMS and 1.5 voxel max on every kind (asserted).
+
+Changed from the design:
+- **Craters add up and pass a knee** (a single crater is untouched, nested ones ease into 1.5 x the deepest class). The design's erase rule (`acc = acc(1 - e) + profile`) lifts a small crater on a basin floor back to the datum.
+- **Eroded layers keep the damped sum and the running gradient on the coarse grid** (4 values), not each octave's raw value.
+- **Curves have no per-LOD riser widening**; terraces widen their riser by the input's measured slope, canyons by their wall share.
+- Complex craters have a flat floor, terraces and a central peak; no peak rings, rays or age easing to a cosine bowl.
+
+Carry-overs:
+- **Shell tightness on steep kinds.** 79-80 % of desired leaves mesh empty (v1: 66 %), because worst-case slopes bound warped ridges and summed crater classes loosely. It costs leaves/s and is what makes barren-cratered late at speed. Uniform share of nodes 2.25+ chunk sizes off the ground: v1 335/336, test kinds 110-267 of 280.
+- **Selection cost.** 9-27 ms on its worker against 2.4 ms in M2: small nodes ask `Bounds` directly (1-2 us on these kinds).
+- **Budgets missed:** temperate lattice at LOD 2, 6, 8 and desert at LOD 8 (to 176 ns/point); whole leaf on temperate and desert (the voxel fill is 0.3-0.4 ms of it, as in M2); `Height` (1.7-2.2 us, one point runs every octave), `Bounds` on the stamp kinds, `Classify`; the cratered impostor (0.39 us/sample).
+- **Targets missed:** temperate share over 30 / 45 deg (6.5 / 0.39 %), barren relief p95 (2,711 m: the largest crater a 400 km moon's grid takes is ~24 km radius), desert slope p90 (17.3 deg) and relief p95 (1,262 m), roughness on temperate and desert flats.
+- **Not built:** the ImGui "Planet kind" panel, `--kind-radius`, `--kind-orbit`, the program hash in a handshake (nothing reads `GeneratorVersion` yet), per-chunk culling of gated layers by cap interval (rows skip a layer whose gate is 0 across the window).
+- **Coast.** Between the waterline and the inland clamp's start (continent 0-0.06) hills can dig below sea level, as v1's detail did: lagoons near coasts. The sim tests now search for open seabed instead of assuming the v1 shelf 16 km out.
+- Contact sheets (orbit, 60 km, 8 km, 1.2 km, 60 m): the scratchpad's `kinds/<kind>_sheet.png`. Risers over 76 deg mesh as a one-voxel staircase until `undercut` (K2).
 
 ## Open questions
 
