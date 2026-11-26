@@ -36,6 +36,12 @@ public sealed class MeshPanel
         if (mesh is null)
             return;
 
+        if (edit.FocusPanel)
+        {
+            ImGui.SetNextWindowFocus();
+            edit.FocusPanel = false;
+        }
+
         if (ImGui.Begin("Mesh"u8))
         {
             Validate(mesh);

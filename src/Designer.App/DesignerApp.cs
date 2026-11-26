@@ -69,7 +69,7 @@ public sealed class DesignerApp : IDisposable
         _renderer = new Renderer(_window, _frameStats, Validation, vsync: true) { ClearColor = new float4(0.11f, 0.12f, 0.14f, 1f) };
         _imgui = new ImGuiLayer(_window, _renderer);
         _style.LoadFonts();
-        DesignerStyle.SeedLayout(1600, 900);
+        DesignerStyle.UseLayout(1600, 900);
         _hull = new HullRenderer(_renderer);
         _overlay = new OverlayRenderer(_renderer);
         _lighting = new SceneLighting
@@ -428,7 +428,7 @@ public sealed class DesignerApp : IDisposable
         else if (key == GlfwKey.F)
             FrameHull();
         else if (key == GlfwKey.Tab)
-            _meshEdit.Enabled = !_meshEdit.Enabled;
+            _meshEdit.Toggle(_session);
         else if (key is GlfwKey.Number1 or GlfwKey.Number2 or GlfwKey.Number3)
             _meshEdit.Selection.Mode = key == GlfwKey.Number1 ? Mesh.MeshSelectMode.Vertex : key == GlfwKey.Number2 ? Mesh.MeshSelectMode.Edge : Mesh.MeshSelectMode.Face;
     }

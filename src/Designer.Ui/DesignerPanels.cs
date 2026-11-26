@@ -94,7 +94,7 @@ public sealed class DesignerPanels
         Request = FileRequest.None;
         DrawTools(session, stats);
         DrawSolidList(session);
-        DrawProperties(session);
+        DrawProperties(session, meshEdit);
         _meshPanel.Draw(session, meshEdit);
         _layersPanel.Draw(session);
         DrawStats(session, stats);
@@ -239,7 +239,7 @@ public sealed class DesignerPanels
         ImGui.End();
     }
 
-    private void DrawProperties(DesignSession session)
+    private void DrawProperties(DesignSession session, MeshEditState meshEdit)
     {
         if (ImGui.Begin("Properties"u8))
         {
@@ -274,11 +274,10 @@ public sealed class DesignerPanels
                     HullCommands.SetSolid(session, id, solid);
                 }
 
-                ImGui.SameLine();
-
-                if (ImGui.Button("To mesh"u8))
-                    Mesh.MeshCommands.ConvertToMesh(session, id);
             }
+
+            if (ImGui.Button(meshEdit.Enabled ? "Stop editing vertices (Tab)"u8 : "Edit vertices (Tab)"u8))
+                meshEdit.Toggle(session);
 
             var op = Math.Min((int)solid.Op, OpNames.Length - 1);
             DesignerStyle.ItemWidth(120f);

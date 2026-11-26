@@ -1,4 +1,5 @@
 using Brutal.ImGuiApi;
+using System.Runtime.InteropServices;
 using Brutal.Numerics;
 
 namespace BrutalGame.Designer.Ui;
@@ -65,12 +66,26 @@ public sealed class DesignerStyle
     }
 
     /// <summary>
-    /// Once, before the first frame: the default docked layout, unless ImGui has a saved one to load. Tools and solids
-    /// on the left; properties, mesh and hull layers as tabs top right; stats bottom right; the middle is the 3D view.
+    /// The layout file: per user, outside the build output, so the arrangement survives rebuilds and every checkout shares
+    /// it. ImGui loads it on the first frame and saves it a few seconds after each change and on exit.
     /// </summary>
-    public static void SeedLayout(float width, float height)
+    public static string LayoutPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BRUTALGame", "designer-layout.ini");
+
+    /// <summary>
+    /// Once, before the first frame: points ImGui at <see cref="LayoutPath"/> and, when that file does not exist yet, seeds
+    /// the default docked layout. Tools and solids on the left; properties, mesh and hull layers as tabs top right; stats
+    /// bottom right; the middle is the 3D view.
+    /// </summary>
+    public static unsafe void UseLayout(float width, float height)
     {
-        if (File.Exists(Path.Combine(AppContext.BaseDirectory, "imgui.ini")) || File.Exists("imgui.ini"))
+        var path = LayoutPath;
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+
+        // ImGui keeps the pointer for the context's lifetime: allocated once per process, never freed.
+        ImGui.GetIO().IniFilename = (byte*)Marshal.StringToCoTaskMemUTF8(path);
+
+        if (File.Exists(path))
             return;
 
         var w = (int)width;

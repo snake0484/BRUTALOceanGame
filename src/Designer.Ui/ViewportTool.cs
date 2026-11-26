@@ -12,9 +12,33 @@ public sealed class MeshEditState
 {
     public bool Enabled;
     public bool Mirror;
+
+    /// <summary>Set when editing starts, so the Mesh panel comes to the front of its dock tabs.</summary>
+    public bool FocusPanel;
     public readonly MeshSelection Selection = new();
     public uint SolidId;
     public ulong MeshHash;
+
+    /// <summary>
+    /// Vertex editing on or off for the primary solid. Every solid can be edited: a box, wedge or cylinder becomes a mesh
+    /// solid first (one undo group, the same solid), so its vertices, edges and faces can be moved.
+    /// </summary>
+    public void Toggle(DesignSession session)
+    {
+        if (Enabled)
+        {
+            Enabled = false;
+            return;
+        }
+
+        var id = session.Selection.Primary;
+
+        if (id == 0 || (MeshCommands.MeshOf(session, id) is null && !MeshCommands.ConvertToMesh(session, id)))
+            return;
+
+        Enabled = true;
+        FocusPanel = true;
+    }
 
     /// <summary>Drops the selection when the edited solid or its mesh changed under it (undo, another op).</summary>
     public void Sync(uint solid, HullMesh? mesh)
