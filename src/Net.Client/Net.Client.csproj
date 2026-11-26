@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>BrutalGame.Net.Client</RootNamespace>
+    <AssemblyName>BRUTALNetClient</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Net\Net.csproj" />
+  </ItemGroup>
+</Project>

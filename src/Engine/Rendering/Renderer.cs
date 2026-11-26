@@ -41,6 +41,9 @@ public sealed unsafe class Renderer : IDisposable
     private readonly int _frameScope;
     private readonly int _upscaleScope;
     private float _renderScale;
+    private GpuBuffer? _capture;
+    private VkExtent2D _captureExtent;
+    private bool _captureRequested;
 
     private struct FrameData
     {
@@ -383,12 +386,62 @@ public sealed unsafe class Renderer : IDisposable
     }
 
     /// <summary>
+    /// Test probes only (--seam-test): the next frame's scene colour is also copied to a host buffer for
+    /// <see cref="ReadCapture"/>. The game's frame loop never asks for one: no readback there.
+    /// </summary>
+    public void RequestCapture() => _captureRequested = true;
+
+    /// <summary>
+    /// Waits for the device, then the captured scene: 4 bytes per pixel in the swapchain's channel order, rows top down.
+    /// Empty if no frame has been captured.
+    /// </summary>
+    public ReadOnlySpan<byte> ReadCapture(out VkExtent2D extent)
+    {
+        extent = _captureExtent;
+
+        if (_capture is null || _captureRequested)
+            return default;
+
+        Context.Device.WaitIdle();
+        return new ReadOnlySpan<byte>(_capture.Mapped, extent.Width * extent.Height * 4);
+    }
+
+    /// <summary>After the water pass, with the scene colour in TRANSFER_SRC.</summary>
+    private void RecordCapture(CommandBuffer commands)
+    {
+        var extent = _scene.Extent;
+        var size = extent.Width * extent.Height * 4;
+
+        if (_capture is null || _capture.Size < size)
+        {
+            Context.Device.WaitIdle();
+            _capture?.Dispose();
+            _capture = new GpuBuffer(Context, size, VkBufferUsageFlags.TransferDstBit, hostVisible: true, hostRead: true);
+        }
+
+        commands.CopyImageToBuffer(_scene.Colour, VkImageLayout.TransferSrcOptimal, _capture.Handle,
+        [
+            new VkBufferImageCopy
+            {
+                ImageSubresource = new VkImageSubresourceLayers { AspectMask = VkImageAspectFlags.ColorBit, LayerCount = 1 },
+                ImageExtent = new VkExtent3D { Width = extent.Width, Height = extent.Height, Depth = 1 },
+            },
+        ]);
+        _captureExtent = extent;
+        _captureRequested = false;
+    }
+
+    /// <summary>
     /// Closes the water pass, brings the scene to this frame's swapchain image (a copy at the same size, else a bilinear
     /// blit) and opens the UI pass over it at native resolution; <see cref="EndFrame"/> closes it.
     /// </summary>
     public void BeginUiPass(CommandBuffer commands)
     {
         commands.EndRenderPass();
+
+        if (_captureRequested)
+            RecordCapture(commands);
+
         GpuTimer.Begin(commands, _upscaleScope);
 
         // After the acquire semaphore's wait (colour attachment output); the image's old contents are discarded.
@@ -511,6 +564,7 @@ public sealed unsafe class Renderer : IDisposable
 
         GpuTimer.Dispose();
         PipelineStats.Dispose();
+        _capture?.Dispose();
         _scene.Dispose();
         Swapchain.Dispose();
         device.DestroyRenderPass(UiPass, null);

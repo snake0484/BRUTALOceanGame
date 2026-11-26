@@ -11,15 +11,31 @@ using BrutalGame.Water.Ocean;
 namespace BrutalGame.Water.Rendering;
 
 /// <summary>
-/// Draws the swell as a camera-centred clipmap. Vertices come from gl_VertexIndex; each level is one indexed draw.
-/// The vertex shader evaluates the same wave components as <see cref="OceanSwell"/>.
+/// Draws the sea round the camera as a clipmap in the <see cref="SeaFrame"/>'s plane, bent onto the sea sphere. Vertices
+/// come from gl_VertexIndex; each level is drawn tile by tile. The first <see cref="WaveLevels"/> levels carry the
+/// surface: the vertex shader evaluates the same wave components over the same sea tiles as <see cref="OceanSurface"/>
+/// (<see cref="SeaSlots"/>), plus the FFT detail and the shore wash. The levels past them are the far sea out to the
+/// horizon, shaded only (glint and wind roughness). From altitude the fine levels are skipped.
 /// </summary>
 public sealed unsafe class OceanRenderer : IDisposable
 {
-    public const int Levels = 10;
+    /// <summary>Levels that carry waves: the last has 128 m cells and reaches 6.1 km.</summary>
+    public const int WaveLevels = 10;
+
+    /// <summary>All levels: the last reaches 786 km, past the horizon from <see cref="MaxAltitude"/>.</summary>
+    public const int Levels = 17;
     public const int HalfCells = 48;
     public const float BaseSpacing = 0.25f;
     public const int MaxWaves = OceanSwell.MaxComponents;
+
+    /// <summary>Distance (m) from the camera within which waves are drawn: the wave levels' corner.</summary>
+    public const float WaveReach = 1.4142135f * HalfCells * BaseSpacing * (1 << (WaveLevels - 1));
+
+    /// <summary>Camera height above the sea (m) up to which the sea can be drawn: the last level still passes the horizon.</summary>
+    public const double MaxAltitude = 120_000.0;
+
+    /// <summary>The first level drawn has cells of about this share of the camera's height over the sea.</summary>
+    private const float FinestCell = 1f / 96f;
     private const float MorphStart = 0.70f;
     private const float MorphEnd = 0.90f;
     private const int PushConstantSize = 32;
@@ -30,6 +46,15 @@ public sealed unsafe class OceanRenderer : IDisposable
     public Vector3 SkyZenith = new(0.16f, 0.34f, 0.66f);
     public Vector3 SkyHorizon = new(0.62f, 0.74f, 0.86f);
     public float FogDensity = 0.00012f;
+
+    /// <summary>Scales the fog (the air's density at the camera over sea level's).</summary>
+    public float FogFade = 1f;
+
+    /// <summary>
+    /// 1 on the ground .. 0 from altitude, where the surface has faded out into the terrain's far sea (the impostor's
+    /// look); nothing is worth drawing at 0.
+    /// </summary>
+    public float Opacity = 1f;
     public Vector3 WaterDeep = new(0.004f, 0.026f, 0.055f);
     public Vector3 WaterScatter = new(0.0f, 0.11f, 0.10f);
 
@@ -58,8 +83,8 @@ public sealed unsafe class OceanRenderer : IDisposable
     private readonly int[] _tileFirst = new int[2 * Tiles];
     private readonly int[] _tileCount = new int[2 * Tiles];
     private readonly Vector4[] _frustum = new Vector4[5];
-    private float _cullTop;
-    private float _cullBottom;
+    private float _cullReach;
+    private int _firstLevel;
 
     /// <summary>Clipmap tiles drawn last frame, out of all of them.</summary>
     public int TilesDrawn { get; private set; }
@@ -82,10 +107,51 @@ public sealed unsafe class OceanRenderer : IDisposable
         public Vector4 CascadeAnchorX;
         public Vector4 CascadeAnchorZ;
         public Vector4 DepthRect;
+        public Vector4 DepthFar;
+        public Vector4 DepthWrap;
+        public Vector4 DepthValid;
         public Vector4 Carrier;
         public Vector4 Shore;
+        public Vector4 Planet;
+        public Vector4 BandRow;
+        public Vector4 BandSouth;
+        public Vector4 BandNorth;
+        public fixed float SlotToTile[4 * SeaTiles.MaxBlend];
+        public fixed float SlotFromTile[4 * SeaTiles.MaxBlend];
+        public fixed float SlotSide[4 * SeaTiles.MaxBlend];
         public int WaveCount;
+        public int SlotCount;
         public float DebugView;
+        public float Pad0;
+    }
+
+    /// <summary>What the sea is drawn with this frame, beyond the swell.</summary>
+    public struct View
+    {
+        /// <summary>Translation-free view-projection from the sea frame's axes.</summary>
+        public Matrix4x4 ViewProj;
+
+        /// <summary>The camera in the sea frame: x, z in its plane, y above the plane.</summary>
+        public double3 Camera;
+
+        /// <summary>
+        /// The camera's place in the FFT tiles and the foam lace (m): its sea frame x, z plus whatever keeps them
+        /// continuous when the client moves to another sea frame.
+        /// </summary>
+        public double DetailX;
+        public double DetailZ;
+
+        /// <summary>Near and far depth maps (ShoreDepthGrid.NearRect / FarRect): corner relative to the camera, world size (0 = none), depth outside.</summary>
+        public Vector4 DepthNear;
+        public Vector4 DepthFar;
+
+        /// <summary>The part of the near window that holds its depth (ShoreDepthGrid.NearValid): min x, z and max x, z relative to the camera.</summary>
+        public Vector4 DepthValid;
+
+        /// <summary>The near window's corner cell (the map and the surf foam are stored toroidally) and a number that changes when its cells mean another place (a new sea frame).</summary>
+        public int DepthCellX;
+        public int DepthCellZ;
+        public int DepthVersion;
     }
 
     /// <summary>
@@ -98,8 +164,8 @@ public sealed unsafe class OceanRenderer : IDisposable
     private const double LacePeriod = 256.0 / 1.4;
 
     private readonly OceanFft _fft;
-    // Surf foam left behind (ocean_surf_foam.comp): one float per cell of the depth map's 512² grid, GPU only, shared by
-    // all frames; cleared when the depth map re-centres.
+    // Surf foam left behind (ocean_surf_foam.comp): one float per cell of the near depth map's 512² window, GPU only,
+    // shared by all frames; stored toroidally like the map, so it stays put when the window moves.
     private const int SurfFoamBinding = 1 + SampledMaps;
     private const int SurfFoamResolution = 512;
     private const int SurfFoamBytes = SurfFoamResolution * SurfFoamResolution * sizeof(float);
@@ -112,9 +178,16 @@ public sealed unsafe class OceanRenderer : IDisposable
 
     private const int Bindings = 2 + SampledMaps;
     private bool _initialised;
-    private Vector4 _depthRect;
     private double3 _camera;
-    private Vector4 _surfFoamRect;
+    private double _seaRadius;
+    private bool _foamOn;
+    private bool _foamValid;
+    private int _depthCellX;
+    private int _depthCellZ;
+    private int _depthVersion;
+    private int _foamCellX;
+    private int _foamCellZ;
+    private int _foamVersion = -1;
 
     // GPU scopes inside the ocean's own work, nested in the caller's (the profiler and --bench show each).
     private readonly GpuTimer _timer;
@@ -123,13 +196,18 @@ public sealed unsafe class OceanRenderer : IDisposable
 
     private readonly VkImageView _depthView;
     private readonly VkSampler _depthSampler;
+    private readonly VkImageView _depthFarView;
+    private readonly VkSampler _depthFarSampler;
 
-    /// <param name="depthView">Signed depth map (BathymetryTexture), in SHADER_READ_ONLY_OPTIMAL.</param>
-    public OceanRenderer(Renderer renderer, OceanFft fft, VkImageView depthView, VkSampler depthSampler)
+    /// <param name="depthView">Near signed depth map (ShoreDepthTexture, repeat sampler), in SHADER_READ_ONLY_OPTIMAL.</param>
+    /// <param name="depthFarView">Far signed depth map (clamped), in SHADER_READ_ONLY_OPTIMAL.</param>
+    public OceanRenderer(Renderer renderer, OceanFft fft, VkImageView depthView, VkSampler depthSampler, VkImageView depthFarView, VkSampler depthFarSampler)
     {
         _fft = fft;
         _depthView = depthView;
         _depthSampler = depthSampler;
+        _depthFarView = depthFarView;
+        _depthFarSampler = depthFarSampler;
         _device = renderer.Context.Device;
         _pipelines = renderer.Context.Pipelines;
 
@@ -171,7 +249,10 @@ public sealed unsafe class OceanRenderer : IDisposable
     /// <summary>std140 starts the wave array on a 16-byte boundary after the header.</summary>
     private static int WavesOffset => (sizeof(FrameHeader) + 15) & ~15;
 
-    private static int FrameBufferSize => WavesOffset + MaxWaves * sizeof(GpuWave);
+    /// <summary>One vec4 per wave after the waves: its phase in each slot's tile plane.</summary>
+    private static int PhasesOffset => WavesOffset + MaxWaves * sizeof(GpuWave);
+
+    private static int FrameBufferSize => PhasesOffset + MaxWaves * sizeof(Vector4);
 
     private static int Align(int value) => (value + UniformAlignment - 1) / UniformAlignment * UniformAlignment;
 
@@ -259,7 +340,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         return true;
     }
 
-    private const int SampledMaps = 4;
+    private const int SampledMaps = 5;
 
     private VkDescriptorSetLayout CreateSetLayout()
     {
@@ -336,6 +417,7 @@ public sealed unsafe class OceanRenderer : IDisposable
             new() { Sampler = _fft.Sampler, ImageView = _fft.DerivativeView, ImageLayout = VkImageLayout.General },
             new() { Sampler = _fft.Sampler, ImageView = _fft.FoamView, ImageLayout = VkImageLayout.General },
             new() { Sampler = _depthSampler, ImageView = _depthView, ImageLayout = VkImageLayout.ShaderReadOnlyOptimal },
+            new() { Sampler = _depthFarSampler, ImageView = _depthFarView, ImageLayout = VkImageLayout.ShaderReadOnlyOptimal },
         };
 
         Span<VkWriteDescriptorSet> writes = stackalloc VkWriteDescriptorSet[Bindings];
@@ -461,43 +543,88 @@ public sealed unsafe class OceanRenderer : IDisposable
 
     /// <summary>
     /// Writes this frame's waves, camera and shore wash. Call once per frame before <see cref="RecordCompute"/> and
-    /// <see cref="Record"/>, which read them. The GPU works camera-relative: x, z relative to the camera and y the height
-    /// above sea level; everything with a world phase (waves, carrier, cascade tiles, depth map) is rebased in double.
+    /// <see cref="Record"/>, which read them. The GPU works camera-relative in <paramref name="frame"/>: x, z relative to
+    /// the camera and y the height above sea level; everything with a world phase (waves per sea tile, carrier, cascade
+    /// tiles, depth maps) is rebased in double here.
     /// </summary>
-    /// <param name="viewProj">Translation-free view-projection.</param>
-    /// <param name="camera">The camera in the sea's frame, whose sea level is y = 0.</param>
-    /// <param name="depthRect">(origin x, origin z, world size, depth outside the map).</param>
-    public void Prepare(int frameIndex, OceanSwell swell, double renderTime, in Matrix4x4 viewProj, double3 camera, Vector4 depthRect)
+    public void Prepare(int frameIndex, OceanSurface sea, in SeaFrame frame, double renderTime, in View view)
     {
+        var swell = sea.Swell;
         var block = (byte*)_buffer.Mapped + _frameOffsets[frameIndex];
         var header = (FrameHeader*)block;
         var waves = new Span<GpuWave>(block + WavesOffset, MaxWaves);
+        var phases = new Span<float>(block + PhasesOffset, MaxWaves * SeaTiles.MaxBlend);
+        var camera = view.Camera;
         var height = (float)camera.Y;
         _camera = camera;
+        _seaRadius = frame.SeaRadius;
 
-        // Sea positions are heights above sea level: lower them by the camera's height into camera-relative space.
-        header->ViewProj = Matrix4x4.CreateTranslation(0f, -height, 0f) * viewProj;
+        // Sea positions are heights above the frame's plane: lower them by the camera's height into camera-relative space.
+        header->ViewProj = Matrix4x4.CreateTranslation(0f, -height, 0f) * view.ViewProj;
         ExtractFrustum(header->ViewProj);
 
         // Vertical cull range: the tallest swell crests and troughs.
-        var reach = 2f * swell.SignificantWaveHeight + 4f;
-        (_cullTop, _cullBottom) = (reach, -reach);
+        _cullReach = 2f * swell.SignificantWaveHeight + 4f;
+        _firstLevel = FirstLevel((float)(camera.Y + frame.Drop(camera.X, camera.Z)));
+
+        header->Planet = new Vector4((float)camera.X, (float)camera.Z, 0f, (float)frame.SeaRadius);
         header->CameraPos = new Vector4(0f, height, 0f, (float)(renderTime % TimeWrap));
         header->SunDir = new Vector4(SunDirection, SunIntensity);
-        header->SkyZenith = new Vector4(SkyZenith, 0f);
-        header->SkyHorizon = new Vector4(SkyHorizon, FogDensity);
-        header->WaterDeep = new Vector4(WaterDeep, 0f);
+        header->SkyZenith = new Vector4(SkyZenith, Glitter(swell.GpuSpectrum.Params.WindSpeed));
+        header->SkyHorizon = new Vector4(SkyHorizon, FogDensity * FogFade);
+        header->WaterDeep = new Vector4(WaterDeep, Opacity);
         header->WaterScatter = new Vector4(WaterScatter, 0f);
         header->CascadeL = _fft.CascadeSizes;
         header->CascadeKLo = OceanFft.BandLow(swell.GpuSpectrum.Params.MinWavelength) with { W = _fft.FoamStrength };
-        (header->CascadeAnchorX, header->CascadeAnchorZ) = CascadeAnchors(header->CascadeL, camera);
-        header->DepthRect = new Vector4((float)(depthRect.X - camera.X), (float)(depthRect.Y - camera.Z), depthRect.Z, depthRect.W);
-        _depthRect = depthRect;
-        header->Carrier = swell.GpuCarrier(renderTime, camera.X, camera.Z);
-        header->Shore = swell.GpuShore(ShoreWash);
-        header->WaveCount = swell.CopyGpuWaves(waves, renderTime, camera.X, camera.Z);
+        (header->CascadeAnchorX, header->CascadeAnchorZ) = CascadeAnchors(header->CascadeL, view.DetailX, view.DetailZ);
+        header->DepthRect = view.DepthNear;
+        header->DepthFar = view.DepthFar;
+        header->DepthValid = view.DepthValid;
+        header->DepthWrap = new Vector4(view.DepthCellX & (SurfFoamResolution - 1), view.DepthCellZ & (SurfFoamResolution - 1), 0f, 0f);
+        _foamOn = view.DepthNear.Z > 0f;
+        (_depthCellX, _depthCellZ, _depthVersion) = (view.DepthCellX, view.DepthCellZ, view.DepthVersion);
+
+        // The sea tiles round the camera: one wave set, a phase per tile slot, and each slot's plane map.
+        SeaSlots.Build(sea.Tiles, frame, camera.X, camera.Z, WaveReach, out var slots);
+        header->SlotCount = slots.Count;
+        header->BandRow = slots.BandRow;
+        header->BandSouth = slots.BandSouth;
+        header->BandNorth = slots.BandNorth;
+        header->WaveCount = swell.CopyGpuWaves(waves, renderTime, slots.U[0], slots.V[0]);
+
+        for (var s = 0; s < slots.Count; s++)
+        {
+            swell.CopyGpuPhases(phases, s, SeaTiles.MaxBlend, renderTime, slots.U[s], slots.V[s]);
+
+            for (var k = 0; k < 4; k++)
+            {
+                header->SlotSide[4 * s + k] = slots.Side[4 * s + k];
+                header->SlotToTile[4 * s + k] = slots.ToTile[4 * s + k];
+                header->SlotFromTile[4 * s + k] = slots.FromTile[4 * s + k];
+            }
+        }
+
+        // The surf carrier is the camera's tile's; its direction k·(T x) = (Tᵀ k)·x in the frame's plane.
+        var p = slots.Primary;
+        var shore = swell.GpuShore(ShoreWash);
+        header->Carrier = swell.GpuCarrier(renderTime, slots.U[p], slots.V[p]);
+        header->Shore = new Vector4(
+            slots.ToTile[4 * p] * shore.X + slots.ToTile[4 * p + 2] * shore.Y,
+            slots.ToTile[4 * p + 1] * shore.X + slots.ToTile[4 * p + 3] * shore.Y,
+            shore.Z, shore.W);
         header->DebugView = _fft.DebugView ? 1f : 0f;
     }
+
+    /// <summary>The finest level drawn from <paramref name="altitude"/> (m above the sea): cells of about <see cref="FinestCell"/> of it.</summary>
+    private static int FirstLevel(float altitude) =>
+        Math.Clamp((int)MathF.Floor(MathF.Log2(MathF.Max(altitude * FinestCell / BaseSpacing, 1f))), 0, Levels - 2);
+
+    /// <summary>
+    /// What the waves a pixel can't resolve add to the squared roughness of the sun's glint: their slope variance from
+    /// the wind (Cox and Munk 1954: 0.003 + 0.00512 U), as GGX's α = sqrt(2 × variance), less water_shading.glsl's
+    /// ROUGHNESS² that is already there.
+    /// </summary>
+    private static float Glitter(float windSpeed) => MathF.Max(0f, MathF.Sqrt(2f * (0.003f + 0.00512f * windSpeed)) - 0.0064f);
 
     /// <summary>
     /// The ocean's compute work before the water pass: the surf foam left behind
@@ -517,16 +644,27 @@ public sealed unsafe class OceanRenderer : IDisposable
             _initialised = true;
         }
 
+        // No near window (from altitude): nothing reads the foam, and what it holds is stale when the window returns.
+        if (!_foamOn)
+        {
+            _foamVersion = -1;
+            return;
+        }
 
-        // The surf foam map, once per tick (or at once when the depth map it lives on re-centres, since the old foam is
-        // then in the wrong place), decaying by the time since its last update.
+        // The surf foam map, once per tick, decaying by the time since its last update; at once when the window moved
+        // (the cells that came in hold foam from wherever they were before) or shows another sea frame.
         _foamSeconds += MathF.Min(frameSeconds, 0.1f);
-        if (tickIndex == _foamTick && _depthRect == _surfFoamRect)
+        var clear = _foamVersion != _depthVersion;
+        var moved = clear || _foamCellX != _depthCellX || _foamCellZ != _depthCellZ;
+
+        if (tickIndex == _foamTick && !moved)
             return;
 
         Span<float> push = stackalloc float[PushConstantSize / sizeof(float)];
         push[0] = _foamSeconds;
-        push[3] = _depthRect == _surfFoamRect ? 0f : 1f;
+        push[1] = _depthCellX - _foamCellX;
+        push[2] = _depthCellZ - _foamCellZ;
+        push[3] = clear ? 1f : 0f;
         commands.PushConstants(_layout, PushStages, 0, MemoryMarshal.AsBytes(push));
         commands.BindPipeline(VkPipelineBindPoint.Compute, _surfFoamUpdate);
         _timer.Begin(commands, _surfFoamScope);
@@ -535,7 +673,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         Barrier(commands, VkPipelineStageFlags.ComputeShaderBit, VkAccessFlags.ShaderWriteBit, VkPipelineStageFlags.VertexShaderBit, VkAccessFlags.ShaderReadBit);
         _foamTick = tickIndex;
         _foamSeconds = 0f;
-        _surfFoamRect = _depthRect;
+        (_foamCellX, _foamCellZ, _foamVersion) = (_depthCellX, _depthCellZ, _depthVersion);
     }
 
     /// <summary>
@@ -543,20 +681,23 @@ public sealed unsafe class OceanRenderer : IDisposable
     /// x / L + this (x camera-relative), so texture coordinates stay small anywhere in the world. W is the camera modulo
     /// the foam lace's period (<see cref="LacePeriod"/>), wrapped the same way.
     /// </summary>
-    private static (Vector4 X, Vector4 Z) CascadeAnchors(Vector4 sizes, double3 camera)
+    private static (Vector4 X, Vector4 Z) CascadeAnchors(Vector4 sizes, double x, double z)
     {
         static float Frac(double v) => (float)(v - Math.Floor(v));
         static float Wrap(double v) => (float)(v - LacePeriod * Math.Floor(v / LacePeriod));
 
         return (
-            new Vector4(Frac(camera.X / sizes.X), Frac(camera.X / sizes.Y), Frac(camera.X / sizes.Z), Wrap(camera.X)),
-            new Vector4(Frac(camera.Z / sizes.X), Frac(camera.Z / sizes.Y), Frac(camera.Z / sizes.Z), Wrap(camera.Z)));
+            new Vector4(Frac(x / sizes.X), Frac(x / sizes.Y), Frac(x / sizes.Z), Wrap(x)),
+            new Vector4(Frac(z / sizes.X), Frac(z / sizes.Y), Frac(z / sizes.Z), Wrap(z)));
     }
 
     private static void Barrier(CommandBuffer commands, VkPipelineStageFlags srcStage, VkAccessFlags srcAccess, VkPipelineStageFlags dstStage, VkAccessFlags dstAccess) =>
         commands.PipelineBarrier(srcStage, dstStage, VkDependencyFlags.None, [new VkMemoryBarrier { SrcAccessMask = srcAccess, DstAccessMask = dstAccess }], [], []);
 
-    /// <summary>Records the surface (one draw per clipmap level), camera-relative from <see cref="Prepare"/>. Inside the water pass.</summary>
+    /// <summary>
+    /// Records the surface, camera-relative from <see cref="Prepare"/>: each level from the finest the camera's height
+    /// calls for, tile by tile, culled against the frustum with the sphere's drop. Inside the water pass.
+    /// </summary>
     public void Record(CommandBuffer commands, int frameIndex, VkExtent2D extent)
     {
         commands.BindPipeline(VkPipelineBindPoint.Graphics, _pipeline);
@@ -566,18 +707,20 @@ public sealed unsafe class OceanRenderer : IDisposable
         commands.SetScissor(0, [new VkRect2D { Extent = extent }]);
 
         Span<float> push = stackalloc float[PushConstantSize / sizeof(float)];
-        var spacing = BaseSpacing;
+        var spacing = BaseSpacing * (1 << _firstLevel);
         _timer.Begin(commands, _surfaceScope);
 
         var drawn = 0;
         var indices = 0;
+        var limb = Limb * _seaRadius;
 
-        for (var level = 0; level < Levels; level++)
+        for (var level = _firstLevel; level < Levels; level++)
         {
             // Snapped in the sea frame in double, then made camera-relative.
             double snap = 2f * spacing;
             var centreX = (float)(Math.Round(_camera.X / snap) * snap - _camera.X);
             var centreZ = (float)(Math.Round(_camera.Z / snap) * snap - _camera.Z);
+            var shell = level >= WaveLevels;
             push[0] = centreX;
             push[1] = centreZ;
             push[2] = spacing;
@@ -585,22 +728,46 @@ public sealed unsafe class OceanRenderer : IDisposable
             push[4] = MorphStart;
             push[5] = MorphEnd;
             push[6] = level;
-            push[7] = 0f;
+            push[7] = shell ? 1f : 0f;
 
             commands.PushConstants(_layout, PushStages, 0, MemoryMarshal.AsBytes(push));
-            var variant = level == 0 ? 0 : 1;
+            var variant = level == _firstLevel ? 0 : 1;
             var tileSize = TileQuads * spacing;
+            var margin = shell ? 0f : CullMargin;
+            var reach = shell ? 0f : _cullReach;
 
             for (var tile = 0; tile < Tiles; tile++)
             {
                 var count = _tileCount[variant * Tiles + tile];
+
+                if (count == 0)
+                    continue;
+
                 var x0 = centreX + (tile % TileSide * TileQuads - HalfCells) * spacing;
                 var z0 = centreZ + (tile / TileSide * TileQuads - HalfCells) * spacing;
-                var min = new Vector3(x0 - CullMargin, _cullBottom, z0 - CullMargin);
-                var max = new Vector3(x0 + tileSize + CullMargin, _cullTop, z0 + tileSize + CullMargin);
 
-                if (count == 0 || !Visible(min, max))
+                // The tile's nearest and farthest points from the frame's origin give its highest and lowest sea.
+                var ox = x0 + _camera.X;
+                var oz = z0 + _camera.Z;
+                var nearX = Math.Max(Math.Max(ox, -(ox + tileSize)), 0.0);
+                var nearZ = Math.Max(Math.Max(oz, -(oz + tileSize)), 0.0);
+                var farX = Math.Max(Math.Abs(ox), Math.Abs(ox + tileSize));
+                var farZ = Math.Max(Math.Abs(oz), Math.Abs(oz + tileSize));
+                var near = Math.Sqrt(nearX * nearX + nearZ * nearZ);
+                var far = Math.Sqrt(farX * farX + farZ * farZ);
+
+                // Wholly past the limb: every vertex collapses onto it. Partly past it: vertices are pulled inward, out of the box.
+                if (near > limb)
                     continue;
+
+                if (far <= limb)
+                {
+                    var min = new Vector3(x0 - margin, -reach - Drop(far), z0 - margin);
+                    var max = new Vector3(x0 + tileSize + margin, reach - Drop(near), z0 + tileSize + margin);
+
+                    if (!Visible(min, max))
+                        continue;
+                }
 
                 commands.DrawIndexed(count, 1, _tileFirst[variant * Tiles + tile], 0, 0);
                 drawn++;
@@ -614,6 +781,16 @@ public sealed unsafe class OceanRenderer : IDisposable
         TrianglesLastFrame = indices / 3;
 
         _timer.End(commands, _surfaceScope);
+    }
+
+    /// <summary>ocean.vert LIMB.</summary>
+    private const double Limb = 0.999;
+
+    /// <summary>How far the sea sphere lies below the frame's plane at distance r from its origin (ocean_common.glsl seaDrop).</summary>
+    private float Drop(double r)
+    {
+        var r2 = Math.Min(r * r, _seaRadius * _seaRadius);
+        return (float)(r2 / (_seaRadius + Math.Sqrt(_seaRadius * _seaRadius - r2)));
     }
 
     private VkPipeline CreateComputePipeline(string file)

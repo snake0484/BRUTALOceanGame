@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "id": "add.catalyst",
+  "item": {
+    "family": "additive",
+    "densityKgM3": 2000,
+    "refCostPerKg": 10.0,
+    "metastable": null
+  },
+  "effect": {
+    "mC": 0.6
+  },
+  "tradeOff": {
+    "mE": 1.25
+  },
+  "recipe": {
+    "station": "fc.additive_lab",
+    "crude": true,
+    "kind": "Fixed",
+    "timeSPerKg": 2400,
+    "powerW": 5000000.0,
+    "inputs": [
+      {
+        "family": "em",
+        "minPurity": 0.4,
+        "contentKg": 0.4
+      },
+      {
+        "item": "am.cell",
+        "amG": 1.0
+      }
+    ]
+  }
+}

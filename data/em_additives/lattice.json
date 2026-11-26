@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "id": "add.lattice",
+  "item": {
+    "family": "additive",
+    "densityKgM3": 3100,
+    "refCostPerKg": 12.0,
+    "metastable": {
+      "decayPerDay": 0.02,
+      "floorPotency": 0.45
+    }
+  },
+  "effect": {
+    "mS": 1.5
+  },
+  "tradeOff": {
+    "mX": 1.2,
+    "mL": 1.25
+  },
+  "recipe": {
+    "station": "fc.additive_lab",
+    "crude": false,
+    "kind": "Fixed",
+    "timeSPerKg": 3600,
+    "powerW": 5000000.0,
+    "inputs": [
+      {
+        "family": "em",
+        "minPurity": 0.97,
+        "contentKg": 0.1
+      },
+      {
+        "family": "em",
+        "minPurity": 0.85,
+        "contentKg": 0.7
+      }
+    ]
+  }
+}

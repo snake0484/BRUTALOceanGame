@@ -46,8 +46,8 @@ layout(std430, set = 0, binding = 2) buffer Draws {
     DrawCommand commands[];
 } draws;
 
-// Surface Nets apron cells and skirts put vertices up to 2 voxels outside the chunk cube.
-const float CULL_MARGIN_VOXELS = 2.0;
+// Surface Nets apron cells and skirt flanges put vertices up to 3 voxels outside the chunk cube (SurfaceNetsMesher.MarginVoxels).
+const float CULL_MARGIN_VOXELS = 3.0;
 
 bool visible(vec3 origin, float voxelScale)
 {

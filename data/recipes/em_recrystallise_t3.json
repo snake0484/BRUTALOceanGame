@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "id": "em.recrystallise.t3",
+  "kind": "Enrich",
+  "station": "fc.graviton_recrystalliser",
+  "licence": "refinery",
+  "input": {
+    "family": "em",
+    "minPurity": 0.6
+  },
+  "alpha": 6,
+  "yield": 0.75,
+  "loss": 0.03,
+  "purityCap": 0.96,
+  "throughputKgPerHour": 5,
+  "powerW": 50000000.0,
+  "spreadOut": 0.0,
+  "consumes": [
+    {
+      "item": "solvent.cryo",
+      "perKgInput": 0.5
+    }
+  ],
+  "amGPerKg": 0.05
+}

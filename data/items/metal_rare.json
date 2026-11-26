@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "metal.rare",
+  "name": "Rare metal",
+  "family": "metal",
+  "densityKgM3": 8900,
+  "refCostPerKg": 2.0
+}

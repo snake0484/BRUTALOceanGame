@@ -7,7 +7,12 @@ namespace BrutalGame.Terrain;
 /// Surface nets over a padded chunk. Works in voxel units; output positions are chunk-local metres (× chunk VoxelScale).
 /// Skirts (docs/terrain-lod.md): a border vertex is one whose cell index is -1 or 31 on some axis (the cell layers
 /// shared with a neighbour). An edge used by exactly one triangle whose two vertices share a border face is open;
-/// each open edge gets a quad extruded 1 voxel against the edge's average normal, wound like its triangle.
+/// each open edge gets a quad wound like its triangle, each end extruded 1 voxel against its vertex's normal and 1 voxel
+/// outward along the surface (a flange, 45° under where the surface would go on). Outward is per vertex, mitred over
+/// its open edges, so neighbouring quads share their lower corners and the flange has no gaps at the border's zigzags.
+/// The surface stops about half a voxel short of the chunk's plus faces and overhangs its minus faces by as much, so a
+/// coarser leaf on the minus side of a finer one ends about half a fine voxel before the fine mesh begins: a slot that
+/// skirts hanging straight down leave open to a view along it, and the flange floors.
 /// Ends by packing the GPU vertices (<see cref="PackedTerrainVertex"/>) on the meshing thread.
 /// </summary>
 public sealed class SurfaceNetsMesher
@@ -19,6 +24,15 @@ public sealed class SurfaceNetsMesher
     private const float Quantise = 256f;
     private const float InvQuantise = 1f / Quantise;
     private const int InitialEdgeCapacity = 4096;
+
+    /// <summary>The flange reaches at most this far outward (voxels), at a 90° corner.</summary>
+    private const float MaxMitre = 1.41421356f;
+
+    /// <summary>
+    /// The mesh stays within this many voxels of the chunk's cube: apron cells reach 1, and a skirt vertex at most
+    /// √(<see cref="MaxMitre"/>² + 1) further. Culling (terrain_cull.comp) and the packed vertex range allow for it.
+    /// </summary>
+    public const float MarginVoxels = 3f;
 
     private static ReadOnlySpan<byte> EdgeA => [0, 2, 4, 6, 0, 1, 4, 5, 0, 1, 2, 3];
     private static ReadOnlySpan<byte> EdgeB => [1, 3, 5, 7, 2, 3, 6, 7, 4, 5, 6, 7];
@@ -34,15 +48,19 @@ public sealed class SurfaceNetsMesher
     private readonly int[] _cellVertex = new int[ChunkConstants.PaddedVolume];
     private byte[] _vertexBorder = new byte[4096];
     private BorderEdge[] _edges = new BorderEdge[InitialEdgeCapacity];
+
+    /// <summary>Per surface vertex: the sum of its open edges' outward directions, and how many (w).</summary>
+    private Vector4[] _outward = new Vector4[4096];
     private int _edgeCount;
 
     public int LastSkirtTriangles { get; private set; }
 
-    public void Mesh(VoxelChunk chunk, ChunkMesh output, bool skirts = true) => Mesh(chunk, output, skirts, chunk.Coord.VoxelScale);
+    /// <param name="seaColumns">Planet terrain: the generated sea mask, one bit per padded voxel (<see cref="PlanetChunkScratch.SeaColumns"/>). A vertex whose cell has a corner in it gets <see cref="PackedTerrainVertex.SeaColumn"/>.</param>
+    public void Mesh(VoxelChunk chunk, ChunkMesh output, bool skirts = true, ulong[]? seaColumns = null) => Mesh(chunk, output, skirts, chunk.Coord.VoxelScale, seaColumns);
 
     /// <summary>Meshes at an explicit cell size in metres (hull bricks use 0.25 m); terrain passes its chunk's voxel size.</summary>
     [SkipLocalsInit]
-    public unsafe void Mesh(VoxelChunk chunk, ChunkMesh output, bool skirts, float cellScale)
+    public unsafe void Mesh(VoxelChunk chunk, ChunkMesh output, bool skirts, float cellScale, ulong[]? seaColumns = null)
     {
         output.Clear();
         LastSkirtTriangles = 0;
@@ -68,6 +86,7 @@ public sealed class SurfaceNetsMesher
         fixed (sbyte* d = chunk.Density)
         fixed (byte* m = chunk.Material)
         fixed (int* cv = _cellVertex)
+        fixed (ulong* sea = seaColumns)
         {
             for (var z = -1; z <= Last; z++)
             {
@@ -108,6 +127,10 @@ public sealed class SurfaceNetsMesher
                         v.Position = CellVertex(c, mask, edgeA, edgeB, x, y, z, scale, out var f);
                         v.Normal = Gradient(c, f);
                         v.Material = DominantMaterial(m, mats, i, mask);
+
+                        if (sea != null && InSeaColumn(sea, i))
+                            v.Material |= PackedTerrainVertex.SeaColumn;
+
                         border[vertexCount] = (byte)(byz | (x < 0 ? 1 : x == Last ? 2 : 0));
                         cv[i] = vertexCount++;
 
@@ -181,6 +204,12 @@ public sealed class SurfaceNetsMesher
         var vertices = output.Vertices;
         indices = output.Indices;
 
+        if (_outward.Length < vertexCount)
+            _outward = new Vector4[vertices.Length];
+
+        var outward = _outward;
+        Array.Clear(outward, 0, vertexCount);
+
         foreach (ref readonly var e in _edges.AsSpan())
         {
             if (e.Count != 1)
@@ -190,14 +219,31 @@ public sealed class SurfaceNetsMesher
             var b = e.From == e.Lo ? e.Hi : e.Lo;
             ref readonly var va = ref vertices[a];
             ref readonly var vb = ref vertices[b];
-            var n = va.Normal + vb.Normal;
-            var len2 = n.LengthSquared();
-            n = len2 > 1e-12f ? n * (scale / MathF.Sqrt(len2)) : new Vector3(0f, scale, 0f);
+            var o = Vector3.Cross(vb.Position - va.Position, va.Normal + vb.Normal);
+            var len2 = o.LengthSquared();
+
+            if (len2 < 1e-12f)
+                continue;
+
+            var unit = new Vector4(o / MathF.Sqrt(len2), 1f);
+            outward[a] += unit;
+            outward[b] += unit;
+        }
+
+        foreach (ref readonly var e in _edges.AsSpan())
+        {
+            if (e.Count != 1)
+                continue;
+
+            var a = e.From;
+            var b = e.From == e.Lo ? e.Hi : e.Lo;
+            ref readonly var va = ref vertices[a];
+            ref readonly var vb = ref vertices[b];
 
             var a2 = (uint)vertexCount;
             var b2 = a2 + 1;
-            vertices[a2] = va with { Position = va.Position - n };
-            vertices[b2] = vb with { Position = vb.Position - n };
+            vertices[a2] = va with { Position = va.Position + Flange(va.Normal, outward[a]) * scale };
+            vertices[b2] = vb with { Position = vb.Position + Flange(vb.Normal, outward[b]) * scale };
             vertexCount += 2;
 
             indices[indexCount] = b;
@@ -212,6 +258,20 @@ public sealed class SurfaceNetsMesher
         output.VertexCount = vertexCount;
         output.IndexCount = indexCount;
         LastSkirtTriangles = open * 2;
+    }
+
+    /// <summary>A skirt vertex's offset in voxels: against the normal, and outward by the mitre of its edges' directions (their mean m, as m/|m|²).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector3 Flange(Vector3 normal, Vector4 outward)
+    {
+        var sum = new Vector3(outward.X, outward.Y, outward.Z);
+        var count = outward.W;
+        var len2 = sum.LengthSquared();
+
+        if (len2 < 1e-12f)
+            return -normal;
+
+        return sum * (count / MathF.Max(len2, count * count / (MaxMitre * MaxMitre))) - normal;
     }
 
     private void AddEdge(uint from, uint to)
@@ -345,6 +405,14 @@ public sealed class SurfaceNetsMesher
 
         return best;
     }
+
+    /// <summary>Any corner of the cell at <paramref name="i"/> is in the mask: the shoreline errs to the sea side, where ground above the sea is dry anyway.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe bool InSeaColumn(ulong* sea, int i) =>
+        (Bit(sea, i) | Bit(sea, i + 1) | Bit(sea, i + P) | Bit(sea, i + 1 + P) | Bit(sea, i + PP) | Bit(sea, i + 1 + PP) | Bit(sea, i + P + PP) | Bit(sea, i + 1 + P + PP)) != 0;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe ulong Bit(ulong* bits, int i) => (bits[i >> 6] >> (i & 63)) & 1;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int Quad(uint[] indices, int n, int a, int b, int c, int d, bool solidBase)

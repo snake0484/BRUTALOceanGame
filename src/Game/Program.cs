@@ -6,13 +6,16 @@ LogSystem.Initialize(builder => builder.AddSimpleConsole(o => o.SingleLine = tru
 
 var windSpeed = 10f;
 
-// Groundswell: significant height (m), peak period (s), direction it travels toward (degrees). 0 height = none.
+// Groundswell: significant height (m), peak period (s), direction it travels toward (degrees from east toward south). 0 height = none.
 float[] swell = [1.2f, 13f, 0f];
 var foamDebug = false;
 var editTest = false;
 var hideUi = false;
 var benchSeconds = 0.0;
-var flyTest = false;
+var planetFly = false;
+var moonTest = false;
+var shoreFly = false;
+var seamTest = false;
 OrbitTestFrame? orbitTest = null;
 
 // Weather drives the ocean wind and the sky unless --wind pins the sea (tests, benchmarks); --weather forces it on.
@@ -24,6 +27,12 @@ var weatherOffset = 0f;
 // Scene resolution per axis relative to the window (0.5..1); the UI stays native.
 var renderScale = 1f;
 float[]? camera = null;
+
+// Planet kind of the terrain planet and the moons (data/planets/kinds), and the seed its ranges draw from.
+string? planetKind = null;
+ulong? kindSeed = null;
+var steep = false;
+
 for (var i = 0; i < args.Length; i++)
 {
     if (args[i] == "--wind" && i + 1 < args.Length)
@@ -60,8 +69,20 @@ for (var i = 0; i < args.Length; i++)
             i++;
         }
     }
-    else if (args[i] == "--fly-test")
-        flyTest = true;
+    else if (args[i] == "--planet-fly")
+        planetFly = true;
+    else if (args[i] == "--moon-test")
+        moonTest = true;
+    else if (args[i] == "--shore-fly")
+        shoreFly = true;
+    else if (args[i] == "--seam-test")
+        seamTest = true;
+    else if (args[i] == "--planet-kind" && i + 1 < args.Length)
+        planetKind = args[++i];
+    else if (args[i] == "--kind-seed" && i + 1 < args.Length)
+        kindSeed = ulong.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture);
+    else if (args[i] == "--steep")
+        steep = true;
     else if (args[i] == "--orbit-test")
     {
         orbitTest = OrbitTestFrame.Surface;
@@ -80,5 +101,18 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
-using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, flyTest, swell, weather ?? true, weatherOffset, renderScale, orbitTest);
+// menu: without a test or bench flag the menu runs the game; a new world with another seed relaunches it (Menu/MenuLaunch.cs).
+if (BrutalGame.Menu.MenuLaunch.FromArgs(args) is { } menu)
+{
+    do
+    {
+        using var menuApp = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest, shoreFly, seamTest, menu, planetKind, kindSeed, steep);
+        menuApp.Run();
+    }
+    while (menu.TakeRelaunch());
+
+    return;
+}
+
+using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest, shoreFly, seamTest, planetKind: planetKind, kindSeed: kindSeed, steep: steep);
 app.Run();

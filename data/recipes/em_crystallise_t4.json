@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "id": "em.crystallise.t4",
+  "kind": "Enrich",
+  "station": "fc.seeded_crystalliser",
+  "licence": "refinery",
+  "input": {
+    "family": "em",
+    "minPurity": 0.9
+  },
+  "alpha": 10,
+  "yield": 0.7,
+  "loss": 0.02,
+  "purityCap": 0.995,
+  "throughputKgPerHour": 0.5,
+  "powerW": 200000000.0,
+  "spreadOut": 0.0,
+  "consumes": [],
+  "amGPerKg": 0.5,
+  "seed": {
+    "minPurity": 0.97,
+    "minContentFraction": 0.02,
+    "consumedFraction": 0.1
+  }
+}

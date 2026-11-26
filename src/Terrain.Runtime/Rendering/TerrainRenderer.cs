@@ -24,8 +24,17 @@ public sealed unsafe class TerrainRenderer : IDisposable
 {
     public const int MaxHandles = 8192;
     public const int VertexStride = PackedTerrainVertex.SizeInBytes;
-    public const long VertexArenaBytes = 48L << 20;
-    public const long IndexArenaBytes = 96L << 20;
+
+    /// <summary>16-bit indices (planets.md "Memory"): a 32³ leaf with skirts has well under 65k vertices.</summary>
+    public const int IndexStride = sizeof(ushort);
+
+    /// <summary><see cref="Upload"/>: staging or this frame's copies are full; retry next frame.</summary>
+    public const int UploadRetry = -1;
+
+    /// <summary><see cref="Upload"/>: the arenas or handles are full; only freeing chunks makes room.</summary>
+    public const int UploadNoRoom = -2;
+    public const long VertexArenaBytes = 80L << 20;
+    public const long IndexArenaBytes = 64L << 20;
     public const int StagingRegionBytes = 16 << 20;
     public const int MaxUploadsPerFrame = 1024;
 
@@ -138,6 +147,9 @@ public sealed unsafe class TerrainRenderer : IDisposable
         public Vector4 SunDir;
         public Vector4 SkyZenith;
         public Vector4 SkyHorizon;
+        public Vector4 Water;
+        public Vector4 Space;
+        public Vector4 Sea;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -183,12 +195,12 @@ public sealed unsafe class TerrainRenderer : IDisposable
         _indirectCount = context.DrawIndirectCount;
 
         var vertexCapacity = (int)(VertexArenaBytes / VertexStride);
-        var indexCapacity = (int)(IndexArenaBytes / sizeof(uint));
+        var indexCapacity = (int)(IndexArenaBytes / IndexStride);
         _vertexRanges = new RangeAllocator(vertexCapacity, MaxRanges + 1);
         _indexRanges = new RangeAllocator(indexCapacity, MaxRanges + 1);
 
         _vertexArena = new GpuBuffer(context, vertexCapacity * VertexStride, VkBufferUsageFlags.VertexBufferBit | VkBufferUsageFlags.TransferDstBit, false);
-        _indexArena = new GpuBuffer(context, indexCapacity * sizeof(uint), VkBufferUsageFlags.IndexBufferBit | VkBufferUsageFlags.TransferDstBit, false);
+        _indexArena = new GpuBuffer(context, indexCapacity * IndexStride, VkBufferUsageFlags.IndexBufferBit | VkBufferUsageFlags.TransferDstBit, false);
         _staging = new GpuBuffer(context, StagingRegionBytes * StagingRegions, VkBufferUsageFlags.TransferSrcBit, true);
         _uniforms = new GpuBuffer(context, UniformStride * Renderer.FramesInFlight, VkBufferUsageFlags.UniformBufferBit, true);
         _chunkTable = new GpuBuffer(context, MaxHandles * ChunkStride, VkBufferUsageFlags.StorageBufferBit | VkBufferUsageFlags.TransferDstBit, false);
@@ -233,31 +245,38 @@ public sealed unsafe class TerrainRenderer : IDisposable
 
     public long VertexBytesUsed => (long)_vertexRanges.Used * VertexStride;
 
-    public long IndexBytesUsed => (long)_indexRanges.Used * sizeof(uint);
+    public long IndexBytesUsed => (long)_indexRanges.Used * IndexStride;
 
     private static int UniformStride => (sizeof(FrameUniforms) + UniformAlignment - 1) / UniformAlignment * UniformAlignment;
 
     /// <summary>
-    /// Copies the mesh into staging and reserves arena space. Returns a handle, or -1 if out of staging, arena or handle space (retry next frame).
+    /// Copies the mesh into staging and reserves arena space. Returns a handle, <see cref="UploadRetry"/> if out of
+    /// staging (retry next frame) or <see cref="UploadNoRoom"/> if out of arena or handle space.
     /// </summary>
     public int Upload(ChunkCoord coord, ChunkMesh mesh)
     {
         if (_freeHandleCount == 0 || _liveCount + _pendingCount >= MaxRanges)
-            return -1;
+            return UploadNoRoom;
 
         var vertexCount = mesh.VertexCount;
         var indexCount = mesh.IndexCount;
         var empty = vertexCount == 0 || indexCount == 0;
         int vertexOffset = 0, indexOffset = 0;
 
+        if (vertexCount > ushort.MaxValue + 1)
+            throw new InvalidOperationException($"Chunk {coord} has {vertexCount} vertices: more than 16-bit indices reach.");
+
         if (empty)
         {
             vertexCount = 0;
             indexCount = 0;
         }
-        else if (!Stage(mesh, vertexCount, indexCount, out vertexOffset, out indexOffset))
+        else
         {
-            return -1;
+            var staged = Stage(mesh, vertexCount, indexCount, out vertexOffset, out indexOffset);
+
+            if (staged != 0)
+                return staged;
         }
 
         var handle = _freeHandles[--_freeHandleCount];
@@ -288,27 +307,28 @@ public sealed unsafe class TerrainRenderer : IDisposable
         _dirty[_dirtyCount++] = handle;
     }
 
-    private bool Stage(ChunkMesh mesh, int vertexCount, int indexCount, out int vertexOffset, out int indexOffset)
+    /// <summary>0 when staged, else <see cref="UploadRetry"/> or <see cref="UploadNoRoom"/>.</summary>
+    private int Stage(ChunkMesh mesh, int vertexCount, int indexCount, out int vertexOffset, out int indexOffset)
     {
         vertexOffset = 0;
         indexOffset = 0;
         var vertexBytes = vertexCount * VertexStride;
-        var indexBytes = indexCount * sizeof(uint);
+        var indexBytes = indexCount * IndexStride;
 
         if (_copyCount == MaxUploadsPerFrame || _stagingCursor + vertexBytes + indexBytes > MeshStagingBytes)
-            return false;
+            return UploadRetry;
 
         vertexOffset = _vertexRanges.Allocate(vertexCount);
 
         if (vertexOffset < 0)
-            return false;
+            return UploadNoRoom;
 
         indexOffset = _indexRanges.Allocate(indexCount);
 
         if (indexOffset < 0)
         {
             _vertexRanges.Release(vertexOffset, vertexCount);
-            return false;
+            return UploadNoRoom;
         }
 
         var regionStart = (long)_stagingRegion * StagingRegionBytes;
@@ -316,7 +336,11 @@ public sealed unsafe class TerrainRenderer : IDisposable
         var dst = (byte*)_staging.Mapped + src;
 
         MemoryMarshal.AsBytes(mesh.Packed.AsSpan(0, vertexCount)).CopyTo(new Span<byte>(dst, vertexBytes));
-        MemoryMarshal.AsBytes(mesh.Indices.AsSpan(0, indexCount)).CopyTo(new Span<byte>(dst + vertexBytes, indexBytes));
+        var indices = new Span<ushort>(dst + vertexBytes, indexCount);
+        var source = mesh.Indices;
+
+        for (var i = 0; i < indexCount; i++)
+            indices[i] = (ushort)source[i];
 
         _vertexCopies[_copyCount] = new VkBufferCopy
         {
@@ -327,12 +351,14 @@ public sealed unsafe class TerrainRenderer : IDisposable
         _indexCopies[_copyCount] = new VkBufferCopy
         {
             SrcOffset = (ByteSize64)(src + vertexBytes),
-            DstOffset = (ByteSize64)((long)indexOffset * sizeof(uint)),
+            DstOffset = (ByteSize64)((long)indexOffset * IndexStride),
             Size = (ByteSize64)(long)indexBytes,
         };
         _copyCount++;
-        _stagingCursor += vertexBytes + indexBytes;
-        return true;
+
+        // Keep the next mesh's packed vertices 4-byte aligned.
+        _stagingCursor += (vertexBytes + indexBytes + 3) & ~3;
+        return 0;
     }
 
     /// <summary>Removes the chunk now; its arena ranges are reused only once in-flight frames can no longer read them.</summary>
@@ -469,7 +495,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
     /// Camera-relative: each record is <paramref name="rotation"/> × (origin − <paramref name="camera"/>), the
     /// difference taken in whole chunks plus the camera's remainder, so it is exact at any distance.
     /// </summary>
-    /// <param name="camera">The camera in the terrain's frame, whose sea level is y = 0; nothing is drawn past <see cref="MaxCameraMetres"/> or for NaN.</param>
+    /// <param name="camera">The camera in the terrain's (planet's) frame; nothing is drawn past <see cref="MaxCameraMetres"/> or for NaN.</param>
     /// <param name="rotation">The terrain frame's axes to the camera frame's (the axes <paramref name="viewProj"/> takes).</param>
     public void Cull(CommandBuffer commands, int frameIndex, in Matrix4x4 viewProj, double3 camera, doubleQuat rotation)
     {
@@ -574,8 +600,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
     /// feature, one DrawIndexedIndirect over every slot, culled ones with no instances). <paramref name="viewProj"/>
     /// has no translation.
     /// </summary>
-    /// <param name="camera">The camera in the terrain's frame, whose sea level is y = 0.</param>
-    public void Draw(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, double3 camera, in TerrainLighting lighting)
+    public void Draw(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, in TerrainLighting lighting)
     {
         var start = Stopwatch.GetTimestamp();
 
@@ -583,15 +608,18 @@ public sealed unsafe class TerrainRenderer : IDisposable
         {
             var uniforms = (FrameUniforms*)((byte*)_uniforms.Mapped + frameIndex * UniformStride);
             uniforms->ViewProj = viewProj;
-            uniforms->CameraPos = new Vector4(0f, (float)camera.Y, 0f, 0f);
+            uniforms->CameraPos = new Vector4(lighting.PlanetCentre, lighting.SeaRadius);
             uniforms->SunDir = new Vector4(lighting.SunDirection, lighting.SunIntensity);
-            uniforms->SkyZenith = new Vector4(lighting.SkyZenith, 0f);
+            uniforms->SkyZenith = new Vector4(lighting.SkyZenith, lighting.StarIntensity);
             uniforms->SkyHorizon = new Vector4(lighting.SkyHorizon, lighting.FogDensity);
+            uniforms->Water = new Vector4(lighting.WaterColour, lighting.SeaFillStart);
+            uniforms->Space = new Vector4(lighting.SpaceLook, lighting.AtmosphereTop, lighting.AtmosphereScaleHeight, lighting.AtmosphereBase);
+            uniforms->Sea = new Vector4(lighting.CameraAboveSea, 0f, 0f, 0f);
 
             commands.BindPipeline(VkPipelineBindPoint.Graphics, _pipeline);
             commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex], _instances.GpuSet], []);
             commands.BindVertexBuffers(0, [_vertexArena.Handle], [(ByteSize64)0]);
-            commands.BindIndexBuffer(_indexArena.Handle, (ByteSize64)0, VkIndexType.UInt32);
+            commands.BindIndexBuffer(_indexArena.Handle, (ByteSize64)0, VkIndexType.UInt16);
             commands.SetViewport(0, [new VkViewport { Width = extent.Width, Height = extent.Height, MaxDepth = 1f }]);
             commands.SetScissor(0, [new VkRect2D { Extent = extent }]);
 

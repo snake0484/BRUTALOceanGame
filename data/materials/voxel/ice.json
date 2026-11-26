@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "Ice",
+  "densityKgM3": 920,
+  "hardness": 0.2,
+  "placeable": true,
+  "yields": {
+    "item": "ice"
+  }
+}

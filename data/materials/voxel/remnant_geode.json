@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "RemnantGeode",
+  "name": "Crystal geode",
+  "densityKgM3": 3000,
+  "hardness": 0.95,
+  "placeable": false,
+  "yields": {
+    "item": "em",
+    "purityFrom": "range",
+    "purityRange": [
+      0.97,
+      0.99
+    ]
+  }
+}

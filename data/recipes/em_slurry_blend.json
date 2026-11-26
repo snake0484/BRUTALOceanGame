@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "id": "em.slurry.blend",
+  "kind": "Blend",
+  "station": "fc.slurry_blender",
+  "inputs": [
+    {
+      "family": "em",
+      "minPurity": 0.17,
+      "maxPurity": 0.4
+    },
+    {
+      "item": "agent.mix"
+    }
+  ],
+  "agentMinFraction": 0.4,
+  "targetPurity": 0.2,
+  "output": "em.slurry",
+  "throughputKgPerHour": 2000,
+  "powerW": 200000.0,
+  "feePerKg": 0.05
+}

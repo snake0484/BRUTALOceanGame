@@ -21,7 +21,8 @@ public enum OrbitTestFrame
 
 /// <summary>
 /// --orbit-test, the M1 precision exit check: once the world has loaded, flies the camera from 2 m above the test planet
-/// (drawn as a smooth sphere, lit by the star through the frame tree, with the island's terrain on it) out to 1e8 m along
+/// (a smooth sphere through the marker below the impostor switch, the detail ladder above it, lit by the star through the
+/// frame tree, with the terrain round the spawn on it) out to 1e8 m along
 /// <see cref="OrbitPath"/>. The camera moves by per-frame deltas in double, as a flown camera would, and looks about the
 /// marker's closed-form position so it never follows the drawn one. Each frame records:
 /// <list type="bullet">
@@ -31,8 +32,9 @@ public enum OrbitTestFrame
 /// <item>the GPU's marker (planet.frag probe, read after the frame's fence) against the CPU's float prediction;</item>
 /// <item>depth and impostor surface precision, terrain chunks the GPU cull drew, and frame timings.</item>
 /// </list>
-/// The marker is fixed to the surface; in the inertial variant it sits 1e-3 rad off the spin pole so it turns under the
-/// camera slowly enough to stay in view. Logs a summary per altitude decade, PASS or FAIL, writes every frame to
+/// The marker is fixed to the surface at the planet's visible height there (ground or sea, as the impostor bakes it), so
+/// the sphere's radius is R + that height; in the inertial variant it sits 1e-3 rad off the spin pole so it turns under
+/// the camera slowly enough to stay in view. Logs a summary per altitude decade, PASS or FAIL, writes every frame to
 /// orbit_test.csv, and closes the window. Pixels are render-target pixels (render scale applied).
 /// </summary>
 public sealed class OrbitTest
@@ -82,6 +84,7 @@ public sealed class OrbitTest
     private readonly float[] _frameMs = new float[MaxFrames];
     private readonly float[] _workMs = new float[MaxFrames];
     private readonly float[] _gpuMs = new float[MaxFrames];
+    private readonly Vector3[] _bodyMs = new Vector3[MaxFrames];
     private int _count;
     private double _start = -1.0;
     private double _s;
@@ -93,7 +96,8 @@ public sealed class OrbitTest
     private double2 _frameTickResidual;
 
     /// <param name="camera">Its frame must be the planet's surface frame; the inertial variant moves it to the planet's inertial frame.</param>
-    public OrbitTest(FlyCamera camera, CelestialSystem celestial, OrbitTestFrame frame)
+    /// <param name="surfaceHeight">The planet's visible height (m about its radius) at a unit direction in its surface frame.</param>
+    public OrbitTest(FlyCamera camera, CelestialSystem celestial, OrbitTestFrame frame, Func<double3, double> surfaceHeight)
     {
         _camera = camera;
         _frames = celestial.Frames;
@@ -131,6 +135,7 @@ public sealed class OrbitTest
         var markerUp = frame == OrbitTestFrame.Surface
             ? sun + double3.Normalize(side) * 1.2
             : _spinAxis * Math.Cos(PoleOffset) + toward * Math.Sin(PoleOffset);
+        PlanetRadius += surfaceHeight(double3.Normalize(doubleQuat.Conjugate(PlanetAxes) * markerUp));
         _path = new OrbitPath(PlanetRadius, markerUp);
         _markerSurface = _path.Marker;
     }
@@ -139,7 +144,8 @@ public sealed class OrbitTest
 
     public bool Done { get; private set; }
 
-    public double PlanetRadius { get; }
+    /// <summary>The datum radius plus the visible height at the marker: the sphere through the marker.</summary>
+    public double PlanetRadius { get; private set; }
 
     /// <summary>Planet centre and axes in the camera's frame, at render time.</summary>
     public double3 PlanetCentre { get; private set; }
@@ -210,7 +216,8 @@ public sealed class OrbitTest
 
     /// <summary>After the frame: probes the pose it was drawn with.</summary>
     /// <param name="viewport">The render target's size, as passed to <see cref="Fly"/>.</param>
-    public void Record(double time, float aspect, Vector2 viewport, float frameMs, float workMs, float gpuMs, int terrainDrawn)
+    /// <param name="bodyMs">GPU ms of the ladder's points, discs and impostors this frame.</param>
+    public void Record(double time, float aspect, Vector2 viewport, float frameMs, float workMs, float gpuMs, Vector3 bodyMs, int terrainDrawn)
     {
         if (Done || _start < 0.0)
             return;
@@ -244,6 +251,7 @@ public sealed class OrbitTest
         _frameMs[i] = frameMs;
         _workMs[i] = workMs;
         _gpuMs[i] = gpuMs;
+        _bodyMs[i] = bodyMs;
     }
 
     /// <summary>The GPU's marker for an earlier sample (<see cref="ProbeTag"/>), read after that frame's fence.</summary>
@@ -323,8 +331,8 @@ public sealed class OrbitTest
         var worstGpuJitter = 0f;
         var worstTickPose = 0f;
         var worstTickSmooth = 0f;
-        Log.Info($"orbit test ({Frame} frame): {_count} frames over {Hold + Seconds:F0} s, {OrbitPath.StartAltitude} m to {OrbitPath.EndAltitude:E0} m over a {PlanetRadius / 1000.0:F0} km sphere, render target {viewport.X}x{viewport.Y}");
-        Log.Info("altitude band   frames  jitter max px  smooth max px  pose err max px  pixel err max px  gpu-cpu max px  gpu jitter px  gpu spread px  coverage px  gpu frames  terrain drawn  camera err max m  surface err max  depth  finite  frame p50/max ms  work p50 ms  gpu planet p50 ms");
+        Log.Info($"orbit test ({Frame} frame): {_count} frames over {Hold + Seconds:F0} s, {OrbitPath.StartAltitude} m to {OrbitPath.EndAltitude:E0} m over a {PlanetRadius / 1000.0:F3} km sphere, render target {viewport.X}x{viewport.Y}");
+        Log.Info("altitude band   frames  jitter max px  smooth max px  pose err max px  pixel err max px  gpu-cpu max px  gpu jitter px  gpu spread px  coverage px  gpu frames  terrain drawn  camera err max m  surface err max  depth  finite  frame p50/max ms  work p50 ms  gpu planet p50 ms  bodies points/discs/impostors p50 ms");
 
         for (var i = 0; i < _count; i++)
         {
@@ -352,6 +360,9 @@ public sealed class OrbitTest
             var frame = new List<float>();
             var work = new List<float>();
             var planet = new List<float>();
+            var points = new List<float>();
+            var discs = new List<float>();
+            var impostors = new List<float>();
 
             for (var i = 0; i < _count; i++)
             {
@@ -372,6 +383,9 @@ public sealed class OrbitTest
                 frame.Add(_frameMs[i]);
                 work.Add(_workMs[i]);
                 planet.Add(_gpuMs[i]);
+                points.Add(_bodyMs[i].X);
+                discs.Add(_bodyMs[i].Y);
+                impostors.Add(_bodyMs[i].Z);
 
                 if (float.IsNaN(_gpuError[i]))
                     continue;
@@ -396,6 +410,9 @@ public sealed class OrbitTest
             frame.Sort();
             work.Sort();
             planet.Sort();
+            points.Sort();
+            discs.Sort();
+            impostors.Sort();
             worstJitter = MathF.Max(worstJitter, jitter);
             worstSmooth = MathF.Max(worstSmooth, smooth);
             worstPose = MathF.Max(worstPose, pose);
@@ -403,7 +420,7 @@ public sealed class OrbitTest
             worstGpuJitter = MathF.Max(worstGpuJitter, gpuJitter);
             pass &= jitter < JitterLimit && smooth < SmoothnessLimit && pose < PoseErrorLimit && resolved > 0 && gpu < GpuErrorLimit && gpuJitter < JitterLimit
                 && depthOk && finite && cameraError < CameraErrorLimit && surface < SurfaceErrorLimit;
-            Log.Info($"{Math.Max(OrbitPath.StartAltitude, Math.Pow(10, band)),8:G2}-{Math.Pow(10, band + 1):G2} m {frames,7} {jitter,14:E2} {smooth,14:E2} {pose,16:E2} {pixel,17:E2} {gpu,15:E2} {gpuJitter,14:E2} {spread,14:E2} {coverage,12:E2} {resolved,11} {terrain,14} {cameraError,17:E2} {surface,16:E2}  {(depthOk ? "ok" : "BAD"),5}  {(finite ? "ok" : "NaN"),6}  {frame[frame.Count / 2],7:F2}/{frame[^1]:F2} {work[work.Count / 2],12:F2} {planet[planet.Count / 2],18:F4}");
+            Log.Info($"{Math.Max(OrbitPath.StartAltitude, Math.Pow(10, band)),8:G2}-{Math.Pow(10, band + 1):G2} m {frames,7} {jitter,14:E2} {smooth,14:E2} {pose,16:E2} {pixel,17:E2} {gpu,15:E2} {gpuJitter,14:E2} {spread,14:E2} {coverage,12:E2} {resolved,11} {terrain,14} {cameraError,17:E2} {surface,16:E2}  {(depthOk ? "ok" : "BAD"),5}  {(finite ? "ok" : "NaN"),6}  {frame[frame.Count / 2],7:F2}/{frame[^1]:F2} {work[work.Count / 2],12:F2} {planet[planet.Count / 2],18:F4}  {points[points.Count / 2]:F4}/{discs[discs.Count / 2]:F4}/{impostors[impostors.Count / 2]:F4}");
         }
 
         var csv = WriteCsv();
@@ -413,13 +430,13 @@ public sealed class OrbitTest
 
     private string WriteCsv()
     {
-        var builder = new StringBuilder("frame,time_s,altitude_m,camera_err_m,pixel_x,pixel_y,exact_x,exact_y,jitter_px,smooth_px,tick_smooth_px,pose_err_px,tick_pose_err_px,gpu_x,gpu_y,gpu_cpu_px,gpu_jitter_px,gpu_spread_px,coverage_err_px,gpu_fragments,terrain_drawn,depth,depth_ok,surface_err,frame_ms,work_ms,gpu_planet_ms\n");
+        var builder = new StringBuilder("frame,time_s,altitude_m,camera_err_m,pixel_x,pixel_y,exact_x,exact_y,jitter_px,smooth_px,tick_smooth_px,pose_err_px,tick_pose_err_px,gpu_x,gpu_y,gpu_cpu_px,gpu_jitter_px,gpu_spread_px,coverage_err_px,gpu_fragments,terrain_drawn,depth,depth_ok,surface_err,frame_ms,work_ms,gpu_planet_ms,gpu_points_ms,gpu_discs_ms,gpu_impostors_ms\n");
 
         for (var i = 0; i < _count; i++)
         {
             ref readonly var s = ref _samples[i];
             builder.Append(CultureInfo.InvariantCulture,
-                $"{i},{_time[i]:F4},{_altitude[i]:G9},{_cameraError[i]:E3},{s.Pixel.X:F5},{s.Pixel.Y:F5},{s.Exact.X:F5},{s.Exact.Y:F5},{_jitter[i]:E3},{_smooth[i]:E3},{_tickSmooth[i]:E3},{_poseError[i]:E3},{_tickPoseError[i]:E3},{_gpuCentre[i].X:F5},{_gpuCentre[i].Y:F5},{_gpuError[i]:E3},{GpuJitter(i):E3},{_gpuSpread[i]:E3},{_coverageError[i]:E3},{_gpuFragments[i]},{_terrainDrawn[i]},{s.Depth:E6},{(s.DepthOk ? 1 : 0)},{s.SurfaceError:E3},{_frameMs[i]:F3},{_workMs[i]:F3},{_gpuMs[i]:F4}\n");
+                $"{i},{_time[i]:F4},{_altitude[i]:G9},{_cameraError[i]:E3},{s.Pixel.X:F5},{s.Pixel.Y:F5},{s.Exact.X:F5},{s.Exact.Y:F5},{_jitter[i]:E3},{_smooth[i]:E3},{_tickSmooth[i]:E3},{_poseError[i]:E3},{_tickPoseError[i]:E3},{_gpuCentre[i].X:F5},{_gpuCentre[i].Y:F5},{_gpuError[i]:E3},{GpuJitter(i):E3},{_gpuSpread[i]:E3},{_coverageError[i]:E3},{_gpuFragments[i]},{_terrainDrawn[i]},{s.Depth:E6},{(s.DepthOk ? 1 : 0)},{s.SurfaceError:E3},{_frameMs[i]:F3},{_workMs[i]:F3},{_gpuMs[i]:F4},{_bodyMs[i].X:F4},{_bodyMs[i].Y:F4},{_bodyMs[i].Z:F4}\n");
         }
 
         var path = Path.GetFullPath(CsvName);

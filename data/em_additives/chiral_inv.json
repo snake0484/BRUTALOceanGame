@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "id": "add.chiral_inv",
+  "item": {
+    "family": "additive",
+    "densityKgM3": 2400,
+    "refCostPerKg": 14.0,
+    "metastable": null
+  },
+  "effect": {
+    "flowReversalAdd": 1.0
+  },
+  "tradeOff": {
+    "emMul": 1.5,
+    "mX": 1.1
+  },
+  "recipe": {
+    "station": "fc.additive_lab",
+    "crude": false,
+    "kind": "Fixed",
+    "timeSPerKg": 3600,
+    "powerW": 5000000.0,
+    "inputs": [
+      {
+        "item": "add.chiral",
+        "kg": 1.0
+      },
+      {
+        "item": "am.cell",
+        "amG": 0.5
+      }
+    ]
+  }
+}

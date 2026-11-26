@@ -7,7 +7,8 @@ namespace BrutalGame.Terrain;
 /// The GPU terrain vertex (terrain.vert). Position: chunk-local voxel units as 16-bit fixed point, 1/1024 voxel steps from
 /// <see cref="OffsetVoxels"/> voxels below the chunk origin, so it spans [-16, 48) voxels (the chunk plus its apron and
 /// skirts). The mesher snaps surface vertices to 1/256 voxel, so those round-trip exactly; only skirt vertices round.
-/// Normal: octahedral, 2 × snorm16. Collision keeps the full-precision <see cref="TerrainVertex"/>.
+/// Normal: octahedral, 2 × snorm16. Material: the palette index, plus <see cref="SeaColumn"/> on planet terrain.
+/// Collision keeps the full-precision <see cref="TerrainVertex"/>.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
 public struct PackedTerrainVertex
@@ -17,6 +18,15 @@ public struct PackedTerrainVertex
     public const int OffsetVoxels = 16;
     public const float InvStepsPerVoxel = 1f / StepsPerVoxel;
     private const float SnormMax = 32767f;
+
+    /// <summary>
+    /// Material bit of a vertex in the generated sea mask (terrain.frag): only there is ground under the sea radius under
+    /// water, so a pit dug inland below sea level stays dry (planets.md "pit rule").
+    /// </summary>
+    public const uint SeaColumn = 1u << 15;
+
+    /// <summary>The material's palette index.</summary>
+    public const uint MaterialMask = SeaColumn - 1;
 
     public ushort X;
     public ushort Y;

@@ -2,6 +2,8 @@
 
 Localized weather: storms in one place, sun and calm in another. It is cheap because almost nothing about it changes from one tick to the next. Weather is **analytic** (a function of seed and time, like the swell), so it can be evaluated anywhere and needs no networking. A coarse **snapshot map** around the camera is the product everything queries.
 
+On planets (D31) the same model runs on the sphere: `SphereWeatherField` and `SphereWeatherCache` (see "On planets" below). The flat `WeatherField` and `WeatherMap` stay until `src/Game` and `src/Sim` move over; nothing else uses them.
+
 ## Model (`src/Weather/`, namespace `BrutalGame.Weather`, pure CPU, v1 implemented)
 
 ### Climate (`WeatherClimate`)
@@ -56,6 +58,95 @@ Localized weather: storms in one place, sun and calm in another. It is cheap bec
 - **Layout:** cells are AoS (`WeatherSample`, 7 floats). Each sample reads all fields at 4 nodes, so they sit together.
 - **Threading:** Tick on the main thread. Sample is read-only between ticks, like the swell.
 
+## On planets (`SphereWeatherField`, `SphereWeatherCache`, `PlanetClimate`; D31, implemented, not yet hooked up)
+
+The island model carried over: kinds, lives, profiles and how systems combine are unchanged. What changed is where systems spawn, how they move, the distances and the circulation sense. It is still a pure function of seed + tick.
+
+### Climate per body (`PlanetClimate`)
+
+- `Seed`, `Radius`, `SpinAxis` (north; the body spins right-handed about it).
+- **Zonal steering:** `ZonalCells` bands per hemisphere alternate easterly (trades, from the equator) and westerly. `u(lat) = −amp_b · sin(π x)` with `x = |lat| / 90° × cells`, so it is 0 on the equator, at every band edge and at the poles.
+  - Each band's amplitude is `EasterlySpeed` or `WesterlySpeed` × (1 ± `JetVariation`) from the seed.
+  - The prevailing wind adds `MeridionalShare` × u poleward: equatorward under trades, poleward under westerlies.
+- **Bands from the seed:** storminess and base cloud are scaled per band by 1 ± their variation, linear between band centres (continuous across the equator).
+- **Equatorial fade:** circulation round a system is × smoothstep(0, sin `EquatorFade`, |sin lat|) at its centre (5°), so nothing spins on the equator. Its pressure, cloud and rain stay.
+- **Scales:** `SizeScale` (radii, cell size), `WindScale` (systems' own winds), `TimeScale` (lives). The own drift is 1.5 m/s × size / time, so the spawn-to-edge reach stays the same fraction of a cell at any scale.
+- **Presets:**
+  - `Rocky(seed, radius, day, axis)`: the island table. Bands = 3 × √(ΩR / Earth's ΩR), clamped 1..6. For the 1000 km, 6 h worlds that is **2** (trades to 45°, westerlies to the pole). Set `ZonalCells` to override.
+  - `GasGiant(seed, radius, axis)`: 4–10 bands per hemisphere from the seed, jets 50–180 m/s, `SizeScale` 190 (storms 1,500–2,300 km, lows up to 3,000 km), `WindScale` 9.6 (storm winds ~130–250 m/s), `TimeScale` 200 (lives of ~2.5–8 days), base cloud 0.9. No rendering; `GasGiantWeather` (planets.md) can wrap it.
+
+### Lattice (`SphereWeatherField`)
+
+- **Rows:** `Rows = round(πR / (24 km × size))`, 131 on a 1000 km world. Row j holds `max(1, round(2πR cos lat_j / 24 km))` cells (~22,000 in all, never stored). A life is hashed from (row, cell, slot), as the island hashed (cx, cz, slot).
+- **Drift:** each row turns rigidly about the pole at `ω_j = 0.8 u(lat_j) / (R cos lat_j)`, in closed form from the tick. Each system also drifts on its own, up to 1.5 m/s, along a great circle from its spawn point, so it can cross a pole.
+- **Spawn:** a point within the row's latitude band and the cell's longitude span, 10% in from the edges.
+- **Window:** a point visits the rows within `Reach` of its latitude (16 km radius + 5.1 km drift, + 1% safety). In each row it visits the cells whose longitude span can hold a spawn point within `Reach` of it.
+  - The widest longitude offset is found per row. Where the reach circle is tangent to a meridian inside the row it is `asin(sin ρ / sin θ)`; otherwise it is the law-of-cosines value at the row's edges. If the reach circle holds a pole, that can be the full row.
+  - Cells come in ascending order, even when the range wraps. So any wider window sees shared systems in the same order, which is what makes the bit-for-bit test possible.
+- **The high-latitude cap,** measured over 0–90° every 0.01°: at most 3 cells per row below 75°, 4 above, and 9 cells (18 systems) in total. D31's bound was ≤ 24. The sample buffer holds 64 for gas giants' coarse rows.
+- **Geometry:**
+  - Distances are great-circle: angle² ≈ chord² (1 + chord²/12) (the next term is ~θ⁶/360), with no trig per system.
+  - Circulation is `Spin × (cos 20° · p × d − sin 20° · tangent(d))`, with `d = p − centre`. It is counter-clockwise about local up for `Spin` > 0: northern lows and storms, and southern highs.
+  - Inflow into lows (and outflow from highs) has the same sign in both hemispheres.
+- **Trig:** sin and cos of row centres and cell centres are tabled at construction. Each row's drift costs one SinCos per gather, and spawn offsets up to 0.02 rad use a Taylor series that is exact to rounding. So a rocky world takes no CRT trig per system. Polar rows and gas giants fall back to `Math.SinCos`.
+
+### API
+
+- `Sample(double3 planetLocal, long tick)` returns a `WeatherSample`: wind, cloud, rain (precipitation intensity), storm, pressure and gust.
+  - Wind is **(east, north)** in the local tangent frame.
+  - Altitude is ignored: this is the 10 m wind.
+- `ToPlanet(unit, wind)` gives the planet-frame vector, e.g. for `v_air = v − wind`. `Basis(unit, out east, out north)` and `Direction(lat, lon)` are also public.
+- `Gather(unit, extraAngle, time, span)` and `Evaluate(unit, systems)` work as on the island. `Zonal(lat)` is the steering profile.
+- Read-only, safe from jobs, no allocation.
+
+### Cache (`SphereWeatherCache`)
+
+- **Planet-fixed lattice:** an equal-angle cube sphere, with 1,568 cells per face edge on a 1000 km world (~1 km). It is cut into 16 × 16-cell tiles, each baked at 5 s snapshot times (300 ticks).
+  - A sample is bilinear in its tile and a lerp between the snapshots either side of its tick.
+  - Nodes store the **planet-frame** wind, projected to (east, north) at the sample point. So lerps stay right where east and north turn fast (the poles).
+- **Camera-independent:** a node's value depends only on the node and the snapshot. Any cache that holds a tile (server or client, headless or not) returns bit-identical samples there.
+  - Anchors only choose which tiles are kept: the camera on a client, the sim's sea reference point and ships on a server.
+  - Shared face edges have identical node points (antisymmetric tan table), so samples are continuous across faces.
+- **Tick(tick, anchors):**
+  - Tiles within `CoverRadius` (4 km) of an anchor get the current and next snapshot. If either is missing it is baked synchronously; that happens on the first tick, a time jump or a teleport (`SyncBakes`, `LastSyncMs`).
+  - Tiles within `PrefetchRadius` (12 km) get the next two snapshots, baked a few node rows per tick (at most 8) by deadline. Normal flight never bakes synchronously.
+  - The tile window per anchor is conservative on every face it can reach: a face angle moves ≤ ρ / (n·p − ρ).
+- **Capacity:** 48 tiles × 3 snapshots, 1.3 MB, preallocated. Tiles beyond that are dropped (`DroppedTiles`).
+- **Sampling:**
+  - `TrySample` returns false off the kept tiles.
+  - `Sample` then falls back to the analytic field at the exact tick. So a caller that needs anchor-independent values must anchor its points.
+- **Threading:** Tick on one thread. Sampling is read-only between ticks and safe from jobs.
+
+### How the sim and renderer should consume it (for the M2 hookup)
+
+- **Sim (headless, server):**
+  - Own one `SphereWeatherField` per body with an atmosphere: `PlanetClimate.Rocky` from `PlanetParams`, with `TickSeconds` set to the sim's.
+  - **Swell wind:** sample the field directly, as `SwellWind` does now, about a sim-chosen sea reference point (never the camera), every `WindInterval` ticks. Nine samples a second cost ~10–30 µs.
+    - Alternatively, keep a `SphereWeatherCache` anchored on that point and on the awake ships. The values are the same on every machine.
+  - **Drag and lift (D10):** `field.Sample(shipPos, tick)` at 10 Hz per awake ship in an atmosphere, with `ToPlanet` for the vector, lerped between samples.
+- **Client renderer:**
+  - One `SphereWeatherCache` for the focus body. Tick it with the camera as an anchor, plus the sim's sea point if the client runs the swell.
+  - Sample it per frame at the camera for the sky, rain, audio and the sea's wind.
+  - For clouds near the camera, upload the kept tiles' nodes (cloud, rain, storm) after a bake. It is GPU-only, and nothing reads back.
+  - The planet-wide GPU coverage bake (planets.md) can enumerate systems with `Gather(centre, hemisphere angle, time, span)`.
+- **Gas giants:** `new SphereWeatherField(PlanetClimate.GasGiant(...))`. `GasGiantWind` adds depth and gust noise on top.
+- **Not done here:** `WeatherSystem`, `SwellWind`, `SimWorld` and `WeatherPanel` still use the flat field. Swap them during M2, then delete `WeatherField`, `WeatherMap` and their tests.
+
+### Measured (2026-11-26, Release, this dev machine, with other sessions building)
+
+- **Field sample:** ~1.0 µs in a clean process.
+  - It is 3.6 µs after other trig-heavy work in the same process (`SampleCost`); the island's flat field measures 1.6 µs there.
+  - Plan with ~1–4 µs, not planets.md's 0.3 µs estimate.
+  - Breakdown: the window takes ~90 ns and `Evaluate` ~30 ns. The rest is ~13 slot lives (hashing, divisions).
+- **Cache sample:** ~0.3–0.36 µs.
+- **Cache tick,** anchor moving at 30 m/s: median ~12 µs, p99 ~25 µs. The first tick takes 2–3 ms for 8 synchronous tile snapshots, cold JIT included (~0.8 ms warm).
+- **Cache against field:** worst errors of 0.66 m/s wind, 0.003 cloud and 0.005 rain, under a storm over 30 s.
+- **Smoothness:**
+  - Per-tick change at fixed points while the anchor flies at 100 m/s: 0.0002 m/s.
+  - Per 10 m step across a cube face corner: 0.019 m/s.
+  - Across the antimeridian, 1 mm apart: 1e-5 m/s.
+  - Per 10 m step over the poles: ≤ 0.014 m/s.
+
 ## Game coupling (`src/Game/WeatherSystem.cs`, `src/Sim/SwellWind.cs`)
 
 - **Ticks:** `GameApp.Tick` calls `WeatherSystem.Tick(SimWorld.WeatherTime, camera)` (sim time + debug offset). The cost is recorded into the Weather panel.
@@ -97,6 +188,21 @@ Localized weather: storms in one place, sun and calm in another. It is cheap bec
 - **Smoothness:** per-tick change at a fixed point, with the camera flying at 100 m/s across snapshot rotations and re-centres: < 0.05 m/s and < 0.005 cloud. One rebuild only.
 - **Rebuilds:** a time jump rebuilds and matches the field.
 - **Allocation:** none in Tick or Sample.
+- **Sphere (`SphereWeatherTests`):**
+  - **Determinism:** the same seed is bit-identical; a different seed differs.
+  - **Lattice window,** checked bit for bit against a 200 km gather (0.4 rad on the gas giant). It covers 764 points, including both poles, 89.999°, 75°/76° and either side of the antimeridian, on a rocky world and on a gas giant with a tilted axis.
+  - **Candidate-cell cap:** at most 3 per row below 75°, 4 above.
+  - **Continuity** across the antimeridian, and over each pole while a system sits on it.
+  - **Rotation sense** by hemisphere and kind, with inflow. Every lattice system spins with its hemisphere; within 0.5° of the equator, |spin| < 0.1.
+  - **Zonal bands** alternate, and are still at the equator and the poles.
+  - **Cache:**
+    - It matches the field.
+    - Its values don't depend on the anchors (bit for bit).
+    - It is smooth tick to tick, with no synchronous bakes after the first tick.
+    - It is continuous across cube faces.
+    - A time jump rebakes it.
+  - **Allocation:** none.
+  - **Cost** (`Perf` trait).
 
 ## Not yet
 

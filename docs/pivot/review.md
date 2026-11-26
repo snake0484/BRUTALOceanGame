@@ -69,6 +69,8 @@ None of these exist in `src/` today. There is no character controller, no networ
 10. **Impostor ↔ octree handoff and focus-body switching.** Needed so the moon becomes the focus body during approach.
 11. **Profiling.** Zones, streaming, hull bake and network rows in `ProfilerPanel`, plus a two-client bench path. Without these, milestone budgets can't be checked.
 
+**Round 6 note (2026-11-26).** Designed since this review, so no longer missing as designs (nothing is built): ship atmospheres (ship-atmosphere.md), AI ships and crew (ai-ships-and-crew.md), combat, shields and sensors (combat-and-sensors.md), factions, law, sieges and land (factions-and-law.md, which owns the shared `IncidentRecord`). Still missing: settlements and NPC population on planets; death, medical and respawn; missions and contracts; a character doc (vitals, suits and their penalties). Rings' unseen event placement is a rule now (`EventHideKm`), not a risk. X3 (the server sends mass properties) also covers bend events (D59).
+
 ## Questions for user
 
 1. **Getting to the moon.** Real orbital transfer at real time, a quantum/jump drive (Star Citizen style), or a moon placed close? With 1 g on a 1000 km planet, low orbit is 3.1 km/s and a Hohmann transfer to a moon at 20,000 km takes a few hours. This decides time-warp policy, rails usage and render distances.

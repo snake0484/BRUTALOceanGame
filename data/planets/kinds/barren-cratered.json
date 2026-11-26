@@ -1,0 +1,19 @@
+{
+  "id": "barren-cratered",
+  "schema": 1,
+  "requires": { "radiusKm": [150, 1500], "zone": ["hot", "temperate", "cold"], "gravityG": [0.05, 0.6] },
+  "relief": { "minM": -8000, "maxM": 8000 },
+  "sea": { "present": false },
+  "materials": "barren",
+
+  "layers": [
+    { "name": "crust", "type": "fbm", "lambdaR": 1.2, "octaves": 6, "amplitude": 1.0, "gain": 0.5, "normalize": true },
+    { "name": "provinces", "type": "curve", "in": "crust", "out": "h", "ease": true,
+      "knots": [[-1.0, [-3000, -2300]], [-0.12, [-1400, -1000]], [0.08, [400, 800]], [1.0, [2100, 2900]]] },
+    { "name": "highland", "type": "mask", "channel": "crust", "from": -0.12, "to": 0.08 },
+    { "name": "massifs", "type": "billow", "out": "h", "lambdaM": 9000, "octaves": 8, "amplitudeM": [190, 270], "gain": 0.47, "scale": { "channel": "highland" } },
+    { "name": "swells", "type": "fbm", "out": "h", "lambdaM": 40000, "octaves": 5, "amplitudeM": [350, 550], "gain": 0.5 },
+    { "name": "impacts", "type": "craters", "radiusM": [96, 48000], "coverage": 0.12, "age": [0.25, 1.0], "complexDiameterM": 15000, "freshOut": "fresh" },
+    { "name": "regolith", "type": "fbm", "out": "h", "lambdaM": 24, "octaves": 4, "amplitudeM": [0.2, 0.3], "gain": 0.55 }
+  ]
+}

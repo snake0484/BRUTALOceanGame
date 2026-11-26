@@ -8,18 +8,6 @@ public sealed class TerrainTests
 {
     private const int P = ChunkConstants.Padded;
 
-    private static readonly ChunkCoord[] SampleCoords =
-    [
-        new(0, 0, 0), new(0, 1, 0), new(20, 0, 0), new(-22, -1, 2), new(3, 0, -5), new(-2, 1, 1), new(12, -1, 9), new(0, -2, 0),
-    ];
-
-    private static VoxelChunk Generate(ChunkCoord coord, in TerrainParams p)
-    {
-        var chunk = new VoxelChunk { Coord = coord };
-        TerrainGenerator.Generate(chunk, p);
-        return chunk;
-    }
-
     private static void FillSphere(VoxelChunk chunk, Vector3 worldCentre, float radius)
     {
         var origin = chunk.Coord.WorldOrigin;
@@ -86,109 +74,6 @@ public sealed class TerrainTests
         edges[key] = edges.GetValueOrDefault(key) + 1;
     }
 
-    private static ulong Fnv(ulong h, ReadOnlySpan<byte> data)
-    {
-        foreach (var b in data)
-            h = (h ^ b) * 1099511628211UL;
-
-        return h;
-    }
-
-    private static (ulong Voxels, ulong Mesh) Lod0Hashes()
-    {
-        var p = new TerrainParams { Seed = 1234 };
-        var mesher = new SurfaceNetsMesher();
-        var mesh = new ChunkMesh();
-        var hv = 14695981039346656037UL;
-        var hm = 14695981039346656037UL;
-
-        foreach (var coord in SampleCoords)
-        {
-            var c = Generate(coord, p);
-            hv = Fnv(hv, MemoryMarshal.AsBytes(c.Density.AsSpan()));
-            hv = Fnv(hv, c.Material);
-            hv = Fnv(hv, [c.HasSurface ? (byte)1 : (byte)0]);
-            mesher.Mesh(c, mesh, skirts: false);
-            hm = Fnv(hm, MemoryMarshal.AsBytes(mesh.VertexSpan));
-            hm = Fnv(hm, MemoryMarshal.AsBytes(mesh.IndexSpan));
-        }
-
-        return (hv, hm);
-    }
-
-    private static ulong Lod0EditHash()
-    {
-        BrushOp[] ops =
-        [
-            new(new Vector3(648f, 5f, 10f), 6f, BrushMode.Dig, VoxelMaterial.Air),
-            new(new Vector3(653f, 8f, 12f), 3f, BrushMode.Place, VoxelMaterial.Dirt),
-            new(new Vector3(638.3f, -2.7f, 25.1f), 4.4f, BrushMode.Place, VoxelMaterial.Sand),
-        ];
-
-        var c = Generate(new ChunkCoord(20, 0, 0), new TerrainParams());
-        VoxelEditor.Apply(c, ops);
-        var h = Fnv(14695981039346656037UL, MemoryMarshal.AsBytes(c.Density.AsSpan()));
-        return Fnv(h, c.Material);
-    }
-
-    [Fact]
-    public void Lod0OutputMatchesReference()
-    {
-        var (voxels, mesh) = Lod0Hashes();
-        Assert.Equal(17430437274052174611UL, voxels);
-        Assert.Equal(7113128240621187065UL, mesh);
-        Assert.Equal(15154270313198445626UL, Lod0EditHash());
-    }
-
-    [Fact]
-    public void GenerationIsDeterministicAndThreadSafe()
-    {
-        var p = new TerrainParams { Seed = 1234 };
-        var serial = SampleCoords.Select(c => Generate(c, p)).ToArray();
-        var again = SampleCoords.Select(c => Generate(c, p)).ToArray();
-        var parallel = new VoxelChunk[SampleCoords.Length * 8];
-        Parallel.For(0, parallel.Length, i => parallel[i] = Generate(SampleCoords[i % SampleCoords.Length], p));
-
-        Assert.Contains(serial, c => c.HasSurface);
-
-        for (var i = 0; i < parallel.Length; i++)
-        {
-            var s = serial[i % SampleCoords.Length];
-            var r = i < serial.Length ? again[i] : s;
-            Assert.Equal(s.Density, r.Density);
-            Assert.Equal(s.Material, r.Material);
-            Assert.Equal(s.Density, parallel[i].Density);
-            Assert.Equal(s.Material, parallel[i].Material);
-            Assert.Equal(s.HasSurface, parallel[i].HasSurface);
-        }
-
-        var other = Generate(SampleCoords[2], new TerrainParams { Seed = 99 });
-        Assert.NotEqual(serial[2].Density, other.Density);
-    }
-
-    [Fact]
-    public void GeneratedNeighboursAgreeOnSharedApron()
-    {
-        var p = new TerrainParams();
-        var a = Generate(new ChunkCoord(20, 0, 0), p);
-        var b = Generate(new ChunkCoord(21, 0, 0), p);
-        Assert.True(a.HasSurface || b.HasSurface);
-
-        for (var z = -1; z <= ChunkConstants.Size; z++)
-        {
-            for (var y = -1; y <= ChunkConstants.Size; y++)
-            {
-                for (var k = 0; k < 2; k++)
-                {
-                    var ia = ChunkConstants.Index(ChunkConstants.Size - 1 + k, y, z);
-                    var ib = ChunkConstants.Index(-1 + k, y, z);
-                    Assert.Equal(a.Density[ia], b.Density[ib]);
-                    Assert.Equal(a.Material[ia], b.Material[ib]);
-                }
-            }
-        }
-    }
-
     [Fact]
     public void SphereMeshIsAccurateOutwardAndClosed()
     {
@@ -251,16 +136,17 @@ public sealed class TerrainTests
     [Fact]
     public void EmptyAndFullChunksProduceNoGeometry()
     {
-        var p = new TerrainParams { SeabedDepth = -10f };
-        var air = Generate(new ChunkCoord(100, ChunkConstants.MaxChunkY, 100), p);
-        var solid = Generate(new ChunkCoord(100, ChunkConstants.MinChunkY, 100), p);
         var mesher = new SurfaceNetsMesher();
         var mesh = new ChunkMesh();
+        var air = new VoxelChunk();
+        var solid = new VoxelChunk();
+        air.Fill(127, VoxelMaterial.Air);
+        solid.Fill(-127, VoxelMaterial.Rock);
+        air.RecomputeHasSurface();
+        solid.RecomputeHasSurface();
 
         Assert.False(air.HasSurface);
         Assert.False(solid.HasSurface);
-        Assert.All(air.Density, d => Assert.True(d >= 0));
-        Assert.All(solid.Density, d => Assert.True(d < 0));
 
         mesher.Mesh(air, mesh);
         Assert.True(mesh.IsEmpty);
@@ -269,20 +155,13 @@ public sealed class TerrainTests
         mesher.Mesh(solid, mesh);
         Assert.True(mesh.IsEmpty);
         Assert.Equal(0, mesh.VertexCount);
-
-        var manual = new VoxelChunk();
-        manual.Fill(-20, VoxelMaterial.Rock);
-        manual.RecomputeHasSurface();
-        Assert.False(manual.HasSurface);
-        mesher.Mesh(manual, mesh);
-        Assert.True(mesh.IsEmpty);
     }
 
     [Fact]
     public void MesherDoesNotAllocateAfterWarmUp()
     {
-        var p = new TerrainParams();
-        var chunk = Generate(new ChunkCoord(20, 0, 0), p);
+        var chunk = new VoxelChunk();
+        FillSphere(chunk, new Vector3(16f, 40f, 16f), 30f);
         Assert.True(chunk.HasSurface);
         var mesher = new SurfaceNetsMesher();
         var mesh = new ChunkMesh();
@@ -300,49 +179,24 @@ public sealed class TerrainTests
     }
 
     [Fact]
-    public void GeneratorDoesNotAllocate()
-    {
-        var p = new TerrainParams();
-        var chunk = new VoxelChunk { Coord = new ChunkCoord(6, 0, 0) };
-        TerrainGenerator.Generate(chunk, p);
-
-        var before = GC.GetAllocatedBytesForCurrentThread();
-
-        for (var i = 0; i < 5; i++)
-            TerrainGenerator.Generate(chunk, p);
-
-        Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
-    }
-
-    [Fact]
     public void VertexLayoutMatchesGpu()
     {
         Assert.Equal(TerrainVertex.SizeInBytes, Unsafe.SizeOf<TerrainVertex>());
     }
 
     [Fact]
-    public void IslandHasBeachesAndSeabed()
-    {
-        var p = new TerrainParams();
-        Assert.True(TerrainGenerator.SurfaceHeight(0f, 0f, p) > 30f);
-        Assert.InRange(TerrainGenerator.SurfaceHeight(2000f, 2000f, p), p.SeabedDepth - p.SeabedUndulation - 1f, p.SeabedDepth + p.SeabedUndulation + 1f);
-    }
-
-    [Fact]
     public void PlaceAcrossSeamIsWatertightAndApronsAgree()
     {
-        var op = new BrushOp(new Vector3(32f, 16f, 16f), 9f, BrushMode.Place, VoxelMaterial.Rock);
-        Span<ChunkCoord> affected = stackalloc ChunkCoord[64];
-        var count = VoxelEditor.AffectedChunks(op, affected);
-        Assert.Contains(new ChunkCoord(0, 0, 0), affected[..count].ToArray());
-        Assert.Contains(new ChunkCoord(1, 0, 0), affected[..count].ToArray());
+        var op = EditOp.At(32.0, 16.0, 16.0, 9f, BrushMode.Place, VoxelMaterial.Rock);
+        Assert.True(PlanetEditor.Intersects(op, new ChunkCoord(0, 0, 0)));
+        Assert.True(PlanetEditor.Intersects(op, new ChunkCoord(1, 0, 0)));
 
         var a = new VoxelChunk { Coord = new ChunkCoord(0, 0, 0) };
         var b = new VoxelChunk { Coord = new ChunkCoord(1, 0, 0) };
         a.Fill(127, VoxelMaterial.Air);
         b.Fill(127, VoxelMaterial.Air);
-        VoxelEditor.Apply(a, [op]);
-        VoxelEditor.Apply(b, [op]);
+        PlanetEditor.Apply(a, [op]);
+        PlanetEditor.Apply(b, [op]);
         Assert.True(a.HasSurface && b.HasSurface);
 
         for (var z = -1; z <= ChunkConstants.Size; z++)
@@ -372,7 +226,7 @@ public sealed class TerrainTests
         var chunk = new VoxelChunk { Coord = new ChunkCoord(0, 0, 0) };
         chunk.Fill(-127, VoxelMaterial.Rock);
         var centre = new Vector3(16f, 16f, 16f);
-        VoxelEditor.Apply(chunk, [new BrushOp(centre, 8.3f, BrushMode.Dig, VoxelMaterial.Air)]);
+        PlanetEditor.Apply(chunk, [EditOp.At(centre.X, centre.Y, centre.Z, 8.3f, BrushMode.Dig, VoxelMaterial.Air)]);
         Assert.True(chunk.HasSurface);
 
         var mesh = new ChunkMesh();
@@ -387,24 +241,6 @@ public sealed class TerrainTests
         }
 
         AssertEdgeManifold([(mesh, Vector3.Zero)]);
-    }
-
-    [Fact]
-    public void EditsReplayDeterministically()
-    {
-        var p = new TerrainParams();
-        BrushOp[] ops =
-        [
-            new(new Vector3(200f, 5f, 10f), 6f, BrushMode.Dig, VoxelMaterial.Air),
-            new(new Vector3(205f, 8f, 12f), 3f, BrushMode.Place, VoxelMaterial.Dirt),
-        ];
-
-        var a = Generate(new ChunkCoord(6, 0, 0), p);
-        var b = Generate(new ChunkCoord(6, 0, 0), p);
-        VoxelEditor.Apply(a, ops);
-        VoxelEditor.Apply(b, ops);
-        Assert.Equal(a.Density, b.Density);
-        Assert.Equal(a.Material, b.Material);
     }
 
     private static void FillPlane(VoxelChunk chunk, float height)
@@ -486,43 +322,19 @@ public sealed class TerrainTests
     }
 
     [Fact]
-    public void CoarseGeneratedSurfaceFollowsHeightField()
-    {
-        var p = new TerrainParams { OverhangAmplitude = 0f };
-        var chunk = Generate(new ChunkCoord(0, 0, 0, 2), p);
-        Assert.True(chunk.HasSurface);
-
-        var mesh = new ChunkMesh();
-        new SurfaceNetsMesher().Mesh(chunk, mesh, skirts: false);
-        var checkedCount = 0;
-
-        foreach (var v in mesh.VertexSpan)
-        {
-            if (v.Normal.Y < 0.8f)
-                continue;
-
-            var world = chunk.Coord.WorldOrigin + v.Position;
-            Assert.InRange(world.Y - TerrainGenerator.SurfaceHeight(world.X, world.Z, p), -chunk.Coord.VoxelScale, chunk.Coord.VoxelScale);
-            checkedCount++;
-        }
-
-        Assert.True(checkedCount > 50);
-    }
-
-    [Fact]
     public void BrushCraterLandsInSamePlaceAcrossLods()
     {
-        var op = new BrushOp(new Vector3(16f, 16f, 16f), 6f, BrushMode.Dig, VoxelMaterial.Air);
+        var op = EditOp.At(16.0, 16.0, 16.0, 6f, BrushMode.Dig, VoxelMaterial.Air);
         var fine = new VoxelChunk { Coord = new ChunkCoord(0, 0, 0) };
         var coarse = new VoxelChunk { Coord = new ChunkCoord(0, 0, 0, 1) };
         FillPlane(fine, 16f);
         FillPlane(coarse, 16f);
 
-        Assert.True(VoxelEditor.Intersects(op, fine.Coord));
-        Assert.True(VoxelEditor.Intersects(op, coarse.Coord));
+        Assert.True(PlanetEditor.Intersects(op, fine.Coord));
+        Assert.True(PlanetEditor.Intersects(op, coarse.Coord));
 
-        VoxelEditor.Apply(fine, [op]);
-        VoxelEditor.Apply(coarse, [op]);
+        PlanetEditor.Apply(fine, [op]);
+        PlanetEditor.Apply(coarse, [op]);
 
         var s = coarse.Coord.VoxelScale;
         var h0 = ColumnSurface(fine, 16f, 16f);
@@ -534,37 +346,12 @@ public sealed class TerrainTests
     }
 
     [Fact]
-    public void AffectedChunksAtLodCoverIntersectingChunks()
+    public void EditReachStopsAtTheApron()
     {
-        Span<ChunkCoord> affected = stackalloc ChunkCoord[256];
-        var rng = new Random(7);
-
-        for (var n = 0; n < 200; n++)
-        {
-            var lod = n % 4;
-            var op = new BrushOp(new Vector3(rng.NextSingle() * 400f - 200f, rng.NextSingle() * 100f - 50f, rng.NextSingle() * 400f - 200f),
-                1f + rng.NextSingle() * 20f, BrushMode.Dig, VoxelMaterial.Air);
-            var count = VoxelEditor.AffectedChunks(op, lod, affected);
-            var list = affected[..count].ToArray();
-            Assert.All(list, c => Assert.Equal(lod, c.Lod));
-
-            var centre = ChunkCoord.FromWorld(op.Centre, lod);
-            Assert.Contains(centre, list);
-
-            for (var dz = -2; dz <= 2; dz++)
-            for (var dy = -2; dy <= 2; dy++)
-            for (var dx = -2; dx <= 2; dx++)
-            {
-                var c = centre with { X = centre.X + dx, Y = centre.Y + dy, Z = centre.Z + dz };
-
-                if (c.Y >= ChunkConstants.MinChunkY >> lod && c.Y <= ChunkConstants.MaxChunkY >> lod && VoxelEditor.Intersects(op, c))
-                    Assert.Contains(c, list);
-            }
-        }
-
-        var small = new BrushOp(new Vector3(16f), 3f, BrushMode.Dig, VoxelMaterial.Air);
-        Assert.False(VoxelEditor.Intersects(small, new ChunkCoord(1, 0, 0)));
-        Assert.False(VoxelEditor.Intersects(small, new ChunkCoord(2, 0, 0, 1)));
+        var small = EditOp.At(16.0, 16.0, 16.0, 3f, BrushMode.Dig, VoxelMaterial.Air);
+        Assert.True(PlanetEditor.Intersects(small, new ChunkCoord(0, 0, 0)));
+        Assert.False(PlanetEditor.Intersects(small, new ChunkCoord(1, 0, 0)));
+        Assert.False(PlanetEditor.Intersects(small, new ChunkCoord(2, 0, 0, 1)));
     }
 
     [Theory]
@@ -592,8 +379,10 @@ public sealed class TerrainTests
         foreach (var v in plain.VertexSpan)
             Assert.Equal(16f, v.Position.Y);
 
-        var lo = -0.5f * s;
-        var hi = (ChunkConstants.Size - 0.5f) * s;
+        // The flange: 1 voxel down and 1 voxel out past the surface's edge, corners mitred onto both sides' lines.
+        var lo = -1.5f * s;
+        var hi = (ChunkConstants.Size + 0.5f) * s;
+        var tolerance = 1e-4f * s;
         Span<int> sides = stackalloc int[4];
         var centre = new Vector3(ChunkConstants.Size * s * 0.5f, 0f, ChunkConstants.Size * s * 0.5f);
 
@@ -602,11 +391,14 @@ public sealed class TerrainTests
             var pos = skirted.Vertices[v].Position;
             Assert.Equal(16f - s, pos.Y, 4);
             Assert.Equal(Vector3.UnitY, skirted.Vertices[v].Normal);
-            Assert.True(pos.X == lo || pos.X == hi || pos.Z == lo || pos.Z == hi);
-            sides[0] += pos.X == lo ? 1 : 0;
-            sides[1] += pos.X == hi ? 1 : 0;
-            sides[2] += pos.Z == lo ? 1 : 0;
-            sides[3] += pos.Z == hi ? 1 : 0;
+            Assert.InRange(pos.X, lo - tolerance, hi + tolerance);
+            Assert.InRange(pos.Z, lo - tolerance, hi + tolerance);
+            var before = sides[0] + sides[1] + sides[2] + sides[3];
+            sides[0] += MathF.Abs(pos.X - lo) <= tolerance ? 1 : 0;
+            sides[1] += MathF.Abs(pos.X - hi) <= tolerance ? 1 : 0;
+            sides[2] += MathF.Abs(pos.Z - lo) <= tolerance ? 1 : 0;
+            sides[3] += MathF.Abs(pos.Z - hi) <= tolerance ? 1 : 0;
+            Assert.True(sides[0] + sides[1] + sides[2] + sides[3] > before, $"skirt vertex {pos} is on no side's line");
         }
 
         foreach (var count in sides)
@@ -636,13 +428,12 @@ public sealed class TerrainTests
     }
 
     [Fact]
-    public void CoarseGenerateAndMeshDoNotAllocateAfterWarmUp()
+    public void CoarseFillAndMeshDoNotAllocateAfterWarmUp()
     {
-        var p = new TerrainParams();
         var chunk = new VoxelChunk { Coord = new ChunkCoord(0, 0, 0, 3) };
         var mesher = new SurfaceNetsMesher();
         var mesh = new ChunkMesh();
-        TerrainGenerator.Generate(chunk, p);
+        FillPlane(chunk, 100f);
         Assert.True(chunk.HasSurface);
         mesher.Mesh(chunk, mesh);
         mesher.Mesh(chunk, mesh);
@@ -651,44 +442,12 @@ public sealed class TerrainTests
 
         for (var i = 0; i < 5; i++)
         {
-            TerrainGenerator.Generate(chunk, p);
+            FillPlane(chunk, 100f);
             mesher.Mesh(chunk, mesh);
         }
 
         Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
         Assert.True(mesh.IndexCount > 0);
         Assert.True(mesher.LastSkirtTriangles > 0);
-    }
-
-    [Fact]
-    public void UniformCoarseChunksExitEarly()
-    {
-        var p = new TerrainParams();
-        ChunkCoord[] coords = [new(0, 1, 0, 4), new(0, -2, 0, 4), new(-3, 2, 7, 4), new(5, -3, -4, 4)];
-        var chunk = new VoxelChunk();
-
-        foreach (var c in coords)
-        {
-            chunk.Coord = c;
-            TerrainGenerator.Generate(chunk, p);
-            Assert.False(chunk.HasSurface);
-        }
-
-        chunk.Coord = coords[0];
-        TerrainGenerator.Generate(chunk, p);
-        Assert.All(chunk.Density, d => Assert.Equal(sbyte.MaxValue, d));
-        chunk.Coord = coords[1];
-        TerrainGenerator.Generate(chunk, p);
-        Assert.All(chunk.Density, d => Assert.Equal(-sbyte.MaxValue, d));
-
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-
-        for (var i = 0; i < 400; i++)
-        {
-            chunk.Coord = coords[i & 3];
-            TerrainGenerator.Generate(chunk, p);
-        }
-
-        Assert.True(sw.Elapsed.TotalMilliseconds < 200, $"400 uniform chunks took {sw.Elapsed.TotalMilliseconds:F1} ms");
     }
 }

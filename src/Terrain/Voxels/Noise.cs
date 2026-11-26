@@ -99,6 +99,129 @@ internal static class Noise
         return Lerp(a, b, w);
     }
 
+    /// <summary>
+    /// |Δn| ≤ this × |Δx| for <see cref="Gradient3(double, double, double, uint)"/>. ∇n is linear in the eight corner
+    /// gradients, each one of the 12 edge vectors, so the steepest slope along a direction e at an in-cell point is the
+    /// sum over corners of the two largest |components| of (w·I + (f − c)·∇wᵀ)·e. Maximised over the cell and e it is
+    /// 3.75 = 2 × the fade's steepest slope, at the cell centre along an axis (hill climb, 400 restarts; the sampled
+    /// maximum over 2 × 10⁶ points is 3.20). Height bounds rely on it.
+    /// </summary>
+    public const float GradientLipschitz = 3.8f;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static uint Fold(long v) => (uint)v ^ ((uint)(v >> 32) * 0x9E3779B1u);
+
+    /// <summary><see cref="Grad3"/>'s 16 gradients as a table (x, y, z, pad): a dot product instead of unpredictable branches.</summary>
+    internal static readonly float[] GradientTable =
+    [
+        1f, 1f, 0f, 0f, -1f, 1f, 0f, 0f, 1f, -1f, 0f, 0f, -1f, -1f, 0f, 0f,
+        1f, 0f, 1f, 0f, -1f, 0f, 1f, 0f, 1f, 0f, -1f, 0f, -1f, 0f, -1f, 0f,
+        0f, 1f, 1f, 0f, 0f, -1f, 1f, 0f, 0f, 1f, -1f, 0f, 0f, -1f, -1f, 0f,
+        1f, 1f, 0f, 0f, 0f, -1f, 1f, 0f, -1f, 1f, 0f, 0f, 0f, -1f, -1f, 0f,
+    ];
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float Dot(uint hash, float x, float y, float z)
+    {
+        var i = (int)(hash & 15) * 4;
+        var g = GradientTable;
+        return g[i] * x + g[i + 1] * y + g[i + 2] * z;
+    }
+
+    /// <summary>
+    /// Double-lattice gradient noise for planet-scale coordinates: the cell index comes from a double floor as long and is
+    /// hashed, only the in-cell fraction is float (a float position steps by 6 cm at 1e6 m). Branch-free gradients.
+    /// </summary>
+    public static float Gradient3(double x, double y, double z, uint seed)
+    {
+        var fx0 = Math.Floor(x);
+        var fy0 = Math.Floor(y);
+        var fz0 = Math.Floor(z);
+        var x0 = (long)fx0;
+        var y0 = (long)fy0;
+        var z0 = (long)fz0;
+        var fx = (float)(x - fx0);
+        var fy = (float)(y - fy0);
+        var fz = (float)(z - fz0);
+        var hx0 = seed ^ (Fold(x0) * 0x8DA6B343u);
+        var hx1 = seed ^ (Fold(x0 + 1) * 0x8DA6B343u);
+        var hy0 = Fold(y0) * 0xD8163841u;
+        var hy1 = Fold(y0 + 1) * 0xD8163841u;
+        var hz0 = Fold(z0) * 0xCB1AB31Fu;
+        var hz1 = Fold(z0 + 1) * 0xCB1AB31Fu;
+        var u = Fade(fx);
+        var v = Fade(fy);
+        var w = Fade(fz);
+        var n000 = Dot(Mix(hx0 ^ hy0 ^ hz0), fx, fy, fz);
+        var n100 = Dot(Mix(hx1 ^ hy0 ^ hz0), fx - 1f, fy, fz);
+        var n010 = Dot(Mix(hx0 ^ hy1 ^ hz0), fx, fy - 1f, fz);
+        var n110 = Dot(Mix(hx1 ^ hy1 ^ hz0), fx - 1f, fy - 1f, fz);
+        var n001 = Dot(Mix(hx0 ^ hy0 ^ hz1), fx, fy, fz - 1f);
+        var n101 = Dot(Mix(hx1 ^ hy0 ^ hz1), fx - 1f, fy, fz - 1f);
+        var n011 = Dot(Mix(hx0 ^ hy1 ^ hz1), fx, fy - 1f, fz - 1f);
+        var n111 = Dot(Mix(hx1 ^ hy1 ^ hz1), fx - 1f, fy - 1f, fz - 1f);
+        var a = Lerp(Lerp(n000, n100, u), Lerp(n010, n110, u), v);
+        var b = Lerp(Lerp(n001, n101, u), Lerp(n011, n111, u), v);
+        return Lerp(a, b, w);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float FadeSlope(float t) => 30f * t * t * (t - 1f) * (t - 1f);
+
+    /// <summary><see cref="Gradient3(double, double, double, uint)"/> with its analytic derivative in lattice units; the value is the same bits.</summary>
+    public static float Gradient3(double x, double y, double z, uint seed, out float dx, out float dy, out float dz)
+    {
+        var fx0 = Math.Floor(x);
+        var fy0 = Math.Floor(y);
+        var fz0 = Math.Floor(z);
+        var x0 = (long)fx0;
+        var y0 = (long)fy0;
+        var z0 = (long)fz0;
+        var fx = (float)(x - fx0);
+        var fy = (float)(y - fy0);
+        var fz = (float)(z - fz0);
+        var hx0 = seed ^ (Fold(x0) * 0x8DA6B343u);
+        var hx1 = seed ^ (Fold(x0 + 1) * 0x8DA6B343u);
+        var hy0 = Fold(y0) * 0xD8163841u;
+        var hy1 = Fold(y0 + 1) * 0xD8163841u;
+        var hz0 = Fold(z0) * 0xCB1AB31Fu;
+        var hz1 = Fold(z0 + 1) * 0xCB1AB31Fu;
+        var u = Fade(fx);
+        var v = Fade(fy);
+        var w = Fade(fz);
+        var g = GradientTable;
+        var i000 = (int)(Mix(hx0 ^ hy0 ^ hz0) & 15) * 4;
+        var i100 = (int)(Mix(hx1 ^ hy0 ^ hz0) & 15) * 4;
+        var i010 = (int)(Mix(hx0 ^ hy1 ^ hz0) & 15) * 4;
+        var i110 = (int)(Mix(hx1 ^ hy1 ^ hz0) & 15) * 4;
+        var i001 = (int)(Mix(hx0 ^ hy0 ^ hz1) & 15) * 4;
+        var i101 = (int)(Mix(hx1 ^ hy0 ^ hz1) & 15) * 4;
+        var i011 = (int)(Mix(hx0 ^ hy1 ^ hz1) & 15) * 4;
+        var i111 = (int)(Mix(hx1 ^ hy1 ^ hz1) & 15) * 4;
+        var n000 = g[i000] * fx + g[i000 + 1] * fy + g[i000 + 2] * fz;
+        var n100 = g[i100] * (fx - 1f) + g[i100 + 1] * fy + g[i100 + 2] * fz;
+        var n010 = g[i010] * fx + g[i010 + 1] * (fy - 1f) + g[i010 + 2] * fz;
+        var n110 = g[i110] * (fx - 1f) + g[i110 + 1] * (fy - 1f) + g[i110 + 2] * fz;
+        var n001 = g[i001] * fx + g[i001 + 1] * fy + g[i001 + 2] * (fz - 1f);
+        var n101 = g[i101] * (fx - 1f) + g[i101 + 1] * fy + g[i101 + 2] * (fz - 1f);
+        var n011 = g[i011] * fx + g[i011 + 1] * (fy - 1f) + g[i011 + 2] * (fz - 1f);
+        var n111 = g[i111] * (fx - 1f) + g[i111 + 1] * (fy - 1f) + g[i111 + 2] * (fz - 1f);
+        var a = Lerp(Lerp(n000, n100, u), Lerp(n010, n110, u), v);
+        var b = Lerp(Lerp(n001, n101, u), Lerp(n011, n111, u), v);
+
+        dx = Blend(g[i000], g[i100], g[i010], g[i110], g[i001], g[i101], g[i011], g[i111], u, v, w)
+            + FadeSlope(fx) * Lerp(Lerp(n100 - n000, n110 - n010, v), Lerp(n101 - n001, n111 - n011, v), w);
+        dy = Blend(g[i000 + 1], g[i100 + 1], g[i010 + 1], g[i110 + 1], g[i001 + 1], g[i101 + 1], g[i011 + 1], g[i111 + 1], u, v, w)
+            + FadeSlope(fy) * Lerp(Lerp(n010 - n000, n110 - n100, u), Lerp(n011 - n001, n111 - n101, u), w);
+        dz = Blend(g[i000 + 2], g[i100 + 2], g[i010 + 2], g[i110 + 2], g[i001 + 2], g[i101 + 2], g[i011 + 2], g[i111 + 2], u, v, w)
+            + FadeSlope(fz) * (b - a);
+        return Lerp(a, b, w);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float Blend(float c000, float c100, float c010, float c110, float c001, float c101, float c011, float c111, float u, float v, float w) =>
+        Lerp(Lerp(Lerp(c000, c100, u), Lerp(c010, c110, u), v), Lerp(Lerp(c001, c101, u), Lerp(c011, c111, u), v), w);
+
     public static float Fbm2(float x, float y, int octaves, uint seed)
     {
         var sum = 0f;
