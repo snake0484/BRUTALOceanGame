@@ -142,6 +142,45 @@ public sealed class PlanetLeafSelectorTests(ITestOutputHelper output)
         Assert.Equal(Select(camera, 0).Order, set.Order);
     }
 
+    /// <summary>The hole check's cover (review F7): finer leaves cover a coarse node only when they cover all of it that could show, not when any one of them is drawn.</summary>
+    [Fact]
+    public void DescendantsCoverNeedsEveryShowingLeaf()
+    {
+        var camera = Above(30.0);
+        var ground = Above(0.0);
+        var selector = new PlanetLeafSelector(Bounds.Value, new EditStore());
+        var set = new LeafSet();
+        selector.Select(camera, 0, 2000.0, set);
+        var node = ChunkCoord.FromPlanet(ground.X, ground.Y, ground.Z, 2);
+        var drawable = new HashSet<ulong>(set.Leaves);
+        var ancestors = new HashSet<ulong>(set.Internal);
+        var showing = default(ChunkCoord);
+        var under = 0;
+
+        foreach (var leaf in set.Order)
+        {
+            if (leaf.Lod != 0 || leaf.Parent.Parent != node)
+                continue;
+
+            under++;
+
+            if (!selector.ProvablyUnseen(leaf, camera))
+                showing = leaf;
+        }
+
+        Assert.Contains(node.Key, set.Internal);
+        Assert.True(under > 1 && showing.Parent.Parent == node, $"{under} leaves under {node}");
+        Assert.True(TerrainWorld.DescendantsCover(node, drawable, ancestors, selector, camera));
+
+        drawable.Remove(showing.Key);
+        Assert.False(TerrainWorld.DescendantsCover(node, drawable, ancestors, selector, camera));
+
+        drawable.Clear();
+        drawable.Add(showing.Key);
+        Assert.True(TerrainWorld.DescendantsCover(showing, drawable, ancestors, selector, camera));
+        Assert.Equal(under == 1, TerrainWorld.DescendantsCover(node, drawable, ancestors, selector, camera));
+    }
+
     [Fact]
     public void SelectionIsAllocationFree()
     {

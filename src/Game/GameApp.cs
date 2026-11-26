@@ -86,6 +86,7 @@ public sealed class GameApp : IDisposable
     private readonly ShoreFlyTest? _shoreFly;
     private readonly OrbitTest? _orbitTest;
     private readonly MoonTest? _moonTest;
+    private readonly SeamTest? _seamTest;
     private readonly PlanetRenderer? _planets;
     private readonly CelestialView _celestial;
     private readonly int _planetTerrainBody;
@@ -129,7 +130,8 @@ public sealed class GameApp : IDisposable
     /// <param name="orbitTest">--orbit-test [inertial]: the test planet as a smooth sphere below the impostor switch and on the detail ladder above it, with the terrain round the spawn on it, flown from 2 m to 1e8 m with the camera in its surface or inertial frame; no ocean.</param>
     /// <param name="moonTest">--moon-test: the camera falls onto the moon from 1e9 m (a point of light) through disc, impostor and the focus switch to its octree, logging the ladder's GPU time per stage.</param>
     /// <param name="shoreFly">--shore-fly: the camera follows the spawn's waterline, then climbs, logging the ocean's GPU time and the depth maps' work.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false, bool shoreFly = false)
+    /// <param name="seamTest">--seam-test: static views of the octree alone over a key clear colour; one captured frame per view counts the pixels showing through it.</param>
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false, bool shoreFly = false, bool seamTest = false)
     {
         var weatherField = new WeatherField(new WeatherClimate());
         _sim = new SimWorld(seed: 1, WorkerBudget.Tick, weatherField) { DriveWind = weather, WeatherTimeOffset = weatherOffset * 60.0 };
@@ -180,7 +182,7 @@ public sealed class GameApp : IDisposable
         _instances = new InstanceBuffer(_renderer);
         _terrainRenderer = new TerrainRenderer(_renderer, _instances);
 
-        _celestial = new CelestialView(_renderer, _sim) { Pinned = orbitTest is not null || planetFly };
+        _celestial = new CelestialView(_renderer, _sim) { Pinned = orbitTest is not null || planetFly || seamTest };
         _planetTerrainBody = _celestial.FocusTerrainBody;
 
         if (orbitTest is { } orbitFrame)
@@ -210,6 +212,7 @@ public sealed class GameApp : IDisposable
             _planetScope = _renderer.GpuTimer.Register("Planet");
 
         _moonTest = moonTest ? new MoonTest(_camera, _sim, _terrain, _celestial, _renderer.GpuTimer, _terrainScope) : null;
+        _seamTest = seamTest ? new SeamTest(_camera, _sim, _terrain, _renderer) : null;
         _shoreFly = shoreFly ? new ShoreFlyTest(_camera, _sim, _depths, _depthTexture, _renderer.GpuTimer, [_oceanScope, _fftScope, _oceanComputeScope]) : null;
 
         var pipelineStats = _renderer.PipelineStats;
@@ -223,7 +226,7 @@ public sealed class GameApp : IDisposable
         if (benchSeconds > 0.0)
             _bench = new GpuBenchmark(_renderer.GpuTimer, benchSeconds, ["CPU frame", "CPU record", "Terrain rec"], [_stats.Frame, _stats.Record, _terrainRenderer.DrawMs]);
 
-        if (hideUi || _bench is not null || _planetFly is not null || _moonTest is not null || _shoreFly is not null)
+        if (hideUi || _bench is not null || _planetFly is not null || _moonTest is not null || _shoreFly is not null || _seamTest is not null)
         {
             _profiler.Open = false;
             _oceanPanel.Open = false;
@@ -270,13 +273,14 @@ public sealed class GameApp : IDisposable
             _sim.UpdateRenderPoses();
             _sections.Ticks = Lap(ref mark);
 
-            if (_orbitTest is null && _planetFly is null && _moonTest is null && _shoreFly is null)
+            if (_orbitTest is null && _planetFly is null && _moonTest is null && _shoreFly is null && _seamTest is null)
                 _camera.Update(_window, frameSeconds, _imgui.WantCaptureMouse, _imgui.WantCaptureKeyboard);
 
             _planetFly?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds);
             _shoreFly?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady, _seaFrames);
             _orbitTest?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady, OutputAspect, RenderViewport, _sim.RenderTime);
             _moonTest?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady);
+            _seamTest?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady && _octreeCover >= 1f);
             _celestial.Update(_camera);
             UpdateCameraSpeed(frameSeconds);
 
@@ -316,7 +320,7 @@ public sealed class GameApp : IDisposable
 
                 // The ocean is drawn in the sea frame under the camera, up to the height where it has faded into the terrain's far sea.
                 var seaCamera = _seaFramed ? _seaFrame.ToLocal(terrainCamera) : default;
-                var ocean = _seaWanted && _seaFramed && _ocean.Opacity > 0f;
+                var ocean = _seaWanted && _seaFramed && _ocean.Opacity > 0f && _seamTest is null;
                 _oceanDrawn = ocean;
 
                 mark = Stopwatch.GetTimestamp();
@@ -384,7 +388,7 @@ public sealed class GameApp : IDisposable
                 }
                 else
                 {
-                    _celestial.Draw(commands, _renderer.FrameIndex, extent, _camera, aspect, _focusBlend);
+                    _celestial.Draw(commands, _renderer.FrameIndex, extent, _camera, aspect, _seamTest is null ? _focusBlend : SeamTest.OctreeAlone(_focusBlend));
                 }
 
                 _renderer.EndOpaquePass(commands);
@@ -421,9 +425,10 @@ public sealed class GameApp : IDisposable
             _planetFly?.Record(_sections, _camera.ViewProjection(OutputAspect));
             _moonTest?.Record(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, _stats.Frame.Last, _sections.Work, _terrainRenderer.DrawnLastFrame, _camera.ViewProjection(OutputAspect), _renderer.Extent.Height, _focusBlend.Covers);
             _shoreFly?.Record(_sections, _ocean.TilesDrawn);
+            _seamTest?.Record(_camera.ViewProjection(OutputAspect));
             RecordOrbitTest();
 
-            if (_planetFly is { Done: true } || _orbitTest is { Done: true } || _moonTest is { Done: true } || _shoreFly is { Done: true })
+            if (_planetFly is { Done: true } || _orbitTest is { Done: true } || _moonTest is { Done: true } || _shoreFly is { Done: true } || _seamTest is { Done: true })
                 _window.ShouldClose = true;
         }
     }
@@ -443,7 +448,7 @@ public sealed class GameApp : IDisposable
         };
         _weather.Update(CameraXZ, _ocean, clear, _weatherPanel.DriveSky);
         var horizon = _orbitTest is null ? System.Numerics.Vector3.Lerp(SpaceColour, _ocean.SkyHorizon, Atmosphere) : SpaceColour;
-        _renderer.ClearColor = new float4(horizon.X, horizon.Y, horizon.Z, 1f);
+        _renderer.ClearColor = _seamTest is null ? new float4(horizon.X, horizon.Y, horizon.Z, 1f) : SeamTest.Key;
     }
 
     /// <summary>Relative air density at the camera: fog and the sky colour scale with it.</summary>

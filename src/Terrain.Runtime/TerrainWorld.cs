@@ -58,7 +58,8 @@ public sealed class TerrainWorld : IDisposable
     private readonly List<ChunkCoord> _scratch = new(8192);
     private readonly List<ChunkCoord> _dirty = new(256);
     private readonly List<EditOp> _pendingOps = new(64);
-    private readonly HashSet<ulong> _readyAncestors = new(16384);
+    private readonly HashSet<ulong> _drawable = new(8192);
+    private readonly HashSet<ulong> _drawableAncestors = new(16384);
     private readonly int[] _holeLods = new int[PlanetLeafSelector.MaxLeafLod + 1];
     private LeafSet _desired = new();
     private Body? _body;
@@ -746,15 +747,15 @@ public sealed class TerrainWorld : IDisposable
 
     /// <summary>
     /// Desired leaves that a camera-relative frustum (planet axes, planes as (n, d) with n·p + d ≥ 0 inside) sees, that may
-    /// show something (<see cref="PlanetLeafSelector.ProvablyUnseen"/>), but nothing loaded covers: not ready, no ready
-    /// ancestor and no ready descendant. A test metric, not per-frame game work.
+    /// show something (<see cref="PlanetLeafSelector.ProvablyUnseen"/>), but that loaded leaves do not cover: not ready, no
+    /// ready ancestor, and ready descendants over less than all of it (<see cref="DescendantsCover"/>). LOD seams are not
+    /// leaves: the pixel probe (--seam-test) counts those. A test metric, not per-frame game work.
     /// </summary>
     public int CountHoles(ReadOnlySpan<Vector4> planes)
     {
         if (_body is null)
             return 0;
 
-        _readyAncestors.Clear();
         Array.Clear(_holeLods);
         var holes = 0;
         var built = false;
@@ -766,30 +767,63 @@ public sealed class TerrainWorld : IDisposable
 
             if (!built)
             {
-                foreach (var record in _chunks.Values)
-                {
-                    if (!record.Ready)
-                        continue;
-
-                    for (var a = record.Coord; a.Lod <= PlanetLeafSelector.MaxLeafLod; a = a.Parent)
-                    {
-                        if (!_readyAncestors.Add(a.Key))
-                            break;
-                    }
-                }
-
+                BuildDrawable();
                 built = true;
             }
 
-            if (_readyAncestors.Contains(leaf.Key))
+            if (DescendantsCover(leaf, _drawable, _drawableAncestors, _body.Selector, _camera))
                 continue;
 
             holes++;
             _holeLods[leaf.Lod]++;
-
         }
 
         return holes;
+    }
+
+    /// <summary>
+    /// The leaves the renderer drew this frame, and every node above one. An upload is in the frame it was made in (its
+    /// table record and mesh copy go out together, a re-mesh swapping whole), so every ready leaf counts.
+    /// </summary>
+    private void BuildDrawable()
+    {
+        _drawable.Clear();
+        _drawableAncestors.Clear();
+
+        foreach (var record in _chunks.Values)
+        {
+            if (!record.Ready)
+                continue;
+
+            _drawable.Add(record.Coord.Key);
+
+            for (var a = record.Coord.Parent; a.Lod <= PlanetLeafSelector.MaxLeafLod && _drawableAncestors.Add(a.Key); a = a.Parent)
+            {
+            }
+        }
+    }
+
+    /// <summary>
+    /// Drawn leaves at or below <paramref name="node"/> cover all of it that could show: every branch down from it ends
+    /// in a drawn leaf or in a node that provably shows nothing. One drawn descendant is not enough.
+    /// </summary>
+    /// <param name="drawable">Keys of the drawn leaves.</param>
+    /// <param name="ancestors">Keys of every node above a drawn leaf.</param>
+    internal static bool DescendantsCover(ChunkCoord node, HashSet<ulong> drawable, HashSet<ulong> ancestors, PlanetLeafSelector selector, double3 camera)
+    {
+        if (drawable.Contains(node.Key))
+            return true;
+
+        if (node.Lod == 0 || !ancestors.Contains(node.Key))
+            return selector.ProvablyUnseen(node, camera);
+
+        for (var i = 0; i < 8; i++)
+        {
+            if (!DescendantsCover(new ChunkCoord(node.X * 2 + (i & 1), node.Y * 2 + ((i >> 1) & 1), node.Z * 2 + ((i >> 2) & 1), node.Lod - 1), drawable, ancestors, selector, camera))
+                return false;
+        }
+
+        return true;
     }
 
     private bool AncestorReady(ChunkCoord leaf)
