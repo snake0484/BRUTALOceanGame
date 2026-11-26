@@ -15,7 +15,7 @@ Core pillars, in priority order:
 
 ## Rules for Claude
 
-- Never build the project unless asked.
+- Build and test when implementing (the user asked for this on 2026-11-26; it applies to subagents and sessions doing implementation work too). Don't build for docs or design-only work. Prefer quick, targeted tests: build once, then `dotnet test` only the touched projects with `--no-build --filter "Category!=Perf"`.
 - Read `~/.claude/cs-standards.md` before writing C#.
 - `BRUTAL/` is the upstream framework. Do not modify it; game code lives outside it. If the framework needs a change, say so and propose it separately.
 - BRUTAL is deliberately small: no renderer, scene graph or editor. We write our own. Do not pull in a general-purpose engine.
