@@ -494,6 +494,72 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
         Assert.Throws<InvalidDataException>(() => PlanetKind.Parse("""{ "id": "t-wet", "schema": 1, "relief": { "minM": -1, "maxM": 1 }, "sea": { "present": true }, "layers": [] }"""));
     }
 
+    private static PlanetKindProgram CompileLayers(string layers) =>
+        PlanetKindCompiler.Compile(PlanetKind.Parse($$"""{ "id": "t-bad", "schema": 1, "relief": { "minM": -4000, "maxM": 4000 }, "sea": { "present": false }, "layers": [ {{layers}} ] }"""), TestKinds.Generator(TestKinds.Mountains).Params);
+
+    private const string Field = """{ "name": "n", "type": "fbm", "lambdaR": 0.5, "octaves": 3, "normalize": true, "gradient": true }, """;
+
+    /// <summary>Bad data fails at compile with the kind and the layer in the message, never as a hang, a NaN or a loose bound.</summary>
+    [Theory]
+    [InlineData("""{ "name": "g", "type": "fbm", "out": "h", "lambdaM": 900, "octaves": 3, "amplitudeM": 50, "scale": { "channel": "n" } }""", "'n' is not a mask")]
+    [InlineData("""{ "name": "g", "type": "terrace", "levels": { "count": 4, "fromM": 0, "toM": 900 }, "strength": { "channel": "n" } }""", "'n' is not a mask")]
+    [InlineData("""{ "name": "g", "type": "canyon", "field": "n", "halfWidthM": 500, "depthM": 100, "gate": { "channel": "n" } }""", "'n' is not a mask")]
+    [InlineData("""{ "name": "g", "type": "canyon", "field": "n", "halfWidthM": 0, "depthM": 100 }""", "halfWidthM > 0")]
+    [InlineData("""{ "name": "g", "type": "canyon", "field": "n", "halfWidthM": 500, "depthM": -100 }""", "depthM")]
+    [InlineData("""{ "name": "g", "type": "craters", "radiusM": [0, 5000] }""", "radiusM 0 < min < max")]
+    [InlineData("""{ "name": "g", "type": "craters", "radiusM": [100, 5000], "age": [0.8, 0.2] }""", "age")]
+    [InlineData("""{ "name": "g", "type": "ergs", "cellKm": 0, "radiusKm": [20, 45], "lambdaM": [90, 260], "heightRatio": [0.06, 0.1] }""", "cellKm > 0")]
+    [InlineData("""{ "name": "g", "type": "fbm", "out": "h", "lambdaM": 900, "octaves": 3, "amplitudM": 50 }""", "unknown key 'amplitudM'")]
+    [InlineData("""{ "name": "g", "type": "fbm", "out": "h", "lambdaM": 900, "octaves": "three" }""", "not a number")]
+    [InlineData("""{ "name": "g", "type": "fbm", "out": "h", "lambdaM": 900, "octaves": 3, "gate": { "channel": "n", "from": 0.1, "too": 0.3 } }""", "unknown key 'too'")]
+    [InlineData("""{ "name": "g", "type": "terrace", "riserBandM": 2 }""", "missing 'levels'")]
+    [InlineData("""{ "name": "g", "type": "curve", "in": "n", "knots": [[0, 1], [1]] }""", "a knot is [in, out]")]
+    [InlineData("""{ "name": "g", "type": "curve", "in": "n", "knots": [[0, "low"], [1, 2]] }""", "not a number")]
+    [InlineData("""{ "name": "n", "type": "mask", "lat": [0.1, 0.9] }""", "channel 'n' already exists")]
+    public void BadLayersAreRejectedByName(string layer, string message)
+    {
+        var e = Assert.Throws<InvalidDataException>(() => CompileLayers(Field + layer));
+        Assert.Contains("t-bad", e.Message);
+        Assert.Contains(layer.Contains("\"name\": \"n\"") ? "'n'" : "'g'", e.Message);
+        Assert.Contains(message, e.Message);
+    }
+
+    [Theory]
+    [InlineData("""{ "id": "t-top", "schema": 1, "relif": { "minM": -1, "maxM": 1 }, "layers": [] }""", "unknown key 'relif'")]
+    [InlineData("""{ "id": "t-top", "schema": 1, "layers": [] }""", "missing 'relief'")]
+    [InlineData("""{ "id": "t-top", "schema": 1, "relief": { "minM": "low", "maxM": 1 }, "layers": [] }""", "malformed")]
+    [InlineData("""{ "id": "t-top", "schema": 1, "relief": { "minM": -1, "maxM": 1 }, "layers": {} }""", "layers must be an array")]
+    [InlineData("""{ "id": "t-top", "schema": 1, "relief": { "minM": -1, "maxM": 1 }, "materials": "lava", "layers": [] }""", "unknown materials")]
+    public void BadKindsAreRejectedByName(string json, string message)
+    {
+        var e = Assert.Throws<InvalidDataException>(() => PlanetKind.Parse(json));
+        Assert.Contains("t-top", e.Message);
+        Assert.Contains(message, e.Message);
+    }
+
+    /// <summary>A gate's seeded range draws on its layer and its place in it, so adding a layer elsewhere leaves it alone.</summary>
+    [Fact]
+    public void GateRangesDoNotMoveWithOtherLayers()
+    {
+        const string gated = """{ "name": "g", "type": "fbm", "out": "h", "lambdaM": 900, "octaves": 3, "amplitudeM": 50, "gate": { "all": [ { "lat": [0.1, 0.9] }, { "channel": "n", "from": [-0.3, 0.3], "to": [0.4, 0.9] } ] } }""";
+        const string extra = """{ "name": "x", "type": "fbm", "out": "h", "lambdaM": 5000, "octaves": 2, "amplitudeM": 10, "gate": { "lat": [0.2, 0.4] } }, """;
+
+        static (float From, float Inverse) Range(PlanetKindProgram p)
+        {
+            for (var layer = p.LayerCount - 1; layer >= 0; layer--)
+            {
+                if (p.Op[layer] == LayerOp.Mask && p.Mode[layer] == LayerMode.MaskChannel && p.LayerNames[layer] == "g")
+                    return (p.Params[p.ParamBase[layer]], p.Params[p.ParamBase[layer] + 1]);
+            }
+
+            throw new InvalidOperationException("No channel mask");
+        }
+
+        var range = Range(CompileLayers(Field + gated));
+        Assert.InRange(range.From, -0.3f, 0.3f);
+        Assert.Equal(range, Range(CompileLayers(Field + extra + gated)));
+    }
+
     /// <summary>The knee is the identity below 80 % of the range, strictly increasing above it, and never leaves the range.</summary>
     [Fact]
     public void KneeIsMonotoneAndBounded()
