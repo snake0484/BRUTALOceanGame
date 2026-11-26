@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "em.concentrate.t0",
+  "kind": "Enrich",
+  "station": "fc.concentrator",
+  "licence": "refinery",
+  "input": {
+    "family": "em",
+    "minPurity": 0.0
+  },
+  "alpha": 50,
+  "yield": 0.85,
+  "loss": 0.02,
+  "purityCap": 0.2,
+  "throughputKgPerHour": 2000,
+  "powerW": 200000.0,
+  "spreadOut": 0.0,
+  "consumes": []
+}

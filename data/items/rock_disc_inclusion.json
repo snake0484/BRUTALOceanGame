@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "rock.disc_inclusion",
+  "name": "Disc-debris inclusions",
+  "family": "rock",
+  "densityKgM3": 3200,
+  "refCostPerKg": 3.0
+}

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "id": "em.crude_recrystallise.t2c",
+  "kind": "Enrich",
+  "station": "fc.crude_recrystalliser",
+  "licence": null,
+  "input": {
+    "family": "em",
+    "minPurity": 0.3
+  },
+  "alpha": 2.5,
+  "yield": 0.65,
+  "loss": 0.08,
+  "purityCap": 0.8,
+  "throughputKgPerHour": 15,
+  "powerW": 3000000.0,
+  "spreadOut": 0.2,
+  "consumes": [
+    {
+      "item": "solvent.cryo",
+      "perKgInput": 0.8
+    }
+  ]
+}

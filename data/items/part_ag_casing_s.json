@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "part.ag_casing.s",
+  "name": "Anti-graviton casing S",
+  "family": "part",
+  "densityKgM3": 2500,
+  "unitMassKg": 20
+}

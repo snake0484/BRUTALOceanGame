@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "id": "add.binder",
+  "item": {
+    "family": "additive",
+    "densityKgM3": 2200,
+    "refCostPerKg": 4.0,
+    "metastable": null
+  },
+  "effect": {
+    "maxOpenTicksMul": 1.5
+  },
+  "tradeOff": {
+    "mS": 0.8
+  },
+  "recipe": {
+    "station": "fc.additive_lab",
+    "crude": true,
+    "kind": "Fixed",
+    "timeSPerKg": 1800,
+    "powerW": 5000000.0,
+    "inputs": [
+      {
+        "family": "em",
+        "minPurity": 0.4,
+        "contentKg": 0.5
+      },
+      {
+        "item": "metal.rare",
+        "kg": 0.3
+      }
+    ]
+  }
+}

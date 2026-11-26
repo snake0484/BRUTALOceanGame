@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "id": "agent.mix",
+  "name": "Mixing agent",
+  "family": "fluid",
+  "densityKgM3": 1400,
+  "refCostPerKg": 0.02,
+  "recipe": {
+    "station": "fc.chem_plant",
+    "timeSPerKg": 2,
+    "powerW": 20000.0,
+    "inputs": [
+      {
+        "item": "ice",
+        "kg": 0.7
+      },
+      {
+        "item": "rock.flux",
+        "kg": 0.3
+      }
+    ]
+  }
+}

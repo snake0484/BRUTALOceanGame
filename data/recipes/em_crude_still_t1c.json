@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "em.crude_still.t1c",
+  "kind": "Enrich",
+  "station": "fc.crude_still",
+  "licence": null,
+  "input": {
+    "family": "em",
+    "minPurity": 0.1
+  },
+  "alpha": 2.0,
+  "yield": 0.7,
+  "loss": 0.08,
+  "purityCap": 0.55,
+  "throughputKgPerHour": 40,
+  "powerW": 300000.0,
+  "spreadOut": 0.15,
+  "consumes": []
+}

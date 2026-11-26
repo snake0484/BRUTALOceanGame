@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "metal.heavy",
+  "name": "Heavy metal",
+  "family": "metal",
+  "densityKgM3": 19300,
+  "refCostPerKg": 1.2
+}

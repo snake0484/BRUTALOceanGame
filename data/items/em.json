@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "em",
+  "name": "Exotic matter",
+  "family": "em",
+  "densityKgM3": 2800,
+  "metastable": "crystal"
+}

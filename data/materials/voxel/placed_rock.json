@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "id": "PlacedRock",
+  "name": "Placed rock",
+  "densityKgM3": 2600,
+  "hardness": 0.5,
+  "placeable": true,
+  "yields": {
+    "item": "rock.flux"
+  }
+}
