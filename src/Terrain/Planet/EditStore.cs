@@ -27,12 +27,18 @@ public sealed class EditStore
     public const int HugeCellLod = 10;
     public const int CoarseMaxLod = 5;
 
+    /// <summary>The octree's root LOD: nodes up to here are marked as holding ops.</summary>
+    public const int RootLod = 15;
+
     private EditOp[] _ops = new EditOp[256];
     private int _count;
     private uint _lastSeq;
     private readonly Dictionary<ulong, OpBucket> _fine = new();
     private readonly Dictionary<ulong, OpBucket> _coarse = new();
     private readonly Dictionary<ulong, OpBucket> _huge = new();
+
+    /// <summary>Nodes above a filed fine cell (LOD 1..15) or huge cell (LOD 11..15): an op lies somewhere under them.</summary>
+    private readonly HashSet<ulong> _occupied = new();
 
     /// <summary>Beyond this distance from the viewer, ops under <see cref="HugeRadius"/> are not applied at LOD ≥ 1.</summary>
     public double EditRadius = DefaultEditRadius;
@@ -144,6 +150,32 @@ public sealed class EditStore
         return Any(_huge, HugeCellLod, node, distance);
     }
 
+    /// <summary>
+    /// True if any op at all lies under <paramref name="node"/>, whatever LOD it shows at: an octree walk must descend
+    /// through the node even where the shell calls it uniform (a deep mine, a tower). Conservative.
+    /// </summary>
+    public bool Under(in ChunkCoord node)
+    {
+        if (node.Lod > HugeCellLod)
+            return _occupied.Contains(node.Key);
+
+        if (node.Lod == FineCellLod ? _fine.ContainsKey(node.Key) : _occupied.Contains(node.Key))
+            return true;
+
+        var shift = HugeCellLod - node.Lod;
+
+        if (!_huge.TryGetValue(new ChunkCoord(node.X >> shift, node.Y >> shift, node.Z >> shift, HugeCellLod).Key, out var bucket))
+            return false;
+
+        for (var i = 0; i < bucket.Count; i++)
+        {
+            if (PlanetEditor.Intersects(_ops[bucket.Items[i]], node))
+                return true;
+        }
+
+        return false;
+    }
+
     /// <summary>The largest voxel (m) an op of this radius shows at, up to <paramref name="maxLod"/>; LOD 0 always.</summary>
     private static double CoarsestVoxel(float radius, int maxLod)
     {
@@ -177,9 +209,19 @@ public sealed class EditStore
             {
                 bucket = new OpBucket();
                 tier.Add(key, bucket);
+
+                if (cellLod != CoarseCellLod)
+                    MarkAncestors(new ChunkCoord(x, y, z, cellLod));
             }
 
             bucket.Add(index);
+        }
+    }
+
+    private void MarkAncestors(ChunkCoord cell)
+    {
+        for (var a = cell.Parent; a.Lod <= RootLod && _occupied.Add(a.Key); a = a.Parent)
+        {
         }
     }
 

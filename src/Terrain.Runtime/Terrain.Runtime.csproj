@@ -12,5 +12,6 @@
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Sim.Tests" />
+    <InternalsVisibleTo Include="Terrain.Tests" />
   </ItemGroup>
 </Project>

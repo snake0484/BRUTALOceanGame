@@ -48,14 +48,15 @@ public sealed class LeafSet
 /// Planet octree leaf selection (planets.md "Streaming at flight speeds", "Main-thread work per frame"): 8 roots at LOD
 /// 15 around the planet centre, LOD 13-15 always split, leaves LOD 0..12. A node splits while the camera is within
 /// <see cref="SplitFactor"/> × its size, down to the speed bias's minimum LOD. Nodes the shell classifies as uniform air or
-/// rock (<see cref="PlanetHeightBounds"/>) are dropped unless an edit reaches them, and so are nodes below the horizon of
+/// rock (<see cref="PlanetHeightBounds"/>) are dropped unless an edit shows on them (leaves) or lies anywhere under them
+/// (split nodes, so the LOD-0 leaf of a deep mine or a tower is still reached), and so are nodes below the horizon of
 /// the planet's lowest ground (view-independent, so turning never pops), by a margin so terrain loads before it can rise
 /// into view. Allocation-free once the output has grown.
 /// Reads the bounds and the edit store: nothing may write the store while a selection runs.
 /// </summary>
 public sealed class PlanetLeafSelector
 {
-    public const int RootLod = 15;
+    public const int RootLod = EditStore.RootLod;
     public const int MaxLeafLod = PlanetGenerator.MaxLod;
     public const double SplitFactor = 3.0;
 
@@ -130,7 +131,9 @@ public sealed class PlanetLeafSelector
         var top = (float)_maxHeight;
         var shell = lod <= MaxLeafLod ? Bounds.Classify(node, out top) : GlobalClass(ox - s, oy - s, oz - s, ox + size, oy + size, oz + size, rMax, lod);
 
-        if (shell != NodeClass.Surface && (lod > MaxLeafLod || !Edits.Reaches(node, distance)))
+        var split = lod > MaxLeafLod || (lod > _minLod && distance < SplitFactor * size);
+
+        if (shell != NodeClass.Surface && !(split ? Edits.Under(node) : Edits.Reaches(node, distance)))
         {
             output.Uniform++;
             return;
@@ -144,7 +147,7 @@ public sealed class PlanetLeafSelector
             return;
         }
 
-        if (lod > MaxLeafLod || (lod > _minLod && distance < SplitFactor * size))
+        if (split)
         {
             var child = lod - 1;
 
@@ -180,14 +183,13 @@ public sealed class PlanetLeafSelector
             topRadius = Math.Min(topRadius, TopRadius(MaxRadius(a), top, a.Lod));
         }
 
-        return Beyond(Distance(camera, leaf), Horizon(camera), topRadius) || Empty(leaf, camera, EmptyDepth + 1);
+        var distance = Distance(camera, leaf);
+        return Beyond(distance, Horizon(camera), topRadius) || (!Edits.Reaches(leaf, distance) && Empty(leaf, EmptyDepth + 1));
     }
 
-    private bool Empty(ChunkCoord node, double3 camera, int depth)
+    /// <summary>The generated ground crosses nothing in the node. Only ops that show at the leaf's own LOD add to its mesh, so finer nodes ask the shell alone.</summary>
+    private bool Empty(ChunkCoord node, int depth)
     {
-        if (Edits.Reaches(node, Distance(camera, node)))
-            return false;
-
         if (Bounds.Classify(node) != NodeClass.Surface)
             return true;
 
@@ -196,7 +198,7 @@ public sealed class PlanetLeafSelector
 
         for (var i = 0; i < 8; i++)
         {
-            if (!Empty(new ChunkCoord(node.X * 2 + (i & 1), node.Y * 2 + ((i >> 1) & 1), node.Z * 2 + ((i >> 2) & 1), node.Lod - 1), camera, depth - 1))
+            if (!Empty(new ChunkCoord(node.X * 2 + (i & 1), node.Y * 2 + ((i >> 1) & 1), node.Z * 2 + ((i >> 2) & 1), node.Lod - 1), depth - 1))
                 return false;
         }
 

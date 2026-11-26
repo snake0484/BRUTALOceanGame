@@ -326,6 +326,34 @@ public sealed class PlanetTests(ITestOutputHelper output)
         Assert.False(store.Reaches(ChunkCoord.FromPlanet(p.X, p.Y, p.Z, 5), 0));
     }
 
+    /// <summary>Every op is under each octree node over it, whatever its size, and nodes away from every op hold none.</summary>
+    [Fact]
+    public void EveryOpIsUnderItsAncestors()
+    {
+        var store = new EditStore();
+        var random = new Random(5);
+        var centre = new Brutal.Numerics.double3(Radius * 0.6, -Radius * 0.8, 0.0);
+
+        for (var i = 0; i < 200; i++)
+        {
+            var radius = (float)(i % 20 == 0 ? 32.0 + random.NextDouble() * 2000.0 : 0.5 + random.NextDouble() * 31.0);
+            store.Add(EditOp.At(
+                centre.X + (random.NextDouble() - 0.5) * 30000.0, centre.Y + (random.NextDouble() - 0.5) * 30000.0, centre.Z + (random.NextDouble() - 0.5) * 30000.0,
+                radius, i % 3 == 0 ? BrushMode.Place : BrushMode.Dig, VoxelMaterial.Rock));
+        }
+
+        foreach (var op in store.Ops)
+        {
+            op.Centre(out var x, out var y, out var z);
+
+            for (var lod = 0; lod <= EditStore.RootLod; lod++)
+                Assert.True(store.Under(ChunkCoord.FromPlanet(x, y, z, lod)), $"radius {op.Radius} at LOD {lod}");
+        }
+
+        for (var lod = 0; lod <= 12; lod++)
+            Assert.False(store.Under(ChunkCoord.FromPlanet(-centre.X, -centre.Y, centre.Z + 100000.0, lod)), $"LOD {lod}");
+    }
+
     private static EditOp[] Gathered(EditStore store, Brutal.Numerics.double3 p, int lod, double distance, ref EditOp[] buffer)
     {
         var n = store.Gather(ChunkCoord.FromPlanet(p.X, p.Y, p.Z, lod), distance, ref buffer);

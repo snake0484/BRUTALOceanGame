@@ -1,4 +1,5 @@
 using Brutal.Numerics;
+using BrutalGame.Physics;
 using BrutalGame.Terrain.Runtime;
 using Xunit.Abstractions;
 
@@ -17,6 +18,22 @@ public sealed class PlanetLeafSelectorTests(ITestOutputHelper output)
     {
         var d = double3.Normalize(new double3(0.3, 0.8, -0.5));
         return d * (TestPlanet.Radius + TestPlanet.Generator.Surface.Height(d.X, d.Y, d.Z) + altitude);
+    }
+
+    /// <summary>A point <paramref name="offset"/> m above inland ground, clear of the protected shore so digging is allowed.</summary>
+    private static double3 Inland(double offset)
+    {
+        var surface = TestPlanet.Generator.Surface;
+        var random = new Random(7);
+
+        while (true)
+        {
+            var d = double3.Normalize(new double3(random.NextDouble() - 0.5, random.NextDouble() - 0.5, random.NextDouble() - 0.5));
+            var h = surface.Height(d.X, d.Y, d.Z);
+
+            if (h > surface.SeaHeight + 300f && h < surface.SeaHeight + 1500f)
+                return d * (TestPlanet.Radius + h + offset);
+        }
     }
 
     private static LeafSet Select(double3 camera, int minLod, double margin = 0.0)
@@ -88,6 +105,57 @@ public sealed class PlanetLeafSelectorTests(ITestOutputHelper output)
             var centre = leaf.Origin + new double3(0.5 * leaf.SizeMetres);
             Assert.True(double3.Dot(centre, up) > 0.0, $"{leaf} is on the far side");
         }
+    }
+
+    /// <summary>
+    /// A dig 500 m down and a place 300 m up sit where the shell calls every node above LOD 0 uniform, and neither shows
+    /// at LOD 1: the octree must still reach their LOD-0 leaf, which meshes, builds collision and counts for the hole check.
+    /// </summary>
+    [Theory]
+    [InlineData(-500.0, BrushMode.Dig)]
+    [InlineData(300.0, BrushMode.Place)]
+    public void EditsFarFromTheGroundKeepTheirLeaf(double offset, BrushMode mode)
+    {
+        var p = Inland(offset);
+        var edits = new EditStore();
+        edits.Add(EditOp.At(p.X, p.Y, p.Z, 1.5f, mode, VoxelMaterial.Rock));
+        var leaf = ChunkCoord.FromPlanet(p.X, p.Y, p.Z, 0);
+        var selector = new PlanetLeafSelector(Bounds.Value, edits);
+        var set = new LeafSet();
+        selector.Select(p, 0, 2000.0, set);
+
+        Assert.NotEqual(NodeClass.Surface, Bounds.Value.Classify(leaf.Parent));
+        Assert.False(edits.Reaches(leaf.Parent, 0.0));
+        Assert.Contains(leaf.Key, set.Leaves);
+        Assert.False(selector.ProvablyUnseen(leaf, p));
+        Assert.True(selector.ProvablyUnseen(new ChunkCoord(leaf.X + 3, leaf.Y, leaf.Z), p));
+
+        for (var a = leaf.Parent; a.Lod <= PlanetLeafSelector.MaxLeafLod; a = a.Parent)
+            Assert.Contains(a.Key, set.Internal);
+
+        using var shape = new StaticMeshShape();
+        var job = new ChunkJob { Generator = TestPlanet.Generator, Shape = shape };
+        job.Chunk.Coord = leaf;
+        job.GatherOps(edits, 0.0);
+        job.Run();
+        output.WriteLine($"{offset} m: {set.Count} leaves, leaf {leaf} meshed {job.Mesh.IndexCount / 3} triangles, collision {shape.TriangleCount}");
+
+        Assert.True(job.Mesh.IndexCount > 0, "the edit meshes");
+        Assert.True(shape.IsBuilt, "the edit collides");
+    }
+
+    /// <summary>Without edits nothing changes: the same camera selects the same leaves as an empty store.</summary>
+    [Fact]
+    public void AnEditElsewhereLeavesTheSelectionAlone()
+    {
+        var camera = Above(30.0);
+        var far = -camera;
+        var edits = new EditStore();
+        edits.Add(EditOp.At(far.X, far.Y, far.Z, 1.5f, BrushMode.Dig, VoxelMaterial.Rock));
+        var set = new LeafSet();
+        new PlanetLeafSelector(Bounds.Value, edits).Select(camera, 0, 0.0, set);
+
+        Assert.Equal(Select(camera, 0).Order, set.Order);
     }
 
     [Fact]
