@@ -12,11 +12,17 @@ public enum NodeClass : byte
 /// at every mip, so selection classifies a node as uniform air or solid with no job and no storage. Each texel holds the
 /// bounds over a cap of twice its level's largest half-diagonal around its centre, so the texel holding a query cap's
 /// centre covers the whole cap; bounds come from <see cref="PlanetSurface.Bounds"/> (rigorous) rounded outward to 1 m.
-/// Small nodes are refined with their own cap. Build once at system load (per face, on jobs); queries are read-only.
+/// Two bands (planet-kinds.md §3): one holds at every LOD, one from LOD <see cref="CoarseBandLod"/> up, where the small
+/// features a kind drops no longer widen it. Small nodes are refined with their own cap and LOD range. Build once at
+/// system load (per face, on jobs); queries are read-only.
 /// </summary>
 public sealed class PlanetHeightBounds
 {
     public const int DefaultResolution = 256;
+    public const int Bands = 2;
+
+    /// <summary>The second band bounds H at this LOD and coarser.</summary>
+    public const int CoarseBandLod = 3;
 
     /// <summary>A node whose cap is under this share of the finest texel's gets its own bounds evaluated.</summary>
     private const double RefineShare = 0.25;
@@ -25,8 +31,8 @@ public sealed class PlanetHeightBounds
     public readonly int Resolution;
     public readonly int Levels;
 
-    private readonly short[][] _lo;
-    private readonly short[][] _hi;
+    private readonly short[][][] _lo = new short[Bands][][];
+    private readonly short[][][] _hi = new short[Bands][][];
     private readonly double[] _allowance;
     private readonly double _radius;
 
@@ -39,17 +45,23 @@ public sealed class PlanetHeightBounds
         Resolution = resolution;
         Levels = System.Numerics.BitOperations.Log2((uint)resolution) + 1;
         _radius = generator.Params.Radius;
-        _lo = new short[Levels][];
-        _hi = new short[Levels][];
         _allowance = new double[Levels];
 
-        for (var level = 0; level < Levels; level++)
+        for (var band = 0; band < Bands; band++)
         {
-            var n = resolution >> level;
-            _lo[level] = new short[CubeLattice.Faces * n * n];
-            _hi[level] = new short[CubeLattice.Faces * n * n];
-            _allowance[level] = MaxHalfDiagonal(n);
+            _lo[band] = new short[Levels][];
+            _hi[band] = new short[Levels][];
+
+            for (var level = 0; level < Levels; level++)
+            {
+                var n = resolution >> level;
+                _lo[band][level] = new short[CubeLattice.Faces * n * n];
+                _hi[band][level] = new short[CubeLattice.Faces * n * n];
+            }
         }
+
+        for (var level = 0; level < Levels; level++)
+            _allowance[level] = MaxHalfDiagonal(resolution >> level);
     }
 
     /// <summary>Lowest ground anywhere on the planet (the coarsest level's lowest texel): the horizon occluder's height.</summary>
@@ -59,7 +71,7 @@ public sealed class PlanetHeightBounds
         {
             var min = (float)Generator.Params.MaxHeight;
 
-            foreach (var lo in _lo[Levels - 1])
+            foreach (var lo in _lo[0][Levels - 1])
                 min = MathF.Min(min, lo);
 
             return min;
@@ -75,8 +87,6 @@ public sealed class PlanetHeightBounds
         for (var level = 0; level < Levels; level++)
         {
             var n = Resolution >> level;
-            var lo = _lo[level];
-            var hi = _hi[level];
 
             for (var j = 0; j < n; j++)
             {
@@ -84,10 +94,14 @@ public sealed class PlanetHeightBounds
                 {
                     TexelCentre(face, i, j, n, out var dx, out var dy, out var dz);
                     var cap = HalfDiagonal(face, i, j, n, dx, dy, dz) + _allowance[level];
-                    Generator.Surface.Bounds(dx, dy, dz, cap, out var l, out var h);
                     var k = (face * n + j) * n + i;
-                    lo[k] = (short)MathF.Floor(l);
-                    hi[k] = (short)MathF.Ceiling(h);
+
+                    for (var band = 0; band < Bands; band++)
+                    {
+                        Generator.Surface.Bounds(dx, dy, dz, cap, band * CoarseBandLod, PlanetGenerator.MaxLod, out var l, out var h);
+                        _lo[band][level][k] = (short)MathF.Floor(l);
+                        _hi[band][level][k] = (short)MathF.Ceiling(h);
+                    }
                 }
             }
         }
@@ -99,14 +113,20 @@ public sealed class PlanetHeightBounds
             BuildFace(face);
     }
 
-    /// <summary>Bounds of H over the cap of directions within <paramref name="angle"/> of unit direction d.</summary>
-    public void Query(double dx, double dy, double dz, double angle, out float lo, out float hi)
+    /// <summary>Bounds of H over the cap of directions within <paramref name="angle"/> of unit direction d, at every LOD.</summary>
+    public void Query(double dx, double dy, double dz, double angle, out float lo, out float hi) =>
+        Query(dx, dy, dz, angle, 0, PlanetGenerator.MaxLod, out lo, out hi);
+
+    /// <summary>Bounds of H over the cap for every LOD in [<paramref name="minLod"/>, <paramref name="maxLod"/>].</summary>
+    public void Query(double dx, double dy, double dz, double angle, int minLod, int maxLod, out float lo, out float hi)
     {
         if (angle < _allowance[0] * RefineShare)
         {
-            Generator.Surface.Bounds(dx, dy, dz, angle, out lo, out hi);
+            Generator.Surface.Bounds(dx, dy, dz, angle, minLod, maxLod, out lo, out hi);
             return;
         }
+
+        var band = minLod >= CoarseBandLod ? 1 : 0;
 
         for (var level = 0; level < Levels; level++)
         {
@@ -118,8 +138,8 @@ public sealed class PlanetHeightBounds
             var i = Math.Min((int)((CubeLattice.ToT(gu) + 1.0) * (n * 0.5)), n - 1);
             var j = Math.Min((int)((CubeLattice.ToT(gv) + 1.0) * (n * 0.5)), n - 1);
             var k = (face * n + j) * n + i;
-            lo = _lo[level][k];
-            hi = _hi[level][k];
+            lo = _lo[band][level][k];
+            hi = _hi[band][level][k];
             return;
         }
 
@@ -138,10 +158,18 @@ public sealed class PlanetHeightBounds
     /// Uniform air or solid if every voxel of the node's padded volume is saturated in the generator; else Surface.
     /// Edits are the caller's: a uniform node an op reaches (<see cref="EditStore.Reaches"/>) must still be generated.
     /// </summary>
-    public NodeClass Classify(in ChunkCoord node) => Classify(node, out _);
+    public NodeClass Classify(in ChunkCoord node) => Classify(node, node.Lod, node.Lod, out _);
 
-    /// <summary>As <see cref="Classify(in ChunkCoord)"/>; <paramref name="hi"/> is the highest ground the node's cap can hold (MaxHeight if not queried).</summary>
-    public NodeClass Classify(in ChunkCoord node, out float hi)
+    /// <summary>As <see cref="Classify(in ChunkCoord)"/> for leaves generated anywhere from <paramref name="wantLod"/> up to the node's own LOD.</summary>
+    public NodeClass Classify(in ChunkCoord node, int wantLod) => Classify(node, wantLod, node.Lod, out _);
+
+    /// <summary>
+    /// Uniform only if it is for the heights of every LOD in [<paramref name="wantLod"/>, <paramref name="maxLod"/>]: a
+    /// node that will be split is asked with the finest LOD its leaves can have, a node standing in for a coarser leaf
+    /// with that leaf's LOD as the upper end. <paramref name="hi"/> is the highest ground the node's cap can hold
+    /// (MaxHeight if not queried).
+    /// </summary>
+    public NodeClass Classify(in ChunkCoord node, int wantLod, int maxLod, out float hi)
     {
         hi = Generator.Params.MaxHeight;
         var lod = node.Lod;
@@ -173,7 +201,7 @@ public sealed class PlanetHeightBounds
             return NodeClass.Surface;
 
         var angle = Math.Asin(half / dc) + PlanetGenerator.LatticePadCells * Generator.CellAngle(lod);
-        Query(cx / dc, cy / dc, cz / dc, angle, out var lo, out hi);
+        Query(cx / dc, cy / dc, cz / dc, angle, Math.Min(wantLod, lod), Math.Max(maxLod, lod), out var lo, out hi);
 
         if (wMin > hi + pad)
             return NodeClass.Air;

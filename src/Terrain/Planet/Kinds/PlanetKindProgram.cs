@@ -68,7 +68,10 @@ public sealed class PlanetKindProgram
     public bool HasSea;
 
     public double[] Frequency = [], OffsetX = [], OffsetY = [], OffsetZ = [];
-    public float[] Wavelength = [], Amplitude = [], OctaveMean = [];
+    public float[] Wavelength = [], Amplitude = [];
+
+    /// <summary>Per octave: the mean a ridged or billow octave contributes (what a LOD that skips it adds back); for eroded, its least damping factor.</summary>
+    public float[] OctaveMean = [];
     public uint[] Seed = [];
 
     public LayerOp[] Op = [];

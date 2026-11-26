@@ -129,9 +129,12 @@ public sealed class PlanetLeafSelector
         var distance = Distance(ox, oy, oz, size);
         var rMax = MaxRadius(ox - s, oy - s, oz - s, ox + size, oy + size, oz + size);
         var top = (float)_maxHeight;
-        var shell = lod <= MaxLeafLod ? Bounds.Classify(node, out top) : GlobalClass(ox - s, oy - s, oz - s, ox + size, oy + size, oz + size, rMax, lod);
-
         var split = lod > MaxLeafLod || (lod > _minLod && distance < SplitFactor * size);
+
+        // A node that splits stands for leaves down to the finest LOD: its class must hold at each of their band limits.
+        var shell = lod <= MaxLeafLod
+            ? Bounds.Classify(node, split ? _minLod : lod, lod, out top)
+            : GlobalClass(ox - s, oy - s, oz - s, ox + size, oy + size, oz + size, rMax, lod);
 
         if (shell != NodeClass.Surface && !(split ? Edits.Under(node) : Edits.Reaches(node, distance)))
         {
@@ -179,18 +182,18 @@ public sealed class PlanetLeafSelector
 
         for (var a = leaf; a.Lod <= MaxLeafLod; a = a.Parent)
         {
-            Bounds.Classify(a, out var top);
+            Bounds.Classify(a, leaf.Lod, a.Lod, out var top);
             topRadius = Math.Min(topRadius, TopRadius(MaxRadius(a), top, a.Lod));
         }
 
         var distance = Distance(camera, leaf);
-        return Beyond(distance, Horizon(camera), topRadius) || (!Edits.Reaches(leaf, distance) && Empty(leaf, EmptyDepth + 1));
+        return Beyond(distance, Horizon(camera), topRadius) || (!Edits.Reaches(leaf, distance) && Empty(leaf, leaf.Lod, EmptyDepth + 1));
     }
 
     /// <summary>The generated ground crosses nothing in the node. Only ops that show at the leaf's own LOD add to its mesh, so finer nodes ask the shell alone.</summary>
-    private bool Empty(ChunkCoord node, int depth)
+    private bool Empty(ChunkCoord node, int leafLod, int depth)
     {
-        if (Bounds.Classify(node) != NodeClass.Surface)
+        if (Bounds.Classify(node, node.Lod, leafLod, out _) != NodeClass.Surface)
             return true;
 
         if (depth == 1 || node.Lod == 0)
@@ -198,7 +201,7 @@ public sealed class PlanetLeafSelector
 
         for (var i = 0; i < 8; i++)
         {
-            if (!Empty(new ChunkCoord(node.X * 2 + (i & 1), node.Y * 2 + ((i >> 1) & 1), node.Z * 2 + ((i >> 2) & 1), node.Lod - 1), depth - 1))
+            if (!Empty(new ChunkCoord(node.X * 2 + (i & 1), node.Y * 2 + ((i >> 1) & 1), node.Z * 2 + ((i >> 2) & 1), node.Lod - 1), leafLod, depth - 1))
                 return false;
         }
 

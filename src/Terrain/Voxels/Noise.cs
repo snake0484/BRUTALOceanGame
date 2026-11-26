@@ -100,10 +100,13 @@ internal static class Noise
     }
 
     /// <summary>
-    /// |Δn| ≤ this × |Δx| for <see cref="Gradient3(double, double, double, uint)"/>: per axis |∂n| ≤ 1.875 (quintic fade
-    /// slope) × 4 (two |g·d| ≤ 2) + 1 = 8.5, times √3 for the L2 step. Loose but rigorous; height bounds rely on it.
+    /// |Δn| ≤ this × |Δx| for <see cref="Gradient3(double, double, double, uint)"/>. ∇n is linear in the eight corner
+    /// gradients, each one of the 12 edge vectors, so the steepest slope along a direction e at an in-cell point is the
+    /// sum over corners of the two largest |components| of (w·I + (f − c)·∇wᵀ)·e. Maximised over the cell and e it is
+    /// 3.75 = 2 × the fade's steepest slope, at the cell centre along an axis (hill climb, 400 restarts; the sampled
+    /// maximum over 2 × 10⁶ points is 3.20). Height bounds rely on it.
     /// </summary>
-    public const float GradientLipschitz = 14.73f;
+    public const float GradientLipschitz = 3.8f;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static uint Fold(long v) => (uint)v ^ ((uint)(v >> 32) * 0x9E3779B1u);

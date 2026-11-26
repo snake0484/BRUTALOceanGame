@@ -53,7 +53,7 @@ public static class PlanetKindCompiler
     private sealed class Builder(PlanetKind kind, PlanetParams p)
     {
         private readonly List<double> _frequency = [], _offsetX = [], _offsetY = [], _offsetZ = [];
-        private readonly List<float> _wavelength = [], _amplitude = [], _params = [];
+        private readonly List<float> _wavelength = [], _amplitude = [], _aux = [], _params = [];
         private readonly List<uint> _seed = [];
         private readonly List<LayerOp> _op = [];
         private readonly List<byte> _dst = [], _srcA = [], _srcB = [], _gate = [], _scale = [], _warp = [], _mode = [];
@@ -352,6 +352,7 @@ public static class PlanetKindCompiler
                     _frequency.Add(1.0 / wavelength);
                     _wavelength.Add((float)wavelength);
                     _amplitude.Add(a);
+                    _aux.Add(0f);
                     _seed.Add(h);
                     _offsetX.Add((Noise.Mix(h ^ 0x68E31DA4u) & 0xFFFF) * (1.0 / 64.0));
                     _offsetY.Add((Noise.Mix(h ^ 0xB5297A4Du) & 0xFFFF) * (1.0 / 64.0));
@@ -378,6 +379,18 @@ public static class PlanetKindCompiler
                 LayerOp.Eroded => Push((float)Num(layer, "damping", 1.0)),
                 _ => 0,
             };
+
+            if (op == LayerOp.Eroded)
+            {
+                // The running slope is at most the noise's steepest gradient × Σ a·f, which floors each octave's damping.
+                var steepest = 0.0;
+
+                for (var i = first; i < _amplitude.Count; i++)
+                {
+                    steepest += _amplitude[i] * _frequency[i] * Noise.GradientLipschitz;
+                    _aux[i] = (float)(1.0 / (1.0 + _params[paramBase] * steepest * steepest));
+                }
+            }
 
             if (op == LayerOp.Warp)
             {
@@ -558,7 +571,7 @@ public static class PlanetKindCompiler
                 OffsetZ = [.. _offsetZ],
                 Wavelength = [.. _wavelength],
                 Amplitude = [.. _amplitude],
-                OctaveMean = new float[_amplitude.Count],
+                OctaveMean = [.. _aux],
                 Seed = [.. _seed],
                 Op = [.. _op],
                 Dst = [.. _dst],

@@ -216,8 +216,8 @@ internal static partial class LayerOps
                 {
                     OctaveInterval(p, first + o, qx, qy, qz, reach, out var nLo, out var nHi);
                     var a = p.Amplitude[first + o];
-                    sumLo += a * MathF.Min(nLo, 0f);
-                    sumHi += a * MathF.Max(nHi, 0f);
+                    var least = p.OctaveMean[first + o];
+                    Accumulate(a * MathF.Min(nLo * least, nLo), a * MathF.Max(nHi * least, nHi), o >= endMax, 0f, ref sumLo, ref sumHi);
                 }
 
                 break;
