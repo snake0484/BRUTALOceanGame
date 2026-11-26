@@ -69,6 +69,9 @@ public sealed class PlanetKindProgram
     public float MinHeight, MaxHeight, SeaHeight;
     public bool HasSea;
 
+    /// <summary>Continent value from which the sea clamp holds (D30).</summary>
+    public float InlandStart;
+
     public double[] Frequency = [], OffsetX = [], OffsetY = [], OffsetZ = [];
     public float[] Wavelength = [], Amplitude = [];
 

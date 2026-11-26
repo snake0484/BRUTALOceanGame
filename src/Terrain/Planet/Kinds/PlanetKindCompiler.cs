@@ -17,6 +17,10 @@ public static class PlanetKindCompiler
     public const float KneeShare = 0.8f;
     public const float TerraceSlope = 0.5f;
 
+    /// <summary>A terrace riser spans this many voxels of ground where the input is no steeper than <see cref="SteepShare"/> of the planet.</summary>
+    public const float RiserVoxels = 2f;
+    public const double SteepShare = 0.9;
+
     private const int CalibrationPoints = 2048;
     private const uint OctaveSalt = 0x9E3779B9u;
     private const int None = PlanetKindProgram.None;
@@ -748,7 +752,7 @@ public static class PlanetKindCompiler
             if (p.HasSea)
             {
                 var continent = Existing(kind.Continent ?? throw Error("a sea needs a continent channel"));
-                var clamp = Push(p.SeaHeight + p.ShoreProtectHeight + 1f, LayerOps.LegacyInlandStart);
+                var clamp = Push(p.SeaHeight + p.ShoreProtectHeight + 1f, kind.InlandStart);
                 Emit(LayerOp.SeaClamp, PlanetKindProgram.Height, continent, paramBase: clamp);
             }
 
@@ -775,6 +779,7 @@ public static class PlanetKindCompiler
                 MaxHeight = p.MaxHeight,
                 SeaHeight = p.SeaHeight,
                 HasSea = p.HasSea,
+                InlandStart = Compat ? LayerOps.LegacyInlandStart : kind.InlandStart,
                 Frequency = [.. _frequency],
                 OffsetX = [.. _offsetX],
                 OffsetY = [.. _offsetY],
@@ -848,7 +853,7 @@ public static class PlanetKindCompiler
                     switch (program.Op[layer])
                     {
                         case LayerOp.Terrace:
-                            program.RiserBand[at] = MathF.Max(_band[layer], _slope[layer] * voxel);
+                            program.RiserBand[at] = MathF.Max(_band[layer], RiserVoxels * _slope[layer] * voxel);
                             continue;
                         case LayerOp.Canyon:
                         {
@@ -1005,8 +1010,10 @@ public static class PlanetKindCompiler
         }
 
         /// <summary>
-        /// A terrace riser must span a voxel on the ground, so its band in input height grows with the voxel by the
-        /// input's RMS slope: measured here over a 64 m step at the calibration points, on the layers before the terrace.
+        /// A terrace riser must span voxels on the ground or the lattice point-samples a step, so its band in input height
+        /// grows with the voxel by the input's slope: the steep end of it (<see cref="SteepShare"/>), measured over a 64 m
+        /// step at the calibration points on the layers before the terrace. One slope per body, not per point: the height
+        /// stays a pure function of the direction.
         /// </summary>
         private void TerraceSlopes(PlanetKindProgram program, ref RowSet set)
         {
@@ -1046,12 +1053,11 @@ public static class PlanetKindCompiler
                     }
                 }
 
-                var square = 0.0;
-
                 for (var i = 0; i < n; i++)
-                    square += (double)input[i] * input[i];
+                    input[i] = MathF.Abs(input[i]);
 
-                _slope[layer] = (float)(Math.Sqrt(square / n) / step);
+                Array.Sort(input);
+                _slope[layer] = (float)(input[(int)(n * SteepShare)] / step);
             }
         }
 

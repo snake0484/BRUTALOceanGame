@@ -11,12 +11,19 @@ public sealed class PlanetKind
 {
     public const int CurrentSchema = 1;
     public const string CompatV1 = "v1";
+    public const float DefaultInlandStart = 0.06f;
 
     public required string Id { get; init; }
     public string? Compat { get; init; }
     public float ReliefMin { get; init; }
     public float ReliefMax { get; init; }
     public bool SeaPresent { get; init; }
+
+    /// <summary>
+    /// Continent value from which the sea clamp holds the ground above the protected band (D30). Layers that can carve
+    /// should gate in no earlier, or their hollows in the coastal ramp flood.
+    /// </summary>
+    public float InlandStart { get; init; } = DefaultInlandStart;
 
     /// <summary>The channel the sea clamp reads; required with a sea.</summary>
     public string? Continent { get; init; }
@@ -29,6 +36,8 @@ public sealed class PlanetKind
     public bool IsCompatV1 => Compat == CompatV1;
 
     private static readonly string[] Keys = ["id", "schema", "compat", "requires", "relief", "sea", "continent", "materials", "layers"];
+    private static readonly string[] ReliefKeys = ["minM", "maxM"];
+    private static readonly string[] SeaKeys = ["present", "inlandStart"];
 
     public static PlanetKind Parse(string json)
     {
@@ -40,17 +49,18 @@ public sealed class PlanetKind
             var root = document.RootElement.Clone();
             id = Need(root, "id", id).GetString() ?? throw new InvalidDataException("Planet kind without an id");
 
-            foreach (var property in root.EnumerateObject())
-            {
-                if (Array.IndexOf(Keys, property.Name) < 0)
-                    throw new InvalidDataException($"Planet kind {id}: unknown key '{property.Name}'");
-            }
+            Known(root, Keys, id);
 
             if (Need(root, "schema", id).GetInt32() != CurrentSchema)
                 throw new InvalidDataException($"Planet kind {id}: schema {root.GetProperty("schema").GetInt32()} is not {CurrentSchema}");
 
             var relief = Need(root, "relief", id);
             var layers = Need(root, "layers", id);
+            var sea = root.TryGetProperty("sea", out var s) ? s : default;
+            Known(relief, ReliefKeys, id);
+
+            if (sea.ValueKind != JsonValueKind.Undefined)
+                Known(sea, SeaKeys, id);
 
             var kind = new PlanetKind
             {
@@ -58,7 +68,8 @@ public sealed class PlanetKind
                 Compat = root.TryGetProperty("compat", out var c) ? c.GetString() : null,
                 ReliefMin = Need(relief, "minM", id).GetSingle(),
                 ReliefMax = Need(relief, "maxM", id).GetSingle(),
-                SeaPresent = root.TryGetProperty("sea", out var s) && Need(s, "present", id).GetBoolean(),
+                SeaPresent = sea.ValueKind != JsonValueKind.Undefined && Need(sea, "present", id).GetBoolean(),
+                InlandStart = sea.ValueKind != JsonValueKind.Undefined && sea.TryGetProperty("inlandStart", out var inland) ? inland.GetSingle() : DefaultInlandStart,
                 Continent = root.TryGetProperty("continent", out var k) ? k.GetString() : null,
                 Materials = root.TryGetProperty("materials", out var m) ? m.GetString() : null,
                 Layers = layers,
@@ -70,6 +81,9 @@ public sealed class PlanetKind
             if (kind.ReliefMin >= kind.ReliefMax)
                 throw new InvalidDataException($"Planet kind {id}: empty relief range");
 
+            if (kind.InlandStart is <= 0f or > 0.5f)
+                throw new InvalidDataException($"Planet kind {id}: sea.inlandStart must be in (0, 0.5]");
+
             if (kind.SeaPresent && kind.Continent is null && !kind.IsCompatV1)
                 throw new InvalidDataException($"Planet kind {id}: a sea needs a continent channel");
 
@@ -79,6 +93,18 @@ public sealed class PlanetKind
         catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException)
         {
             throw new InvalidDataException($"Planet kind {id}: malformed ({e.Message})", e);
+        }
+    }
+
+    private static void Known(JsonElement obj, string[] keys, string id)
+    {
+        if (obj.ValueKind != JsonValueKind.Object)
+            throw new InvalidDataException($"Planet kind {id}: malformed (an object was expected)");
+
+        foreach (var property in obj.EnumerateObject())
+        {
+            if (Array.IndexOf(keys, property.Name) < 0)
+                throw new InvalidDataException($"Planet kind {id}: unknown key '{property.Name}'");
         }
     }
 

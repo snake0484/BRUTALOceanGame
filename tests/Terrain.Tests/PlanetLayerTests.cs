@@ -710,6 +710,35 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
     [InlineData(TestKinds.Temperate)]
     public void InlandGroundClearsTheProtectedBand(string kind) => ShoreBand(TestKinds.Generator(kind), output);
 
+    /// <summary>The shipped sea kind's carving layers gate in where its sea clamp starts: land in the coastal ramp never dips under the sea.</summary>
+    [Fact]
+    public void CoastalRampHoldsNoPits()
+    {
+        var surface = TestKinds.Generator(TestKinds.Temperate).Surface;
+        var program = surface.Program;
+        var random = new Random(71);
+        Span<float> rows = stackalloc float[program.Rows];
+        var ramp = 0;
+
+        for (var n = 0; n < 200_000; n++)
+        {
+            TestKinds.RandomDirection(random, out var x, out var y, out var z);
+            double qx = x * surface.Radius, qy = y * surface.Radius, qz = z * surface.Radius;
+            rows.Clear();
+            var set = new RowSet { X = new ReadOnlySpan<double>(in qx), Y = new ReadOnlySpan<double>(in qy), Z = new ReadOnlySpan<double>(in qz), Ch = rows, Count = 1, Stride = 1, Channels = program.ChannelCount, W = 1, H = 1, Direct = true };
+            LayerOps.Evaluate(program, 0, ref set);
+            var continent = rows[program.ContinentChannel];
+
+            if (continent < 0.001f || continent >= program.InlandStart)
+                continue;
+
+            ramp++;
+            Assert.True(rows[PlanetKindProgram.Height] >= surface.SeaHeight - 0.5f, $"Ground at {rows[PlanetKindProgram.Height] - surface.SeaHeight} m about the sea where the continent is {continent}");
+        }
+
+        Assert.True(ramp > 1_000, $"{ramp} ramp samples");
+    }
+
     internal static void ShoreBand(PlanetGenerator generator, ITestOutputHelper output)
     {
         var surface = generator.Surface;
@@ -729,7 +758,7 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
             Assert.Equal(h, surface.Height(x, y, z));
             sea += h < surface.SeaHeight ? 1 : 0;
 
-            if (rows[program.ContinentChannel] < LayerOps.LegacyInlandStart)
+            if (rows[program.ContinentChannel] < program.InlandStart)
                 continue;
 
             inland++;
