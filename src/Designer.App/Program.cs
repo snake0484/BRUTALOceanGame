@@ -35,6 +35,11 @@ for (var i = 0; i < args.Length; i++)
         demo = true;
     else if (args[i] == "--demo-mesh")
         demoMesh = true;
+    else if (args[i] == "--demo-brushes")
+    {
+        demo = true;
+        DesignerApp.BrushDemo = true;
+    }
     else if (args[i] == "--demo-layered")
         demoLayered = true;
     else if (args[i] == "--cutaway" && i + 2 < args.Length)

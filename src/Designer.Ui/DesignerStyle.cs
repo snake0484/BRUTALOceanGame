@@ -17,6 +17,7 @@ public sealed class DesignerStyle
     public const float BodySize = 18f;
     public const float SmallSize = 15f;
     public const uint DockSpaceId = 0x0D0C5000;
+    public const uint EditDock = 0x00000005;
 
     private const float MinDpiShare = 0.8f;
     private const float MinScale = 0.6f;
@@ -107,6 +108,9 @@ public sealed class DesignerStyle
 
             [Window][Hull layers]
             DockId=0x00000005,2
+
+            [Window][Brushes]
+            DockId=0x00000005,3
 
             [Window][Stats]
             DockId=0x00000006,0

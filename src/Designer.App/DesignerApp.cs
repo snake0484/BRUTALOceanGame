@@ -177,7 +177,11 @@ public sealed class DesignerApp : IDisposable
         var copy = doc.Clone();
         PlanCanonical.Canonicalise(copy);
         _stats.Hash = PlanFormat.HashBody(copy);
-        _baker.Start(doc.Solids.AsSpan(), doc.Meshes, _catalog.Densities(doc), doc.Layers);
+        var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), doc.Meshes, doc.Brushes, doc.Layers is not null);
+        _panels.Strokes.Expanded = expanded;
+        _stats.Generated = expanded.Generated;
+        _stats.Unstuck = expanded.Unstuck;
+        _baker.Start(expanded.Solids, expanded.Meshes, _catalog.Densities(doc), doc.Layers);
         UpdatePalette(doc);
     }
 
@@ -246,7 +250,8 @@ public sealed class DesignerApp : IDisposable
         var cut = _panels.Cutaway;
         _hull.SetCutaway(cut.Enabled ? cut.Axis : -1, cut.Offset, cut.Flip);
         _overlay.Begin(_camera.Position);
-        _tool.Update(_session, _meshEdit, _camera, viewport, viewProj, !io.WantCaptureMouse, _overlay);
+        var strokeUsedMouse = !_tool.Dragging && _panels.Strokes.Update(_session, _camera, viewport, viewProj, !io.WantCaptureMouse, _overlay);
+        _tool.Update(_session, _meshEdit, _camera, viewport, viewProj, !io.WantCaptureMouse && !strokeUsedMouse, _overlay);
         _imgui.EndFrame();
     }
 
@@ -368,11 +373,16 @@ public sealed class DesignerApp : IDisposable
         FrameHull();
     }
 
+    /// <summary>--demo-brushes: the demo hull dressed with brush strokes.</summary>
+    public static bool BrushDemo;
+
     private void Demo(bool mesh)
     {
         var all = _catalog.All;
 
-        if (mesh)
+        if (BrushDemo)
+            SampleHulls.BrushedHull(_session, all[0].Id, all[Math.Min(2, all.Count - 1)].Id);
+        else if (mesh)
             SampleHulls.MeshHull(_session, all[0].Id, all[Math.Min(2, all.Count - 1)].Id);
         else
             SampleHulls.HollowBoxWithCylinder(_session, all[0].Id, all[Math.Min(2, all.Count - 1)].Id);

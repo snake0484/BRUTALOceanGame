@@ -23,6 +23,35 @@ public static class SampleHulls
     }
 
     /// <summary>
+    /// The box-and-cylinder hull dressed with brushes: a half-round rib along the roof edge, a channel cut along the
+    /// starboard side, a row of bolt heads (a stamp made from a small cylinder, then deleted) down the port side, and a
+    /// rib over the cylinder nose, drawn above it and stuck down onto its curve.
+    /// </summary>
+    public static void BrushedHull(DesignSession session, DefId hull, DefId trim)
+    {
+        const int m = HullSolid.PositionUnitsPerMetre;
+        const int h = HullSolid.HalfUnitsPerMetre;
+        HollowBoxWithCylinder(session, hull, trim);
+        var bolt = HullCommands.AddSolid(session, SolidShape.Cylinder, SolidOp.Add, 0, 20 * m, 0, (ushort)(0.25 * h), (ushort)(0.125 * h), (ushort)(0.25 * h), SolidRotation.Identity, trim);
+        var stamp = BrushCommands.AddStampFromSolid(session, bolt);
+        session.Selection.Set(bolt);
+        HullCommands.DeleteSelected(session);
+        var rib = BrushCommands.AddSweep(session, ProfilePreset.HalfRound, 0.4, 0.25);
+        var channel = BrushCommands.AddSweep(session, ProfilePreset.Channel, 0.5, 0.3);
+        var up = new Vector3d(0, 1, 0);
+        var trimMaterial = session.EnsureMaterial(trim);
+        var hullMaterial = session.EnsureMaterial(hull);
+
+        BrushCommands.AddStroke(session, rib, [StrokePoint.From(new Vector3d(-5.5, 6.4, 3.5), up), StrokePoint.From(new Vector3d(5.5, 6.4, 3.5), up)], SolidOp.Add, trimMaterial);
+        BrushCommands.AddStroke(session, channel,
+            [StrokePoint.From(new Vector3d(6.4, 5.0, -3.5), new Vector3d(1, 0, 0)), StrokePoint.From(new Vector3d(6.4, 5.0, 3.5), new Vector3d(1, 0, 0))], SolidOp.Subtract, hullMaterial);
+        BrushCommands.AddStroke(session, stamp,
+            [StrokePoint.From(new Vector3d(-6.4, 4.5, -3.5), new Vector3d(-1, 0, 0)), StrokePoint.From(new Vector3d(-6.4, 4.5, 3.5), new Vector3d(-1, 0, 0))], SolidOp.Add, trimMaterial);
+        BrushCommands.AddStroke(session, rib,
+            [StrokePoint.From(new Vector3d(-1.0, 5.0, 4.2), up), StrokePoint.From(new Vector3d(0, 5.0, 7.0), up), StrokePoint.From(new Vector3d(1.0, 5.0, 9.8), up)], SolidOp.Add, trimMaterial);
+    }
+
+    /// <summary>
     /// A mesh-modelled hull: a box converted to a mesh, loop cut at mid-length, its nose face extruded, inset and extruded
     /// again, smoothed by two Catmull-Clark levels with the bottom edges kept creased, then cut by a primitive Subtract
     /// (a cargo door) to show it stays cuttable, with a primitive turret on top.

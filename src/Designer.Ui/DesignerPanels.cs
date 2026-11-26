@@ -21,6 +21,8 @@ public sealed class DesignStats
     public int MaxSolidsPerBrick;
     public bool Baking;
     public float PrepareMs;
+    public int Generated;
+    public int Unstuck;
     public int ExactBricks;
     public PlanHash Hash;
     public readonly ValidationLog Validation = new();
@@ -49,6 +51,10 @@ public sealed class DesignerPanels
     private float _wallMetres = 0.5f;
     private readonly MeshPanel _meshPanel = new();
     private readonly LayersPanel _layersPanel;
+    private readonly BrushesPanel _brushesPanel;
+
+    /// <summary>The viewport's stroke drawing and editing tool (the Brushes panel drives it).</summary>
+    public readonly StrokeTool Strokes = new();
 
     private static readonly string[] RoleNames = ["Skin", "Room", "Component", "Panel"];
 
@@ -67,6 +73,7 @@ public sealed class DesignerPanels
     {
         _catalog = catalog;
         _layersPanel = new LayersPanel(catalog);
+        _brushesPanel = new BrushesPanel(catalog);
     }
 
     public FileRequest Request { get; private set; }
@@ -97,6 +104,7 @@ public sealed class DesignerPanels
         DrawProperties(session, meshEdit);
         _meshPanel.Draw(session, meshEdit);
         _layersPanel.Draw(session);
+        _brushesPanel.Draw(session, Strokes);
         DrawStats(session, stats);
     }
 
@@ -377,6 +385,9 @@ public sealed class DesignerPanels
             ImGui.Text($"bricks {stats.Bricks} ({stats.ExactBricks} exact)  triangles {stats.Triangles}  max solids/brick {stats.MaxSolidsPerBrick}");
             ImGui.Text($"bake {stats.BakeMs:F2} ms wall  {stats.BakeCpuMs:F2} ms cpu  rebaked {stats.Rebaked} reused {stats.Reused}{(stats.Baking ? "  (baking)" : "")}");
             ImGui.Text($"mesh prepare {stats.PrepareMs:F2} ms (subdivide + BVH, cached by mesh hash)");
+
+            if (stats.Generated > 0 || stats.Unstuck > 0)
+                ImGui.Text($"strokes: {stats.Generated} generated solids, {stats.Unstuck} points off the hull");
             ImGui.Text($"plan hash {stats.Hash}  undo {session.Undo.UndoCount} redo {session.Undo.RedoCount}");
             ImGui.SeparatorText($"Validation: {stats.Validation.Errors} errors, {stats.Validation.Warnings} warnings");
 
