@@ -56,3 +56,16 @@ Already recorded earlier in this round: 1 g on 1000 km planets; realistic planet
 - D33 Fragments from legal mining near a station: ALWAYS the MINER's liability.
   - Applied: liability (who pays) is separate from class (intent). Debris of legal mining (made outside every `ProtectRadius`) that damages a station, its shield or anything inside its protected zone is the event actor's liability in every class, including debris redirected by station defence (`IncidentRecord.Liable`). Owner: rings-and-asteroids.md.
 - D37 A shatter at the threshold breaks the WHOLE BODY: a crack through it, a lot of dust (a local fog cloud that cuts visibility and sensors for a while), and large fragments flung in different directions. Below the threshold a hit makes a crater and cracks. (rings-and-asteroids.md revision 4, `DustCloud`.)
+
+## Ship atmospheres (2026-11-26)
+- D38 Ships have atmospheres inside.
+- D39 Hull damage can leak atmosphere.
+- D40 Airlocks are needed.
+- D41 More advanced ships can use AIR BARRIERS: a small particle shield across an opening that keeps air in the room; it needs constant power.
+- D42 EMERGENCY SHIELDS may exist that stop breaches from leaking. (Design: ship-atmosphere.md, pending.)
+
+## AI ships and crew (2026-11-26)
+- D43 The game has AI ships.
+- D44 AI crew are not fully simulated until needed.
+- D45 The pilot is a placeholder for a ship-flying AI.
+- D46 Players see the crew of other ships and stations passing the windows, even as a simpler render. (Design: ai-ships-and-crew.md.)
