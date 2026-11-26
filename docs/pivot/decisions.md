@@ -69,3 +69,8 @@ Already recorded earlier in this round: 1 g on 1000 km planets; realistic planet
 - D44 AI crew are not fully simulated until needed.
 - D45 The pilot is a placeholder for a ship-flying AI.
 - D46 Players see the crew of other ships and stations passing the windows, even as a simpler render. (Design: ai-ships-and-crew.md.)
+- D47 Player ships can have AI crew.
+- D48 Crew positions can be scanned.
+- D49 People can surrender.
+- D50 Prepare for 200 hulls actually rendered at once. Far ships are simplified further and become data unless they get into a fight.
+- D51 Max crew is 100 per ship. If needed, crew on other floors or outside the player's room are simplified.
