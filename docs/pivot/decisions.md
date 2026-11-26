@@ -105,7 +105,7 @@ Already recorded earlier in this round: 1 g on 1000 km planets; realistic planet
 Round 6 designs: D55, D56 and D59 in combat-and-sensors.md; D54, D57, D58, D68, D72 and D74 in factions-and-law.md; D60-D66 in ship-atmosphere.md; D59 (storage) and D71 (sockets) in ship-hulls.md; D64, D67-D71 in ship-design-and-construction.md; D58, D66 and D71 in warp.md; D72-D74 in rings-and-asteroids.md; D53 in ai-ships-and-crew.md. The r7 consistency pass applied them across the other docs.
 
 ## Planets and decoration (2026-11-26)
-- D75 Planets are far too flat. Different KINDS of planet generation are needed; bodies never touch, so each can have its own generator. (Design: planet-kinds.md, pending.)
+- D75 Planets are far too flat. Different KINDS of planet generation are needed; bodies never touch, so each can have its own generator. (Design: planet-kinds.md.)
 - D76 Full 3D terrain features must be possible (caves, arches, overhangs).
 - D77 Terrain decoration (rocks, trees and so on) is generated too. (Design: terrain-decoration.md.)
 - D78 A planet designer tool may be needed: brushes that paint biomes and weight modifiers onto a planet. (Not designed yet. Likely shape: painted low-resolution cube-sphere maps per body that the planet kind's layers read as masks and weights, authored in the designer app shell.)
