@@ -15,7 +15,10 @@ public sealed class LeafSet
     public readonly HashSet<ulong> Internal = new(4096);
     public readonly List<ChunkCoord> Order = new(8192);
 
-    /// <summary>Each leaf's priority (distance in its own voxels), parallel to <see cref="Order"/> and sorted with it.</summary>
+    /// <summary>
+    /// Each leaf's priority, parallel to <see cref="Order"/> and sorted with it: distance in its own voxels over 1 + LOD.
+    /// A missing coarse leaf is a hole to the horizon, a missing fine one a blur under its ready parent, so coarse loads first.
+    /// </summary>
     public readonly List<float> Keys = new(8192);
     public readonly int[] PerLod = new int[PlanetLeafSelector.MaxLeafLod + 1];
 
@@ -165,7 +168,7 @@ public sealed class PlanetLeafSelector
 
         output.Leaves.Add(node.Key);
         output.Order.Add(node);
-        output.Keys.Add((float)(distance / s));
+        output.Keys.Add((float)(distance / (s * (1 + lod))));
         output.PerLod[lod]++;
         output.FinestLod = Math.Min(output.FinestLod, lod);
     }
@@ -176,7 +179,8 @@ public sealed class PlanetLeafSelector
     /// it uniform down to <see cref="EmptyDepth"/> levels, so it meshes empty. What a hole check wants. Main thread,
     /// between edits; safe against a running <see cref="Select"/>.
     /// </summary>
-    public bool ProvablyUnseen(ChunkCoord leaf, double3 camera)
+    /// <param name="finer">Ask what finer leaves would show in the node, each level at its own LOD as selection does, not what a leaf of the node's LOD meshes.</param>
+    public bool ProvablyUnseen(ChunkCoord leaf, double3 camera, bool finer = false)
     {
         var topRadius = double.MaxValue;
 
@@ -187,10 +191,13 @@ public sealed class PlanetLeafSelector
         }
 
         var distance = Distance(camera, leaf);
-        return Beyond(distance, Horizon(camera), topRadius) || (!Edits.Reaches(leaf, distance) && Empty(leaf, leaf.Lod, EmptyDepth + 1));
+        return Beyond(distance, Horizon(camera), topRadius) || (!Edits.Reaches(leaf, distance) && Empty(leaf, finer ? 0 : leaf.Lod, EmptyDepth + 1));
     }
 
-    /// <summary>The generated ground crosses nothing in the node. Only ops that show at the leaf's own LOD add to its mesh, so finer nodes ask the shell alone.</summary>
+    /// <summary>
+    /// The generated ground crosses nothing in the node, for a leaf of <paramref name="leafLod"/> (or each node's own LOD
+    /// if that is finer). Only ops that show at the leaf's own LOD add to its mesh, so finer nodes ask the shell alone.
+    /// </summary>
     private bool Empty(ChunkCoord node, int leafLod, int depth)
     {
         if (Bounds.Classify(node, node.Lod, leafLod, out _) != NodeClass.Surface)

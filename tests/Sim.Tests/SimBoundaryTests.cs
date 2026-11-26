@@ -37,6 +37,22 @@ public class SimBoundaryTests
         throw new InvalidOperationException($"No sea {depth} m deep within 400 km of the spawn");
     }
 
+    /// <summary>Straight out to sea from the spawn (the bubble's +x), the first point within 40 km where the sea is this deep.</summary>
+    private static double3 Seaward(SimWorld sim, float depth)
+    {
+        var surface = sim.Generator.Surface;
+
+        for (var x = 500f; x <= 40_000f; x += 500f)
+        {
+            var d = Dir(sim, x);
+
+            if (surface.Height(d.X, d.Y, d.Z) <= surface.SeaHeight - depth)
+                return d;
+        }
+
+        throw new InvalidOperationException($"No sea {depth} m deep within 40 km straight out from the spawn");
+    }
+
     private static readonly string[] Forbidden = ["Brutal.Vulkan", "Brutal.Glfw", "Brutal.ImGui", "Brutal.ShaderC", "Engine", "Debug"];
     private static readonly string[] ForbiddenProjects = ["Engine", "Water.Rendering", "Terrain.Runtime", "Debug", "Game"];
     private static readonly string[] ForbiddenPackages = ["BRUTAL.Vulkan", "BRUTAL.Glfw", "BRUTAL.ImGui", "BRUTAL.ShaderC"];
@@ -215,7 +231,11 @@ public class SimBoundaryTests
     {
         using var sim = new SimWorld(seed: 1, workerThreads: 1);
         // Where the sea is 70 m deep the seabed's conservative bounds sit wholly under the protected band.
-        var offshore = Offshore(sim, 70f);
+        var surface = sim.Generator.Surface;
+        var offshore = Seaward(sim, 70f);
+        surface.Bounds(offshore.X, offshore.Y, offshore.Z, 5e-5, 0, 0, out var lowest, out var highest);
+        var seabed = surface.Height(offshore.X, offshore.Y, offshore.Z);
+        Assert.True(highest < surface.ProtectHeight - 30f && lowest > seabed - 40f, $"Seabed at {seabed} m bounded {lowest} .. {highest} m, band top {surface.ProtectHeight} m");
         sim.QueueEdit(Under(sim, offshore, 400f, BrushMode.Dig));
         sim.QueueEdit(Under(sim, offshore, 400f, BrushMode.Place));
         sim.QueueEdit(Under(sim, -400f, 150f, BrushMode.Dig));

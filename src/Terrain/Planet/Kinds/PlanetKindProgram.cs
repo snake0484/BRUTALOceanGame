@@ -57,6 +57,10 @@ public sealed class PlanetKindProgram
     public const int MaxLayers = 64;
     public const int Lods = PlanetGenerator.MaxLod + 1;
     public const int TempRows = 8;
+
+    /// <summary>Most table entries one layer holds (24 octaves of a three-field warp), and a point's cache of them with derivatives.</summary>
+    public const int LayerOctaves = 72;
+    public const int OctaveCache = 4 * LayerOctaves;
     public const byte None = 255;
     public const int Height = 0;
 
@@ -68,6 +72,9 @@ public sealed class PlanetKindProgram
     public double AxisX, AxisY, AxisZ;
     public float MinHeight, MaxHeight, SeaHeight;
     public bool HasSea;
+
+    /// <summary>Continent value from which the sea clamp holds (D30).</summary>
+    public float InlandStart;
 
     public double[] Frequency = [], OffsetX = [], OffsetY = [], OffsetZ = [];
     public float[] Wavelength = [], Amplitude = [];

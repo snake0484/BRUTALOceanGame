@@ -351,6 +351,114 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
     }
 
     /// <summary>
+    /// The lattice heights a chunk generates from (octaves of 256 voxels and longer interpolated from every 8th point)
+    /// stay inside the bounds of its node's cap, as <see cref="PlanetHeightBounds.Classify(in ChunkCoord)"/> asks them.
+    /// </summary>
+    [Theory]
+    [InlineData(TestKinds.Mountains)]
+    [InlineData(TestKinds.Mesa)]
+    [InlineData(TestKinds.Sea)]
+    [InlineData(TestKinds.Stamps)]
+    [InlineData(TestKinds.Temperate)]
+    [InlineData(TestKinds.Barren)]
+    [InlineData(TestKinds.Desert)]
+    public void LatticeHeightsStayInsideTheNodeBounds(string kind)
+    {
+        var generator = TestKinds.Generator(kind);
+        var scratch = new PlanetChunkScratch();
+        var random = new Random(83);
+        var points = 0;
+
+        foreach (var lod in new[] { 0, 1, 3, 5, 7, 9, 11 })
+        {
+            for (var n = 0; n < 12; n++)
+            {
+                TestKinds.RandomDirection(random, out var x, out var y, out var z);
+                var coord = TestKinds.SurfaceChunk(generator, x, y, z, lod);
+                var s = coord.VoxelSize;
+                var size = ChunkConstants.Size * s;
+                var origin = coord.Origin;
+                double cx = origin.X + 0.5 * (size - s), cy = origin.Y + 0.5 * (size - s), cz = origin.Z + 0.5 * (size - s);
+                var distance = Math.Sqrt(cx * cx + cy * cy + cz * cz);
+                var angle = Math.Asin(0.5 * (size + s) * Math.Sqrt(3.0) / distance) + PlanetGenerator.LatticePadCells * generator.CellAngle(lod);
+                generator.Surface.Bounds(cx / distance, cy / distance, cz / distance, angle, lod, lod, out var lo, out var hi);
+                points += generator.EvaluateLattice(coord, scratch);
+
+                for (var w = 0; w < scratch.WindowCount; w++)
+                {
+                    var window = scratch.Windows[w];
+
+                    foreach (var h in scratch.Heights.AsSpan(window.HBase, window.HW * window.HH))
+                        Assert.True(h >= lo && h <= hi, $"{kind} LOD {lod}: lattice height {h} outside {lo} .. {hi}");
+                }
+            }
+        }
+
+        Assert.True(points > 50_000);
+    }
+
+    /// <summary>
+    /// A node classified uniform for a coarser leaf's LOD (what the hole check asks of the nodes under a leaf) holds none
+    /// of that leaf's surface: every voxel of the leaf inside the node is air, or every one is rock.
+    /// </summary>
+    [Theory]
+    [InlineData(TestKinds.Mountains)]
+    [InlineData(TestKinds.Mesa)]
+    [InlineData(TestKinds.Sea)]
+    [InlineData(TestKinds.Stamps)]
+    [InlineData(TestKinds.Temperate)]
+    [InlineData(TestKinds.Barren)]
+    [InlineData(TestKinds.Desert)]
+    public void NodesEmptyForACoarserLeafHoldNoneOfItsSurface(string kind)
+    {
+        var generator = TestKinds.Generator(kind);
+        var bounds = new PlanetHeightBounds(generator, 32);
+        bounds.Build();
+        var scratch = new PlanetChunkScratch();
+        var random = new Random(89);
+        var uniform = 0;
+
+        foreach (var leafLod in new[] { 3, 4, 6, 9 })
+        {
+            for (var n = 0; n < 8; n++)
+            {
+                TestKinds.RandomDirection(random, out var x, out var y, out var z);
+                var leaf = TestKinds.SurfaceChunk(generator, x, y, z, leafLod);
+                var chunk = Generate(leaf, generator, scratch);
+
+                for (var depth = 1; depth <= 3; depth++)
+                {
+                    var across = 1 << depth;
+                    var span = ChunkConstants.Size / across;
+
+                    for (var k = 0; k < 24; k++)
+                    {
+                        int i = random.Next(across), j = random.Next(across), l = random.Next(across);
+                        var node = new ChunkCoord(leaf.X * across + i, leaf.Y * across + j, leaf.Z * across + l, leafLod - depth);
+                        var cls = bounds.Classify(node, node.Lod, leafLod, out _);
+
+                        if (cls == NodeClass.Surface)
+                            continue;
+
+                        uniform++;
+
+                        for (var vz = l * span; vz <= (l + 1) * span; vz++)
+                        for (var vy = j * span; vy <= (j + 1) * span; vy++)
+                        for (var vx = i * span; vx <= (i + 1) * span; vx++)
+                        {
+                            var density = chunk.Density[ChunkConstants.Index(vx, vy, vz)];
+                            Assert.True(cls == NodeClass.Air ? density > 0 : density < 0, $"{kind}: {cls} node {node} under leaf {leaf} holds density {density}");
+                        }
+                    }
+                }
+            }
+        }
+
+        output.WriteLine($"{kind}: {uniform} uniform nodes under surface leaves");
+        Assert.True(uniform > 20, $"{uniform} uniform nodes");
+    }
+
+    /// <summary>
     /// A lattice window and a point query see the same stamps: heights from the row evaluator over a window (culled stamp
     /// list, footprint rectangles) equal the per-point lookup wherever no octave sits on the coarse grid.
     /// </summary>
@@ -426,6 +534,135 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
         Assert.True(steepest <= Noise.GradientLipschitz);
     }
 
+    private static double Fade(double t) => t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+
+    private static double FadeSlope(double t) => 30.0 * t * t * (t - 1.0) * (t - 1.0);
+
+    /// <summary>Unit directions over half the sphere (a slope's size is the same along −e), no direction further than √2 / across from one of them.</summary>
+    private static double[] Directions(int across)
+    {
+        var list = new double[3 * across * across * 3];
+        var k = 0;
+
+        for (var face = 0; face < 3; face++)
+        for (var j = 0; j < across; j++)
+        for (var i = 0; i < across; i++)
+        {
+            double u = -1.0 + (2.0 * i + 1.0) / across, v = -1.0 + (2.0 * j + 1.0) / across;
+            var l = Math.Sqrt(1.0 + u * u + v * v);
+            list[k + face] = 1.0 / l;
+            list[k + (face + 1) % 3] = u / l;
+            list[k + (face + 2) % 3] = v / l;
+            k += 3;
+        }
+
+        return list;
+    }
+
+    /// <summary>
+    /// The steepest slope at in-cell point p along any of the directions, over every choice of the eight corner
+    /// gradients: ∇n·e is linear in them, each one of the 12 edge vectors, so each corner gives the two largest
+    /// |components| of w·e + (∇w·e)(p − c).
+    /// </summary>
+    private static double SteepestSlope(double px, double py, double pz, ReadOnlySpan<double> directions)
+    {
+        Span<double> corner = stackalloc double[8 * 7];
+
+        for (var c = 0; c < 8; c++)
+        {
+            int cx = c & 1, cy = (c >> 1) & 1, cz = c >> 2;
+            double wx = cx == 0 ? 1.0 - Fade(px) : Fade(px), wy = cy == 0 ? 1.0 - Fade(py) : Fade(py), wz = cz == 0 ? 1.0 - Fade(pz) : Fade(pz);
+            double sx = cx == 0 ? -FadeSlope(px) : FadeSlope(px), sy = cy == 0 ? -FadeSlope(py) : FadeSlope(py), sz = cz == 0 ? -FadeSlope(pz) : FadeSlope(pz);
+            var o = corner.Slice(c * 7, 7);
+            (o[0], o[1], o[2], o[3]) = (wx * wy * wz, sx * wy * wz, wx * sy * wz, wx * wy * sz);
+            (o[4], o[5], o[6]) = (px - cx, py - cy, pz - cz);
+        }
+
+        var steepest = 0.0;
+
+        for (var d = 0; d < directions.Length; d += 3)
+        {
+            double ex = directions[d], ey = directions[d + 1], ez = directions[d + 2];
+            var sum = 0.0;
+
+            for (var c = 0; c < 56; c += 7)
+            {
+                var along = corner[c + 1] * ex + corner[c + 2] * ey + corner[c + 3] * ez;
+                double a = Math.Abs(corner[c] * ex + along * corner[c + 4]), b = Math.Abs(corner[c] * ey + along * corner[c + 5]), e = Math.Abs(corner[c] * ez + along * corner[c + 6]);
+                sum += a + b + e - Math.Min(a, Math.Min(b, e));
+            }
+
+            steepest = Math.Max(steepest, sum);
+        }
+
+        return steepest;
+    }
+
+    /// <summary>
+    /// <see cref="Noise.GradientLipschitz"/> against the worst case over the corner gradients, on a grid of in-cell
+    /// points (1/32 apart over an octant, the cell being symmetric, and 1/128 apart round the centre, where the slope
+    /// peaks). Over directions the bound is proven: the slope along e is a seminorm in e, so the supremum is at most the
+    /// grid's maximum / (1 − the grid's gap). Between the grid's points it is sampled, not proven.
+    /// </summary>
+    [Fact]
+    public void NoiseSlopeBoundHoldsOnAGrid()
+    {
+        const int coarseAcross = 24, fineAcross = 144;
+        double[] coarse = Directions(coarseAcross), fine = Directions(fineAcross);
+        double coarseGap = Math.Sqrt(2.0) / coarseAcross, fineGap = Math.Sqrt(2.0) / fineAcross;
+        var worst = 0.0;
+        var refined = 0;
+
+        void Check(double x, double y, double z)
+        {
+            var bound = SteepestSlope(x, y, z, coarse) / (1.0 - coarseGap);
+
+            if (bound > Noise.GradientLipschitz)
+            {
+                bound = SteepestSlope(x, y, z, fine) / (1.0 - fineGap);
+                refined++;
+            }
+
+            worst = Math.Max(worst, bound);
+            Assert.True(bound <= Noise.GradientLipschitz, $"Slope bound {bound} at ({x}, {y}, {z})");
+        }
+
+        for (var k = 0; k <= 16; k++)
+        for (var j = 0; j <= 16; j++)
+        for (var i = 0; i <= 16; i++)
+            Check(i / 32.0, j / 32.0, k / 32.0);
+
+        for (var k = -3; k <= 0; k++)
+        for (var j = -3; j <= 0; j++)
+        for (var i = -3; i <= 0; i++)
+            Check(0.5 + i / 128.0, 0.5 + j / 128.0, 0.5 + k / 128.0);
+
+        output.WriteLine($"Steepest slope bound on the grid {worst:F4} ({refined} points on the fine directions), constant {Noise.GradientLipschitz}");
+        Assert.True(worst > 3.7);
+    }
+
+    /// <summary><see cref="Noise.SlopeLipschitz"/>: the analytic gradient turns no faster between 10⁶ pairs of nearby points (sampled, not proven).</summary>
+    [Fact]
+    public void NoiseGradientTurnsUnderTheSlopeBound()
+    {
+        var random = new Random(97);
+        var fastest = 0.0;
+
+        for (var n = 0; n < 1_000_000; n++)
+        {
+            double x = random.NextDouble() * 4096.0, y = random.NextDouble() * 4096.0, z = random.NextDouble() * 4096.0;
+            var step = 0.002 + 0.05 * random.NextDouble();
+            TestKinds.RandomDirection(random, out var ex, out var ey, out var ez);
+            Noise.Gradient3(x, y, z, (uint)n >> 10, out var ax, out var ay, out var az);
+            Noise.Gradient3(x + ex * step, y + ey * step, z + ez * step, (uint)n >> 10, out var bx, out var by, out var bz);
+            double dx = bx - ax, dy = by - ay, dz = bz - az;
+            fastest = Math.Max(fastest, Math.Sqrt(dx * dx + dy * dy + dz * dz) / step);
+        }
+
+        output.WriteLine($"Fastest gradient turn {fastest:F3} per unit, bound {Noise.SlopeLipschitz}");
+        Assert.True(fastest <= Noise.SlopeLipschitz * 1.0001);
+    }
+
     /// <summary>The eight-lane lattice rows equal the scalar ones bit for bit: heights and chunk bytes of every kind, either way.</summary>
     [Theory]
     [InlineData("legacy-rolling")]
@@ -465,6 +702,41 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
         Assert.True(surfaces >= 8);
     }
 
+    /// <summary>A point query runs each layer's octaves eight at a time: the same heights and bounds, bit for bit, as octave by octave.</summary>
+    [Theory]
+    [InlineData("legacy-rolling")]
+    [InlineData(TestKinds.Temperate)]
+    [InlineData(TestKinds.Barren)]
+    [InlineData(TestKinds.Desert)]
+    [InlineData(TestKinds.Mountains)]
+    [InlineData(TestKinds.Mesa)]
+    public void PointOctavesMatchScalar(string kind)
+    {
+        var surface = (kind == "legacy-rolling" ? TestPlanet.Generator : TestKinds.Generator(kind)).Surface;
+        var random = new Random(101);
+
+        for (var n = 0; n < 3000; n++)
+        {
+            TestKinds.RandomDirection(random, out var x, out var y, out var z);
+            var lod = n % (PlanetGenerator.MaxLod + 1);
+            var angle = Math.Pow(10.0, -6.0 + 4.0 * random.NextDouble());
+            var vector = surface.Height(x, y, z, lod);
+            surface.Bounds(x, y, z, angle, lod, PlanetGenerator.MaxLod, out var lo, out var hi);
+
+            try
+            {
+                LayerOps.SimdEnabled = false;
+                Assert.Equal(BitConverter.SingleToInt32Bits(surface.Height(x, y, z, lod)), BitConverter.SingleToInt32Bits(vector));
+                surface.Bounds(x, y, z, angle, lod, PlanetGenerator.MaxLod, out var scalarLo, out var scalarHi);
+                Assert.Equal((scalarLo, scalarHi), (lo, hi));
+            }
+            finally
+            {
+                LayerOps.SimdEnabled = true;
+            }
+        }
+    }
+
     [Fact]
     public void WarpThatFoldsIsRejected()
     {
@@ -492,6 +764,72 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
         Assert.Equal(LayerOp.Curve, program.Op[^1]);
         Assert.Throws<InvalidDataException>(() => PlanetKindCompiler.Compile(PlanetKind.Parse(template.Replace("AMP", "2100")), p));
         Assert.Throws<InvalidDataException>(() => PlanetKind.Parse("""{ "id": "t-wet", "schema": 1, "relief": { "minM": -1, "maxM": 1 }, "sea": { "present": true }, "layers": [] }"""));
+    }
+
+    private static PlanetKindProgram CompileLayers(string layers) =>
+        PlanetKindCompiler.Compile(PlanetKind.Parse($$"""{ "id": "t-bad", "schema": 1, "relief": { "minM": -4000, "maxM": 4000 }, "sea": { "present": false }, "layers": [ {{layers}} ] }"""), TestKinds.Generator(TestKinds.Mountains).Params);
+
+    private const string Field = """{ "name": "n", "type": "fbm", "lambdaR": 0.5, "octaves": 3, "normalize": true, "gradient": true }, """;
+
+    /// <summary>Bad data fails at compile with the kind and the layer in the message, never as a hang, a NaN or a loose bound.</summary>
+    [Theory]
+    [InlineData("""{ "name": "g", "type": "fbm", "out": "h", "lambdaM": 900, "octaves": 3, "amplitudeM": 50, "scale": { "channel": "n" } }""", "'n' is not a mask")]
+    [InlineData("""{ "name": "g", "type": "terrace", "levels": { "count": 4, "fromM": 0, "toM": 900 }, "strength": { "channel": "n" } }""", "'n' is not a mask")]
+    [InlineData("""{ "name": "g", "type": "canyon", "field": "n", "halfWidthM": 500, "depthM": 100, "gate": { "channel": "n" } }""", "'n' is not a mask")]
+    [InlineData("""{ "name": "g", "type": "canyon", "field": "n", "halfWidthM": 0, "depthM": 100 }""", "halfWidthM > 0")]
+    [InlineData("""{ "name": "g", "type": "canyon", "field": "n", "halfWidthM": 500, "depthM": -100 }""", "depthM")]
+    [InlineData("""{ "name": "g", "type": "craters", "radiusM": [0, 5000] }""", "radiusM 0 < min < max")]
+    [InlineData("""{ "name": "g", "type": "craters", "radiusM": [100, 5000], "age": [0.8, 0.2] }""", "age")]
+    [InlineData("""{ "name": "g", "type": "ergs", "cellKm": 0, "radiusKm": [20, 45], "lambdaM": [90, 260], "heightRatio": [0.06, 0.1] }""", "cellKm > 0")]
+    [InlineData("""{ "name": "g", "type": "fbm", "out": "h", "lambdaM": 900, "octaves": 3, "amplitudM": 50 }""", "unknown key 'amplitudM'")]
+    [InlineData("""{ "name": "g", "type": "fbm", "out": "h", "lambdaM": 900, "octaves": "three" }""", "not a number")]
+    [InlineData("""{ "name": "g", "type": "fbm", "out": "h", "lambdaM": 900, "octaves": 3, "gate": { "channel": "n", "from": 0.1, "too": 0.3 } }""", "unknown key 'too'")]
+    [InlineData("""{ "name": "g", "type": "terrace", "riserBandM": 2 }""", "missing 'levels'")]
+    [InlineData("""{ "name": "g", "type": "curve", "in": "n", "knots": [[0, 1], [1]] }""", "a knot is [in, out]")]
+    [InlineData("""{ "name": "g", "type": "curve", "in": "n", "knots": [[0, "low"], [1, 2]] }""", "not a number")]
+    [InlineData("""{ "name": "n", "type": "mask", "lat": [0.1, 0.9] }""", "channel 'n' already exists")]
+    public void BadLayersAreRejectedByName(string layer, string message)
+    {
+        var e = Assert.Throws<InvalidDataException>(() => CompileLayers(Field + layer));
+        Assert.Contains("t-bad", e.Message);
+        Assert.Contains(layer.Contains("\"name\": \"n\"") ? "'n'" : "'g'", e.Message);
+        Assert.Contains(message, e.Message);
+    }
+
+    [Theory]
+    [InlineData("""{ "id": "t-top", "schema": 1, "relif": { "minM": -1, "maxM": 1 }, "layers": [] }""", "unknown key 'relif'")]
+    [InlineData("""{ "id": "t-top", "schema": 1, "layers": [] }""", "missing 'relief'")]
+    [InlineData("""{ "id": "t-top", "schema": 1, "relief": { "minM": "low", "maxM": 1 }, "layers": [] }""", "malformed")]
+    [InlineData("""{ "id": "t-top", "schema": 1, "relief": { "minM": -1, "maxM": 1 }, "layers": {} }""", "layers must be an array")]
+    [InlineData("""{ "id": "t-top", "schema": 1, "relief": { "minM": -1, "maxM": 1 }, "materials": "lava", "layers": [] }""", "unknown materials")]
+    public void BadKindsAreRejectedByName(string json, string message)
+    {
+        var e = Assert.Throws<InvalidDataException>(() => PlanetKind.Parse(json));
+        Assert.Contains("t-top", e.Message);
+        Assert.Contains(message, e.Message);
+    }
+
+    /// <summary>A gate's seeded range draws on its layer and its place in it, so adding a layer elsewhere leaves it alone.</summary>
+    [Fact]
+    public void GateRangesDoNotMoveWithOtherLayers()
+    {
+        const string gated = """{ "name": "g", "type": "fbm", "out": "h", "lambdaM": 900, "octaves": 3, "amplitudeM": 50, "gate": { "all": [ { "lat": [0.1, 0.9] }, { "channel": "n", "from": [-0.3, 0.3], "to": [0.4, 0.9] } ] } }""";
+        const string extra = """{ "name": "x", "type": "fbm", "out": "h", "lambdaM": 5000, "octaves": 2, "amplitudeM": 10, "gate": { "lat": [0.2, 0.4] } }, """;
+
+        static (float From, float Inverse) Range(PlanetKindProgram p)
+        {
+            for (var layer = p.LayerCount - 1; layer >= 0; layer--)
+            {
+                if (p.Op[layer] == LayerOp.Mask && p.Mode[layer] == LayerMode.MaskChannel && p.LayerNames[layer] == "g")
+                    return (p.Params[p.ParamBase[layer]], p.Params[p.ParamBase[layer] + 1]);
+            }
+
+            throw new InvalidOperationException("No channel mask");
+        }
+
+        var range = Range(CompileLayers(Field + gated));
+        Assert.InRange(range.From, -0.3f, 0.3f);
+        Assert.Equal(range, Range(CompileLayers(Field + extra + gated)));
     }
 
     /// <summary>The knee is the identity below 80 % of the range, strictly increasing above it, and never leaves the range.</summary>
@@ -559,7 +897,7 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
         var random = new Random(31);
         const int taps = 6;
 
-        foreach (var lod in new[] { 1, 2, 3, 4, 5, 6 })
+        for (var lod = 1; lod <= PlanetGenerator.MaxLod; lod++)
         {
             var s = (double)(1 << lod);
             double square = 0.0, worst = 0.0;
@@ -644,6 +982,35 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
     [InlineData(TestKinds.Temperate)]
     public void InlandGroundClearsTheProtectedBand(string kind) => ShoreBand(TestKinds.Generator(kind), output);
 
+    /// <summary>The shipped sea kind's carving layers gate in where its sea clamp starts: land in the coastal ramp never dips under the sea.</summary>
+    [Fact]
+    public void CoastalRampHoldsNoPits()
+    {
+        var surface = TestKinds.Generator(TestKinds.Temperate).Surface;
+        var program = surface.Program;
+        var random = new Random(71);
+        Span<float> rows = stackalloc float[program.Rows];
+        var ramp = 0;
+
+        for (var n = 0; n < 200_000; n++)
+        {
+            TestKinds.RandomDirection(random, out var x, out var y, out var z);
+            double qx = x * surface.Radius, qy = y * surface.Radius, qz = z * surface.Radius;
+            rows.Clear();
+            var set = new RowSet { X = new ReadOnlySpan<double>(in qx), Y = new ReadOnlySpan<double>(in qy), Z = new ReadOnlySpan<double>(in qz), Ch = rows, Count = 1, Stride = 1, Channels = program.ChannelCount, W = 1, H = 1, Direct = true };
+            LayerOps.Evaluate(program, 0, ref set);
+            var continent = rows[program.ContinentChannel];
+
+            if (continent < 0.001f || continent >= program.InlandStart)
+                continue;
+
+            ramp++;
+            Assert.True(rows[PlanetKindProgram.Height] >= surface.SeaHeight - 0.5f, $"Ground at {rows[PlanetKindProgram.Height] - surface.SeaHeight} m about the sea where the continent is {continent}");
+        }
+
+        Assert.True(ramp > 1_000, $"{ramp} ramp samples");
+    }
+
     internal static void ShoreBand(PlanetGenerator generator, ITestOutputHelper output)
     {
         var surface = generator.Surface;
@@ -663,7 +1030,7 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
             Assert.Equal(h, surface.Height(x, y, z));
             sea += h < surface.SeaHeight ? 1 : 0;
 
-            if (rows[program.ContinentChannel] < LayerOps.LegacyInlandStart)
+            if (rows[program.ContinentChannel] < program.InlandStart)
                 continue;
 
             inland++;

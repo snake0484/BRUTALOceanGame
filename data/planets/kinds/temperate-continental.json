@@ -3,14 +3,14 @@
   "schema": 1,
   "requires": { "radiusKm": [400, 1500], "zone": ["temperate"], "gravityG": [0.6, 1.4] },
   "relief": { "minM": -8000, "maxM": 9000 },
-  "sea": { "present": true },
+  "sea": { "present": true, "inlandStart": 0.02 },
   "continent": "continent",
   "materials": "temperate",
 
   "layers": [
     { "name": "continent", "type": "fbm", "lambdaR": 1.25, "octaves": 9, "amplitude": 1.0, "gain": 0.5, "normalize": true },
     { "name": "shape", "type": "curve", "in": "continent", "out": "h",
-      "knots": [[-1.0, -6500], [-0.33, [-4600, -3600]], [-0.03, -160], [0.0, 0], [0.06, [60, 110]], [0.3, [600, 900]], [1.0, [1500, 1900]]] },
+      "knots": [[-1.0, -6500], [-0.33, [-4600, -3600]], [-0.002, -20], [0.0, 0], [0.002, 16], [0.06, [60, 110]], [0.3, [600, 900]], [1.0, [1500, 1900]]] },
     { "name": "inland", "type": "mask", "channel": "continent", "from": 0.02, "to": 0.12 },
 
     { "name": "beltNoise", "type": "fbm", "lambdaR": 0.45, "octaves": 4, "amplitude": 1.0, "gain": 0.5, "normalize": true },

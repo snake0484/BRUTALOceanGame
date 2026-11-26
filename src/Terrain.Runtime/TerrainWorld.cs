@@ -815,7 +815,7 @@ public sealed class TerrainWorld : IDisposable
             return true;
 
         if (node.Lod == 0 || !ancestors.Contains(node.Key))
-            return selector.ProvablyUnseen(node, camera);
+            return selector.ProvablyUnseen(node, camera, finer: true);
 
         for (var i = 0; i < 8; i++)
         {

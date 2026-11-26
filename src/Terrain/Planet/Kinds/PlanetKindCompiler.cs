@@ -17,6 +17,10 @@ public static class PlanetKindCompiler
     public const float KneeShare = 0.8f;
     public const float TerraceSlope = 0.5f;
 
+    /// <summary>A terrace riser spans this many voxels of ground where the input is no steeper than <see cref="SteepShare"/> of the planet.</summary>
+    public const float RiserVoxels = 2f;
+    public const double SteepShare = 0.9;
+
     private const int CalibrationPoints = 2048;
     private const uint OctaveSalt = 0x9E3779B9u;
     private const int None = PlanetKindProgram.None;
@@ -52,6 +56,17 @@ public static class PlanetKindCompiler
 
     private sealed class Builder(PlanetKind kind, PlanetParams p)
     {
+        private static readonly string[] NoiseKeys = ["name", "type", "out", "lambdaM", "lambdaR", "octaves", "amplitude", "amplitudeM", "gain", "normalize", "precise", "gradient", "warp", "gate", "scale", "ridgeGain", "damping"];
+        private static readonly string[] CurveKeys = ["name", "type", "in", "out", "knots", "ease", "op"];
+        private static readonly string[] TerraceKeys = ["name", "type", "levels", "riserBandM", "benchSlope", "warp", "strength"];
+        private static readonly string[] LevelKeys = ["count", "fromM", "toM", "jitter"];
+        private static readonly string[] CanyonKeys = ["name", "type", "field", "halfWidthM", "depthM", "floor", "benches", "riser", "gate"];
+        private static readonly string[] CraterKeys = ["name", "type", "out", "radiusM", "age", "coverage", "complexDiameterM", "freshOut", "gate", "scale"];
+        private static readonly string[] ErgKeys = ["name", "type", "out", "cellKm", "presence", "radiusKm", "lambdaM", "heightRatio", "gate", "scale"];
+        private static readonly string[] LegacyKeys = ["name", "type", "continent", "ridge", "detail"];
+        private static readonly string[] GateKeys = ["all", "any", "not", "alt", "lat", "channel", "from", "to"];
+        private static readonly string[] MaskKeys = ["name", "type", "out", "all", "any", "not", "alt", "lat", "channel", "from", "to"];
+
         private readonly List<double> _frequency = [], _offsetX = [], _offsetY = [], _offsetZ = [];
         private readonly List<float> _wavelength = [], _amplitude = [], _aux = [], _params = [];
         private readonly List<uint> _seed = [];
@@ -63,11 +78,13 @@ public static class PlanetKindCompiler
         private readonly List<StampClass> _classes = [];
         private readonly Dictionary<string, int> _channels = new(StringComparer.Ordinal) { ["h"] = PlanetKindProgram.Height };
         private readonly HashSet<int> _written = [PlanetKindProgram.Height];
+        private readonly HashSet<int> _masks = [];
         private readonly Stack<int> _freeTemps = new();
         private readonly List<int> _liveTemps = [];
         private readonly uint _baseSeed = Noise.SeedOf(p.Seed);
         private int _channelCount = 1;
         private int _legacyOctave;
+        private int _gates;
         private string _layer = "";
 
         private bool Compat => kind.IsCompatV1;
@@ -112,14 +129,33 @@ public static class PlanetKindCompiler
 
         private static string? Text(JsonElement obj, string name) => obj.TryGetProperty(name, out var e) ? e.GetString() : null;
 
+        private JsonElement Need(JsonElement obj, string name) => obj.TryGetProperty(name, out var e) ? e : throw Error($"missing '{name}'");
+
+        private void Keys(JsonElement obj, string what, string[] allowed)
+        {
+            if (obj.ValueKind != JsonValueKind.Object)
+                throw Error($"{what} must be an object");
+
+            foreach (var property in obj.EnumerateObject())
+            {
+                if (Array.IndexOf(allowed, property.Name) < 0)
+                    throw Error($"unknown key '{property.Name}' in {what}");
+            }
+        }
+
         private static bool Flag(JsonElement obj, string name) => obj.TryGetProperty(name, out var e) && e.GetBoolean();
 
         private int Existing(string name) => _channels.TryGetValue(name, out var c) ? c : throw Error($"no channel '{name}' yet");
 
+        private int Channel(JsonElement obj, string name) => Existing(Text(obj, name) ?? throw Error($"missing '{name}'"));
+
         private int NewChannels(string name, int count)
         {
             var first = _channelCount;
-            _channels.Add(name, first);
+
+            if (!_channels.TryAdd(name, first))
+                throw Error($"channel '{name}' already exists");
+
             _channelCount += count;
             return first;
         }
@@ -159,6 +195,7 @@ public static class PlanetKindCompiler
             _slope.Add(TerraceSlope);
             _names.Add(_layer);
             _written.Add(dst);
+            _masks.Remove(dst);
             return _op.Count - 1;
         }
 
@@ -190,12 +227,19 @@ public static class PlanetKindCompiler
 
             var dst = Temp();
             Emit(LayerOp.Mask, dst, src, mode: mode, paramBase: Push(from, 1f / (to - from)));
+            _masks.Add(dst);
             return dst;
         }
 
-        /// <summary>Lowers a gate expression to mask ops; returns the channel holding it.</summary>
-        private int Gate(JsonElement e)
+        /// <summary>
+        /// Lowers a gate expression to mask ops; returns the channel holding it, always a mask in [0, 1] (the bounds and the
+        /// gated layers rely on that). Ranges draw on the gate's index within its layer.
+        /// </summary>
+        private int Gate(JsonElement e, string[]? keys = null)
         {
+            Keys(e, "a gate", keys ?? GateKeys);
+            var index = _gates++;
+
             if (e.TryGetProperty("all", out var all) || e.TryGetProperty("any", out all))
             {
                 var mode = e.TryGetProperty("all", out _) ? LayerMode.Mul : LayerMode.Max;
@@ -213,6 +257,7 @@ public static class PlanetKindCompiler
 
                     var dst = Temp();
                     Emit(LayerOp.Combine, dst, acc, c, mode: mode);
+                    _masks.Add(dst);
                     acc = dst;
                 }
 
@@ -221,8 +266,10 @@ public static class PlanetKindCompiler
 
             if (e.TryGetProperty("not", out var not))
             {
+                var inner = Gate(not);
                 var dst = Temp();
-                Emit(LayerOp.Combine, dst, Gate(not), mode: LayerMode.Invert);
+                Emit(LayerOp.Combine, dst, inner, mode: LayerMode.Invert);
+                _masks.Add(dst);
                 return dst;
             }
 
@@ -238,13 +285,14 @@ public static class PlanetKindCompiler
                 return MaskOp(LayerMode.MaskLat, None, from, to);
             }
 
-            var channel = Existing(Text(e, "channel") ?? throw Error("a gate needs all, any, not, alt, lat or channel"));
+            var name = Text(e, "channel") ?? throw Error("a gate needs all, any, not, alt, lat or channel");
+            var channel = Existing(name);
 
             if (!e.TryGetProperty("from", out var f))
-                return channel;
+                return _masks.Contains(channel) ? channel : throw Error($"channel '{name}' is not a mask: gate on it with from and to");
 
-            var path = $"layers.{_layer}.gate.{_op.Count}";
-            return MaskOp(LayerMode.MaskChannel, channel, (float)Resolve(f, path + ".from"), (float)Resolve(e.GetProperty("to"), path + ".to"));
+            var path = $"layers.{_layer}.gate.{index}";
+            return MaskOp(LayerMode.MaskChannel, channel, (float)Resolve(f, path + ".from"), (float)Resolve(Need(e, "to"), path + ".to"));
         }
 
         /// <summary>gate × scale as one mask channel, or None.</summary>
@@ -263,9 +311,22 @@ public static class PlanetKindCompiler
 
         public void Layer(JsonElement layer)
         {
-            _layer = Text(layer, "name") ?? throw new InvalidDataException($"Planet kind {kind.Id}: a layer without a name");
-            var type = Text(layer, "type") ?? throw Error("no type");
+            _layer = "?";
+            _gates = 0;
 
+            try
+            {
+                _layer = Text(layer, "name") ?? throw Error("a layer without a name");
+                Lower(layer, Text(layer, "type") ?? throw Error("no type"));
+            }
+            catch (Exception e) when (e is InvalidOperationException or KeyNotFoundException or FormatException or IndexOutOfRangeException)
+            {
+                throw Error($"malformed ({e.Message})");
+            }
+        }
+
+        private void Lower(JsonElement layer, string type)
+        {
             switch (type)
             {
                 case "fbm":
@@ -294,8 +355,10 @@ public static class PlanetKindCompiler
                     break;
                 case "mask":
                 {
-                    var m = Gate(layer);
-                    Emit(LayerOp.Combine, NewChannels(Text(layer, "out") ?? _layer, 1), m, mode: LayerMode.Copy);
+                    var m = Gate(layer, MaskKeys);
+                    var dst = NewChannels(Text(layer, "out") ?? _layer, 1);
+                    Emit(LayerOp.Combine, dst, m, mode: LayerMode.Copy);
+                    _masks.Add(dst);
                     break;
                 }
                 case "craters":
@@ -314,6 +377,7 @@ public static class PlanetKindCompiler
 
         private void NoiseLayer(JsonElement layer, LayerOp op)
         {
+            Keys(layer, "the layer", NoiseKeys);
             var octaves = (int)Math.Round(Num(layer, "octaves"));
             var lambda = layer.TryGetProperty("lambdaM", out _) ? Num(layer, "lambdaM") : Num(layer, "lambdaR") * p.Radius;
             var amplitude = (float)(layer.TryGetProperty("amplitudeM", out _) ? Num(layer, "amplitudeM") : Num(layer, "amplitude", 1.0));
@@ -322,8 +386,8 @@ public static class PlanetKindCompiler
             var fields = op == LayerOp.Warp ? 3 : 1;
             byte mode = 0;
 
-            if (octaves < 1 || octaves > 24 || lambda <= 0.0 || amplitude < 0f)
-                throw Error("octaves must be 1..24, wavelength positive, amplitude ≥ 0");
+            if (octaves < 1 || octaves > 24 || lambda <= 0.0 || amplitude < 0f || gain is <= 0f or > 1f)
+                throw Error("octaves must be 1..24, wavelength positive, amplitude ≥ 0, gain in (0, 1]");
 
             if (Flag(layer, "precise"))
                 mode |= LayerMode.Precise;
@@ -388,6 +452,9 @@ public static class PlanetKindCompiler
                 _ => 0,
             };
 
+            if (op is LayerOp.Ridged or LayerOp.Eroded && _params[paramBase] < 0f)
+                throw Error("ridgeGain and damping must be ≥ 0");
+
             if (op == LayerOp.Eroded)
             {
                 // The running slope is at most the noise's steepest gradient × Σ a·f, which floors each octave's damping.
@@ -425,13 +492,23 @@ public static class PlanetKindCompiler
 
         private void CurveLayer(JsonElement layer)
         {
+            Keys(layer, "the layer", CurveKeys);
             var src = Existing(Text(layer, "in") ?? throw Error("a curve needs 'in'"));
             var outName = Text(layer, "out") ?? "h";
-            var knots = layer.GetProperty("knots");
-            var count = knots.GetArrayLength();
+            var knots = Need(layer, "knots");
+            var count = knots.ValueKind == JsonValueKind.Array ? knots.GetArrayLength() : 0;
 
             if (count is < 2 or > 8)
                 throw Error("a curve takes 2..8 knots");
+
+            foreach (var knot in knots.EnumerateArray())
+            {
+                if (knot.ValueKind != JsonValueKind.Array || knot.GetArrayLength() != 2)
+                    throw Error("a knot is [in, out]");
+            }
+
+            if (Text(layer, "op") is { } op && op != "add")
+                throw Error($"unknown op '{op}': a curve sets its channel, or adds with \"op\": \"add\"");
 
             var at = Push(count);
             var k = 0;
@@ -461,16 +538,18 @@ public static class PlanetKindCompiler
 
         private void TerraceLayer(JsonElement layer)
         {
-            var levels = layer.GetProperty("levels");
-            var count = Math.Clamp((int)Math.Round(Resolve(levels.GetProperty("count"), $"layers.{_layer}.levels.count")), 1, 16);
-            var from = levels.GetProperty("fromM").GetSingle();
-            var to = levels.GetProperty("toM").GetSingle();
+            Keys(layer, "the layer", TerraceKeys);
+            var levels = Need(layer, "levels");
+            Keys(levels, "levels", LevelKeys);
+            var count = Math.Clamp((int)Math.Round(Resolve(Need(levels, "count"), $"layers.{_layer}.levels.count")), 1, 16);
+            var from = Need(levels, "fromM").GetSingle();
+            var to = Need(levels, "toM").GetSingle();
             var jitter = levels.TryGetProperty("jitter", out var j) ? Math.Clamp(j.GetSingle(), 0f, 0.9f) : 0f;
             var band = (float)Num(layer, "riserBandM", 2.0);
             var beta = (float)Num(layer, "benchSlope", 0.05);
 
-            if (to <= from || beta is < 0f or > 1f)
-                throw Error("terrace needs fromM < toM and benchSlope in [0, 1]");
+            if (to <= from || beta is < 0f or > 1f || band <= 0f)
+                throw Error("terrace needs fromM < toM, benchSlope in [0, 1] and riserBandM > 0");
 
             var strata = Text(layer, "warp") is { } w ? Existing(w) : None;
             var strength = layer.TryGetProperty("strength", out var s) ? Gate(s) : None;
@@ -485,6 +564,7 @@ public static class PlanetKindCompiler
 
         private void CanyonLayer(JsonElement layer)
         {
+            Keys(layer, "the layer", CanyonKeys);
             var field = Existing(Text(layer, "field") ?? throw Error("a canyon needs 'field'"));
             var source = _dst.IndexOf((byte)field);
 
@@ -497,6 +577,9 @@ public static class PlanetKindCompiler
             var benches = (float)Math.Round(Num(layer, "benches", 0.0));
             var riser = Math.Clamp((float)Num(layer, "riser", 0.5), 0.05f, 1f);
             var steepest = 0.0;
+
+            if (halfWidth <= 0f || depth < 0f || benches is < 0f or > 8f)
+                throw Error("a canyon needs halfWidthM > 0, depthM ≥ 0 and benches 0..8");
 
             for (var o = _firstOctave[source]; o < _firstOctave[source] + _octaveCount[source]; o++)
                 steepest += _amplitude[o] * _frequency[o];
@@ -532,6 +615,7 @@ public static class PlanetKindCompiler
 
         private void StampLayer(JsonElement layer, LayerOp op)
         {
+            Keys(layer, "the layer", op == LayerOp.Craters ? CraterKeys : ErgKeys);
             var first = _classes.Count;
             var seed = (uint)SplitMix(p.KindSeed ^ Fnv(Encoding.UTF8.GetBytes($"layers.{_layer}.seed")));
 
@@ -541,6 +625,9 @@ public static class PlanetKindCompiler
                 var (ageMin, ageMax) = layer.TryGetProperty("age", out _) ? Pair(layer, "age") : (0f, 1f);
                 var coverage = Num(layer, "coverage", 0.1);
                 var complex = (float)Num(layer, "complexDiameterM", 1e9);
+
+                if (rMin <= 0f || rMax <= rMin || ageMin < 0f || ageMax > 1f || ageMin > ageMax || coverage is <= 0.0 or > 1.0 || complex <= 0f)
+                    throw Error("craters need radiusM 0 < min < max, age 0 ≤ min ≤ max ≤ 1, coverage in (0, 1] and complexDiameterM > 0");
                 var grids = Math.Clamp((int)Math.Ceiling(coverage / (2.0 * GridCoverage)), 1, 3);
                 var presence = (float)Math.Min(coverage / (2.0 * grids * GridCoverage), 1.0);
                 var steps = 0;
@@ -576,12 +663,17 @@ public static class PlanetKindCompiler
                 var (rMin, rMax) = Pair(layer, "radiusKm");
                 var (lambdaMin, lambdaMax) = Pair(layer, "lambdaM");
                 var (ratioMin, ratioMax) = Pair(layer, "heightRatio");
+                var presence = (float)Num(layer, "presence", 0.3);
+
+                if (cell <= 0.0 || rMin <= 0f || rMax < rMin || lambdaMin <= 0f || lambdaMax < lambdaMin || ratioMin < 0f || ratioMax < ratioMin || presence is < 0f or > 1f)
+                    throw Error("ergs need cellKm > 0, radiusKm, lambdaM and heightRatio as 0 < min ≤ max, presence in [0, 1]");
+
                 rMax = MathF.Min(rMax * 1000f, (float)(0.4 * cell));
                 rMin = MathF.Min(rMin * 1000f, rMax);
 
                 AddClass(op, seed, new StampClass
                 {
-                    RadiusMin = rMin, RadiusMax = rMax, Presence = (float)Num(layer, "presence", 0.3), Reach = 1f,
+                    RadiusMin = rMin, RadiusMax = rMax, Presence = presence, Reach = 1f,
                     LambdaMin = lambdaMin, LambdaMax = lambdaMax, RatioMin = ratioMin, RatioMax = ratioMax, RimMax = lambdaMax * ratioMax,
                 }, cell);
             }
@@ -611,18 +703,22 @@ public static class PlanetKindCompiler
             Emit(op, sum, b: fresh, paramBase: at);
 
             if (fresh != None)
+            {
                 _written.Add(fresh);
+                _masks.Add(fresh);
+            }
 
             AddInto(Existing(Text(layer, "out") ?? "h"), sum, mask);
         }
 
         private void LegacyLayer(JsonElement layer)
         {
+            Keys(layer, "the layer", LegacyKeys);
             PlanetParams.LegacyDraws(p.Seed, out var land, out var mountains);
             var sea = p.SeaHeight;
             var floor = p.HasSea ? sea + p.ShoreProtectHeight + 1f : float.NegativeInfinity;
             var at = Push(land, mountains, sea, p.MinHeight + 600f, floor, p.MinHeight, p.MaxHeight);
-            Emit(LayerOp.Legacy, PlanetKindProgram.Height, Existing(Text(layer, "continent")!), Existing(Text(layer, "ridge")!), scale: Existing(Text(layer, "detail")!), paramBase: at);
+            Emit(LayerOp.Legacy, PlanetKindProgram.Height, Channel(layer, "continent"), Channel(layer, "ridge"), scale: Channel(layer, "detail"), paramBase: at);
         }
 
         public PlanetKindProgram Finish()
@@ -656,7 +752,7 @@ public static class PlanetKindCompiler
             if (p.HasSea)
             {
                 var continent = Existing(kind.Continent ?? throw Error("a sea needs a continent channel"));
-                var clamp = Push(p.SeaHeight + p.ShoreProtectHeight + 1f, LayerOps.LegacyInlandStart);
+                var clamp = Push(p.SeaHeight + p.ShoreProtectHeight + 1f, kind.InlandStart);
                 Emit(LayerOp.SeaClamp, PlanetKindProgram.Height, continent, paramBase: clamp);
             }
 
@@ -683,6 +779,7 @@ public static class PlanetKindCompiler
                 MaxHeight = p.MaxHeight,
                 SeaHeight = p.SeaHeight,
                 HasSea = p.HasSea,
+                InlandStart = Compat ? LayerOps.LegacyInlandStart : kind.InlandStart,
                 Frequency = [.. _frequency],
                 OffsetX = [.. _offsetX],
                 OffsetY = [.. _offsetY],
@@ -756,7 +853,7 @@ public static class PlanetKindCompiler
                     switch (program.Op[layer])
                     {
                         case LayerOp.Terrace:
-                            program.RiserBand[at] = MathF.Max(_band[layer], _slope[layer] * voxel);
+                            program.RiserBand[at] = MathF.Max(_band[layer], RiserVoxels * _slope[layer] * voxel);
                             continue;
                         case LayerOp.Canyon:
                         {
@@ -913,8 +1010,10 @@ public static class PlanetKindCompiler
         }
 
         /// <summary>
-        /// A terrace riser must span a voxel on the ground, so its band in input height grows with the voxel by the
-        /// input's RMS slope: measured here over a 64 m step at the calibration points, on the layers before the terrace.
+        /// A terrace riser must span voxels on the ground or the lattice point-samples a step, so its band in input height
+        /// grows with the voxel by the input's slope: the steep end of it (<see cref="SteepShare"/>), measured over a 64 m
+        /// step at the calibration points on the layers before the terrace. One slope per body, not per point: the height
+        /// stays a pure function of the direction.
         /// </summary>
         private void TerraceSlopes(PlanetKindProgram program, ref RowSet set)
         {
@@ -954,12 +1053,11 @@ public static class PlanetKindCompiler
                     }
                 }
 
-                var square = 0.0;
-
                 for (var i = 0; i < n; i++)
-                    square += (double)input[i] * input[i];
+                    input[i] = MathF.Abs(input[i]);
 
-                _slope[layer] = (float)(Math.Sqrt(square / n) / step);
+                Array.Sort(input);
+                _slope[layer] = (float)(input[(int)(n * SteepShare)] / step);
             }
         }
 

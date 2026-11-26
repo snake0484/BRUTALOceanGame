@@ -108,6 +108,12 @@ internal static class Noise
     /// </summary>
     public const float GradientLipschitz = 3.8f;
 
+    /// <summary>
+    /// |Δ∇n| ≤ this × |Δx|: the Hessian's largest stretch, found the same way (the sum over corners of the two largest
+    /// |components| of ∂(w·e₁ + (f − c)·∇w·e₁)/∂e₂; hill climbs from 2,600 starts reach 14.47). Gradient bounds rely on it.
+    /// </summary>
+    public const float SlopeLipschitz = 15f;
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static uint Fold(long v) => (uint)v ^ ((uint)(v >> 32) * 0x9E3779B1u);
 

@@ -324,9 +324,9 @@ public sealed class PlanetKindTests(ITestOutputHelper output)
     /// or to a layer's maths shows here (a changed kind takes a new id once worlds are saved).
     /// </summary>
     [Theory]
-    [InlineData("temperate-continental", 1.0e6, 1, 0x83078AD9DDF7A3E1UL, 0xB6576351132222D9UL, 0x0AC4B923A3608CEFUL)]
+    [InlineData("temperate-continental", 1.0e6, 1, 0xAEF3DFE64E631397UL, 0x760CB0BDDAD6958AUL, 0xF0509FFEBFD42209UL)]
     [InlineData("barren-cratered", 4.0e5, 2, 0x7619E33BB7D536D9UL, 0x084FA7C4A315A545UL, 0x4BE79B7985CE5216UL)]
-    [InlineData("desert-canyon", 1.0e6, 1, 0x6644F7C4DE205754UL, 0xAEDA65CE93515175UL, 0x612245D630A02DCEUL)]
+    [InlineData("desert-canyon", 1.0e6, 1, 0x67C69FF7894851DFUL, 0x5BBC512C962DDC32UL, 0x07719C24D5262FC6UL)]
     public void KindGoldenHashes(string kind, double radius, int body, ulong program, ulong heights, ulong chunks)
     {
         var generator = new PlanetGenerator(PlanetParams.Generate(PlanetParams.BodySeed(SystemSeed, body), radius, kind: kind));
