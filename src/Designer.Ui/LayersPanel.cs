@@ -21,7 +21,6 @@ public sealed class Cutaway
 /// </summary>
 public sealed class LayersPanel
 {
-    public const float Width = 360f;
 
     private static readonly string[] AxisNames = ["X", "Y", "Z"];
 
@@ -35,12 +34,9 @@ public sealed class LayersPanel
 
     public readonly Cutaway Cutaway = new();
 
-    public void Draw(DesignSession session, float x, float y)
+    public void Draw(DesignSession session)
     {
-        ImGui.SetNextWindowPos(new float2(x, y), ImGuiCond.FirstUseEver);
-        ImGui.SetNextWindowSize(new float2(Width, 0f), ImGuiCond.FirstUseEver);
-
-        if (ImGui.Begin("Hull layers"u8, ImGuiWindowFlags.AlwaysAutoResize))
+        if (ImGui.Begin("Hull layers"u8))
         {
             var layers = session.Doc.Layers;
 
@@ -86,14 +82,14 @@ public sealed class LayersPanel
                 ImGui.PushID(l);
                 var layer = stack.Layers[l];
                 var slot = CatalogSlot(session.Doc, layer.Material);
-                ImGui.SetNextItemWidth(150f);
+                DesignerStyle.ItemWidth(150f);
 
                 if (MaterialCombo("##mat"u8, ref slot))
                     LayerCommands.SetLayer(session, s, l, _catalog.All[slot].Id, layer.ThicknessMm);
 
                 ImGui.SameLine();
                 int mm = layer.ThicknessMm;
-                ImGui.SetNextItemWidth(110f);
+                DesignerStyle.ItemWidth(110f);
                 ImGui.InputInt("mm"u8, ref mm, 25, 250, ImGuiInputTextFlags.None);
 
                 if (ImGui.IsItemDeactivatedAfterEdit() || (ImGui.IsItemEdited() && !ImGui.IsItemActive()))
@@ -133,7 +129,7 @@ public sealed class LayersPanel
             ImGui.Text($"{AxisNames[cut.Axis]} =");
             ImGui.SameLine();
             var metres = cut.Position * HullBrush.MetresPerPositionUnit;
-            ImGui.SetNextItemWidth(130f);
+            DesignerStyle.ItemWidth(130f);
             ImGui.InputDouble("m"u8, ref metres, 0.25, 1.0, "%.2f"u8, ImGuiInputTextFlags.None);
 
             if (ImGui.IsItemDeactivatedAfterEdit() || (ImGui.IsItemEdited() && !ImGui.IsItemActive()))
@@ -165,7 +161,7 @@ public sealed class LayersPanel
         foreach (var (section, stack) in LayerCommands.Sections(layers))
         {
             ImGui.PushID(2000 + section.Id);
-            ImGui.SetNextItemWidth(110f);
+            DesignerStyle.ItemWidth(110f);
 
             if (ImGui.BeginCombo($"{section.Label}", $"stack {stack}", ImGuiComboFlags.None))
             {
@@ -200,13 +196,13 @@ public sealed class LayersPanel
 
         ImGui.SameLine();
         ImGui.Checkbox("Flip"u8, ref Cutaway.Flip);
-        ImGui.SetNextItemWidth(260f);
+        DesignerStyle.ItemWidth(260f);
         ImGui.SliderFloat("##offset"u8, ref Cutaway.Offset, -60f, 60f, "%.2f m"u8, ImGuiSliderFlags.None);
     }
 
     private static void StackCombo(DesignSession session, HullLayering layers, ReadOnlySpan<byte> label, int which, int current)
     {
-        ImGui.SetNextItemWidth(110f);
+        DesignerStyle.ItemWidth(110f);
 
         if (ImGui.BeginCombo(label, $"stack {current}", ImGuiComboFlags.None))
         {

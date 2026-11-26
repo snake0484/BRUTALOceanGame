@@ -12,7 +12,6 @@ namespace BrutalGame.Designer.Ui;
 /// </summary>
 public sealed class MeshPanel
 {
-    public const float Width = 330f;
     private const int Units = HullBrush.PositionUnitsPerMetre;
 
     private static readonly string[] Modes = ["Vertex", "Edge", "Face"];
@@ -29,7 +28,7 @@ public sealed class MeshPanel
     private MeshIssue _issue;
     private int _issueAt;
 
-    public void Draw(DesignSession session, MeshEditState edit, float x, float y)
+    public void Draw(DesignSession session, MeshEditState edit)
     {
         var id = session.Selection.Primary;
         var mesh = MeshCommands.MeshOf(session, id);
@@ -37,10 +36,7 @@ public sealed class MeshPanel
         if (mesh is null)
             return;
 
-        ImGui.SetNextWindowPos(new float2(x, y), ImGuiCond.FirstUseEver);
-        ImGui.SetNextWindowSize(new float2(Width, 0f), ImGuiCond.FirstUseEver);
-
-        if (ImGui.Begin("Mesh"u8, ImGuiWindowFlags.AlwaysAutoResize))
+        if (ImGui.Begin("Mesh"u8))
         {
             Validate(mesh);
             var triangles = MeshCache.Get(mesh).TriangleCount;
@@ -82,7 +78,7 @@ public sealed class MeshPanel
                 edit.Selection.Clear();
 
             var levels = (int)mesh.SubdivLevels;
-            ImGui.SetNextItemWidth(120f);
+            DesignerStyle.ItemWidth(120f);
 
             if (ImGui.SliderInt("Subdivision"u8, ref levels, 0, HullMesh.MaxLevels, "%d"u8, ImGuiSliderFlags.None))
                 Run(MeshCommands.SetLevels(session, id, levels, edit.Mirror));
@@ -111,7 +107,7 @@ public sealed class MeshPanel
             if (ImGui.Button("Bevel"u8))
                 Op(session, edit, id, b => MeshOps.BevelEdges(b, edit.Selection.Edges.ToArray(), Metres(_bevel)));
 
-            ImGui.SetNextItemWidth(90f);
+            DesignerStyle.ItemWidth(90f);
             ImGui.SliderFloat("##loop"u8, ref _loopFactor, 0.05f, 0.95f, "%.2f"u8, ImGuiSliderFlags.None);
             ImGui.SameLine();
 
@@ -139,7 +135,7 @@ public sealed class MeshPanel
                 });
 
             ImGui.SeparatorText("Mesh"u8);
-            ImGui.SetNextItemWidth(50f);
+            DesignerStyle.ItemWidth(50f);
 
             if (ImGui.BeginCombo("##axis"u8, $"{Axes[_knifeAxis]}", ImGuiComboFlags.None))
             {
@@ -153,7 +149,7 @@ public sealed class MeshPanel
             }
 
             ImGui.SameLine();
-            ImGui.SetNextItemWidth(80f);
+            DesignerStyle.ItemWidth(80f);
             ImGui.InputFloat("##knife"u8, ref _knifeOffset, 0.25f, 1f, "%.2f"u8, ImGuiInputTextFlags.None);
             ImGui.SameLine();
 
@@ -211,7 +207,7 @@ public sealed class MeshPanel
 
     private static void Amount(ReadOnlySpan<byte> label, ref float metres)
     {
-        ImGui.SetNextItemWidth(90f);
+        DesignerStyle.ItemWidth(90f);
         ImGui.InputFloat(label, ref metres, 0.125f, 0.5f, "%.3f m"u8, ImGuiInputTextFlags.None);
         ImGui.SameLine();
     }

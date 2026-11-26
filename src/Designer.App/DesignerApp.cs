@@ -38,6 +38,7 @@ public sealed class DesignerApp : IDisposable
     private readonly FilePlanHost _files = new();
     private readonly DesignSession _session = new();
     private readonly DesignerPanels _panels;
+    private readonly DesignerStyle _style = new();
     private readonly DesignStats _stats = new();
     private readonly ViewportTool _tool = new();
     private readonly MeshEditState _meshEdit = new();
@@ -67,6 +68,8 @@ public sealed class DesignerApp : IDisposable
         _window = Glfw.CreateWindow(new GlfwWindow.CreateInfo { Title = Title, Size = new int2(1600, 900) });
         _renderer = new Renderer(_window, _frameStats, Validation, vsync: true) { ClearColor = new float4(0.11f, 0.12f, 0.14f, 1f) };
         _imgui = new ImGuiLayer(_window, _renderer);
+        _style.LoadFonts();
+        DesignerStyle.SeedLayout(1600, 900);
         _hull = new HullRenderer(_renderer);
         _overlay = new OverlayRenderer(_renderer);
         _lighting = new SceneLighting
@@ -233,7 +236,10 @@ public sealed class DesignerApp : IDisposable
         var viewport = new Vector2(output.Width, output.Height);
         UpdateCamera(io, viewport.Y);
         _panels.PlaceAt = _camera.Target;
+        _style.Begin(io.DisplaySize.Y, _window.ContentScale.X);
+        DesignerStyle.DockSpace();
         _panels.Draw(_session, _stats, _meshEdit);
+        _style.End();
         HandleFiles();
 
         var viewProj = _camera.ViewProjection(viewport.X / Math.Max(1f, viewport.Y));

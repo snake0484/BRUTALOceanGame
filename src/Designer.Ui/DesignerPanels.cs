@@ -34,7 +34,6 @@ public sealed class DesignStats
 public sealed class DesignerPanels
 {
     private const float DefaultSizeMetres = 4f;
-    private const float RightColumnWidth = 400f;
 
     private static readonly string[] ShapeNames = ["Box", "Wedge", "Cylinder"];
     private static readonly string[] OpNames = ["Add", "Subtract", "Paint"];
@@ -48,7 +47,6 @@ public sealed class DesignerPanels
     private int _newMaterial;
     private bool _newSubtract;
     private float _wallMetres = 0.5f;
-    private float _right;
     private readonly MeshPanel _meshPanel = new();
     private readonly LayersPanel _layersPanel;
 
@@ -94,20 +92,17 @@ public sealed class DesignerPanels
     public void Draw(DesignSession session, DesignStats stats, MeshEditState meshEdit)
     {
         Request = FileRequest.None;
-        _right = ImGui.GetIO().DisplaySize.X - RightColumnWidth;
         DrawTools(session, stats);
         DrawBrushList(session);
         DrawProperties(session);
-        _meshPanel.Draw(session, meshEdit, _right - MeshPanel.Width - 10f, 330f);
-        _layersPanel.Draw(session, _right - LayersPanel.Width - 10f, 10f);
+        _meshPanel.Draw(session, meshEdit);
+        _layersPanel.Draw(session);
         DrawStats(session, stats);
     }
 
     private void DrawTools(DesignSession session, DesignStats stats)
     {
-        ImGui.SetNextWindowPos(new float2(10f, 10f), ImGuiCond.FirstUseEver);
-
-        if (ImGui.Begin("Designer"u8, ImGuiWindowFlags.AlwaysAutoResize))
+        if (ImGui.Begin("Designer"u8))
         {
             var name = session.Path.Length > 0 ? Path.GetFileName(session.Path) : "untitled";
             ImGui.Text($"{name}{(session.Modified ? " *" : "")}  ({session.Doc.Brushes.Count} brushes)");
@@ -130,9 +125,8 @@ public sealed class DesignerPanels
             if (ImGui.Button("Save as..."u8))
                 Request = FileRequest.SaveAs;
 
-            ImGui.SetNextItemWidth(300f);
+            ImGui.SetNextItemWidth(-1f);
             ImGui.InputText("##path"u8, _pathBuffer, ImGuiInputTextFlags.None, (ImGuiInputTextCallback?)null, default);
-            ImGui.SameLine();
 
             if (ImGui.Button("Load path"u8))
                 Request = FileRequest.OpenPath;
@@ -167,7 +161,7 @@ public sealed class DesignerPanels
             ImGui.Checkbox("Grid"u8, ref session.Snap.Enabled);
             ImGui.SameLine();
             var step = Snap.Steps.IndexOf(session.Snap.Step);
-            ImGui.SetNextItemWidth(90f);
+            DesignerStyle.ItemWidth(90f);
 
             if (ImGui.BeginCombo("Step"u8, $"{StepNames[step]}", ImGuiComboFlags.None))
             {
@@ -222,8 +216,6 @@ public sealed class DesignerPanels
 
     private void DrawBrushList(DesignSession session)
     {
-        ImGui.SetNextWindowPos(new float2(10f, 330f), ImGuiCond.FirstUseEver);
-        ImGui.SetNextWindowSize(new float2(300f, 360f), ImGuiCond.FirstUseEver);
 
         if (ImGui.Begin("Brushes"u8))
         {
@@ -249,9 +241,7 @@ public sealed class DesignerPanels
 
     private void DrawProperties(DesignSession session)
     {
-        ImGui.SetNextWindowPos(new float2(_right, 10f), ImGuiCond.FirstUseEver);
-
-        if (ImGui.Begin("Properties"u8, ImGuiWindowFlags.AlwaysAutoResize))
+        if (ImGui.Begin("Properties"u8))
         {
             var id = session.Selection.Primary;
 
@@ -276,7 +266,7 @@ public sealed class DesignerPanels
             else
             {
                 var shape = Math.Min((int)brush.Shape, ShapeNames.Length - 1);
-                ImGui.SetNextItemWidth(120f);
+                DesignerStyle.ItemWidth(120f);
 
                 if (Combo("Shape"u8, ref shape, ShapeNames))
                 {
@@ -291,7 +281,7 @@ public sealed class DesignerPanels
             }
 
             var op = Math.Min((int)brush.Op, OpNames.Length - 1);
-            ImGui.SetNextItemWidth(120f);
+            DesignerStyle.ItemWidth(120f);
 
             if (Combo("Op"u8, ref op, OpNames))
             {
@@ -302,7 +292,7 @@ public sealed class DesignerPanels
             if (session.Doc.Layers is not null)
             {
                 var role = (int)BrushRoles.Of(brush);
-                ImGui.SetNextItemWidth(120f);
+                DesignerStyle.ItemWidth(120f);
 
                 if (Combo("Role"u8, ref role, RoleNames))
                     Designer.LayerCommands.SetRole(session, id, (BrushRole)role);
@@ -362,7 +352,7 @@ public sealed class DesignerPanels
             if (ImGui.Button("Later"u8))
                 HullCommands.Move(session, id, 1);
 
-            ImGui.SetNextItemWidth(80f);
+            DesignerStyle.ItemWidth(80f);
             ImGui.InputFloat("Wall m"u8, ref _wallMetres, 0.25f, 0.5f, "%.2f"u8, ImGuiInputTextFlags.None);
             _wallMetres = MathF.Max(_wallMetres, (float)HullCommands.MinWallMetres);
             ImGui.SameLine();
@@ -376,9 +366,7 @@ public sealed class DesignerPanels
 
     private void DrawStats(DesignSession session, DesignStats stats)
     {
-        ImGui.SetNextWindowPos(new float2(_right, 520f), ImGuiCond.FirstUseEver);
-
-        if (ImGui.Begin("Stats"u8, ImGuiWindowFlags.AlwaysAutoResize))
+        if (ImGui.Begin("Stats"u8))
         {
             var mass = stats.Mass;
             var com = mass.CentreOfMass;
@@ -443,7 +431,7 @@ public sealed class DesignerPanels
 
     private static bool Field(ReadOnlySpan<byte> label, ref double value)
     {
-        ImGui.SetNextItemWidth(140f);
+        DesignerStyle.ItemWidth(140f);
         var changed = ImGui.InputDouble(label, ref value, 0.25, 1.0, "%.3f"u8, ImGuiInputTextFlags.None);
         return ImGui.IsItemDeactivatedAfterEdit() || (changed && !ImGui.IsItemActive());
     }
@@ -451,7 +439,7 @@ public sealed class DesignerPanels
     /// <summary>Degrees in 15 degree steps; typing commits on leaving the field, the +/- buttons at once.</summary>
     private static bool StepField(ReadOnlySpan<byte> label, ref int degrees)
     {
-        ImGui.SetNextItemWidth(140f);
+        DesignerStyle.ItemWidth(140f);
         var changed = ImGui.InputInt(label, ref degrees, BrushRotation.DegreesPerStep, 90, ImGuiInputTextFlags.None);
         var edited = ImGui.IsItemDeactivatedAfterEdit() || (changed && !ImGui.IsItemActive());
         degrees = (int)Math.Round(degrees / (double)BrushRotation.DegreesPerStep) * BrushRotation.DegreesPerStep;
@@ -488,7 +476,7 @@ public sealed class DesignerPanels
 
         index = Math.Clamp(index, 0, all.Count - 1);
         var changed = false;
-        ImGui.SetNextItemWidth(160f);
+        DesignerStyle.ItemWidth(160f);
 
         if (ImGui.BeginCombo(label, $"{all[index].Name}", ImGuiComboFlags.None))
         {
