@@ -432,7 +432,7 @@ internal static class Stamps
         }
         else
         {
-            profile = -s.Depth + (s.Depth + rim) * (1f - LayerOps.CanyonProfile((x - FloorShare) / (1f - FloorShare), 0f, s.Benches, 0.6f));
+            profile = -s.Depth + (s.Depth + rim) * (1f - LayerOps.CanyonProfile((x - FloorShare) / (1f - FloorShare), 0f, s.Benches, 0.85f));
         }
 
         acc += profile * all;

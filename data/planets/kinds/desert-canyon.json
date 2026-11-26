@@ -1,0 +1,30 @@
+{
+  "id": "desert-canyon",
+  "schema": 1,
+  "requires": { "radiusKm": [300, 1500], "zone": ["hot", "temperate"], "gravityG": [0.3, 1.2] },
+  "relief": { "minM": -3000, "maxM": 7000 },
+  "sea": { "present": false },
+  "materials": "desert",
+
+  "layers": [
+    { "name": "base", "type": "fbm", "lambdaR": 1.0, "octaves": 6, "amplitude": 1.0, "gain": 0.5, "normalize": true },
+    { "name": "plateau", "type": "curve", "in": "base", "out": "h",
+      "knots": [[-1.0, -1800], [-0.15, -400], [0.05, [900, 1400]], [0.12, [1300, 1900]], [1.0, [2200, 3000]]] },
+    { "name": "mesa", "type": "fbm", "lambdaM": 90000, "octaves": 4, "amplitude": 1.0, "gain": 0.5, "normalize": true },
+    { "name": "strata", "type": "fbm", "lambdaM": 24000, "octaves": 2, "amplitudeM": [20, 60], "gain": 0.5 },
+    { "name": "swales", "type": "fbm", "out": "h", "lambdaM": 9000, "octaves": 5, "amplitudeM": [240, 360], "gain": 0.45 },
+    { "name": "mesas", "type": "terrace", "levels": { "count": [8, 11], "fromM": 300, "toM": 2600, "jitter": 0.35 },
+      "riserBandM": 2, "benchSlope": 0.03, "warp": "strata", "strength": { "channel": "mesa", "from": -0.3, "to": 0.0 } },
+    { "name": "meander", "type": "warp", "lambdaM": [6000, 9000], "octaves": 2, "amplitudeM": [400, 750], "gain": 0.5 },
+    { "name": "canyonField", "type": "fbm", "lambdaM": [10000, 18000], "octaves": 3, "amplitude": 1.0, "gain": 0.45, "warp": "meander", "precise": true, "gradient": true },
+    { "name": "cfade", "type": "fbm", "lambdaM": 150000, "octaves": 2, "amplitude": 1.0, "gain": 0.5, "normalize": true },
+    { "name": "canyons", "type": "canyon", "field": "canyonField", "halfWidthM": [700, 1600], "depthM": [500, 1100], "floor": 0.3, "benches": [2, 3], "riser": 0.35,
+      "gate": { "all": [ { "alt": [200, 500] }, { "channel": "cfade", "from": -0.35, "to": 0.0 } ] } },
+    { "name": "badlands", "type": "eroded", "out": "h", "lambdaM": 3000, "octaves": 7, "amplitudeM": [220, 360], "gain": 0.47, "damping": [0.6, 1.5],
+      "gate": { "channel": "mesa", "from": 0.0, "to": -0.4 } },
+    { "name": "dunes", "type": "ergs", "cellKm": 300, "presence": [0.25, 0.45], "radiusKm": [60, 110], "lambdaM": [90, 260], "heightRatio": [0.06, 0.10],
+      "gate": { "alt": [700, 500] } },
+    { "name": "oldCraters", "type": "craters", "radiusM": [64, 8192], "coverage": 0.02, "age": [0.5, 1.0], "complexDiameterM": 4000, "freshOut": "fresh" },
+    { "name": "gravel", "type": "fbm", "out": "h", "lambdaM": 32, "octaves": 5, "amplitudeM": [0.15, 0.25], "gain": 0.5, "scale": { "channel": "fresh" } }
+  ]
+}

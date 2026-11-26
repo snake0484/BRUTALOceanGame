@@ -404,51 +404,18 @@ internal static partial class LayerOps
             dst[i] += c;
     }
 
-    /// <summary>One octave over the rows, clamped to [−1, 1]; points whose gate is exactly 0 are skipped (their term is multiplied by it).</summary>
-    private static void NoiseRow(PlanetKindProgram p, int octave, ref RowSet r, byte warp, ReadOnlySpan<float> gate, Span<float> n)
-    {
-        var f = p.Frequency[octave];
-        var ox = p.OffsetX[octave];
-        var oy = p.OffsetY[octave];
-        var oz = p.OffsetZ[octave];
-        var seed = p.Seed[octave];
-        ReadOnlySpan<double> x = r.X, y = r.Y, z = r.Z;
-
-        if (warp == None)
-        {
-            if (gate.IsEmpty && NoiseRowSimd(x, y, z, f, ox, oy, oz, seed, n))
-                return;
-
-            for (var i = 0; i < n.Length; i++)
-            {
-                if (!gate.IsEmpty && gate[i] == 0f)
-                {
-                    n[i] = 0f;
-                    continue;
-                }
-
-                n[i] = Math.Clamp(Noise.Gradient3(x[i] * f + ox, y[i] * f + oy, z[i] * f + oz, seed), -1f, 1f);
-            }
-
-            return;
-        }
-
-        ReadOnlySpan<float> wx = r.Row(warp), wy = r.Row(warp + 1), wz = r.Row(warp + 2);
-
-        for (var i = 0; i < n.Length; i++)
-        {
-            if (!gate.IsEmpty && gate[i] == 0f)
-            {
-                n[i] = 0f;
-                continue;
-            }
-
-            n[i] = Math.Clamp(Noise.Gradient3((x[i] + wx[i]) * f + ox, (y[i] + wy[i]) * f + oy, (z[i] + wz[i]) * f + oz, seed), -1f, 1f);
-        }
-    }
+    /// <summary>
+    /// One octave over the rows, clamped to [−1, 1]. Points whose gate is exactly 0 need no value (their term is multiplied
+    /// by it): a row that is mostly gated off skips them one by one, any other runs eight points at a time.
+    /// </summary>
+    private static void NoiseRow(PlanetKindProgram p, int octave, ref RowSet r, byte warp, ReadOnlySpan<float> gate, Span<float> n) =>
+        NoiseRows(p, octave, ref r, warp, gate, n, default, default, default);
 
     /// <summary>As <see cref="NoiseRow"/> with the analytic derivative in lattice units (the warp's Jacobian is left out).</summary>
-    private static void NoiseRowD(PlanetKindProgram p, int octave, ref RowSet r, byte warp, ReadOnlySpan<float> gate, Span<float> n, Span<float> gx, Span<float> gy, Span<float> gz)
+    private static void NoiseRowD(PlanetKindProgram p, int octave, ref RowSet r, byte warp, ReadOnlySpan<float> gate, Span<float> n, Span<float> gx, Span<float> gy, Span<float> gz) =>
+        NoiseRows(p, octave, ref r, warp, gate, n, gx, gy, gz);
+
+    private static void NoiseRows(PlanetKindProgram p, int octave, ref RowSet r, byte warp, ReadOnlySpan<float> gate, Span<float> n, Span<float> gx, Span<float> gy, Span<float> gz)
     {
         var f = p.Frequency[octave];
         var ox = p.OffsetX[octave];
@@ -456,21 +423,40 @@ internal static partial class LayerOps
         var oz = p.OffsetZ[octave];
         var seed = p.Seed[octave];
         var warped = warp != None;
+        var derivative = !gx.IsEmpty;
         ReadOnlySpan<float> wx = warped ? r.Row(warp) : default, wy = warped ? r.Row(warp + 1) : default, wz = warped ? r.Row(warp + 2) : default;
+        var start = gate.IsEmpty || !MostlyZero(gate) ? NoiseRowSimd(r.X, r.Y, r.Z, wx, wy, wz, f, ox, oy, oz, seed, n, gx, gy, gz) : 0;
 
-        for (var i = 0; i < n.Length; i++)
+        for (var i = start; i < n.Length; i++)
         {
             if (!gate.IsEmpty && gate[i] == 0f)
             {
-                n[i] = gx[i] = gy[i] = gz[i] = 0f;
+                n[i] = 0f;
+
+                if (derivative)
+                    gx[i] = gy[i] = gz[i] = 0f;
+
                 continue;
             }
 
             var x = warped ? r.X[i] + wx[i] : r.X[i];
             var y = warped ? r.Y[i] + wy[i] : r.Y[i];
             var z = warped ? r.Z[i] + wz[i] : r.Z[i];
-            n[i] = Math.Clamp(Noise.Gradient3(x * f + ox, y * f + oy, z * f + oz, seed, out gx[i], out gy[i], out gz[i]), -1f, 1f);
+
+            n[i] = derivative
+                ? Math.Clamp(Noise.Gradient3(x * f + ox, y * f + oy, z * f + oz, seed, out gx[i], out gy[i], out gz[i]), -1f, 1f)
+                : Math.Clamp(Noise.Gradient3(x * f + ox, y * f + oy, z * f + oz, seed), -1f, 1f);
         }
+    }
+
+    private static bool MostlyZero(ReadOnlySpan<float> gate)
+    {
+        var zeros = 0;
+
+        for (var i = 0; i < gate.Length; i++)
+            zeros += gate[i] == 0f ? 1 : 0;
+
+        return zeros * 2 > gate.Length;
     }
 
     /// <summary>Bilinear from the coarse grid (every 8th lattice point); a(1−f) + b·f form, exact at coarse points.</summary>

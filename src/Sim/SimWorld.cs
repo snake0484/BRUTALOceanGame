@@ -75,7 +75,14 @@ public sealed class SimWorld : IDisposable
 
     private readonly record struct EditCommand(long Tick, EditOp Op);
 
-    public SimWorld(ulong seed, int workerThreads, WeatherField? weather = null, int entityCapacity = EntityTable.DefaultCapacity)
+    public const string PlanetKind = "temperate-continental";
+    public const string MoonKind = "barren-cratered";
+
+    /// <summary>The test system's planet kinds by body type, until the system generator assigns them (planet-kinds.md §2).</summary>
+    public static string KindOf(CelestialKind kind) => kind == CelestialKind.Moon ? MoonKind : PlanetKind;
+
+    /// <param name="kind">Debug override of the terrain planet's and the moons' kind (--planet-kind), with its own seed for the kind's parameter ranges.</param>
+    public SimWorld(ulong seed, int workerThreads, WeatherField? weather = null, int entityCapacity = EntityTable.DefaultCapacity, string? kind = null, ulong? kindSeed = null)
     {
         Seed = seed;
         Weather = weather;
@@ -85,12 +92,12 @@ public sealed class SimWorld : IDisposable
         Entities = new EntityTable(entityCapacity);
         PlanetIndex = FirstPlanet(Celestial);
         ref readonly var body = ref Celestial[PlanetIndex];
-        Planet = PlanetParams.Generate(PlanetParams.BodySeed(seed, PlanetIndex), body.Radius, body.Mu / (body.Radius * body.Radius));
+        Planet = BodyTerrain(body, PlanetParams.BodySeed(seed, PlanetIndex), kind, kindSeed);
         Generator = new PlanetGenerator(Planet);
         BodyParams = new PlanetParams?[Celestial.Count];
 
         for (var i = 0; i < Celestial.Count; i++)
-            BodyParams[i] = i == PlanetIndex ? Planet : RockyParams(Celestial, seed, i);
+            BodyParams[i] = i == PlanetIndex ? Planet : RockyParams(Celestial, seed, i, kind, kindSeed);
 
         PlanetSpawn.FindCoast(Generator.Surface, body.SpinAxis, out var coast, out Seaward);
         var level = Planet.HasSea ? Planet.SeaRadius : Planet.Radius + Generator.Surface.Height(coast.X, coast.Y, coast.Z);
@@ -255,16 +262,21 @@ public sealed class SimWorld : IDisposable
     }
 
     /// <summary>A moon's terrain: airless and dry, barren rock; null for a star. Planets other than the terrain's get seas.</summary>
-    private static PlanetParams? RockyParams(CelestialSystem celestial, ulong seed, int index)
+    private static PlanetParams? RockyParams(CelestialSystem celestial, ulong seed, int index, string? kind, ulong? kindSeed)
     {
         ref readonly var body = ref celestial[index];
 
         if (body.Kind is not (CelestialKind.Planet or CelestialKind.Moon))
             return null;
 
-        var moon = body.Kind == CelestialKind.Moon;
-        var p = PlanetParams.Generate(PlanetParams.BodySeed(seed, index), body.Radius, body.Mu / (body.Radius * body.Radius), ocean: !moon);
-        return moon ? p with { Materials = PlanetMaterials.Barren } : p;
+        return BodyTerrain(body, PlanetParams.BodySeed(seed, index), body.Kind == CelestialKind.Moon ? kind : null, kindSeed);
+    }
+
+    /// <summary>A body's terrain from its kind: the kind decides the sea, the relief range and the materials; moons stay dry.</summary>
+    private static PlanetParams BodyTerrain(in CelestialBody body, ulong bodySeed, string? kind, ulong? kindSeed)
+    {
+        var p = PlanetParams.Generate(bodySeed, body.Radius, body.Mu / (body.Radius * body.Radius), ocean: body.Kind != CelestialKind.Moon, kind ?? KindOf(body.Kind), kindSeed);
+        return body.SpinAxis == new double3(p.AxisX, p.AxisY, p.AxisZ) ? p : p.WithAxis(body.SpinAxis.X, body.SpinAxis.Y, body.SpinAxis.Z);
     }
 
     /// <summary>

@@ -92,11 +92,18 @@ internal static class TestKinds
         lock (Generators)
         {
             if (!Generators.TryGetValue(kind, out var generator))
-                Generators[kind] = generator = new PlanetGenerator(PlanetParams.Generate(PlanetParams.BodySeed(0x5EED_2026UL, 3), Radius, 5.0, kind: kind));
+                Generators[kind] = generator = new PlanetGenerator(PlanetParams.Generate(PlanetParams.BodySeed(0x5EED_2026UL, 3), RadiusOf(kind), 5.0, kind: kind));
 
             return generator;
         }
     }
+
+    public const string Temperate = "temperate-continental";
+    public const string Barren = "barren-cratered";
+    public const string Desert = "desert-canyon";
+
+    /// <summary>The shipped planet kinds run at the test system's planet radius, the moon's kind and the test kinds at the moon's.</summary>
+    public static double RadiusOf(string kind) => kind is Temperate or Desert ? 1.0e6 : Radius;
 
     public static void RandomDirection(Random random, out double x, out double y, out double z)
     {
@@ -138,6 +145,9 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
     [InlineData(TestKinds.Mesa)]
     [InlineData(TestKinds.Sea)]
     [InlineData(TestKinds.Stamps)]
+    [InlineData(TestKinds.Temperate)]
+    [InlineData(TestKinds.Barren)]
+    [InlineData(TestKinds.Desert)]
     public void ProgramsAreDeterministic(string kind)
     {
         var p = TestKinds.Generator(kind).Params;
@@ -167,6 +177,12 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
     [InlineData(TestKinds.Stamps, 0)]
     [InlineData(TestKinds.Stamps, 4)]
     [InlineData(TestKinds.Stamps, 8)]
+    [InlineData(TestKinds.Temperate, 0)]
+    [InlineData(TestKinds.Temperate, 3)]
+    [InlineData(TestKinds.Barren, 0)]
+    [InlineData(TestKinds.Barren, 3)]
+    [InlineData(TestKinds.Desert, 0)]
+    [InlineData(TestKinds.Desert, 3)]
     public void BoundsHoldEverySample(string kind, int minLod)
     {
         var surface = TestKinds.Generator(kind).Surface;
@@ -211,6 +227,12 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
     [InlineData(TestKinds.Stamps, 0)]
     [InlineData(TestKinds.Stamps, 2)]
     [InlineData(TestKinds.Stamps, 5)]
+    [InlineData(TestKinds.Temperate, 0)]
+    [InlineData(TestKinds.Temperate, 3)]
+    [InlineData(TestKinds.Barren, 0)]
+    [InlineData(TestKinds.Barren, 4)]
+    [InlineData(TestKinds.Desert, 0)]
+    [InlineData(TestKinds.Desert, 2)]
     public void NeighboursAgreeOnAprons(string kind, int lod)
     {
         var generator = TestKinds.Generator(kind);
@@ -268,6 +290,9 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
     [InlineData(TestKinds.Mesa)]
     [InlineData(TestKinds.Sea)]
     [InlineData(TestKinds.Stamps)]
+    [InlineData(TestKinds.Temperate)]
+    [InlineData(TestKinds.Barren)]
+    [InlineData(TestKinds.Desert)]
     public void ShellClassificationMatchesBruteForce(string kind)
     {
         var generator = TestKinds.Generator(kind);
@@ -401,6 +426,45 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
         Assert.True(steepest <= Noise.GradientLipschitz);
     }
 
+    /// <summary>The eight-lane lattice rows equal the scalar ones bit for bit: heights and chunk bytes of every kind, either way.</summary>
+    [Theory]
+    [InlineData("legacy-rolling")]
+    [InlineData(TestKinds.Temperate)]
+    [InlineData(TestKinds.Barren)]
+    [InlineData(TestKinds.Desert)]
+    [InlineData(TestKinds.Mountains)]
+    public void SimdRowsMatchScalar(string kind)
+    {
+        var generator = kind == "legacy-rolling" ? TestPlanet.Generator : TestKinds.Generator(kind);
+        var scratch = new PlanetChunkScratch();
+        var random = new Random(59);
+        var surfaces = 0;
+
+        for (var n = 0; n < 12; n++)
+        {
+            TestKinds.RandomDirection(random, out var x, out var y, out var z);
+            var coord = TestKinds.SurfaceChunk(generator, x, y, z, n % 4 * 2);
+            var vector = Generate(coord, generator, scratch, withMask: n % 2 == 0);
+            var lattice = scratch.Heights.AsSpan(0, 1024).ToArray();
+
+            try
+            {
+                LayerOps.SimdEnabled = false;
+                var scalar = Generate(coord, generator, scratch, withMask: n % 2 == 0);
+                Assert.Equal(scalar.Density, vector.Density);
+                Assert.Equal(scalar.Material, vector.Material);
+                Assert.True(scratch.Heights.AsSpan(0, 1024).SequenceEqual(lattice));
+                surfaces += scalar.HasSurface ? 1 : 0;
+            }
+            finally
+            {
+                LayerOps.SimdEnabled = true;
+            }
+        }
+
+        Assert.True(surfaces >= 8);
+    }
+
     [Fact]
     public void WarpThatFoldsIsRejected()
     {
@@ -485,6 +549,9 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
     [InlineData(TestKinds.Mesa)]
     [InlineData(TestKinds.Sea)]
     [InlineData(TestKinds.Stamps)]
+    [InlineData(TestKinds.Temperate)]
+    [InlineData(TestKinds.Barren)]
+    [InlineData(TestKinds.Desert)]
     public void LodsFollowTheFilteredSurface(string kind) => BandLimit(TestKinds.Generator(kind).Surface, output, 0.35, 1.5);
 
     internal static void BandLimit(PlanetSurface surface, ITestOutputHelper output, double rmsLimit, double maxLimit)
@@ -535,6 +602,9 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
     [InlineData(TestKinds.Mesa)]
     [InlineData(TestKinds.Sea)]
     [InlineData(TestKinds.Stamps)]
+    [InlineData(TestKinds.Temperate)]
+    [InlineData(TestKinds.Barren)]
+    [InlineData(TestKinds.Desert)]
     public void SamplingAndGenerationAreAllocationFree(string kind)
     {
         var generator = TestKinds.Generator(kind);
@@ -571,6 +641,7 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
     /// <summary>D30 on a sea kind: past the coastal ramp no ground stands at or below the protected band, and the voxel mask is the base-height test.</summary>
     [Theory]
     [InlineData(TestKinds.Sea)]
+    [InlineData(TestKinds.Temperate)]
     public void InlandGroundClearsTheProtectedBand(string kind) => ShoreBand(TestKinds.Generator(kind), output);
 
     internal static void ShoreBand(PlanetGenerator generator, ITestOutputHelper output)
@@ -611,7 +682,7 @@ public sealed class PlanetLayerTests(ITestOutputHelper output)
             TestKinds.RandomDirection(random, out var x, out var y, out var z);
             var h = surface.Height(x, y, z);
 
-            if (MathF.Abs(h - surface.SeaHeight) > 12f)
+            if (h > surface.SeaHeight + 2f || h < surface.SeaHeight - 12f)
                 continue;
 
             chunk.Coord = TestKinds.SurfaceChunk(generator, x, y, z, 0);

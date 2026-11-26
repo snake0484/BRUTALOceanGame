@@ -98,6 +98,13 @@ public readonly record struct PlanetParams
         return p with { ProgramHash = PlanetKindCompiler.Compile(recipe, p).ContentHash };
     }
 
+    /// <summary>The same body with its spin axis (planet frame) set: latitude masks read it, so the program hash follows.</summary>
+    public PlanetParams WithAxis(double x, double y, double z)
+    {
+        var p = this with { AxisX = x, AxisY = y, AxisZ = z };
+        return p with { ProgramHash = PlanetKindCompiler.Compile(PlanetKinds.Get(KindId), p).ContentHash };
+    }
+
     /// <summary>The v1 recipe's seeded continent offset and ridge height (compat "v1").</summary>
     internal static void LegacyDraws(ulong seed, out float landBias, out float mountainHeight)
     {

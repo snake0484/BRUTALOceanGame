@@ -11,8 +11,21 @@ namespace BrutalGame.Sim.Tests;
 
 public class SimBoundaryTests
 {
-    /// <summary>16 km out from the spawn's waterline, along the sea frame's +x.</summary>
-    private const float OffshoreX = 16_000f;
+    /// <summary>How far out from the spawn's waterline, along the sea frame's +x, the sea is first this deep (the coast is the planet kind's).</summary>
+    private static float Offshore(SimWorld sim, float depth)
+    {
+        var surface = sim.Generator.Surface;
+
+        for (var x = 1000f; x <= 200_000f; x += 500f)
+        {
+            var d = Dir(sim, x);
+
+            if (surface.Height(d.X, d.Y, d.Z) < surface.SeaHeight - depth)
+                return x;
+        }
+
+        throw new InvalidOperationException($"No sea {depth} m deep within 200 km of the spawn");
+    }
 
     private static readonly string[] Forbidden = ["Brutal.Vulkan", "Brutal.Glfw", "Brutal.ImGui", "Brutal.ShaderC", "Engine", "Debug"];
     private static readonly string[] ForbiddenProjects = ["Engine", "Water.Rendering", "Terrain.Runtime", "Debug", "Game"];
@@ -190,12 +203,10 @@ public class SimBoundaryTests
     public void Edits_InsideTheProtectedSeabedAreDropped()
     {
         using var sim = new SimWorld(seed: 1, workerThreads: 1);
-        // 16 km out the sea is ~90 m deep: the seabed's conservative bounds (±12 m here) sit wholly under the protected band.
-        var sea = Dir(sim, OffshoreX);
-        Assert.True(sim.Generator.Surface.Height(sea.X, sea.Y, sea.Z) < sim.Generator.Surface.ProtectHeight - 30f, "16 km out from the spawn's waterline is deep sea");
-
-        sim.QueueEdit(Under(sim, OffshoreX, 400f, BrushMode.Dig));
-        sim.QueueEdit(Under(sim, OffshoreX, 400f, BrushMode.Place));
+        // Where the sea is 70 m deep the seabed's conservative bounds sit wholly under the protected band.
+        var offshore = Offshore(sim, 70f);
+        sim.QueueEdit(Under(sim, offshore, 400f, BrushMode.Dig));
+        sim.QueueEdit(Under(sim, offshore, 400f, BrushMode.Place));
         sim.QueueEdit(Under(sim, -400f, 150f, BrushMode.Dig));
         sim.Tick();
 
@@ -248,7 +259,7 @@ public class SimBoundaryTests
         Assert.Equal(-2f, sim.Shore.Depth(d.X, d.Y, d.Z), 0.01f);
         Assert.Equal(0f, sim.Ocean.SampleHeight(d * sim.Planet.SeaRadius, sim.Clock.TickIndex));
 
-        var open = Dir(sim, 3000f);
+        var open = Dir(sim, Offshore(sim, 30f));
         Assert.NotEqual(0f, sim.Ocean.SampleHeight(open * sim.Planet.SeaRadius, sim.Clock.TickIndex));
         Assert.Equal(sim.Ocean.SampleHeight(open * sim.Planet.SeaRadius, sim.Clock.TickIndex), sim.Ocean.SampleHeight(open * (sim.Planet.SeaRadius + 500.0), sim.Clock.TickIndex));
     }

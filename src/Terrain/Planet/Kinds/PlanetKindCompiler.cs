@@ -243,7 +243,8 @@ public static class PlanetKindCompiler
             if (!e.TryGetProperty("from", out var f))
                 return channel;
 
-            return MaskOp(LayerMode.MaskChannel, channel, f.GetSingle(), e.GetProperty("to").GetSingle());
+            var path = $"layers.{_layer}.gate.{_op.Count}";
+            return MaskOp(LayerMode.MaskChannel, channel, (float)Resolve(f, path + ".from"), (float)Resolve(e.GetProperty("to"), path + ".to"));
         }
 
         /// <summary>gate × scale as one mask channel, or None.</summary>

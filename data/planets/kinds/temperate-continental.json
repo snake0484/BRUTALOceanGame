@@ -1,0 +1,34 @@
+{
+  "id": "temperate-continental",
+  "schema": 1,
+  "requires": { "radiusKm": [400, 1500], "zone": ["temperate"], "gravityG": [0.6, 1.4] },
+  "relief": { "minM": -8000, "maxM": 9000 },
+  "sea": { "present": true },
+  "continent": "continent",
+  "materials": "temperate",
+
+  "layers": [
+    { "name": "continent", "type": "fbm", "lambdaR": 1.25, "octaves": 9, "amplitude": 1.0, "gain": 0.5, "normalize": true },
+    { "name": "shape", "type": "curve", "in": "continent", "out": "h",
+      "knots": [[-1.0, -6500], [-0.33, [-4600, -3600]], [-0.03, -160], [0.0, 0], [0.06, [60, 110]], [0.3, [600, 900]], [1.0, [1500, 1900]]] },
+    { "name": "inland", "type": "mask", "channel": "continent", "from": 0.02, "to": 0.12 },
+
+    { "name": "beltNoise", "type": "fbm", "lambdaR": 0.45, "octaves": 4, "amplitude": 1.0, "gain": 0.5, "normalize": true },
+    { "name": "belt", "type": "mask",
+      "all": [ { "channel": "beltNoise", "from": [-0.2, -0.15], "to": -0.04 }, { "channel": "beltNoise", "from": [0.15, 0.2], "to": 0.04 }, { "channel": "inland" } ] },
+    { "name": "upNoise", "type": "fbm", "lambdaR": 0.16, "octaves": 3, "amplitude": 1.0, "gain": 0.5, "normalize": true },
+    { "name": "uplands", "type": "mask", "all": [ { "channel": "upNoise", "from": -0.2, "to": 0.05 }, { "channel": "inland" } ] },
+
+    { "name": "bend", "type": "warp", "lambdaM": 12000, "octaves": 2, "amplitudeM": [900, 1300], "gain": 0.5 },
+    { "name": "ranges", "type": "ridged", "out": "h", "lambdaM": [16000, 22000], "octaves": 12, "amplitudeM": [2600, 3600], "gain": 0.45,
+      "ridgeGain": 2.0, "warp": "bend", "gate": { "channel": "belt" } },
+    { "name": "plateaus", "type": "eroded", "out": "h", "lambdaM": 7000, "octaves": 10, "amplitudeM": [520, 760], "gain": 0.47, "damping": [0.5, 1.0],
+      "gate": { "channel": "uplands" } },
+    { "name": "valleyField", "type": "fbm", "lambdaM": [24000, 36000], "octaves": 3, "amplitude": 1.0, "gain": 0.45, "warp": "bend", "precise": true, "gradient": true },
+    { "name": "valleys", "type": "canyon", "field": "valleyField", "halfWidthM": [900, 1500], "depthM": [180, 320], "floor": 0.15, "benches": 0,
+      "gate": { "all": [ { "channel": "uplands" }, { "not": { "channel": "belt" } } ] } },
+    { "name": "hills", "type": "eroded", "out": "h", "lambdaM": 2400, "octaves": 8, "amplitudeM": [220, 300], "gain": 0.47, "damping": [0.6, 1.2],
+      "gate": { "channel": "inland" } },
+    { "name": "soil", "type": "fbm", "out": "h", "lambdaM": 16, "octaves": 4, "amplitudeM": [0.08, 0.14], "gain": 0.55, "gate": { "channel": "inland" } }
+  ]
+}
