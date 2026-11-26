@@ -601,7 +601,7 @@ storms     cell active  ⇔  hash(TSeed, cell, ⌊t / 60⌋) < max(0, 1.9 · (u 
   - Missiles behave as ships (their own `κ` and thrust) but detonate on wall contact instead of being ejected.
   - Beams are straight and stop at the wall (v1).
 - **Retaliation:** the wormhole strikes anything projecting gravitons or anti-gravitons **outside its own hull** while the device's host is **in the tunnel frame**. Devices in normal space (a damper covering a mouth, a destabiliser at range) are never struck.
-  - **Triggers:** an active tractor beam (requested or not: the wormhole reacts to the projection, not to consent, so a gate cannot tractor a ship through a tunnel even on request; round 5, D26); an armed anti-graviton charge; gravity weapons; a gravity damper (it projects up to 5 km); a stabiliser in mode Drain; an interdiction emitter; a catcher.
+  - **Triggers:** an active tractor beam (requested or not: the wormhole reacts to the projection, not to consent, so a gate cannot tractor a ship through a tunnel even on request; round 5, D26); an armed anti-graviton charge; gravity weapons, a raised gravity shield lobe among them (combat-and-sensors.md, D55); a gravity damper (it projects up to 5 km); a stabiliser in mode Drain; an interdiction emitter; a catcher.
   - **Exempt** (they act inside the hull): gravity plating, inertial dampening, tidal compensators and mag boots. A stabiliser in mode Feed pours into the throat, not outward, so it is exempt (decided, round 5: former open question 17).
   - **Strike:** on the tick the projection starts, then every 60 ticks while it lasts, a discharge from the nearest wall point to the projecting component. Damage is `RetK · (1 + n)`, with `n` the strikes so far on that component's **owner group** in this tunnel, so it escalates and a swarm of cheap projectors escalates fastest. The projecting component is disabled for 10 s, so a tractor lock breaks at once. Each strike drains `0.005 · EsMax`, within the drain cap (see Stability).
   - **Who takes the damage:** the projecting component and the grid it is mounted on, nothing else. The arc is drawn but hits no one in between, so a cheap projector parked beside an enemy is not a lightning rod. A projector clamped or docked onto a grid of another owner group is struck alone (its own body), never the foreign host, so planting a tractor limpet on an enemy hull cannot turn the wormhole on them.
@@ -901,7 +901,7 @@ A **catcher** is a component on a station or ship. It projects a **catch point**
   - a loaded **copy** of another faction's key, which is a spoof.
 - **A genuine keyed emitter always claims its faction's current epoch,** at every reading. A wormhole keeps the faction its generator's owner had at charge start, but its epoch follows the faction live, even after the generator is gone. Only copies are frozen at their scanned epoch. (Freezing genuine wormholes would make a key rotation flag the faction's own open wormholes as forged.)
 - Natural mouths are always noise and have no key.
-- Factions (`FactionId`, a set of groups) are new and hold the keys. A group without a faction is keyless.
+- Factions (`FactionId`, a set of groups) are new and hold the keys. A group without a faction is keyless. (Round 6: factions-and-law.md defines them. `FactionId` is a byte, 0 = none and 1–31. A "group" or "owner group" here is its `Organisation`; a party is not an owner. An organisation gets a key by chartering under a faction, and `GatePolicy.Faction` reads enlistment and charters.)
 
 **Truth stays on the server:**
 - Whether an emitter is genuine, and a copy's fidelity and age, never leave it.
@@ -955,7 +955,7 @@ A fresh forgery usually outlasts a charge unless its key is stale. That is the i
 - Any emitter can load a copy: catchers, generators, frames and stabilisers. The decision names catchers; generators, frames and stabilisers use the same mechanism (decided, round 5: former open question 11).
 
 **Key rotation:**
-- A faction's key holder rotates the key: `Epoch++`, with a 1 h cooldown.
+- A faction's key holder (a faction officer, factions-and-law.md) rotates the key: `Epoch++`, with a 1 h cooldown.
 - Every genuine emitter of the faction, and every open wormhole its members opened, claims the new epoch from the next tick, and members' `E_ref` updates (`KeyRotated`, to members only).
 - Outsiders learn the new epoch only by reading a re-keyed emitter. From then on, every older copy is flagged as forged at once by their group.
 - Copies are not re-keyed. Copiers must scan again.
@@ -1044,7 +1044,7 @@ A fresh forgery usually outlasts a charge unless its key is stale. That is the i
   - A frame's own signature is its builder's key, or noise if it runs dark.
 - **Discovery:**
   - Closed mouths are undetectable.
-  - Open mouths are contacts within a sensor range of `2,000 km · r̂`.
+  - Open mouths are contacts within a sensor range of `2,000 km · r̂` (round 6: a gravimetric contact at that range for an M gravimeter, × 2 for L; combat-and-sensors.md section 4 owns sensor kinds and ranges).
   - First detection sends a `NaturalWormholeRecord` (~60 B: anchors, schedule parameters, radius, `pairSeed = hash(NaturalSeed, pairIndex)`) to the player and their party. Flow, flush and stability parameters derive from `pairSeed`. The record is persisted with the player and can be traded as a chart item. The pair seed reveals nothing about other pairs.
   - After discovery there is zero traffic: clients evaluate the schedule and flow from the tick. The only exception is `NaturalCommit` on redirected cycles.
 - **Camping:** natural mouths can still be camped. Plans never see uncharted closed mouths, and commits only see their scheduled windows as occupancy, indistinguishable from hidden hulls.
@@ -1064,7 +1064,7 @@ A fresh forgery usually outlasts a charge unless its key is stale. That is the i
     - It is computed from the 0.5 m coarse occupancy, by marching from the room centroid to space and summing solid cells × 0.5 m × material density.
     - About 10 µs per room at bake time. Rebuilt with the bake.
   - **Interior dose** = `D · exp(−(σ(dir★) + σ_shield) / σ0)`, with `σ0 = 200 kg/m²`. 1 m of composite at 1,500 kg/m³ attenuates to about 5e-4.
-  - The `RadiationShield` component adds `σ_shield` in every direction while it is powered.
+  - The `EnergyShield` component (combat-and-sensors.md, D55; its S class is the `RadiationShield` of earlier revisions) adds `σ_shield` in every direction while it is powered. It also absorbs wall discharges and storm hits as pulses, up to its heat pool. Particle and energy shields are not graviton projectors and are never struck.
   - **Characters** accumulate dose into health. About 5 Gy is lethal, so roughly 100 s unshielded at 1 AU. EVA uses the suit's σ.
   - **Components** have a hardening threshold. Above it they are disabled for `dose / rate` seconds.
   - **Hulls** take damage only in the corona heat zone, as a flat heat rate.
@@ -1226,7 +1226,7 @@ public enum SlotRefusal : byte { None, Refused, Full, FeeUnpaid, FlowClosed, Gro
 public readonly record struct WormholeId(ushort Value);
 public readonly record struct MouthId(ushort Value);
 public readonly record struct CatcherId(ushort Value);
-public readonly record struct FactionId(ushort Value);
+public readonly record struct FactionId(byte Value);              // round 6: owned by factions-and-law.md; 0 = none, 1..31 (was ushort)
 
 /// Component, data-driven (data/wormgen/*.json); sent by id.
 public struct WormholeGenerator
@@ -1311,7 +1311,7 @@ public struct CatchSlot { public int Booking, Requester; public ushort Requester
 public struct Signature { public SignatureKind Kind; public FactionId Faction; public ushort Epoch; public float EmitQ, Fidelity; public long ScannedAt; } // Keyed: Epoch unused (current); Copied: frozen
 public struct FactionKey { public FactionId Faction; public ushort Epoch; public long RotatedAt; }                               // server table
 public struct SignatureCopy { public FactionId Faction; public ushort Epoch; public float Fidelity; public long ScannedAt; }      // item payload, 16 B
-public struct Sensor { public float Quality, Range; }
+public struct Sensor { public float Quality, Range; }             // round 6: the signature reader component of combat-and-sensors.md (Quality 0.4 / 0.7 / 1.0, range × 0.5 / 1 / 2 for S / M / L)
 public struct ReadingState { public int Reader, Emitter; public float Evidence; public long LastClose; public SignatureVerdict Verdict; }  // pool of 4096, 1 Hz staggered
 public sealed class EpochSeen { public ushort[] Epoch; }      // [group * MaxFactions + faction], preallocated
 public static class Signatures
@@ -1654,7 +1654,7 @@ public struct AdditiveMix { public ushort A0, A1; public float F0, F1; }   // it
 - **A captured wormhole opens straight onto the captured destination.** The view through the mouth is always true; there is no faking. Open question 1 of revision 2 is settled this way.
 - **Interdiction never forces travel.** It only moves the far end. Getting a victim through takes a physical method:
   - **Tractor beams:** a component that applies force between two hulls, through the normal per-body force pass. Force limits, ranges, modes and billing are tractor-beams.md's (the owner). A tractor lock already blocks warp spool, so it is both anti-escape and pull-in. The lock breaks when the victim crosses (see the crossing rules above), so the tractoring ship stays behind unless it follows.
-    - **Consent (round 5, D26; owned by tractor-beams.md "Consent (D26)", which adopts this text):** a tractor lock on a ship that did not request it is a **weapon** use: a hostile act, with the same standing, fines and faction consequences as firing on it. It writes an `IncidentRecord` of kind `TractorLock` (rings-and-asteroids.md) on acquire, even with no damage. Pulling an interdicted victim toward a mouth is therefore always an attack. A managed gate or station may tractor a ship to a dock or into its mouth's entry lane only when the ship's crew has **requested** it (a consent flag on a docking or tow request; catch slots place wormhole ends, not ships, so a `SlotRequest` carries none). Otherwise ships manoeuvre themselves.
+    - **Consent (round 5, D26; owned by tractor-beams.md "Consent (D26)", which adopts this text):** a tractor lock on a ship that did not request it is a **weapon** use: a hostile act, with the same standing, fines and faction consequences as firing on it. It writes an `IncidentRecord` of kind `TractorLock` (the shared record, owned by factions-and-law.md) on acquire, even with no damage. Pulling an interdicted victim toward a mouth is therefore always an attack. A managed gate or station may tractor a ship to a dock or into its mouth's entry lane only when the ship's crew has **requested** it (a consent flag on a docking or tow request; catch slots place wormhole ends, not ships, so a `SlotRequest` carries none). Otherwise ships manoeuvre themselves.
       - **Scope:** consent names one emitter owner group and lapses on release, on docking, on the ship crossing a mouth, or after 120 s without a lock. A third party locking a consenting ship is still a weapon use, and a ship cannot grant consent to stage a fake attack (the server judges by the flag, not by claims).
       - Inside a tunnel the wall strikes any active tractor, requested or not (see Tunnels, retaliation), so consent never lets a gate tow a ship through a bore.
     - Without antimatter a tractor can only **pull** (gravitons only); pushing needs anti-gravitons, so AM (round 5, D28). Without AM, Hold is a pull-only tether: it limits range and reels in but cannot stop a target closing; it still blocks warp spool. Pull-in is the interdiction use either way.
@@ -2002,3 +2002,13 @@ Skeptical lead review of the round-5 edits against decisions.md (D19, D23, D21, 
 - Tractors (items 10, 11, D26, D28): force limits point at tractor-beams.md; consent text kept verbatim with tractor-beams.md as owner and an `IncidentRecord` `TractorLock` on acquire; retaliation states this doc owns the strike path and tractor-beams calls it; without AM, Hold is a pull-only tether that still blocks spool.
 - Systems (item 15): natural pairs may cross systems and only they do; no cross-system warp; Dark Gate far end in this or another system; sharding by system then SOI subtree.
 - Stale refs (item 16): zones.md -> frames-and-zones.md; decisions-r5.md -> decisions.md; the round-5 "Other docs, not fixed here" note and the `MouthFloor` proposal marked resolved/applied. D27 and D33 do not touch this doc.
+
+## Round 6 / r7 consistency notes
+
+2026-11-26. This doc was not revised in round 6; the r7 cross-check applied what decisions D52-D74 and the round 6 docs ask of it. Decisions were not re-litigated, nothing was built or run.
+
+- **D57 (factions-and-law.md):** it defines `FactionId` (a byte), organisations (this doc's "group" and "owner group"), enlistment, charters and key holders, and owns `IncidentRecord`. Managed-gate fee tables may key on its standing bands (members and Honoured at base, Trusted × 1.25, Neutral × 1.5, Unwelcome refused); natural pairs stay free (D23). Redirect contests pool per `FactionId` as before.
+- **D55 (combat-and-sensors.md shields):** a raised gravity shield lobe is an `External` projection, struck on the tick it is raised and every 60 ticks; particle and energy shields are never struck. `RadiationShield` is the S class of its `EnergyShield`, which also absorbs wall discharges and storm hits. Lobes, like tractors, do not project through a mouth disc.
+- **D56 (combat-and-sensors.md weapons and sensors):** `Sensor {Quality, Range}` is its signature reader, which runs this doc's contest and copy scans; mouths are gravimetric contacts at the stated range; spoofed transponders are this doc's signature copies broadcast as a claim. Wall contacts and rams resolve as its contact hit (`Blunt`, dents before holes, D59). Rounds cross instant mouths and ricochet in tunnels as written here.
+- **D71:** this doc names no Control wiring.
+- **D66:** nothing here depended on a warp seal.

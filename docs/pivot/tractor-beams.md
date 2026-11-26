@@ -241,6 +241,8 @@ A 4 m run of 0.5 m standard wall is 2 m² of joint, which holds 2 MN in tension.
 | Tank, trap, cargo pod | 10 × full mass × 9.81 | same × 1 m |
 | Reactor, drive core | 5 MN | 5 MN·m |
 | Tractor emitter | 1.5 × rated × OverdriveMul | same × 1 m |
+| Gravity shield emitter (combat-and-sensors.md, D55) | 1.5 × rated force | same × 1 m |
+| Weapon (combat-and-sensors.md owns the numbers) | 3 × round momentum / 0.1 s: autocannon 15 kN, mass driver and railgun 1.2 MN, capital mass driver 45 MN | same × 1 m |
 | Docking collar | 5 MN / 2 MN | 5 MN·m |
 | **TowPoint** S / M / L / XL | 1 / 10 / 50 / 200 MN | same × 1 m |
 | Option `ReinforcedMount` | × 3, +20 % housing mass | |
@@ -250,10 +252,12 @@ A 4 m run of 0.5 m standard wall is 2 m² of joint, which holds 2 MN in tension.
 - **Live ships:** a ship is evaluated only while it receives ≥ 1 kN from any beam, or its own emitter delivers ≥ 1 kN, and for 60 ticks after.
   - While live, its own thrust is included in `F_ext`, so a ship thrusting against a lock loads its own structure. Running is part of the tug-of-war.
   - So a 1 kN docking nudge can't make a ship's own thrust tear it, the build tool **refuses** (not just warns about) a blueprint whose full own thrust on any axis gives `u ≥ 0.9` on any cut or mount. Every intact ship can fly itself. A damaged ship can fall below that, and then a tow can finish it: accepted, it is the physics.
-  - Not live means no evaluation, whatever else happens. Rams, pulses, tidal stress and shrapnel keep their own damage models (exotic-matter, rings-and-asteroids).
+  - Not live means no evaluation, whatever else happens. Rams, pulses, tidal stress and shrapnel keep their own damage models (exotic-matter, rings-and-asteroids). Round 6 (D59): for rams, shells, pulses and any single event of ≥ 1e5 N·s, that model is combat-and-sensors.md's one-shot impulsive evaluation over this same graph (≤ 8 a tick server-wide), which bends cuts before it tears them.
 - **Rate:** 20 Hz per live ship (every third tick, staggered).
 - **Break rule:**
   - A cut or mount breaks at `u ≥ 1` on 2 consecutive evaluations (0.1 s), or at once at `u ≥ 1.5`.
+  - **Yield before break (round 6, D59; combat-and-sensors.md "Form 3: deformation"):** a hull cut at `u ≥ YieldU` (0.8) yields. While it stays there the far side rotates about the cut at up to 2°/s and shears at up to 0.1 m/s, stored as a `HullHinge` (ship-hulls.md), to at most 12° and 1 m; past either it breaks by the rule above. A yielded cut keeps 70 % of its capacities. The structure graph stays in material space and is never rebuilt for a dent or bend alone. A cut that cannot yield (a ship holds at most 7 hinges, a brick touches at most 2) tears through the existing split rule.
+  - **Build quality (D67):** `StressEdge` ratings scale with the builder's skill tier (ship-design-and-construction.md), so an Unskilled-built hull yields and tears at about two thirds of nominal.
   - Highest `u` first. At most 1 hull cut and 4 mounts per ship per evaluation, and at most 4 hull cuts per ship per second, so a capital ship comes apart in visible stages, not 50 pieces in one tick.
   - Server-wide, at most 4 hull cuts per tick, in a fair queue (one per ship, round-robin).
   - Breaks are queued in the force pass and applied in the next tick's step 3, in damage-application order. That is the same "cascades go to the next tick" rule as everything else.
@@ -356,16 +360,16 @@ A 4 m run of 0.5 m standard wall is 2 m² of joint, which holds 2 MN in tension.
   - Both of those make stations the easiest tractor target in the game, and an overloaded anchor drops the station. Every station is a protected zone (rings), so the protected-zone rule below stops other parties doing either unless the zone permits it, or a declared siege lifts it for the besiegers (Sieges, below).
   - Station emitters' reactions are debited to the anchor.
 - **Protected zones (all tractor delivery, not just locks):**
-  - A hit on another party's body delivers nothing (it is spill) if **either** the target body **or** the emitter is inside a protected zone, unless the zone permits it. This is tested per (beam, body) at each geometry update and covers Sweep as well as Lock: two narrow opposed sweeps from outside the zone can't tear a ship docked inside it, and a ship parked inside a zone can't tear ships outside it from safety.
+  - A hit on another party's body delivers nothing (it is spill) if **either** the target body **or** the emitter is inside a protected zone, unless the zone permits it (`ZonePermission.Check` with `TractorAssist` or `WorkDebris`, factions-and-law.md). This is tested per (beam, body) at each geometry update and covers Sweep as well as Lock: two narrow opposed sweeps from outside the zone can't tear a ship docked inside it, and a ship parked inside a zone can't tear ships outside it from safety.
   - Own and party bodies are always allowed.
   - Grid bubbles count as inside the zone their host is in, so hangar tractors follow the same rule for visitors' craft.
   - **Kept in revision 2:** this zeroing of tractor delivery to other parties' bodies is unchanged outside a declared siege. It protects stations and docked ships from being torn or overloaded by beams.
-  - **Sieges (D27; proposed, owned by a future factions and law doc, mirrored in rings-and-asteroids.md):**
-    - A faction may declare a siege on a station grid; it is public and logged. Besieging parties are hostile to that station and its zone for the siege's duration.
+  - **Sieges (D27):** factions-and-law.md "Sieges and capture" owns the rule: who may declare, notice, the Open state, the capture clock, striking colours and `EvacGraceS`. What it means for tractors:
+    - A siege is declared under that doc's rules (factions at `War`, an authority's writ, or anyone in Lawless space). It is public and logged, and nothing below is lifted until its notice has run and it is Open.
     - **Lifted** for the besiegers only: the zeroing above (besiegers' delivery to the station and its zone's bodies, and the station's emitters' delivery to besiegers, are real), and zone courtesies (docking assist, consent). Neutral parties in the zone keep full protection.
-    - **Kept:** rings' asteroid rules inside `ProtectRadius` (lock refused, sweep zero, no rock-working: no debris manufactured inside), shields and debris defence, warp.md's exclusion push for non-permitted arrivals, the station's interdiction ban, and incident records and listings.
-    - **Destruction stays possible but hard:** the anchor needs both independent feeds cut beyond its 10 s buffer, `Release` needs owner authorisation and a 60 s countdown, and tractor overload first raises the `AnchorOverload` alarm and grace window. Dropping a station is the top incident kind (`StationDrop`, heaviest standing and crime penalty).
-    - **Capture is preferred:** boarding and an `Override` held at the station's `CommandCore` (ship-design-and-construction.md) transfers ownership (`StationCapture`). Capture yields the station, its stock and its anchor and gate policies; destruction yields wreckage. Tractors serve a siege as tackle (anti-escape of defenders' ships), tearing exposed turrets and arms, and holding boarding craft to the hull.
+    - **Kept:** rings' asteroid rules inside `ProtectRadius` (lock refused, sweep zero, no rock-working: no debris manufactured inside), shields and debris defence, warp.md's exclusion push for non-permitted arrivals, the station's interdiction ban, and incident records.
+    - **Destruction stays possible but hard:** the anchor needs both independent feeds cut beyond its 10 s buffer, `Release` needs owner authorisation and a 60 s countdown, and tractor overload first raises the `AnchorOverload` alarm and its grace window (`EvacGraceS` by station class). Dropping a station is the top incident kind (`StationDrop`, an atrocity in factions-and-law.md whoever is at war with whom).
+    - **Capture is preferred:** boarding and an `Override` held at the station's `CommandCore` (ship-design-and-construction.md) transfers ownership (`StationCapture`; that doc's one capture clock, paused while a defender contests the core room). Capture yields the station, its stock and its anchor and gate policies; destruction yields wreckage. Tractors serve a siege as tackle (anti-escape of defenders' ships), tearing exposed turrets and arms, and holding boarding craft to the hull.
   - Rings' asteroid rules (lock refused, sweep delivers zero) stay, with one exception (revision 2): the zone's own station-defence emitters, and parties the zone permits, may lock and sweep asteroid **debris** (Dynamic or Coasting bodies) and clouds inside it, never rail, static or kinematic rocks (review fix: a lock frees a rock, so the exemption would have let anyone the zone permits work natural rock inside the zone). Asteroid debris has no owner to protect, so this is not delivery to "another party's body"; defence beams still deliver nothing to ships and grids.
   - **Withdrawn in revision 2:** the proposed line that zeroed a `Thrown` body's contact damage to other parties' grids inside a zone. Rings revision 4 makes debris in zones real: stations defend with shields and these beams, and the damage is an `IncidentRecord` (class from intent; liability per D33 for legal mining fragments).
 - **Frames and bubbles:**
@@ -395,9 +399,9 @@ A 4 m run of 0.5 m standard wall is 2 m² of joint, which holds 2 MN in tension.
   - A client predicting its own ship (C12, re-stepping a local Jolt scene) adds the forces of beams touching it, computed from replicated beam state and the other end's replicated pose, which is full rate.
   - Errors come only from that pose's latency and the spring-damper, and normal reconcile handles them.
   - **Breaks and detaches are never predicted.** When the forecast exceeds 1 the client plays creak and warning effects, but the snap waits for the server event, so a mispredicted tear never has to be undone.
-- **Permissions:** tractor force on another party's ship is attributed to the emitter's owner (as dose is). A beam-pushed rock that hits anything is Hostile when its release path led onto the victim or its zone, whatever the arrival time (rings revision 4 review). Revision 2: a mount break, tear or forced undock it causes on another party's ship is reported as an `IncidentRecord` (the shared server-only record defined in rings-and-asteroids.md; kind `TractorTear`), with the emitter's owner as actor. Protected zones refuse locks on, and zero any sweep delivery to, other parties' bodies when either end is inside the zone, unless the zone permits it or a siege lifts it for besiegers (see Interactions); stations run their own docking assist only on request, server-clamped by enforced Safe-lock.
+- **Permissions:** tractor force on another party's ship is attributed to the emitter's owner (as dose is). A beam-pushed rock that hits anything is Hostile when its release path led onto the victim or its zone, whatever the arrival time (rings revision 4 review). Revision 2: a mount break, tear or forced undock it causes on another party's ship is reported as an `IncidentRecord` (the shared server-only record, owned by factions-and-law.md; kind `TractorTear`), with the emitter's owner as actor. Protected zones refuse locks on, and zero any sweep delivery to, other parties' bodies when either end is inside the zone, unless the zone permits it or a siege lifts it for besiegers (see Interactions); stations run their own docking assist only on request, server-clamped by enforced Safe-lock.
 - **Consent (D26; this doc owns the rule, adopted from wormholes.md's text):**
-  - Any Lock or Sweep delivery to another party's ship, grid or character without consent is a **weapon use**: a hostile act with the same standing, fines and faction consequences as firing on it. It writes an `IncidentRecord` of kind `TractorLock` (class Hostile) on acquire, or on the first delivered force for a sweep, even with no damage. Tears add `TractorTear`.
+  - Any Lock or Sweep delivery to another party's ship, grid or character without consent is a **weapon use**: a hostile act with the same standing, fines and faction consequences as firing on it (factions-and-law.md: the Weapon use row for a lock or sweep with no damage, Hostile damage for a tear). It writes an `IncidentRecord` of kind `TractorLock` (class Hostile) on acquire, or on the first delivered force for a sweep, even with no damage. Tears add `TractorTear`.
   - **Consent** is a flag on a docking, tow or landing request from the target's crew or owner. It names one emitter owner group, and lapses on release, on docking, on the target crossing a mouth, or after 120 s without a lock. A third party locking a consenting ship is still a weapon use; the server judges by the flag, not by claims, so no one can stage a fake attack.
   - Own and party bodies need no consent. Unowned wrecks and asteroids are not ships: rings' rules apply.
   - Station docking assist runs only on a visitor's request, still with server-enforced Safe-lock. Hangar tractors on visitors' craft use the landing request.
@@ -609,7 +613,7 @@ public sealed class TractorSystem             // server + client prediction; Sim
 
 ## Open questions for the user
 
-None. The former questions are answered: 1 (pumped mode) by D28, no AM means pull only; 2 (tunnel retaliation) by wormholes.md revision 3; 3 (tractors on other players' ships) by D26, a weapon unless requested; 4 (station sieges) by D27, sieges allowed and capture preferred. The siege and capture details stay proposals until a factions and law doc exists.
+None. The former questions are answered: 1 (pumped mode) by D28, no AM means pull only; 2 (tunnel retaliation) by wormholes.md revision 3; 3 (tractors on other players' ships) by D26, a weapon unless requested; 4 (station sieges) by D27, sieges allowed and capture preferred. The siege and capture rule is factions-and-law.md's (round 6, D57).
 
 ## Review notes
 
@@ -706,3 +710,13 @@ Lead review of revision 2, 2026-11-25, together with rings-and-asteroids.md revi
 - **Shared record (item 14):** body text uses `IncidentRecord`/`IncidentKind` (`TractorLock`, `TractorTear`, `Thrown`, `StationCapture`, `StationDrop`); historical notes keep `HostileAct` with an "(now `IncidentRecord`)" marker.
 - **Stale notes (item 16):** Revision 2 notes' "8 defence beams inside the bubble's 16, release at 2-5 m/s" marked superseded by review; README change line rewritten (open questions answered, row content per item 17).
 - **Tests and files:** `TractorRules.cs` scope and `TractorTests` gain the D26/D27/D28 cases.
+
+## Round 6 / r7 consistency notes
+
+2026-11-26. This doc was not revised in round 6; the r7 cross-check applied what decisions D52-D74 and the round 6 docs ask of it. Decisions were not re-litigated, nothing was built or run.
+
+- **D59 (combat-and-sensors.md, ship-hulls.md):** cuts yield at `u ≥ 0.8` before they break (a `HullHinge`: bend rate, 12° and 1 m limits, 70 % capacity after yield). The impulsive evaluation is the "own damage model" for rams, shells and pulses. The graph stays in material space.
+- **D55 (gravity shields):** a gravity shield lobe runs through this doc's force pass as a Reaction-drive emitter (EM and AM per newton-second, no AM means no shield, D28). Lobes count in the bubble's beam caps as reserved slots, like defence beams (≤ 2 per grid, 4 on stations, 8 per bubble). Deflecting another party's ship is a `TractorLock`-class weapon use unless it is on a collision course (time to impact under 10 s). Mount table rows added for gravity shield emitters and weapons.
+- **D57 (factions-and-law.md):** it owns `IncidentRecord`, the fines for `TractorLock` and `TractorTear`, `ZonePermission.Check` ("unless the zone permits it") and sieges and capture; the Sieges bullet keeps only what is lifted and kept for tractors.
+- **D67:** stress ratings scale with build quality.
+- **D71:** this doc names no Control wiring; an emitter's commands and status are Data ports (ship-design-and-construction.md).

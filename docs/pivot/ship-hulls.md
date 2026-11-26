@@ -19,7 +19,7 @@ The SDF is scratch memory: it is thrown away after the bake, as terrain chunks a
   - Rooms: flood fill the air.
   - Mass, CoM and inertia: integrate occupancy × material density. Interior cuts lower mass automatically.
   - Splitting: solid connectivity.
-  - Damage: just more subtract brushes.
+  - Damage: holes are just more subtract brushes. Dents and bends (round 6, D59) are a small displacement map applied on top of the bake, never baked in ("Damage and splitting").
 - **Sharp hard-surface edges.** Brushes are analytic, so each sign-change edge records the brush that won there and uses its exact gradient as Hermite data. The QEF vertex then puts corners and creases exactly where they belong. Dual contouring uses the same cell/quad topology as `SurfaceNetsMesher`; only vertex placement differs, so this is one mesher family, not a second one.
 
 **Rejected:**
@@ -103,7 +103,7 @@ public sealed class ComponentDesign                 // bought prefab or player m
     public PortalDef Portal;                       // doors/vents: rooms edge when open
 }
 
-public enum SocketType : byte { Mount, Power, Fuel, Data, Coolant, Control }   // round 5 (D17): Control = hard-wired discrete signal (cancel loop, e-stop, eject, arm); see ship-design-and-construction.md "Wiring"
+public enum SocketType : byte { Mount, Power, Fuel, DataIn, DataOut, Coolant }   // round 6 (D71): wiring is power and data only, and a data cable is one-way, so a data socket is an input or an output (round 5's Control socket is gone); see ship-design-and-construction.md "Wiring"
 public struct Socket { public SocketType Type; public int PosX, PosY, PosZ; public uint Rotation; public ushort FootprintHalfX, FootprintHalfZ; }
 
 /// Fixed-point, exactly incremental: subtract old brick, add new, identical on every peer whatever the edit history.
@@ -124,8 +124,14 @@ public struct BrickState                            // per baked brick, kept aft
     public byte SolidLabels, AirLabels;            // local component counts; labels per coarse cell in a side pool
     public int MeshHandle;                         // renderer slot, client only
     public int SectionIndex;                       // collision section (2×2×2 bricks = 16 m)
+    // Round 6 (D59, combat-and-sensors.md section 2):
+    public byte Material;                          // coarse material of the brick's solid cells; 0xFF = mixed, then 2 bits per coarse cell into a 4-entry palette in a side pool (1 KB, mixed bricks only)
+    public int MaterialPalette;                    // side-pool handle when Material == 0xFF
+    public byte DeformGroup;                       // which DeformGroup this brick moves with (0 = root); a brick in a hinge band also names the far group in the hinge
+    public ushort DentFirst; public byte DentCount; // ≤ 16 dents touching this brick, a run in ShipHull.Deform.BrickDents
 }
 
+// ship-atmosphere.md replaces Room, EdgeKind and RoomEdge with ShipAir (its section 10); the three below are kept as the round 5 sketch.
 public struct Room     { public int Id; public float VolumeM3; public float PressureKpa; public GasMix Gas; public int SeedCell; }
 public enum EdgeKind : byte { Door, Vent, Breach, Leak }
 public struct RoomEdge { public int A, B; /* B = -1: space */ public EdgeKind Kind; public float AreaM2; public uint ComponentId; }
@@ -140,6 +146,39 @@ public sealed class ShipHull                        // runtime, one per ship bod
     public NativeList<Room> Rooms;  public NativeList<RoomEdge> Edges;
     public NativeList<CollisionSection> Sections;  // StaticCompound per section, children of one MutableCompound
     public uint KeepSeedCell;                      // after a split: the body keeps only the solid component holding this cell
+    public HullDeformation Deform;                 // round 6 (D59): dents, hinges, deform groups. Null until the first dent or bend
+    public DamageAccum Accum;                      // round 6: server only, only while under fire, never saved (combat-and-sensors.md)
+}
+
+// ---- Round 6 (D59): dents and deformation. Semantics, sizes from energy, merge rules: combat-and-sensors.md section 2. ----
+public enum DentKind : byte { Dish, Crease, Bulge }
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public struct HullDent                              // 28 B, material space (the undeformed bake's coordinates)
+{
+    public uint Id;                                // server allocated; dents sum in Id order
+    public int PosX, PosY, PosZ;                   // 1/1024 m
+    public ushort Dir;                             // octahedral 16 bit: displacement axis
+    public ushort Radius;                          // 1/256 m
+    public short Depth;                            // 1/1024 m, + inward, − a bulge
+    public DentKind Kind; public byte Group;       // Group: the DeformGroup it rides
+    public ushort HalfLength, LenDir;              // Crease only: half length 1/256 m, octahedral direction
+}
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+public struct HullHinge                             // 36 B: a yielded structural cut (tractor-beams.md structure graph)
+{
+    public uint CutId; public PlaneRef Plane;      // the cut plane, material space
+    public int Cx, Cy, Cz;                         // cut centroid, 1/1024 m
+    public ushort Axis; public short AngleQ;       // octahedral axis; angle in 1/1024 rad (≤ 12°)
+    public short ShearX, ShearY, ShearZ;           // 1/1024 m (≤ 1 m)
+    public byte GroupA, GroupB;
+}
+public struct DeformGroup { public uint Rotation; public int OffX, OffY, OffZ; public MassMoments Mass; }   // rigid transform relative to group 0 (smallest-three, 1/1024 m); Mass: this group's share of the undeformed bake (server)
+public sealed class HullDeformation
+{
+    public NativeList<HullDent> Dents;             // ≤ 1024 per ship
+    public NativeList<ushort> BrickDents;          // per-brick dent index runs (BrickState.DentFirst / DentCount)
+    public NativeList<HullHinge> Hinges;           // ≤ 7
+    public NativeList<DeformGroup> Groups;         // ≤ 8; [0] is the root (identity)
 }
 ```
 
@@ -149,7 +188,7 @@ public sealed class ShipHull                        // runtime, one per ship bod
 2. **Evaluate** each brush only over its own band ∩ brick, in order, into padded 34³ `sbyte` density + `byte` material, plus a `ushort` "winning brush" scratch array. Add = min, Subtract = max(d, −b), Paint = material only, Intersect = max. Smooth union uses Bevel as `k`. Ops are scalar plus SIMD, no trig, fixed order: bit-identical on x64. Correctness never depends on it, though: the server owns mass, rooms and splits. A **Mesh** brush is evaluated by its own path (sign by exact ray parity, distance only in the narrow band; "Mesh brushes" below) and then combined with the same min/max ops, so it counts as one brush against the 256 cap.
 3. **Damage layer:** subtract brushes with a jagged edge from `Noise.cs` (seeded by brush Id).
 4. **Outputs:**
-   - **All peers:** `MassMoments`, coarse 0.5 m solid/air bitsets, local connected-component labels.
+   - **All peers:** `MassMoments`, coarse 0.5 m solid/air bitsets, local connected-component labels, and (round 6) the **coarse material**: one byte when every solid coarse cell of the brick has the same material (the common case), else a 2-bit index per coarse cell into a 4-entry palette (majority material of the cell's fine samples; a fifth material in one brick maps to the nearest palette entry by `e_pen`). The hit test of combat-and-sensors.md reads it.
    - **Client only:** dual contouring mesh (QEF from exact brush gradients), split vertices at creases over 40°, `meshopt_simplify` with border vertices locked (Brutal.MeshOptimizer), then pack to `PackedTerrainVertex`. Its 16-bit chunk-local format already works at any cell scale.
    - The server skips meshing.
 5. **Global pass (cheap, main thread or job):** union-find across brick faces, done for solid and for air.
@@ -170,7 +209,7 @@ public sealed class ShipHull                        // runtime, one per ship bod
 
 **Per-tick cost:**
 - **Hull geometry:** zero. Nothing about the hull runs per tick.
-- **Life support:** walks the room graph, ~1 µs per room (50 ships × 20 rooms ≈ 0.02 ms, jobified).
+- **Life support:** 0 at rest (ship-atmosphere.md: connected rooms at equal pressure are one lazily settled zone; only rooms out of equilibrium are stepped, at 10 Hz). Was: walks the room graph, ~1 µs per room.
 - **Edits:** mass update is O(1) per changed brick (Int128 subtract/add). Collision update is one `MutableCompoundShape.ModifyShape` per changed section, then `MotionProperties.SetMassProperties`; estimated < 0.1 ms main thread.
 
 ### Mesh brushes (round 5, D11: full mesh editing, still cuttable)
@@ -188,9 +227,9 @@ public sealed class ShipHull                        // runtime, one per ship bod
 **Still cuttable, "and whatnot".** Because the booleans are in the SDF, a mesh hull loses nothing the primitive hull had:
 - **Interiors:** Hollow on a mesh brush emits an `Interior | Inset` Subtract brush pointing at the same mesh, `Bevel` = wall thickness (0.5–2 m): the mesh's SDF eroded by the wall, an exact offset inside the band. Cut room, cut corridor and any primitive or mesh Subtract still work over it.
 - **Damage holes, breaches, leaks, splits, repair patches:** unchanged; the damage layer subtracts from whatever the brush list made.
-- **In-world cutting:** a cutting torch (boarding, salvage, rescue) writes Subtract brushes into the damage layer along the cut path (a swept capsule per 0.5 m of cut, coalesced by the existing rule). A closed cut loop through a wall makes a hole; a cut across a whole section is a split. Same caps (4096 per ship, 64 per brick). Station grids are cut the same way: boarding a station to reach its `CommandCore` is the D27 capture path (ship-design-and-construction.md, rings-and-asteroids.md "Sieges (D27)"). Cutting into another party's grid without consent is a hostile act and writes an `IncidentRecord` (rings-and-asteroids.md).
+- **In-world cutting:** a cutting torch (boarding, salvage, rescue) writes Subtract brushes into the damage layer along the cut path (a swept capsule per 0.5 m of cut, coalesced by the existing rule). A closed cut loop through a wall makes a hole; a cut across a whole section is a split. Same caps (4096 per ship, 64 per brick). Station grids are cut the same way: boarding a station to reach its `CommandCore` is the D27 capture path (ship-design-and-construction.md; factions-and-law.md "Sieges and capture"). Cutting into another party's grid without consent is a hostile act and writes an `IncidentRecord` (kind `Boarding`; factions-and-law.md owns the record).
 - **Mass, CoM, inertia, rooms, LOD, collision:** read the bake, so they need no mesh-specific code.
-- **Dents:** still not modelled (open question 3), but a mesh brush is the natural place for them later: a dent could displace control vertices in a per-ship damage copy of the mesh.
+- **Dents and bends (round 6, D59):** modelled as a displacement map over the bake ("Damage and splitting"), so they work on mesh and primitive hulls alike. The earlier idea of displacing control vertices in a per-ship copy of the mesh is withdrawn (mesh brushes only, up to 90 KB per ship per mesh, a BVH rebuild per dent).
 
 **Validation (designer locally on every commit; server on save and import; validated `MeshHash`es are cached so an unchanged mesh is never re-checked; the cache keeps the canonical bytes and compares them on every hit, because xxHash64 is not collision resistant and a crafted collision must not pass an invalid mesh):**
 
@@ -235,7 +274,13 @@ public sealed class ShipHull                        // runtime, one per ship bod
 - **Escape pod bays and station thrusters (D25).** A pod bay is a component whose cutter opens a launch tube to the hull surface (same clear-path rule) ending in an outer hatch (a door portal), so the bay stays a sealed room until launch; station thrusters are ordinary thruster placements.
 - **Station command core (D27).** Every `PlanClass.Station` carries a `CommandCore` component (the ownership token; family, rating and panel in ship-design-and-construction.md). Its housing must sit inside a room (an air component of the bake), because capture is an `Override` held at the core with no defender contesting inside that room's `GridVolume`; Error otherwise. The room is reached like any other: doors, docking, or the cutting torch.
 - **Inertial dampener coverage (D9).** A dampener's bubble covers the rooms (air components of the bake) whose **every** air cell lies inside its radius, plus designer-marked **bay volumes** (boxes) inside the radius for open hangars, which touch space and so are not rooms; bodies entering or leaving a bay box are grid-membership events. The covered list is recomputed with the rooms, on topology change only, and `m_in` on events (exotic-matter.md). Covered rooms feel `g_floor + a_man·max(0, 1 − a_d/|a_man|)` (frames-and-zones.md; `a_d`, `a_max`, `MassMax` in exotic-matter.md): the dampener cancels manoeuvre-type acceleration (thrust, tractor forces, throat drag) up to `a_d` and leaks the excess; plating only adds floor gravity; uncovered rooms feel all of `a_man`. Hangar tractors acting on a visitor's craft in a bay need the visitor's landing request (D26 consent, tractor-beams.md).
-- **Wiring (D17).** Cables are routes (`Medium` Power, Data, Control) laid along hull inner surfaces in trays, or **concealed** inside a hull brush through penetrations (harder to cut, costs a penetration fitting each way). Their segments are tested against damage brushes like framed beams (capsule vs brush); see ship-design-and-construction.md, "Wiring".
+- **Wiring (D17, D71).** Cables are routes of two media, `Power` and `Data` (round 6, D71: no separate Control medium; a data cable is one-way, from a `DataOut` socket to any number of `DataIn` sockets), laid along hull inner surfaces in trays, or **concealed** inside a hull brush through penetrations (harder to cut, costs a penetration fitting each way). Their segments are tested against damage brushes like framed beams (capsule vs brush), and against dents and hinge bands by combat-and-sensors.md's rule (a segment crossing a dent of ≥ 0.25 m is damaged, ≥ 0.6 m cut); see ship-design-and-construction.md, "Wiring".
+- **Shield emitters (round 6, D55).** Ship shields are components, defined in combat-and-sensors.md section 3 (families in ship-design-and-construction.md). What the hull gives them:
+  - **Particle shield emitters** are exterior components. Each covers the hull facing within 60° of its **mount normal**, so where the designer mounts them is the coverage. The bake keeps a per-ship `FacingTable` (14 directions, the `ShieldTable` directions, each listing the emitters that cover it), rebuilt on component or topology change only. A dent of ≥ 0.25 m inside a panel's facing, or a hinge between the emitter and its facing, cuts its area until a re-tune.
+  - **Energy shield projectors** may sit anywhere on the grid; their bubble is the ellipsoid of the grid's bounds plus 5 m, read from the hull AABB.
+  - **Gravity shield emitters** are exterior, gimballed, and mount like a tractor emitter: the mount footprint must carry 1.5 × the class force (tractor-beams.md's mount table), checked against the structure graph.
+  - Emitters take damage like any component (the shared Integrity rule) and detach by the anchor-cell rule.
+- **Suit lockers (round 6, D64).** EVA suits are not worn by default, so `SuitLocker` components (ship-design-and-construction.md, "Suit lockers") stand beside airlocks, in hangars and in crew rooms. To the hull they are ordinary interior placements against a wall (the 70 % mount rule), with a Power socket and ship-atmosphere.md's `Air` socket. The designer's reach checks (an airlock needs one in the room on its ship side or within 10 m of its inner door; ship-atmosphere.md's validation rows) read the room labels and placement positions; nothing is stored in the hull for them.
 
 ### Collision (Jolt)
 
@@ -249,8 +294,9 @@ public sealed class ShipHull                        // runtime, one per ship bod
 - Sections of 16 m become `StaticCompound`s. A `MutableCompound` holds the sections (linear scan stays fine at ~30–100 children), wrapped in `OffsetCenterOfMassShape` so the body uses the real CoM.
 - Mass and inertia come from `MassMoments`, never from the shapes, because filled rooms would make the shapes far too heavy.
 - **Limits:** ≤ 2048 hulls per ship, ≤ 64 vertices per hull.
+- **Dents and bends (round 6, D59):** the convex hulls are built in material space, then the points (≤ 64 each) of the 4 m cells a dent touches are displaced by the dent map and those hulls rebuilt: one `ModifyShape` per section, as for a hole. Sections are children of the `MutableCompound`, so a section takes its `DeformGroup`'s rigid transform as its child transform; sections inside a hinge band are rebuilt with blended points.
 
-**Interior (walking, loose items, small craft in hangars):** the ship is its own physics zone. Inside that grid the hull is a **static** body built from the simplified render mesh via `StaticMeshShape`, only for bricks within 32 m of an occupant (streamed like terrain), ≤ 2k tris per brick. This fits the solar > planet > ship grid design and keeps interior precision local. Grid entry/exit rules belong to the zones design.
+**Interior (walking, loose items, small craft in hangars):** the ship is its own physics zone. Inside that grid the hull is a **static** body built from the simplified render mesh via `StaticMeshShape`, only for bricks within 32 m of an occupant (streamed like terrain), ≤ 2k tris per brick. Round 6: its vertices are displaced by the dent and group map when a brick's interior mesh is built or rebuilt, so a dented wall is dented to walk into. This fits the solar > planet > ship grid design and keeps interior precision local. Grid entry/exit rules belong to the zones design.
 
 **Framework proposal (separate, not done here):** ask upstream BRUTAL to ship a native Jolt with the missing MeshShape and NarrowPhase exports. Until then, `TriangleBvh` serves build-tool picking against hull bricks.
 
@@ -262,7 +308,7 @@ public sealed class ShipHull                        // runtime, one per ship bod
 - **Editing aids:** bevel handle, mirror planes (mirrored brushes are stored as real brushes), select / move / duplicate / group, and save a group as a HullChunk prefab.
 - **Viewing aids:** cross-section clip plane, hull X-ray, hide groups.
 - **Feedback while dragging:** a GPU-raymarched ghost of the one brush. Committing triggers the bake; nothing is baked per frame while dragging.
-- **Undo/redo** is brush list diffs. Edits go to the server as requests, the server validates them (materials, permissions, limits) and broadcasts with a sequence number. (In survival play ship-design-and-construction.md supersedes this: build mode edits plans and the live ship changes through construction steps; this direct path is creative mode.)
+- **Undo/redo** is brush list diffs. Edits go to the server as requests, the server validates them (materials, permissions, limits; "permissions" means the grid's `HullTitle` holder, its organisation's rights, or build-site rules: factions-and-law.md) and broadcasts with a sequence number. (In survival play ship-design-and-construction.md supersedes this: build mode edits plans and the live ship changes through construction steps; this direct path is creative mode.)
 - **Components:**
   - Palette of bought prefabs and the player's own designs. Placing raycasts the hull (`TriangleBvh`) and aligns the Mount socket to the surface normal, snapped to the grid.
   - It is valid only if ≥ 70% of the mount footprint has solid hull behind it, sampled against the coarse occupancy.
@@ -273,12 +319,12 @@ public sealed class ShipHull                        // runtime, one per ship bod
 ### Networking and saves
 
 - **On join or stream-in:** send `ContentHash`. The client asks for the blueprint only on a cache miss, then gets the brush array (delta + zlib via Brutal.ZLib). A 2k-brush ship is ~25 KB.
-- **Edits and damage:** `{shipId, seq, insert/remove/modify brush at index}` (~40 B), and `{shipId, seq, damage brush}` (34 B).
+- **Edits and damage:** `{shipId, seq, insert/remove/modify brush at index}` (~40 B), and `{shipId, seq, damage brush}` (34 B). Round 6 (D59): `HullDentMsg` (28 B, add, change or remove one dent) and `HullBendMsg` (36 B hinge + the new group transform, followed by the server's mass properties, ~60 B), reliable, in the same per-ship sequence as damage brushes (combat-and-sensors.md "Storage, network, determinism").
 - **Mesh entries (round 5):** fetched by `MeshHash` like blueprints (a ship that reuses a mesh prefab sends 8 B). A changed mesh goes as `MeshPatch {meshHashOld, firstVertex, count, int32×3 deltas}` when only positions moved, or a whole entry (≤ ~90 KB raw, typically 5–20 KB packed) after a topology op. In the plan model (ship-design-and-construction.md) these ride in the plan diff on save.
 - **Determinism:**
   - **Server-authoritative:** mass, rooms, splits and collision. Clients' local values are used only for prediction and visuals.
   - **Deterministic by construction anyway:** quantized inputs, fixed order, no trig, Int128 moments.
-- **Saves:** the same bytes. The bake cache on disk is optional and keyed by hash.
+- **Saves:** the same bytes. The bake cache on disk is optional and keyed by hash. Dents, hinges and group transforms are saved with the damage layer (≤ 28 KB + 252 B + 128 B per ship); `DamageAccum` is not saved (it is flushed into dents and leak area first). Dents and bends never touch the bake cache.
 
 ### Mass, volume, inertia
 
@@ -286,8 +332,11 @@ public sealed class ShipHull                        // runtime, one per ship bod
 - Accumulate `MassMoments` per brick in fixed point, sum over bricks, add components via the parallel-axis theorem, and convert once to Jolt `MassProperties` (`SetMass`, `SetInertia`) with the CoM offset.
 - Interior Subtract brushes remove mass by construction.
 - Room volume = air cell count × 0.125 m³.
+- **Round 6 (D59):** mass always comes from the **undeformed** bake, so a dent or bend never changes it (a dent moves material, it removes none). A bend moves whole groups: the server recomputes the centre of mass and inertia from each `DeformGroup`'s moments and transform on the bend event and sends them (review.md X3). A room's volume is reduced by the dent volume inside it, as one number per room.
 
 ### Rooms and pressurisation
+
+ship-atmosphere.md owns gas, runtime rooms and the flow law (D38-D42, D60-D66), and wins where the bullets below differ. Its changes to this section: rooms are **design rooms** and never merge with space at runtime (a hole is an opening found from `Air & ~AirDesign`, one extra bitset on damaged bricks only); rooms and `GridVolume` share one labelling; cells opened by damage belong to the adjacent room; ≤ 255 rooms and ≤ 1,024 edges per grid; nothing runs per tick at rest.
 
 - **Air grid:** the coarse 0.5 m grid. A cell is air only if all its fine samples are air.
 - **Labelling:** per-brick labels plus union-find across bricks. The component touching the ship-bounds margin is space; every other component is a sealed room.
@@ -296,16 +345,57 @@ public sealed class ShipHull                        // runtime, one per ship bod
 - **Breaches:**
   - A hole of ≥ 0.5 m merges a room with space and creates a Breach edge with the damage brush's cross-section area.
   - A smaller hole: if the damage brush's AABB touches both room cells and space cells, it becomes a Leak edge with area πr².
-- **Per tick:** pressure and gas flow over edges.
+  - **Round 6 (D59):** damage below brush size and dents make `Leak` edges without any re-bake: pinhole area from `DamageAccum` adds straight to the edge between the two regions it joins, and a deep dent on a room wall (`Depth / Radius ≥ 0.2`) or a hinge band opens seam leaks (areas in combat-and-sensors.md; flow in ship-atmosphere.md).
+- **Per tick:** nothing at rest. Gas flow over edges is ship-atmosphere.md's event-driven step (rooms out of equilibrium only, 10 Hz).
 
 ### Damage and splitting
 
-- **Holes** are Subtract brushes in the damage layer: sphere or ellipsoid, jagged, radius ≥ 0.25 m. Repair = remove the damage brush or add a patch brush.
+**Round 6 (D59): hull damage has three forms, holes, dents and deformation.** combat-and-sensors.md section 2 owns what causes each (the hit law, contact and ram hits, the impulsive structural pass), how big it is, what it does to doors, seals, components and crew, and how it is repaired. This doc owns what the hull **stores** and how each form reaches the bake, the mesh, collision, mass, splits, LOD and saves.
+
+| Form | What the hull stores | Where | Size and caps | In the bake? |
+| --- | --- | --- | --- | --- |
+| **Hole** | A jagged Subtract `HullBrush` (sphere, ellipsoid or capsule), in material space | `ShipHull.Damage` | 34 B; ≤ 4096 per ship, ≤ 64 per brick | Yes: the touched bricks re-bake |
+| Damage too small for a brush (pits, pinholes, shallow dents) | Removed volume, centroid, dent volume vector and pinhole area per 2 m cell | `ShipHull.Accum` (`DamageAccum`), server only, while under fire | 48 B × ≤ 256 active cells; dropped after 60 s without a hit; not saved | No. It emits a brush, a dent or `Leak` area when a cell crosses a threshold |
+| **Dent** | A `HullDent` displacement record: position, axis, radius, depth, kind (Dish, Crease, Bulge), group | `ShipHull.Deform.Dents`, plus a per-brick index run | 28 B; ≤ 1024 per ship, ≤ 16 per brick | No |
+| **Deformation** (a bend) | A `HullHinge` per yielded structural cut, a `DeformGroup` rigid transform per side, and a group id per brick | `ShipHull.Deform.Hinges` / `Groups`, `BrickState.DeformGroup` | 36 B per hinge, ≤ 7; 16 B per group transform, ≤ 8; 1 B per brick | No |
+| (needed by all three) | Coarse material per 0.5 m solid cell | `BrickState.Material` (+ palette) | 1 B per brick, or 2 bits per cell for mixed bricks | Yes: an output of the bake |
+
+- **Material space.** The brush list, the bake and its cache, occupancy, rooms, air, wiring and the structure graph all stay in the **undeformed** hull's coordinates. A dent or bend is a map from that space to ship space, `x = T_g(X + Σ u_k(X))` (dent displacements `u_k` summed in `Id` order and clamped to 2 m, then the brick's group transform, blended across a 4 m hinge band), applied only where shape is seen or touched:
+  - **Render:** in the hull vertex shader (`hull.vert`), from a per-ship dent buffer and group-transform buffer; the per-brick instance record carries its dent index run (≤ 16) and its one or two group ids. Normals come from the analytic gradient. No re-mesh, no vertex upload, no bake.
+  - **Exterior collision:** displaced convex-hull points and per-section child transforms ("Collision").
+  - **Interior collision:** displaced vertices when a brick's walk mesh is built.
+  - **World-to-hull queries** (a character's room, a hit point, a pick ray) map back by `X ≈ x − Σu(x)` after the inverse group transform (first order, ~50 ns).
+- **Why not in the bake:** a brush list adds and subtracts, and a dent moves material without removing it. Resampling the SDF at displaced points would need a 2 m pad per brick (about 3× the bake), would invalidate the bake cache on every dent and would drift mass. The map costs no bake and conserves mass by construction.
+- **Damage brushes are stored in material space**, so a hole made before a dent moves with the plate, and one made after lands where it was hit (the hit point is mapped back first).
+- **Per-tick cost: still zero.** Dents and bends are events; nothing about them runs per tick on the CPU. The vertex shader pays ≤ 16 dent evaluations for bricks that have dents and none for the rest.
+
+**Holes**
+- Subtract brushes in the damage layer: sphere, ellipsoid or capsule (a perforation along a ray, the cutting torch's swept capsule), jagged, radius ≥ 0.25 m. Repair = remove the damage brush or add a patch brush.
+- **Sources:** weapon perforations and craters, AM breaches, contacts and rams, tears (below), the cutting torch, blow-out panels. Smaller results never make a brush: they accumulate in `DamageAccum`, which emits one 0.25 m brush when a 2 m cell has lost 0.065 m³, and adds pinhole area straight to a `Leak` edge with no re-bake (combat-and-sensors.md "Form 1: holes").
+- **Throttle:** ≤ 8 new damage brushes per ship per second (largest first, the rest merge into the accumulator), under the existing limit of 16 brick re-bakes started per tick across all ships.
 - **Coalescing:** when overlap is > 50%, merge into the bounding sphere. Caps: 4096 per ship, 64 per brick.
+
+**Dents**
+- A `HullDent` displaces material along its axis by `Depth · w(ρ / Radius)`, `w(s) = (1 − s²)²`, within a slab along the axis (combat-and-sensors.md "Form 2: dents" has the full function). The displacement depends only on the distance from the axis, so it is a shear with zero divergence: volume is conserved.
+- **Index:** adding, merging or removing a dent rewrites the `BrickDents` runs of the bricks its bounding box touches (≤ 16 per brick; past the cap the smallest dent in that brick merges into its nearest neighbour). ≤ 4 dent records created or changed per ship per second.
+- **Tear:** at `Depth / Radius > 0.35` the panel ruptures: the record stays and a hole brush of radius `0.3 · Radius` is emitted at its centre, so a dent can become a breach.
+- **Glazing never dents:** a dent whose radius covers a glazing-material cell shatters it to a hole instead.
+
+**Deformation (bends)**
+- The structure graph (tractor-beams.md: 4 m nodes, joints, cut capacities, built lazily from the same occupancy) yields a cut at 80 % of its capacity before it breaks. A yielded cut is a `HullHinge`: the bricks on its far side form a `DeformGroup` that rotates (≤ 12°) and shears (≤ 1 m) about the cut. Past either limit, at 8 groups, or where a brick would touch a third hinge, the cut **tears** instead: that is the split rule below.
+- **Group assignment** is per brick (`BrickState.DeformGroup`), set once when the hinge forms, by which side of the cut plane the brick's solid centroid lies on. Bricks within 4 m of the plane carry both group ids and blend the two transforms by smoothstep on the signed distance, so the hull bends without a crack.
+- **Dents ride their group** (`HullDent.Group`), so a dented plate on a bent tail stays dented in the right place.
+
+**What follows from a dent or bend** (jammed doors, seam leaks, room volume, misaligned components, damaged cables and pipes, lost lift, weakened joints, crew injury, shield coverage) is evaluated on the event by the owning systems, by the rules in combat-and-sensors.md "What dents and bends do to the ship". The hull's part is to answer two queries: the displacement at a point, and the dents and hinge bands overlapping a box.
+
+**Repair** removes records: press out (one dent), cut out and replace (the panel becomes a repair piece with weld joints, ship-design-and-construction.md), straighten in a yard jig (a hinge back to zero). Nothing heals on its own.
+
+**Splitting**
 - **Split check:** after each damage event, run solid union-find over the touched bricks.
   - If it becomes disconnected, the piece with the most mass keeps the body.
   - Each other piece becomes a new body whose blueprint is: the brushes whose AABB meets the piece's bounds (copied, re-centred; mesh brushes keep pointing at their `HullMesh` by `MeshHash`, so no mesh bytes are copied) + the damage brushes + `KeepSeedCell`. The bake discards solid not connected to the seed. Seeds are a few bytes, so this stays network-compact and deterministic.
   - A piece of < 2 m³ becomes debris: a convex hull plus a mesh snapshot, no blueprint, despawned on a timer.
+  - **Dents and bends on a split (round 6):** the union-find runs in material space, so deformation never changes connectivity. Each new body takes the dents whose centre lies in its solid and the hinges whose cut lies inside it; the group holding its seed cell becomes its root, and that group's transform is folded into the new body's pose (so the piece appears exactly where it was drawn). A hinge whose cut is the split surface is dropped, and its far group ends with the piece that left.
 - **Components** go with the piece holding their anchor cell. If the anchor cell is destroyed, the component detaches as its own dynamic body.
 
 ### LOD
@@ -315,6 +405,7 @@ public sealed class ShipHull                        // runtime, one per ship bod
 - **Mesh brushes at LOD ≥ 1** use one subdivision level fewer (level 0 at LOD ≥ 2): the SDF is re-baked at coarser cells anyway, so the finer cage would be wasted triangles in the BVH. Sign comes from the reduced mesh too, which can shift coarse occupancy by under one LOD cell; mass and rooms always come from the L0 bake, so this is visual only.
 - **Beyond ~2 km:** one whole-ship bake at 2–4 m cells.
 - **Beyond ~30 km:** impostor or lit point.
+- **Dents and bends (round 6):** LOD ≥ 2 drops dents under 0.5 m depth from the brick's index run. The whole-ship far bake and the impostor ignore dents and keep group transforms (the far bake is drawn per group), so a broken-backed ship reads as one from 20 km.
 - **L0 budget:** ≤ 400k tris per 100 m ship (~1M raw, ~100k after simplify). L0 mesh memory ~10–15 MB per 100 m ship; only nearby ships hold L0.
 
 ### Limits (enforced by the build tool and the server)
@@ -323,7 +414,10 @@ public sealed class ShipHull                        // runtime, one per ship bod
 | --- | --- |
 | Ship extent | ≤ 1 km (float local frame error ≤ 6e-5 m) |
 | Hull brushes | ≤ 8192 per ship |
-| Damage brushes | ≤ 4096 per ship |
+| Damage brushes | ≤ 4096 per ship; ≤ 64 per brick; ≤ 8 new per ship per second (round 6) |
+| Dents (round 6, D59) | ≤ 1024 per ship (28 KB); ≤ 16 per brick; summed displacement clamped to 2 m; ≤ 4 created or changed per ship per second |
+| Hinges and deform groups (round 6, D59) | ≤ 7 hinges, ≤ 8 groups per ship; ≤ 2 hinges touching one brick; ≤ 12° and ≤ 1 m per hinge, then it tears |
+| `DamageAccum` (round 6) | ≤ 256 active 2 m cells per ship, server only |
 | Brushes overlapping one brick | ≤ 256 |
 | Mesh brushes (round 5) | ≤ 256 `MeshTable` entries; ≤ 4096 control vertices and faces each; ≤ 65,536 subdivided triangles each; ≤ 131,072 control vertices and ≤ 1M subdivided triangles per ship; ≤ 8192 mesh triangles per brick |
 | Mesh inset (Hollow wall) | 0.5–2 m |
@@ -350,14 +444,14 @@ public sealed class ShipHull                        // runtime, one per ship bod
 | `src/Physics/ObjectLayers.cs` | **Add** ShipExterior and ShipInterior layers. |
 | `src/Terrain.Runtime/Rendering/TerrainRenderer.cs`, `src/Terrain.Runtime/Rendering/RangeAllocator.cs` | **Reuse** the arena, staging and indirect-draw code. Push constants become per-draw instance data (ship pose camera-relative from double, plus brick origin and scale). **Cut** the `WaterFogVolume` dependency. |
 | `src/Terrain/Voxels/Noise.cs` | **Reuse** for jagged damage edges. |
-| **New** | `src/Ships` (Blueprint, Brushes, Bake, Mass, Rooms, Damage, Components), `src/Ships.Runtime` (jobs, collision sections, renderer, build tools), `data/components`, `data/ship-materials`. Round 5: `src/Ships/Meshes/` (`HullMesh.cs`, `MeshCanonical.cs` (canonical bytes, `MeshHash`), `IntSubdivision.cs` (integer Catmull-Clark, creases), `MeshSdf.cs` (sign rows, band distance, inset), `MeshValidate.cs`), `src/Ships/AeroStrips.cs` (wing planform from the bake), `src/Designer/Tools/MeshTool.cs` (editor ops, each an invertible op), `data/aero/airfoils.json`. |
+| **New** | `src/Ships` (Blueprint, Brushes, Bake, Mass, Rooms, Damage, Components), `src/Ships.Runtime` (jobs, collision sections, renderer, build tools), `data/components`, `data/ship-materials`. Round 5: `src/Ships/Meshes/` (`HullMesh.cs`, `MeshCanonical.cs` (canonical bytes, `MeshHash`), `IntSubdivision.cs` (integer Catmull-Clark, creases), `MeshSdf.cs` (sign rows, band distance, inset), `MeshValidate.cs`), `src/Ships/AeroStrips.cs` (wing planform from the bake), `src/Designer/Tools/MeshTool.cs` (editor ops, each an invertible op), `data/aero/airfoils.json`. Round 6 (D59): `src/Ships/Damage/HullDeformation.cs` (dent and hinge records, per-brick index runs, the displacement map and its inverse, group assignment, split hand-over), `src/Ships/Damage/CoarseMaterial.cs` (per-brick material byte and palette); `shaders/hull.vert` applies the dent and group map. The hit law, `DamageAccum` and the hull DDA live in combat-and-sensors.md's `src/Combat/`. |
 
 ### Open questions for the user
 
 1. **Hull resolution:** is 0.25 m cells with a 0.5 m minimum wall acceptable for hulls? Each halving costs about 4–8× in bake time and memory; finer detail would go into components.
 2. ~~**Smooth hulls**~~ (decided, D11: full mesh editing, still cuttable). Answered by mesh brushes with integer subdivision and creases; organic hulls are subdivision cages. Lofted / spline surfaces are not planned.
    - **New sub-question:** mesh detail finer than the 0.25 m cell (thin fins, small chamfers) is lost in the bake and flagged by the thin-feature warning. Is that acceptable, or should small craft (≤ 30 m) get an optional 0.125 m hull cell (about 4–8× bake time and memory for those ships)?
-3. **Damage:** are CSG holes (clean or jagged) enough, or do you want dents and deformation? This representation doesn't do dents.
+3. ~~**Damage**~~ (decided, D59: holes, dents and deformation, all three). Holes stay damage brushes; dents and bends are a displacement map over the bake ("Damage and splitting"; causes and effects in combat-and-sensors.md section 2).
 4. ~~**Player-made components**~~ (answered by ship-design-and-construction.md: function is derived from a part graph, not from housing geometry).
 5. ~~**Survival building**~~ (answered by ship-design-and-construction.md: plans, bought or made parts, and construction steps; creative mode builds instantly).
 
@@ -398,3 +492,24 @@ Skeptical lead review, 2026-11-25, against decisions.md (then decisions-r5.md) a
 - **Dampener coverage (items 4, 5):** covered rooms use frames' `g_floor + a_man·max(0, 1 − a_d/|a_man|)` with exotic-matter's `a_d`, `a_max`, `MassMax`; the dampener, not plating, cancels thrust, tractor forces and throat drag; uncovered rooms feel all of it.
 - **Hangar bays (D26, item 11):** hangar tractors on a visitor's craft need the landing request.
 - D28 and D33 do not touch this doc; no other conflict-list item names it.
+
+## Round 6 notes
+
+User decisions D52-D74 (decisions.md) applied in place; they win over earlier text. Decisions were not re-litigated.
+
+Edits here:
+- **D59, holes, dents and deformation.** "Damage and splitting" rewritten around three forms, with a table of what the hull stores for each: damage brushes (holes, material space), `DamageAccum` (sub-brush damage, server, transient), `HullDent` records with per-brick index runs (dents), `HullHinge` + `DeformGroup` + a per-brick group id (bends), and a coarse material per 0.5 m cell. New structs `HullDent` (28 B), `HullHinge` (36 B), `DeformGroup`, `HullDeformation`; `BrickState` gains `Material`, `MaterialPalette`, `DeformGroup`, `DentFirst` / `DentCount`; `ShipHull` gains `Deform` and `Accum`. The map is applied in `hull.vert`, to exterior convex-hull points and section child transforms, and to interior walk-mesh vertices; never in the bake. Mass stays the undeformed bake's; centre of mass and inertia are recomputed per group on a bend. Hull-side rules added: group assignment per brick, the tear rule, glazing never dents, what a split does with dents, hinges and groups, LOD rules, limits rows, `HullDentMsg` / `HullBendMsg`, saves, files. The round 5 "displace control vertices" note is withdrawn. Causes, sizes, effects and repair are referenced from combat-and-sensors.md section 2, not repeated.
+- **D71, wiring is power and data.** `SocketType.Control` removed; `Data` became `DataIn` / `DataOut` because a data cable is one-way. The Wiring hull-feature bullet says two media and adds the dent and hinge test for cable segments.
+- **D55, shield emitters.** New hull-feature bullet: particle emitters cover facing by mount normal (`FacingTable`), energy projectors use the grid bounds, gravity emitters mount like tractor emitters; all defined in combat-and-sensors.md section 3.
+- **D64, suit lockers.** New hull-feature bullet: ordinary interior placements with Power and `Air` sockets; the reach checks are ship-atmosphere.md's validation rows.
+- **Open questions:** 3 marked decided (D59). Still open: 1 (hull resolution) and the 0.125 m sub-question under 2.
+- The round 5 notes above that name a `Control` socket or medium are history; this section and the text above supersede them.
+
+Changes other docs need:
+- **combat-and-sensors.md:** consistent with this doc. To add there or accept from here: `HullHinge`'s field layout and the 16 B `DeformGroup` transform; group assignment is per brick by solid centroid; the split hand-over rule (a piece takes its dents and inner hinges, its group transform folds into the new body's pose); glazing shatters under any dent whose radius covers it; the 5-materials-in-one-brick palette fallback. It does not say where an energy shield projector mounts (this doc assumes anywhere on the grid).
+- **tractor-beams.md:** the structure graph stays in material space and is never rebuilt for a dent or bend alone; a yielded cut is this doc's `HullHinge`, and a cut that cannot yield (limits above) tears through the existing split rule.
+- **ship-atmosphere.md:** (done in the r7 consistency pass) its remaining Control wiring (the `Seal` Control input and loop, the `Interlock` Control pair per door, the `BarrierDown` Control output, the breach shield's Control `Inhibit`, the `VentInhibit` key switch "on a Control line") must become Data lines (D71; ship-design-and-construction.md "Wiring": hold lines and interlocks). `SocketType` is now `Mount, Power, Fuel, DataIn, DataOut, Coolant` plus its `Air`. Pinhole and seam `Leak` edges arrive without a re-bake. Suit lockers (D64) are its `fn.suit_locker`; this doc and ship-design-and-construction.md follow its slots, ports and validation rows.
+- **ai-ships-and-crew.md:** `DamagePool` rows for hulls below L2 carry dents and hinges as well as brushes (combat-and-sensors.md gives the sizes); a hull promoted to a body applies them with no re-bake.
+- **README.md / project CLAUDE.md:** "damage adds subtract brushes" is now "holes are subtract brushes; dents and bends are a displacement map"; wiring is "power, data". (README.md done in the r7 pass; the project CLAUDE.md is outside the staged set.)
+
+**r7 consistency pass (2026-11-26):** the asks above were applied in the staged docs (combat-and-sensors.md accepts this doc's stored layouts and hull-side rules and says where an energy projector mounts; tractor-beams.md states yield, hinges and material space). Here: "Rooms and pressurisation" now defers to ship-atmosphere.md (design rooms, `ShipAir`, 0 per tick at rest), the cutting-torch and edit-permission lines cite factions-and-law.md (`Boarding`, `HullTitle`).

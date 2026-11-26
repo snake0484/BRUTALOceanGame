@@ -242,6 +242,8 @@ Total for a system: roughly 150–200 MB GPU and 50–80 MB CPU.
 ### Edits, storage and network
 
 - **Server-authoritative.** The client sends an edit request. The server validates it, stamps `Seq`, appends it to the region's op log, and broadcasts it to clients whose interest regions overlap. Clients apply it through the existing `ApplyBrush` path, which marks dirty every loaded leaf at any LOD the op affects.
+  - **Land rights (round 6, D74):** validation covers materials, the shore mask and `LandRights.Check` (factions-and-law.md "Land and mining rights"; ~50 ns, cached on the tool for 1 s per cell and claim). It returns `Allowed`, `Illegal` (the op runs and its volume is counted toward an `IllegalDig` or `ClaimJump` case) or `Refused` (settlement ground, see "Protected shores and seabeds"). Factions control most planets, so digging, tunnelling and building need owned land or approval; `Wild` bodies are free.
+  - **Cave drills and tunnelling vehicles (D74):** the `CaveDrill` core (rings-and-asteroids.md; `regulated`) edits planet voxels through this same path as ordinary Subtract ops, one land check per stroke. Proposed rate and op radius as on asteroids (0.1 m³/s, 0.75–1.5 m), data per planet material.
 - **Compaction:** after 64 ops a LOD-0 chunk is baked: final 32³ density + material, RLE then zlib (`Brutal.ZLib`, already in BRUTAL), ~3–8 KB. Its ops are dropped from the fine tier, but kept in the coarse tiers (until the coarse cell compacts, below) so distant views still show large craters.
 - **Joining clients** download snapshots plus pending ops for their interest region.
 - **Persistence:** one file per LOD-10 region (32 km) holding snapshots plus the op log.
@@ -250,7 +252,7 @@ Total for a system: roughly 150–200 MB GPU and 50–80 MB CPU.
 **Permanence and growth bounds (user decision D32: planet edits are permanent).** Nothing regrows, and nothing is aged out. Growth is bounded by structure, not by time:
 - **Per LOD-0 chunk:** at most one snapshot (≤ 8 KB; a chunk dug out to air or filled solid compacts to a 16 B uniform record) plus fewer than 64 pending fine ops (< 2.6 KB). So **≤ ~10.5 KB per touched chunk, forever**, however many times it is edited.
 - **Coarse tiers:** ops with `Radius ≥ 4 m` were kept forever in the coarse tier for distant views. They now compact too: after 256 ops in a LOD-5 cell (1 km), the cell bakes one snapshot per touched **LOD-1..5 surface chunk** (32³ at that chunk's own voxel size, ~4–8 KB each), and its coarse ops drop. Baking only the LOD-5 chunk would show a 20 m crater at 32 m voxels from a LOD-2/3 leaf 1 km away; per-LOD snapshots keep each leaf at its own resolution. A fully worked km² holds ~480 such chunks (~4 MB), under a third of its LOD-0 bound (~1,400 chunks × 10.5 KB).
-- **Huge tier** (`Radius ≥ 32 m`: craters, bombs, impacts, dropped stations (rare under D27: factions prefer capture, and a drop is the `StationDrop` incident in rings-and-asteroids' `IncidentRecord`), warp arrivals that hit): 40 B per op, bounded by its cost (AM, impacts), filed by LOD-10 cell (32 km) so a leaf scans only the cells it covers (≤ 64 lists for a LOD-12 leaf). Once a cell's list passes 256 ops, it compacts like the coarse tier into snapshots of the touched LOD-6..12 surface chunks.
+- **Huge tier** (`Radius ≥ 32 m`: craters, bombs, impacts, dropped stations (rare under D27: factions prefer capture, and a drop is the `StationDrop` incident in the shared `IncidentRecord`, owned by factions-and-law.md), warp arrivals that hit): 40 B per op, bounded by its cost (AM, impacts), filed by LOD-10 cell (32 km) so a leaf scans only the cells it covers (≤ 64 lists for a LOD-12 leaf). Once a cell's list passes 256 ops, it compacts like the coarse tier into snapshots of the touched LOD-6..12 surface chunks.
 - **Edit rate:** the server caps each player at 8 ops/s sustained (burst 32) through the existing validation; a drill is one op per stroke, not per voxel.
 - **Adversarial bound and byte budget:** the rate cap alone still lets a griefer put 64 ops into each new chunk (one fresh 8 KB snapshot per 8 s, ~3.6 MB per played hour, ~1.8 GB a day for 64 such players). The server therefore counts stored bytes per `Author` and, past a budget per played hour (knob, 1 MB; heavy honest mining is ≤ ~0.3 MB), drops that player to 1 op/s until the hour's average is back under. A cap on storage, not on digging where it already has been: re-editing a compacted chunk adds nothing.
 - **Worst-case growth** (estimates): a heavy miner tunnelling 3 m wide at 10 m/min crosses ~30 LOD-0 chunks an hour, ≤ ~300 KB/h. 64 such miners for 8 played hours a day is ≤ ~150 MB a day on disk, an upper bound: typical play (building, surface quarries reusing the same chunks) is about a tenth. Game time stops when the server is empty, so idle servers grow by nothing.
@@ -259,7 +261,7 @@ Total for a system: roughly 150–200 MB GPU and 50–80 MB CPU.
 
 ### Protected shores and seabeds (user decision D30: unminable)
 
-There are no holes below sea level at the coast, so the sea sphere never has to flood anything.
+There are no holes below sea level at the coast, so the sea sphere never has to flood anything. D60 (round 6) says the same from both sides: terrain around water is solid, and ships are never flooded with sea water (ship-atmosphere.md: an opening below the sea surface carries no flow).
 
 **The band, precisely.** A point `p` is protected iff its column's **unedited** surface is low:
 ```
@@ -278,6 +280,7 @@ protected(p) = h(dir) ≤ (SeaRadius − Radius) + ShoreProtectHeight      Shore
 - **The same clamp applies to every terrain-removing brush:** impact craters, breach damage, anti-graviton and other bomb brushes. Seabeds and shores never crater.
 - **Cost:** the column mask is 128 B per chunk from the height grid already built in step 2. The clamp needs the generated densities during replay, a 32 KB job-scratch copy taken only for chunks that have protected columns and ops (a small share of coastal chunks). The server's validation uses the same mask, so a fully protected op is dropped before it is logged (no storage for it).
 - The `ShoreDepthMap` refinement scan (Ocean section) now only ever sees additions on the shore.
+- **Settlement ground (round 6, D74; factions-and-law.md):** `Reserved` settlement footprints are one more source for the same per-chunk protected-column mask, for **tools only**. Drills, cave drills and tunnelling vehicles are clamped to the generated density there. The Huge tier (impacts, bombs, blasts) is not clamped on settlement ground: region shields stop those, or nothing does. Elsewhere on held land an unlicensed dig is not refused; it runs and is illegal. Each held body's surface region grid (cube-sphere, 6 × 16 × 16 bytes) and its settlement footprints are generated world data.
 
 ### Deep heat (user decision D29)
 
@@ -410,7 +413,7 @@ rho = p*M / (R_gas*T)           gravity: the point-mass μ/r² (patched conics),
 - **Crush depth** comes from the ship, not the body:
   - each **sealed room** gets a rating at hull bake, `p_crush = k_shape · 2·t·σ_c / r_room` (thin-shell with a buckling knob `k_shape` 0.1; ship materials gain `compressiveMPa`, as tractor-beams.md already asks). For example, 0.25 m composite walls round a 10 m room give ~15 bar, a crush depth of ~128 km;
   - each **component housing** has `PressureRatingBar` in data (default 10 bar, ~100 km; deep-rated variants cost more), plus `MaxAmbientK` (default 400 K, ~157 km);
-  - **1 Hz server check** per ship below the datum: a room over its rating implodes (a damage brush on its walls through the ship-hulls damage path; the room floods with ambient gas, lethal to crew inside); a component over its rating is disabled until back under, and destroyed past 1.5×. Thrusters are components, so a ship that dives too deep can lose the means to climb out;
+  - **1 Hz server check** per ship below the datum: a room whose `p_amb − p_room` is over its rating implodes (ship-atmosphere.md: the difference counts, not ambient alone, so a room let up to ambient cannot be crushed) (a damage brush on its walls through the ship-hulls damage path; the room floods with ambient gas, lethal to crew inside); a component over its rating is disabled until back under, and destroyed past 1.5×. Thrusters are components, so a ship that dives too deep can lose the means to climb out;
   - the HUD shows depth, ambient pressure and temperature, and "crush in N km" for the weakest room and the weakest critical component.
 - **Abyss:** at `AbyssDepth` (1,000 km, ~3,300 bar) anything left is destroyed by a scheduled event, like a black hole's kill sphere. There is no core to reach.
 
@@ -528,5 +531,15 @@ Lead review, 2026-11-25, against decisions.md round 5 (D29, D30, D31, D32, D10/D
 
 - **Shared enums (item 6):** `CelestialKind.GasGiant` now quotes the canonical enum owned by frames-and-zones (`{Star, Planet, Moon, GasGiant, BlackHole, Remnant}`).
 - **Stale names (item 16):** "decisions-r5" in the round 5 review header now reads decisions.md (round 5). No `zones.md`, `ship-design.md`, `gas-giants.md` or `WarpFloor` references were present.
-- **D27:** the huge edit tier's "dropped stations" notes that drops are rare (capture preferred) and are logged as the `StationDrop` incident (rings-and-asteroids' `IncidentRecord`).
+- **D27:** the huge edit tier's "dropped stations" notes that drops are rare (capture preferred) and are logged as the `StationDrop` incident (the shared `IncidentRecord`, owned by factions-and-law.md).
 - **No change needed:** D26/D28 (planets defines no tractors), D33 (planet digging makes no station-threatening fragments; mining near stations is rings-and-asteroids'), the dampener and plating rename (no `F_cap`/`a_eff` here), warp drives, wormhole floors.
+
+## Round 6 / r7 consistency notes
+
+2026-11-26. This doc was not revised in round 6; the r7 cross-check applied what the round 6 decisions and docs ask of it. Decisions were not re-litigated.
+
+- **D74:** server edit validation gains `LandRights.Check`; cave drills and tunnelling vehicles dig through the ordinary edit path; `Reserved` settlement footprints feed the protected-column mask for tools only; the surface region grid and settlement footprints are generated world data (all owned by factions-and-law.md).
+- **D60:** no sea-water flooding of ships; terrain around water is solid (already the D30 rule here).
+- **D57:** `IncidentRecord` is owned by factions-and-law.md.
+- **D58:** a warp exit's pressure wave over a settlement is that doc's `WarpAttack`; a raised region shield scales the blast for receivers inside it and is a warp exclusion (warp.md). What a settlement contains is still a missing system.
+- **ship-atmosphere.md:** the gas-giant crush test compares `p_amb − p_room` with the room's rating (its change to this doc, accepted).
