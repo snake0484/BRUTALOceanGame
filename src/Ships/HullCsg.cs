@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Numerics;
+using BrutalGame.Ships.Components;
 using BrutalGame.Terrain;
 using static BrutalGame.Ships.HullSurface;
 
@@ -108,6 +109,9 @@ public static class HullCsg
         internal readonly List<Solid> Kept = new();
         internal readonly List<Solid> Flair = new();
 
+        /// <summary>Surfaces drawn as they are: component parts, pipes, placed prefabs.</summary>
+        internal IReadOnlyList<SurfacePolygon> Extras = [];
+
         /// <summary>Solids whose faces can be on the surface: one <see cref="SolidSurface"/> call each.</summary>
         public int Count => Kept.Count;
     }
@@ -118,9 +122,9 @@ public static class HullCsg
         internal readonly List<Output> Items = new();
     }
 
-    public static Scene Prepare(ReadOnlySpan<HullSolid> solids, IReadOnlyList<HullMesh> meshes, bool layered, ExpandedHull? flair = null)
+    public static Scene Prepare(ReadOnlySpan<HullSolid> solids, IReadOnlyList<HullMesh> meshes, bool layered, ExpandedHull? flair = null, IReadOnlyList<SurfacePolygon>? extras = null)
     {
-        var scene = new Scene();
+        var scene = new Scene { Extras = extras ?? [] };
         var cutters = new List<Solid>();
         var panels = new List<Solid>();
 
@@ -209,6 +213,9 @@ public static class HullCsg
             Bin(o.Points, o.Face, o.Reversed, o.Material, bins);
 
         AddFlair(scene, bins, result);
+
+        foreach (var poly in scene.Extras)
+            BinShaded(poly, bins);
 
         foreach (var (key, mesh) in bins)
         {
@@ -857,6 +864,139 @@ public static class HullCsg
                 var t = (plane - Get(a, axis)) / (Get(b, axis) - Get(a, axis));
                 var x = Lerp(a, b, t);
                 clipped.Add(axis == 0 ? x with { X = plane } : axis == 1 ? x with { Y = plane } : x with { Z = plane });
+            }
+        }
+
+        polygon.Clear();
+        polygon.AddRange(clipped);
+    }
+
+    /// <summary>
+    /// The surface as shaded polygons (corner normals from each solid's shading, wound outward), in the solids' own frame:
+    /// a component prefab's look, computed once and then placed (transformed) as many times as it is used.
+    /// </summary>
+    public static List<SurfacePolygon> Shaded(ReadOnlySpan<HullSolid> solids, IReadOnlyList<HullMesh> meshes)
+    {
+        var scene = Prepare(solids, meshes, layered: false);
+        var pieces = new Pieces[scene.Count];
+
+        for (var i = 0; i < pieces.Length; i++)
+            pieces[i] = SolidSurface(scene, i);
+
+        var outputs = Join(pieces);
+        CloseTJunctions(outputs);
+        var list = new List<SurfacePolygon>(outputs.Count);
+
+        foreach (var o in outputs)
+        {
+            var n = o.Points.Count;
+            var poly = new SurfacePolygon { Points = new Vector3d[n], Normals = new Vector3d[n], Material = o.Material };
+
+            for (var k = 0; k < n; k++)
+            {
+                var p = o.Points[o.Reversed ? n - 1 - k : k];
+                var normal = ShadeNormal(o.Face, p);
+                poly.Points[k] = p;
+                poly.Normals[k] = o.Reversed ? Scale(normal, -1.0) : normal;
+            }
+
+            list.Add(poly);
+        }
+
+        return list;
+    }
+
+    /// <summary>Clips a shaded polygon into the bricks it crosses (normals interpolated along clipped edges).</summary>
+    private static void BinShaded(SurfacePolygon poly, Dictionary<BrickKey, ChunkMesh> bins)
+    {
+        if (poly.Points.Length < 3)
+            return;
+
+        var min = poly.Points[0];
+        var max = poly.Points[0];
+
+        foreach (var p in poly.Points)
+        {
+            min = new Vector3d(Math.Min(min.X, p.X), Math.Min(min.Y, p.Y), Math.Min(min.Z, p.Z));
+            max = new Vector3d(Math.Max(max.X, p.X), Math.Max(max.Y, p.Y), Math.Max(max.Z, p.Z));
+        }
+
+        const double size = HullBins.BrickMetres;
+        int x0 = (int)Math.Floor(min.X / size), x1 = (int)Math.Floor(max.X / size);
+        int y0 = (int)Math.Floor(min.Y / size), y1 = (int)Math.Floor(max.Y / size);
+        int z0 = (int)Math.Floor(min.Z / size), z1 = (int)Math.Floor(max.Z / size);
+        var polygon = new List<(Vector3d P, Vector3d N)>();
+        var clipped = new List<(Vector3d P, Vector3d N)>();
+
+        for (var bz = z0; bz <= z1; bz++)
+        for (var by = y0; by <= y1; by++)
+        for (var bx = x0; bx <= x1; bx++)
+        {
+            polygon.Clear();
+
+            for (var k = 0; k < poly.Points.Length; k++)
+                polygon.Add((poly.Points[k], poly.Normals[k]));
+
+            var origin = new Vector3d(bx * size, by * size, bz * size);
+
+            for (var axis = 0; axis < 3 && polygon.Count >= 3; axis++)
+            {
+                ClipShaded(polygon, clipped, axis, Get(origin, axis), true);
+                ClipShaded(polygon, clipped, axis, Get(origin, axis) + size, false);
+            }
+
+            if (polygon.Count < 3)
+                continue;
+
+            var key = new BrickKey((short)bx, (short)by, (short)bz);
+
+            if (!bins.TryGetValue(key, out var mesh))
+                bins[key] = mesh = new ChunkMesh(256, 1024);
+
+            var n = polygon.Count;
+            Reserve(mesh, n, (n - 2) * 3);
+            var first = mesh.VertexCount;
+
+            foreach (var (p, normal) in polygon)
+            {
+                mesh.Vertices[mesh.VertexCount++] = new TerrainVertex
+                {
+                    Position = new Vector3((float)(p.X - origin.X), (float)(p.Y - origin.Y), (float)(p.Z - origin.Z)),
+                    Normal = new Vector3((float)normal.X, (float)normal.Y, (float)normal.Z),
+                    Material = poly.Material,
+                };
+            }
+
+            for (var k = 1; k + 1 < n; k++)
+            {
+                mesh.Indices[mesh.IndexCount++] = (uint)first;
+                mesh.Indices[mesh.IndexCount++] = (uint)(first + k);
+                mesh.Indices[mesh.IndexCount++] = (uint)(first + k + 1);
+            }
+        }
+    }
+
+    private static void ClipShaded(List<(Vector3d P, Vector3d N)> polygon, List<(Vector3d P, Vector3d N)> clipped, int axis, double plane, bool keepAbove)
+    {
+        clipped.Clear();
+
+        for (var i = 0; i < polygon.Count; i++)
+        {
+            var p = polygon[i];
+            var q = polygon[(i + 1) % polygon.Count];
+            var pin = keepAbove ? Get(p.P, axis) >= plane : Get(p.P, axis) <= plane;
+            var qin = keepAbove ? Get(q.P, axis) >= plane : Get(q.P, axis) <= plane;
+
+            if (pin)
+                clipped.Add(p);
+
+            if (pin != qin)
+            {
+                var (a, b) = Less(q.P, p.P) ? (q, p) : (p, q);
+                var t = (plane - Get(a.P, axis)) / (Get(b.P, axis) - Get(a.P, axis));
+                var x = Lerp(a.P, b.P, t);
+                x = axis == 0 ? x with { X = plane } : axis == 1 ? x with { Y = plane } : x with { Z = plane };
+                clipped.Add((x, Normalise(Lerp(a.N, b.N, t), a.N)));
             }
         }
 

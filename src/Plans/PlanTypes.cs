@@ -43,6 +43,10 @@ public static class PlanLimits
 
     /// <summary>Ship extent: every solid's bounds within this many metres of the plan origin on each axis.</summary>
     public const double MaxReachMetres = 500.0;
+    public const int MaxPrefabs = 256;
+
+    /// <summary>A component's parts and housing stay within this distance of its origin (ship-design-and-construction.md: ≤ 8 m housing).</summary>
+    public const double MaxComponentMetres = 8.0;
 
     /// <summary>Smallest half extent of a solid, 1/16 m (half a 0.125 m cell edge): anything thinner bakes to nothing.</summary>
     public const int MinHalfUnits = HullSolid.HalfUnitsPerMetre / 16;

@@ -1,4 +1,5 @@
 using BrutalGame.Ships;
+using BrutalGame.Ships.Components;
 
 namespace BrutalGame.Plans;
 
@@ -40,6 +41,15 @@ public enum IssueCode : ushort
     StrokeBrush,
     StrokeShape,
     StrokeMaterial,
+    PartCount,
+    PartShape,
+    PartMaterial,
+    PipeShape,
+    PipeEnd,
+    PipeMaterial,
+    PlacementPrefab,
+    PrefabLevel,
+    ComponentSize,
 }
 
 public readonly record struct ValidationIssue(Severity Severity, IssueCode Code, ElementRef Element, int Value);
@@ -119,11 +129,71 @@ public static class PlanValidator
 
             if (stroke.Points.Count is < HullStroke.MinPoints or > HullStroke.MaxPoints
                 || stroke.Scale is < 100 or > 10000 || Math.Abs(stroke.Offset * HullSolid.MetresPerPositionUnit) > 16.0
-                || stroke.Points.Any(p => (p.NX | p.NY | p.NZ) == 0 || p.Position.Length() > PlanLimits.MaxReachMetres))
+                || stroke.Points.Any(p => (p.NX == 0 && p.NY == 0 && p.NZ == 0) || p.Position.Length() > PlanLimits.MaxReachMetres))
                 log.Add(Severity.Error, IssueCode.StrokeShape, element, stroke.Points.Count);
 
             if (stroke.Material >= doc.Materials.Count)
                 log.Add(Severity.Error, IssueCode.StrokeMaterial, element, stroke.Material);
+        }
+    }
+
+    /// <summary>Parts, pipes and placements: counts, positive sizes, materials, pipe ends on real ports, placed prefabs present.</summary>
+    private static void ValidateComponents(PlanDocument doc, ValidationLog log)
+    {
+        foreach (var (_, prefab) in doc.Prefabs)
+        {
+            if (prefab.Level != PlanLevel.Component)
+                log.Add(Severity.Error, IssueCode.PrefabLevel, default, (int)prefab.Level);
+        }
+
+        var data = doc.Components;
+
+        if (data is null)
+            return;
+
+        if (data.Parts.Count > ComponentData.MaxParts || data.Pipes.Count > ComponentData.MaxPipes || data.Placements.Count > ComponentData.MaxPlacements)
+            log.Add(Severity.Error, IssueCode.PartCount, default, data.Parts.Count);
+
+        var parts = new Dictionary<uint, ComponentPart>();
+
+        foreach (var p in data.Parts)
+        {
+            var element = new ElementRef(ElementKind.Part, p.Id);
+            parts[p.Id] = p;
+
+            if (p.Kind > PartKind.Igniter || !SolidRotation.IsValid(p.Rotation) || p.P0 <= 0 || p.P1 <= 0 || (p.Kind is PartKind.Chamber or PartKind.Injector && p.P2 <= 0))
+                log.Add(Severity.Error, IssueCode.PartShape, element, (int)p.Kind);
+            else if (p.Kind == PartKind.Nozzle && !PartGeometry.Nozzle(p).IsValid)
+                log.Add(Severity.Error, IssueCode.PartShape, element, (int)p.Kind);
+
+            if (p.Material >= doc.Materials.Count)
+                log.Add(Severity.Error, IssueCode.PartMaterial, element, p.Material);
+
+            if (doc.Level == PlanLevel.Component && p.Position.Length() > PlanLimits.MaxComponentMetres)
+                log.Add(Severity.Error, IssueCode.ComponentSize, element, 0);
+        }
+
+        foreach (var pipe in data.Pipes)
+        {
+            var element = new ElementRef(ElementKind.Route, pipe.Id);
+
+            if (pipe.Nodes.Count is < 2 or > PipeRoute.MaxNodes || pipe.InnerMm == 0 || pipe.InnerMm >= pipe.OuterMm)
+                log.Add(Severity.Error, IssueCode.PipeShape, element, pipe.Nodes.Count);
+
+            foreach (var end in new[] { pipe.From, pipe.To })
+            {
+                if (!end.IsOpen && (!parts.TryGetValue(end.Part, out var part) || end.Port >= PartGeometry.Ports(part).Length))
+                    log.Add(Severity.Error, IssueCode.PipeEnd, element, (int)end.Part);
+            }
+
+            if (pipe.Material >= doc.Materials.Count)
+                log.Add(Severity.Error, IssueCode.PipeMaterial, element, pipe.Material);
+        }
+
+        foreach (var placement in data.Placements)
+        {
+            if (!doc.Prefabs.ContainsKey(placement.Prefab) || !SolidRotation.IsValid(placement.Rotation))
+                log.Add(Severity.Error, IssueCode.PlacementPrefab, new ElementRef(ElementKind.Placement, placement.Id), 0);
         }
     }
 
@@ -180,7 +250,7 @@ public static class PlanValidator
     {
         log.Clear();
 
-        if (doc.Level is not (PlanLevel.Ship or PlanLevel.HullChunk))
+        if (doc.Level is not (PlanLevel.Ship or PlanLevel.HullChunk or PlanLevel.Component))
         {
             log.Add(Severity.Error, IssueCode.UnsupportedLevel, default, (int)doc.Level);
             return;
@@ -231,6 +301,7 @@ public static class PlanValidator
 
         ValidateLayers(doc, log);
         ValidateBrushes(doc, log);
+        ValidateComponents(doc, log);
         var ids = new HashSet<uint>(solids.Length);
         var inBounds = true;
         var anyAdd = false;

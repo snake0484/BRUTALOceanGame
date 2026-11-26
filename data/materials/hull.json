@@ -1,9 +1,13 @@
 {
+  "_note": "yieldMpa: yield strength, for pipe and vessel pressure ratings (Barlow: P = 2 yield t / outer diameter). Public handbook values; the hull composites are game values.",
   "materials": [
-    { "id": "mat.hull.alloy", "name": "Structural alloy", "densityKgM3": 800, "colour": "8C949E" },
-    { "id": "mat.hull.titanium", "name": "Titanium composite", "densityKgM3": 1100, "colour": "B9B4A8" },
-    { "id": "mat.hull.armour", "name": "Armour laminate", "densityKgM3": 2400, "colour": "5A6150" },
-    { "id": "mat.hull.glass", "name": "Glazing", "densityKgM3": 600, "colour": "6FA6C8" },
-    { "id": "mat.hull.paint.red", "name": "Red livery", "densityKgM3": 800, "colour": "A8362E" }
+    { "id": "mat.hull.alloy", "name": "Structural alloy", "densityKgM3": 800, "yieldMpa": 300, "colour": "8C949E" },
+    { "id": "mat.hull.titanium", "name": "Titanium composite", "densityKgM3": 1100, "yieldMpa": 600, "colour": "B9B4A8" },
+    { "id": "mat.hull.armour", "name": "Armour laminate", "densityKgM3": 2400, "yieldMpa": 400, "colour": "5A6150" },
+    { "id": "mat.hull.glass", "name": "Glazing", "densityKgM3": 600, "yieldMpa": 50, "colour": "6FA6C8" },
+    { "id": "mat.part.steel", "name": "Stainless steel", "densityKgM3": 7900, "yieldMpa": 215, "colour": "A7ADB3" },
+    { "id": "mat.part.copper", "name": "Copper alloy", "densityKgM3": 8900, "yieldMpa": 250, "colour": "B87333" },
+    { "id": "mat.part.inconel", "name": "Nickel superalloy", "densityKgM3": 8200, "yieldMpa": 1030, "colour": "8F8A80" },
+    { "id": "mat.hull.paint.red", "name": "Red livery", "densityKgM3": 800, "yieldMpa": 0, "colour": "A8362E" }
   ]
 }

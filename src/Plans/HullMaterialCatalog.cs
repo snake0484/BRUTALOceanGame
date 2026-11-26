@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace BrutalGame.Plans;
 
 /// <summary>A hull material from data: density (kg/m³, a structural composite, not solid metal) and a display colour.</summary>
-public sealed record HullMaterial(DefId Id, string Key, string Name, int DensityKgM3, uint ColourRgb);
+public sealed record HullMaterial(DefId Id, string Key, string Name, int DensityKgM3, uint ColourRgb, int YieldMpa = 0);
 
 /// <summary>Hull materials loaded from <c>data/materials/hull.json</c>; no content in code.</summary>
 public sealed class HullMaterialCatalog
@@ -35,7 +35,8 @@ public sealed class HullMaterialCatalog
             if (density <= 0 || density > 30000)
                 throw new InvalidDataException($"material {key}: density {density} kg/m³ out of range");
 
-            var material = new HullMaterial(DefId.FromName(key), key, name, density, colour);
+            var yield = entry.TryGetProperty("yieldMpa", out var y) ? y.GetInt32() : 0;
+            var material = new HullMaterial(DefId.FromName(key), key, name, density, colour, yield);
 
             if (!catalog._byId.TryAdd(material.Id, material))
                 throw new InvalidDataException($"material {key}: id hash collides with {catalog._byId[material.Id].Key}");

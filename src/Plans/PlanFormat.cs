@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using System.Text;
 using BrutalGame.Ships;
+using BrutalGame.Ships.Components;
 
 namespace BrutalGame.Plans;
 
@@ -66,9 +67,11 @@ public static class PlanFormat
     public const ushort MeshFormat = 2;
     public const ushort LayerFormat = 3;
     public const ushort BrushFormat = 4;
+    public const ushort ComponentFormat = 5;
 
     public static ushort FormatOf(PlanDocument doc) =>
-        doc.Brushes is { IsEmpty: false } ? BrushFormat : doc.Layers is not null ? LayerFormat : doc.Meshes.Count > 0 ? MeshFormat : Format;
+        doc.Components is { IsEmpty: false } || doc.Prefabs.Count > 0 ? ComponentFormat
+        : doc.Brushes is { IsEmpty: false } ? BrushFormat : doc.Layers is not null ? LayerFormat : doc.Meshes.Count > 0 ? MeshFormat : Format;
     public const uint BodyTag = 'B' | ('O' << 8) | ('D' << 16) | ((uint)'Y' << 24);
     public const uint MetaTag = 'M' | ('E' << 8) | ('T' << 16) | ((uint)'A' << 24);
     private const int SectionHeaderBytes = 13;
@@ -88,9 +91,10 @@ public static class PlanFormat
 
         var format = FormatOf(doc);
         var layers = doc.Layers?.ToBytes() ?? [];
-        var brushes = format == BrushFormat ? doc.Brushes!.ToBytes() : [];
+        var brushes = format >= BrushFormat && doc.Brushes is { IsEmpty: false } ? doc.Brushes.ToBytes() : [];
+        var components = format == ComponentFormat ? ComponentBlock(doc) : [];
         var bytes = new byte[BodyFixedBytes + doc.Materials.Count * 4 + n * HullSolid.SizeInBytes + (format >= MeshFormat ? 4 + meshBytes : 0)
-            + (format == BrushFormat ? 1 : 0) + layers.Length + brushes.Length];
+            + (format >= BrushFormat ? 1 : 0) + layers.Length + brushes.Length + components.Length];
         var w = new Writer(bytes);
 
         w.U8((byte)doc.Class);
@@ -154,9 +158,36 @@ public static class PlanFormat
 
         if (format == BrushFormat)
             w.U8(doc.Layers is not null ? (byte)1 : (byte)0);
+        else if (format == ComponentFormat)
+            w.U8((byte)((doc.Layers is not null ? 1 : 0) | (brushes.Length > 0 ? 2 : 0)));
 
         w.Bytes(layers);
         w.Bytes(brushes);
+        w.Bytes(components);
+        return bytes;
+    }
+
+    /// <summary>Format 5's tail: the <see cref="ComponentData"/> block, then u16 prefab count and per prefab u16 format, u32 length, BODY bytes.</summary>
+    private static byte[] ComponentBlock(PlanDocument doc)
+    {
+        var data = (doc.Components ?? new ComponentData()).ToBytes();
+        var prefabs = new List<(ushort Format, byte[] Body)>();
+
+        foreach (var (_, prefab) in doc.Prefabs)
+            prefabs.Add((FormatOf(prefab), EncodeBody(prefab)));
+
+        var bytes = new byte[data.Length + 2 + prefabs.Sum(p => 6 + p.Body.Length)];
+        var w = new Writer(bytes);
+        w.Bytes(data);
+        w.U16((ushort)prefabs.Count);
+
+        foreach (var (format, body) in prefabs)
+        {
+            w.U16(format);
+            w.U32((uint)body.Length);
+            w.Bytes(body);
+        }
+
         return bytes;
     }
 
@@ -222,10 +253,10 @@ public static class PlanFormat
         if (header.Magic != PlanHeader.MagicValue)
             return PlanFormatError.BadMagic;
 
-        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat))
+        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat))
             return PlanFormatError.UnsupportedFormat;
 
-        if (header.Level is not (PlanLevel.Ship or PlanLevel.HullChunk))
+        if (header.Level is not (PlanLevel.Ship or PlanLevel.HullChunk or PlanLevel.Component))
             return PlanFormatError.UnsupportedLevel;
 
         if (header.SectionCount > PlanLimits.MaxSections)
@@ -400,6 +431,7 @@ public static class PlanFormat
         }
 
         var layered = format == LayerFormat;
+        var hasBrushes = format == BrushFormat;
 
         if (format == BrushFormat)
         {
@@ -407,6 +439,14 @@ public static class PlanFormat
                 return false;
 
             layered = flag == 1;
+        }
+        else if (format == ComponentFormat)
+        {
+            if (!r.U8(out var flags) || flags > 3)
+                return false;
+
+            layered = (flags & 1) != 0;
+            hasBrushes = (flags & 2) != 0;
         }
 
         if (layered)
@@ -417,12 +457,37 @@ public static class PlanFormat
                 return false;
         }
 
-        if (format == BrushFormat)
+        if (hasBrushes)
         {
             doc.Brushes = r.Brushes();
 
             if (doc.Brushes is null)
                 return false;
+        }
+
+        if (format == ComponentFormat)
+        {
+            doc.Components = r.Components();
+
+            if (doc.Components is null || !r.U16(out var prefabs) || prefabs > PlanLimits.MaxPrefabs)
+                return false;
+
+            for (var i = 0; i < prefabs; i++)
+            {
+                if (!r.U16(out var prefabFormat) || !r.U32(out var length) || length > r.Remaining || prefabFormat > ComponentFormat)
+                    return false;
+
+                var body = r.Take((int)length);
+                var prefab = new PlanDocument { Level = PlanLevel.Component };
+
+                if (!DecodeBody(body, prefab, prefabFormat))
+                    return false;
+
+                doc.Prefabs[XxHash64.Hash(body)] = prefab;
+            }
+
+            if (doc.Components.IsEmpty)
+                doc.Components = null;
         }
 
         return r.Remaining == 0;
@@ -581,6 +646,20 @@ public static class PlanFormat
             var layers = HullLayering.Read(_bytes[_offset..], out var consumed);
             _offset += consumed;
             return layers;
+        }
+
+        public ComponentData? Components()
+        {
+            var data = ComponentData.Read(_bytes[_offset..], out var consumed);
+            _offset += consumed;
+            return data;
+        }
+
+        public byte[] Take(int length)
+        {
+            var bytes = _bytes.Slice(_offset, length).ToArray();
+            _offset += length;
+            return bytes;
         }
 
         public HullBrushSet? Brushes()

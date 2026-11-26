@@ -16,7 +16,7 @@ public sealed class HullSurfaceBuilder : IDisposable
     private HullCsg.Scene? _scene;
     private HullCsg.Pieces[] _pieces = [];
     private HullCsgResult? _done;
-    private (HullSolid[] Solids, HullMesh[] Meshes, bool Layered, ExpandedHull? Flair)? _pending;
+    private (HullSolid[] Solids, HullMesh[] Meshes, bool Layered, ExpandedHull? Flair, IReadOnlyList<Components.SurfacePolygon>? Extras)? _pending;
     private int _next;
     private int _remaining;
     private long _start;
@@ -42,15 +42,15 @@ public sealed class HullSurfaceBuilder : IDisposable
 
     public bool Busy => _running || _pending is not null;
 
-    public void Start(ReadOnlySpan<HullSolid> solids, IReadOnlyList<HullMesh> meshes, bool layered, ExpandedHull? flair)
+    public void Start(ReadOnlySpan<HullSolid> solids, IReadOnlyList<HullMesh> meshes, bool layered, ExpandedHull? flair, IReadOnlyList<Components.SurfacePolygon>? extras = null)
     {
         if (_running)
         {
-            _pending = (solids.ToArray(), meshes.ToArray(), layered, flair);
+            _pending = (solids.ToArray(), meshes.ToArray(), layered, flair, extras);
             return;
         }
 
-        Begin(solids, meshes, layered, flair);
+        Begin(solids, meshes, layered, flair, extras);
     }
 
     /// <summary>Main thread, each frame: publishes a finished build and starts a waiting one. True when the result changed.</summary>
@@ -69,7 +69,7 @@ public sealed class HullSurfaceBuilder : IDisposable
         if (_pending is { } p)
         {
             _pending = null;
-            Begin(p.Solids, p.Meshes, p.Layered, p.Flair);
+            Begin(p.Solids, p.Meshes, p.Layered, p.Flair, p.Extras);
         }
 
         return true;
@@ -85,10 +85,10 @@ public sealed class HullSurfaceBuilder : IDisposable
         }
     }
 
-    private void Begin(ReadOnlySpan<HullSolid> solids, IReadOnlyList<HullMesh> meshes, bool layered, ExpandedHull? flair)
+    private void Begin(ReadOnlySpan<HullSolid> solids, IReadOnlyList<HullMesh> meshes, bool layered, ExpandedHull? flair, IReadOnlyList<Components.SurfacePolygon>? extras)
     {
         _start = Stopwatch.GetTimestamp();
-        _scene = HullCsg.Prepare(solids, meshes, layered, flair);
+        _scene = HullCsg.Prepare(solids, meshes, layered, flair, extras);
         _pieces = new HullCsg.Pieces[_scene.Count];
         _next = 0;
         _remaining = _scene.Count;

@@ -1,4 +1,5 @@
 using BrutalGame.Ships;
+using BrutalGame.Ships.Components;
 
 namespace BrutalGame.Plans;
 
@@ -42,6 +43,21 @@ public static class PlanCanonical
 
         if (doc.Brushes is { IsEmpty: true })
             doc.Brushes = null;
+
+        if (doc.Components is { IsEmpty: true })
+            doc.Components = null;
+
+        // Prefabs no placement uses are dropped.
+        var used = new HashSet<ulong>();
+
+        if (doc.Components is not null)
+        {
+            foreach (var p in doc.Components.Placements)
+                used.Add(p.Prefab);
+        }
+
+        foreach (var hash in doc.Prefabs.Keys.Where(h => !used.Contains(h)).ToList())
+            doc.Prefabs.Remove(hash);
 
         CompactMaterials(doc);
         CompactMeshes(doc);
@@ -202,6 +218,42 @@ public static class PlanCanonical
                     stack.Layers[i] = layer with { Material = (byte)remap[layer.Material] };
                 }
             }
+        }
+
+        // Part and pipe materials too.
+        if (doc.Components is not null)
+        {
+            for (var i = 0; i < doc.Components.Parts.Count; i++)
+            {
+                var part = doc.Components.Parts[i];
+                part.Material = Keep(part.Material);
+                doc.Components.Parts[i] = part;
+            }
+
+            foreach (var pipe in doc.Components.Pipes)
+                pipe.Material = Keep(pipe.Material);
+        }
+
+        byte Keep(byte material)
+        {
+            if (material >= old.Count)
+                return material;
+
+            if (remap[material] < 0)
+            {
+                var id = old[material];
+                var existing = table.IndexOf(id);
+
+                if (existing < 0)
+                {
+                    existing = table.Count;
+                    table.Add(id);
+                }
+
+                remap[material] = existing;
+            }
+
+            return (byte)remap[material];
         }
 
         // Stroke materials too.

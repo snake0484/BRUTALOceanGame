@@ -1,9 +1,10 @@
 using BrutalGame.Plans;
 using BrutalGame.Ships;
+using BrutalGame.Ships.Components;
 
 namespace BrutalGame.Designer;
 
-public enum OpKind : byte { InsertSolid, RemoveSolid, ModifySolid, AddMaterial, RemoveMaterial, AddMesh, RemoveMesh, SetMesh, SetLayering, SetBrushes }
+public enum OpKind : byte { InsertSolid, RemoveSolid, ModifySolid, AddMaterial, RemoveMaterial, AddMesh, RemoveMesh, SetMesh, SetLayering, SetBrushes, SetComponents, AddPrefab, RemovePrefab }
 
 /// <summary>
 /// One invertible edit, a solid-list diff (ship-hulls "undo = solid list diffs"). Insert and Remove carry the solid and
@@ -24,11 +25,19 @@ public struct PlanOp
     public HullLayering? LayersAfter;
     public HullBrushSet? BrushesBefore;
     public HullBrushSet? BrushesAfter;
+    public ComponentData? ComponentsBefore;
+    public ComponentData? ComponentsAfter;
+    public PlanDocument? Prefab;
+    public ulong PrefabHash;
 
     /// <summary>Replaces the plan's layering (null: a solid hull). Snapshots are never mutated after this.</summary>
     public static PlanOp SetLayering(HullLayering? before, HullLayering? after) => new() { Kind = OpKind.SetLayering, LayersBefore = before, LayersAfter = after };
 
     public static PlanOp SetBrushes(HullBrushSet? before, HullBrushSet? after) => new() { Kind = OpKind.SetBrushes, BrushesBefore = before, BrushesAfter = after };
+
+    public static PlanOp SetComponents(ComponentData? before, ComponentData? after) => new() { Kind = OpKind.SetComponents, ComponentsBefore = before, ComponentsAfter = after };
+
+    public static PlanOp AddPrefab(ulong hash, PlanDocument prefab) => new() { Kind = OpKind.AddPrefab, PrefabHash = hash, Prefab = prefab };
 
     public static PlanOp AddMesh(int index, HullMesh mesh) => new() { Kind = OpKind.AddMesh, Index = index, MeshAfter = mesh };
 
@@ -53,6 +62,9 @@ public struct PlanOp
         OpKind.RemoveMesh => new PlanOp { Kind = OpKind.AddMesh, Index = Index, MeshAfter = MeshBefore },
         OpKind.SetLayering => SetLayering(LayersAfter, LayersBefore),
         OpKind.SetBrushes => SetBrushes(BrushesAfter, BrushesBefore),
+        OpKind.SetComponents => SetComponents(ComponentsAfter, ComponentsBefore),
+        OpKind.AddPrefab => new PlanOp { Kind = OpKind.RemovePrefab, PrefabHash = PrefabHash, Prefab = Prefab },
+        OpKind.RemovePrefab => AddPrefab(PrefabHash, Prefab!),
         _ => SetMesh(Index, MeshAfter!, MeshBefore!),
     };
 
@@ -103,6 +115,18 @@ public struct PlanOp
             case OpKind.SetBrushes:
                 Expect(ReferenceEquals(doc.Brushes, BrushesBefore));
                 doc.Brushes = BrushesAfter;
+                break;
+            case OpKind.SetComponents:
+                Expect(ReferenceEquals(doc.Components, ComponentsBefore));
+                doc.Components = ComponentsAfter;
+                break;
+            case OpKind.AddPrefab:
+                Expect(!doc.Prefabs.ContainsKey(PrefabHash));
+                doc.Prefabs[PrefabHash] = Prefab!;
+                break;
+            case OpKind.RemovePrefab:
+                Expect(doc.Prefabs.TryGetValue(PrefabHash, out var held) && ReferenceEquals(held, Prefab));
+                doc.Prefabs.Remove(PrefabHash);
                 break;
         }
     }
