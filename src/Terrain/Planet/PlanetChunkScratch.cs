@@ -1,9 +1,9 @@
 namespace BrutalGame.Terrain;
 
 /// <summary>
-/// Job-owned scratch for <see cref="PlanetGenerator"/>: the per-face lattice windows, and after a masked generate the
-/// protected voxels (D30 shores and the dig floor) with the generated densities they clamp removal to. Grows during
-/// warm-up only.
+/// Job-owned scratch for <see cref="PlanetGenerator"/>: the per-face lattice windows, the voxels in sea columns, and
+/// after a masked generate the protected voxels (D30 shores and the dig floor) with the generated densities they clamp
+/// removal to. Grows during warm-up only.
 /// </summary>
 public sealed class PlanetChunkScratch
 {
@@ -12,6 +12,13 @@ public sealed class PlanetChunkScratch
 
     /// <summary>Protected voxels over the padded volume, one bit each (<see cref="ChunkConstants.Index"/> order).</summary>
     public readonly ulong[] Protected = new ulong[(ChunkConstants.PaddedVolume + 63) / 64];
+
+    /// <summary>
+    /// The generated sea mask (planets.md "pit rule"): voxels whose column's generated ground is below sea level, one bit
+    /// each. Written by every generate that fills voxel by voxel, for the voxels it evaluates (all of them when masked,
+    /// else all within the saturation pad of the ground: every corner of a cell the surface crosses).
+    /// </summary>
+    public readonly ulong[] SeaColumns = new ulong[(ChunkConstants.PaddedVolume + 63) / 64];
 
     /// <summary>Generated density, copied only by a masked generate (edits to replay).</summary>
     public readonly sbyte[] Generated = new sbyte[ChunkConstants.PaddedVolume];

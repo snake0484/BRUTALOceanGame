@@ -55,11 +55,12 @@ public sealed class SurfaceNetsMesher
 
     public int LastSkirtTriangles { get; private set; }
 
-    public void Mesh(VoxelChunk chunk, ChunkMesh output, bool skirts = true) => Mesh(chunk, output, skirts, chunk.Coord.VoxelScale);
+    /// <param name="seaColumns">Planet terrain: the generated sea mask, one bit per padded voxel (<see cref="PlanetChunkScratch.SeaColumns"/>). A vertex whose cell has a corner in it gets <see cref="PackedTerrainVertex.SeaColumn"/>.</param>
+    public void Mesh(VoxelChunk chunk, ChunkMesh output, bool skirts = true, ulong[]? seaColumns = null) => Mesh(chunk, output, skirts, chunk.Coord.VoxelScale, seaColumns);
 
     /// <summary>Meshes at an explicit cell size in metres (hull bricks use 0.25 m); terrain passes its chunk's voxel size.</summary>
     [SkipLocalsInit]
-    public unsafe void Mesh(VoxelChunk chunk, ChunkMesh output, bool skirts, float cellScale)
+    public unsafe void Mesh(VoxelChunk chunk, ChunkMesh output, bool skirts, float cellScale, ulong[]? seaColumns = null)
     {
         output.Clear();
         LastSkirtTriangles = 0;
@@ -85,6 +86,7 @@ public sealed class SurfaceNetsMesher
         fixed (sbyte* d = chunk.Density)
         fixed (byte* m = chunk.Material)
         fixed (int* cv = _cellVertex)
+        fixed (ulong* sea = seaColumns)
         {
             for (var z = -1; z <= Last; z++)
             {
@@ -125,6 +127,10 @@ public sealed class SurfaceNetsMesher
                         v.Position = CellVertex(c, mask, edgeA, edgeB, x, y, z, scale, out var f);
                         v.Normal = Gradient(c, f);
                         v.Material = DominantMaterial(m, mats, i, mask);
+
+                        if (sea != null && InSeaColumn(sea, i))
+                            v.Material |= PackedTerrainVertex.SeaColumn;
+
                         border[vertexCount] = (byte)(byz | (x < 0 ? 1 : x == Last ? 2 : 0));
                         cv[i] = vertexCount++;
 
@@ -399,6 +405,14 @@ public sealed class SurfaceNetsMesher
 
         return best;
     }
+
+    /// <summary>Any corner of the cell at <paramref name="i"/> is in the mask: the shoreline errs to the sea side, where ground above the sea is dry anyway.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe bool InSeaColumn(ulong* sea, int i) =>
+        (Bit(sea, i) | Bit(sea, i + 1) | Bit(sea, i + P) | Bit(sea, i + 1 + P) | Bit(sea, i + PP) | Bit(sea, i + 1 + PP) | Bit(sea, i + P + PP) | Bit(sea, i + 1 + P + PP)) != 0;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe ulong Bit(ulong* bits, int i) => (bits[i >> 6] >> (i & 63)) & 1;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int Quad(uint[] indices, int n, int a, int b, int c, int d, bool solidBase)

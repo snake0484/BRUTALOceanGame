@@ -127,6 +127,104 @@ public sealed class PlanetShoreTests(ITestOutputHelper output)
         Assert.Equal(1, shore.IndexedOps);
     }
 
+    /// <summary>The LOD-0 leaf at <paramref name="point"/> as a chunk job builds it; counts its vertices under the sea radius, and those in the sea mask.</summary>
+    private static int MeshLeaf(double3 point, EditStore edits, out int below, out int inSeaMask)
+    {
+        var job = new ChunkJob { Generator = TestPlanet.Generator };
+        job.Chunk.Coord = ChunkCoord.FromPlanet(point.X, point.Y, point.Z, 0);
+        job.GatherOps(edits, 0.0);
+        job.Run();
+        (below, inSeaMask) = (0, 0);
+
+        for (var i = 0; i < job.Mesh.VertexCount; i++)
+        {
+            var local = job.Mesh.Vertices[i].Position;
+            var p = job.Chunk.Coord.Origin + new double3(local.X, local.Y, local.Z);
+            below += p.Length() < SeaRadius - 0.5 ? 1 : 0;
+            inSeaMask += (job.Mesh.Packed[i].Material & PackedTerrainVertex.SeaColumn) != 0 ? 1 : 0;
+            Assert.True((job.Mesh.Packed[i].Material & PackedTerrainVertex.MaterialMask) <= (uint)VoxelMaterial.Dirt, "the palette index survives the mask bit");
+        }
+
+        return job.Mesh.VertexCount;
+    }
+
+    /// <summary>
+    /// The pit rule in the terrain's shading (review F3): mesh vertices carry the generated sea mask, which terrain.frag
+    /// needs before it treats ground under the sea radius as under water. Seabed has it; land has not, nor a pit dug
+    /// below sea level inland.
+    /// </summary>
+    [Fact]
+    public void TerrainVertices_CarryTheGeneratedSeaMask()
+    {
+        var none = new EditStore();
+        var seabed = Find(-60f, -40f);
+        var count = MeshLeaf(seabed * (SeaRadius - 50.0), none, out var below, out var inSeaMask);
+        output.WriteLine($"seabed: {count} vertices, {below} under the sea radius, {inSeaMask} in the sea mask");
+        Assert.True(count > 0 && below == count && inSeaMask == count);
+
+        var hill = Find(60f, 90f);
+        count = MeshLeaf(hill * (SeaRadius + 75.0), none, out below, out inSeaMask);
+        output.WriteLine($"hill: {count} vertices, {below} under the sea radius, {inSeaMask} in the sea mask");
+        Assert.True(count > 0 && below == 0 && inSeaMask == 0);
+
+        var inland = Find(6.9f, 7.6f);
+        var pit = new EditStore();
+        pit.Add(At(inland, 0f, 12f, BrushMode.Dig));
+        count = MeshLeaf(inland * (SeaRadius - 6.0), pit, out below, out inSeaMask);
+        output.WriteLine($"inland pit: {count} vertices, {below} under the sea radius, {inSeaMask} in the sea mask");
+        Assert.True(below > 50, $"the pit reaches below sea level ({below} vertices)");
+        Assert.Equal(0, inSeaMask);
+    }
+
+    /// <summary>
+    /// Coarse leaves over low land: their skirts would hang a voxel (hundreds of metres) down, under the sea sphere, where
+    /// the far ocean surface draws over them along every seam. Skirts hung from land stay above the sea, and below the
+    /// vertex they hang from.
+    /// </summary>
+    [Theory]
+    [InlineData(5)]
+    [InlineData(9)]
+    public void LandSkirts_StayAboveTheSea(int lod)
+    {
+        var d = Find(20f, 30f);
+        var job = new ChunkJob { Generator = TestPlanet.Generator };
+        job.Chunk.Coord = ChunkCoord.FromPlanet(d.X * (SeaRadius + 25.0), d.Y * (SeaRadius + 25.0), d.Z * (SeaRadius + 25.0), lod);
+        job.Run();
+        var mesh = job.Mesh;
+        var origin = job.Chunk.Coord.Origin;
+        int land = 0, lifted = 0;
+        var lowest = double.MaxValue;
+
+        double Radius(uint i) => (origin + new double3(mesh.Vertices[i].Position.X, mesh.Vertices[i].Position.Y, mesh.Vertices[i].Position.Z)).Length();
+
+        for (var q = mesh.IndexCount - 6; q >= 0 && mesh.Vertices[mesh.Indices[q + 2]].Normal == mesh.Vertices[mesh.Indices[q + 1]].Normal && mesh.Indices[q + 3] == mesh.Indices[q]; q -= 6)
+        {
+            for (var end = 0; end < 2; end++)
+            {
+                var top = mesh.Indices[q + 1 - end];
+                var skirt = mesh.Indices[q + 2 + 3 * end];
+
+                if ((mesh.Vertices[skirt].Material & PackedTerrainVertex.SeaColumn) != 0)
+                    continue;
+
+                land++;
+                lowest = Math.Min(lowest, Radius(skirt) - SeaRadius);
+                lifted += Radius(skirt) - SeaRadius < 0.06 * job.Chunk.Coord.VoxelSize ? 1 : 0;
+                Assert.True(Radius(skirt) <= Radius(top) + 1e-2 * job.Chunk.Coord.VoxelSize, "a skirt never rises above the vertex it hangs from");
+                Assert.Equal(mesh.Packed[skirt].DecodePosition(job.Chunk.Coord.VoxelScale), PackedTerrainVertex.Encode(mesh.Vertices[skirt], 1f / job.Chunk.Coord.VoxelScale).DecodePosition(job.Chunk.Coord.VoxelScale));
+            }
+        }
+
+        output.WriteLine($"LOD {lod}: {land} land skirt vertices, lowest {lowest:F1} m above the sea, {lifted} held up");
+        Assert.True(land > 20 && lifted > 0, $"{land} land skirt vertices, {lifted} held up");
+        Assert.True(lowest >= 0.0, $"a land skirt hangs {-lowest:F1} m under the sea");
+
+        // The pooled job's next leaf is empty air: nothing meshed, nothing to lift.
+        job.Chunk.Coord = ChunkCoord.FromPlanet(d.X * (SeaRadius + 60_000.0), d.Y * (SeaRadius + 60_000.0), d.Z * (SeaRadius + 60_000.0), lod);
+        job.Run();
+        Assert.Equal(0, job.Mesh.IndexCount);
+    }
+
     /// <summary>Readers on other threads see consistent lists while the one writer files edits and the index grows.</summary>
     [Fact]
     public void Readers_AreSafeWhileEditsAreFiled()

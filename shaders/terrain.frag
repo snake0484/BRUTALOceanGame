@@ -1,6 +1,7 @@
 #version 450
 // Terrain fragment shader: material palette, Lambert sun + hemispheric sky about the planet's radial up, underwater
-// absorption below the sea sphere (and the water's colour where no ocean surface covers it), ocean-matched tonemap/fog.
+// absorption below the sea sphere in the generated sea mask (and the water's colour where no ocean surface covers it;
+// ground dug below sea level inland stays dry: planets.md "pit rule"), ocean-matched tonemap/fog.
 // From altitude (space.x -> 1) it turns into the impostor's look (body.frag): the star alone on the palette, the sea in
 // the impostor's colours with its glint, under the same atmosphere, so the impostor-to-octree switch shows no change.
 #extension GL_GOOGLE_include_directive : require
@@ -38,6 +39,10 @@ const float SEA_RAMP = 200.0;
 const float SPACE_AMBIENT = 0.004;
 const float GLINT = 0.5;
 
+// PackedTerrainVertex.SeaColumn / MaterialMask: the vertex is in the generated sea mask; the rest is the palette index.
+const uint SEA_COLUMN = 0x8000u;
+const uint MATERIAL_MASK = 0x7FFFu;
+
 // Linear albedo, indexed by VoxelMaterial (Air, Rock, Sand, Grass, Dirt).
 const vec3 PALETTE[5] = vec3[5](
     vec3(1.00, 0.00, 1.00),
@@ -57,7 +62,7 @@ void main()
     vec3 N = normalize(vNormal);
     vec3 L = frame.sunDir.xyz;
     float intensity = frame.sunDir.w;
-    vec3 albedo = PALETTE[min(vMaterial, 4u)];
+    vec3 albedo = PALETTE[min(vMaterial & MATERIAL_MASK, 4u)];
 
     // Hemispheric ambient about the radial up: zenith above, horizon at the side, dim bounce below. Float radii are
     // ~1e6 m here, so heights are good to ~0.1 m: plenty for absorption.
@@ -77,7 +82,7 @@ void main()
     vec3 dir = vWorldPos / dist;
 
     // Light lost through the water column above; past the ocean surface's reach the water's own colour fills in.
-    if (frame.planet.w > 0.0)
+    if (frame.planet.w > 0.0 && (vMaterial & SEA_COLUMN) != 0u)
     {
         float depth = max(frame.planet.w - radius, 0.0);
         vec3 through = exp(-ABSORPTION * depth);

@@ -424,6 +424,7 @@ public sealed class PlanetGenerator
         var invs = scratch.Inv;
         var windows = scratch.Windows;
         var mask = scratch.Protected;
+        var seaColumns = scratch.SeaColumns;
         var materials = Params.Materials;
         var rock = (byte)materials.Rock;
         var quant = ChunkConstants.DensityScale / (float)s;
@@ -431,13 +432,16 @@ public sealed class PlanetGenerator
         var halfN = n * 0.5;
         var hasSea = Surface.HasSea;
         var protect = Surface.ProtectHeight;
-        var shore = Surface.SeaHeight + BeachHeight;
+        var sea = Surface.SeaHeight;
+        var shore = sea + BeachHeight;
         var dig = Params.DigDepth;
         var protectedCount = 0;
         var flags = 0;
 
         if (withMask)
             mask.AsSpan().Clear();
+
+        seaColumns.AsSpan().Clear();
 
         fixed (sbyte* density = chunk.Density)
         fixed (byte* material = chunk.Material)
@@ -488,6 +492,9 @@ public sealed class PlanetGenerator
                         var vw = win.I1 - win.I0 + 1;
                         var ib = win.InvBase + (iu - win.I0) + (iv - win.J0) * vw;
                         var inv = Bilinear(invs[ib], invs[ib + 1], invs[ib + vw], invs[ib + vw + 1], fu, fv);
+
+                        if (hasSea && h < sea)
+                            seaColumns[vi >> 6] |= 1UL << vi;
 
                         if (withMask && ((hasSea && h <= protect) || w < h - dig))
                         {
