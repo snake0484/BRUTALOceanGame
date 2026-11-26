@@ -9,7 +9,7 @@ public class PlanFormatTests
     internal static readonly DefId Alloy = DefId.FromName("mat.hull.alloy");
     internal static readonly DefId Titanium = DefId.FromName("mat.hull.titanium");
 
-    internal static HullBrush Brush(uint id, BrushShape shape, BrushOp op, byte material, int x, int y, int z, ushort hx, ushort hy, ushort hz, uint rotation = 0) => new()
+    internal static HullSolid Solid(uint id, SolidShape shape, SolidOp op, byte material, int x, int y, int z, ushort hx, ushort hy, ushort hz, uint rotation = 0) => new()
     {
         Id = id,
         Shape = shape,
@@ -33,11 +33,11 @@ public class PlanFormatTests
         doc.Meta.Tags.Add("test");
         doc.Materials.Add(Alloy);
         doc.Materials.Add(Titanium);
-        doc.Brushes.Add(Brush(1, BrushShape.Box, BrushOp.Add, 0, 0, 3072, 0, 1536, 768, 1024));
-        doc.Brushes.Add(Brush(2, BrushShape.Box, BrushOp.Subtract, 0, 0, 3072, 0, 1408, 640, 896));
-        doc.Brushes.Add(Brush(3, BrushShape.Cylinder, BrushOp.Add, 1, 0, 3072, 7168, 384, 768, 384, BrushRotation.FromSteps(0, 6, 0)));
-        doc.Brushes.Add(Brush(5, BrushShape.Wedge, BrushOp.Add, 1, 0, 7168, -2048, 768, 256, 512));
-        doc.Brushes.Add(Brush(6, BrushShape.Box, BrushOp.Paint, 1, -2048, 3072, 0, 256, 256, 256));
+        doc.Solids.Add(Solid(1, SolidShape.Box, SolidOp.Add, 0, 0, 3072, 0, 1536, 768, 1024));
+        doc.Solids.Add(Solid(2, SolidShape.Box, SolidOp.Subtract, 0, 0, 3072, 0, 1408, 640, 896));
+        doc.Solids.Add(Solid(3, SolidShape.Cylinder, SolidOp.Add, 1, 0, 3072, 7168, 384, 768, 384, SolidRotation.FromSteps(0, 6, 0)));
+        doc.Solids.Add(Solid(5, SolidShape.Wedge, SolidOp.Add, 1, 0, 7168, -2048, 768, 256, 512));
+        doc.Solids.Add(Solid(6, SolidShape.Box, SolidOp.Paint, 1, -2048, 3072, 0, 256, 256, 256));
         doc.Meta.NextId = 7;
         return doc;
     }
@@ -76,7 +76,7 @@ public class PlanFormatTests
 
         Assert.True(PlanFormat.TryDecode(bytes, out var loaded, out var header, out var error), error.ToString());
         Assert.Equal(bytes, PlanFormat.Encode(loaded));
-        Assert.Equal(doc.Brushes.AsSpan().ToArray(), loaded.Brushes.AsSpan().ToArray());
+        Assert.Equal(doc.Solids.AsSpan().ToArray(), loaded.Solids.AsSpan().ToArray());
         Assert.Equal(doc.Materials, loaded.Materials);
         Assert.Equal(doc.Meta.Name, loaded.Meta.Name);
         Assert.Equal(doc.Meta.Tags, loaded.Meta.Tags);
@@ -86,10 +86,10 @@ public class PlanFormatTests
     }
 
     [Fact]
-    public void Header_Is36BytesAndBrush34()
+    public void Header_Is36BytesAndSolid34()
     {
         Assert.Equal(PlanHeader.SizeInBytes, System.Runtime.InteropServices.Marshal.SizeOf<PlanHeader>());
-        Assert.Equal(HullBrush.SizeInBytes, System.Runtime.InteropServices.Marshal.SizeOf<HullBrush>());
+        Assert.Equal(HullSolid.SizeInBytes, System.Runtime.InteropServices.Marshal.SizeOf<HullSolid>());
         Assert.Equal("BPLN"u8.ToArray(), PlanFormat.Encode(Sample())[..4]);
     }
 
@@ -128,7 +128,7 @@ public class PlanFormatTests
     {
         var a = Sample();
         var b = Sample();
-        b.Brushes[0].PosX += 1;
+        b.Solids[0].PosX += 1;
 
         Assert.NotEqual(PlanFormat.HashBody(a), PlanFormat.HashBody(b));
     }

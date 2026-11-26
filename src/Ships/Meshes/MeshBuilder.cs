@@ -112,22 +112,22 @@ public sealed class MeshBuilder
     }
 }
 
-/// <summary>Primitive brushes as control meshes (Convert to mesh): the same solid, centred on the brush origin.</summary>
+/// <summary>Primitive solids as control meshes (Convert to mesh): the same solid, centred on the solid origin.</summary>
 public static class MeshPrimitives
 {
     public const int CylinderSides = 16;
 
-    public static HullMesh FromBrush(in HullBrush brush)
+    public static HullMesh FromSolid(in HullSolid solid)
     {
         var b = new MeshBuilder();
-        int hx = brush.HalfX * 4, hy = brush.HalfY * 4, hz = brush.HalfZ * 4;
+        int hx = solid.HalfX * 4, hy = solid.HalfY * 4, hz = solid.HalfZ * 4;
 
-        switch (brush.Shape)
+        switch (solid.Shape)
         {
-            case BrushShape.Cylinder:
+            case SolidShape.Cylinder:
                 Cylinder(b, hx, hy);
                 break;
-            case BrushShape.Wedge:
+            case SolidShape.Wedge:
                 Wedge(b, hx, hy, hz);
                 break;
             default:
@@ -153,7 +153,7 @@ public static class MeshPrimitives
         CreaseAll(b);
     }
 
-    /// <summary>The wedge brush: full bottom, vertical back face (-Z), slope from the bottom front edge to the top back edge.</summary>
+    /// <summary>The wedge solid: full bottom, vertical back face (-Z), slope from the bottom front edge to the top back edge.</summary>
     public static void Wedge(MeshBuilder b, int hx, int hy, int hz)
     {
         b.AddVertex(new MeshVertex(-hx, -hy, -hz));

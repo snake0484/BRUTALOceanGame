@@ -13,7 +13,7 @@ public class HullBakeTests
     private static HullBaker Bake(PlanDocument doc, int workers)
     {
         var baker = new HullBaker(workers);
-        baker.Start(doc.Brushes.AsSpan(), Densities);
+        baker.Start(doc.Solids.AsSpan(), Densities);
         baker.Wait();
         return baker;
     }
@@ -40,7 +40,7 @@ public class HullBakeTests
     }
 
     [Fact]
-    public void SameBrushes_GiveIdenticalMeshBytes()
+    public void SameSolids_GiveIdenticalMeshBytes()
     {
         var doc = Demo().Doc;
         using var a = Bake(doc, 1);
@@ -61,11 +61,11 @@ public class HullBakeTests
         var session = Demo();
         using var warm = Bake(session.Doc, 4);
         var total = warm.Bricks.Count;
-        var last = session.Doc.Brushes[session.Doc.Brushes.Count - 1];
+        var last = session.Doc.Solids[session.Doc.Solids.Count - 1];
         last.PosY += 1024;
-        HullCommands.SetBrush(session, last.Id, last);
+        HullCommands.SetSolid(session, last.Id, last);
 
-        warm.Start(session.Doc.Brushes.AsSpan(), Densities);
+        warm.Start(session.Doc.Solids.AsSpan(), Densities);
         warm.Wait();
         using var cold = Bake(session.Doc, 4);
 
@@ -84,7 +84,7 @@ public class HullBakeTests
     {
         var session = new DesignSession();
         session.Snap.Step = GridStep.Eighth;
-        var box = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 1152, 2048, -640, 4 * 256, 2 * 256, 3 * 256, 0, UndoTests.Alloy);
+        var box = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 1152, 2048, -640, 4 * 256, 2 * 256, 3 * 256, 0, UndoTests.Alloy);
         HullCommands.Hollow(session, box, 0.5);
         using var baker = Bake(session.Doc, 4);
         var mass = baker.Mass;
@@ -111,12 +111,12 @@ public class HullBakeTests
     {
         var session = new DesignSession();
         session.Snap.Step = GridStep.Eighth;
-        var cylinder = HullCommands.AddBrush(session, BrushShape.Cylinder, BrushOp.Add, 0, 0, 0, 3 * 256, 4 * 256, 3 * 256, BrushRotation.FromSteps(0, 6, 0), UndoTests.Alloy);
-        var wedge = HullCommands.AddBrush(session, BrushShape.Wedge, BrushOp.Add, 40 * 1024, 0, 0, 2 * 256, 3 * 256, 4 * 256, 0, UndoTests.Alloy);
+        var cylinder = HullCommands.AddSolid(session, SolidShape.Cylinder, SolidOp.Add, 0, 0, 0, 3 * 256, 4 * 256, 3 * 256, SolidRotation.FromSteps(0, 6, 0), UndoTests.Alloy);
+        var wedge = HullCommands.AddSolid(session, SolidShape.Wedge, SolidOp.Add, 40 * 1024, 0, 0, 2 * 256, 3 * 256, 4 * 256, 0, UndoTests.Alloy);
         using var baker = Bake(session.Doc, 4);
-        session.TryGetBrush(cylinder, out var c);
-        session.TryGetBrush(wedge, out var w);
-        var expected = BrushGeometry.Volume(c) + BrushGeometry.Volume(w);
+        session.TryGetSolid(cylinder, out var c);
+        session.TryGetSolid(wedge, out var w);
+        var expected = SolidGeometry.Volume(c) + SolidGeometry.Volume(w);
 
         Assert.Equal(1.0, baker.Mass.VolumeM3 / expected, 2);
     }
@@ -130,14 +130,14 @@ public class HullBakeTests
     {
         var session = new DesignSession();
         session.Snap.Enabled = false;
-        HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 333, 1100, -77, 539, 300, 777, 0, UndoTests.Alloy);
-        session.TryGetBrush(session.Selection.Primary, out var box);
-        var half = BrushGeometry.Half(box);
+        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 333, 1100, -77, 539, 300, 777, 0, UndoTests.Alloy);
+        session.TryGetSolid(session.Selection.Primary, out var box);
+        var half = SolidGeometry.Half(box);
 
         foreach (var mesher in new[] { HullMesher.DualContouring, HullMesher.SurfaceNets })
         {
             using var baker = new HullBaker(2) { Mesher = mesher, ExactSurfaces = false };
-            baker.Start(session.Doc.Brushes.AsSpan(), Densities);
+            baker.Start(session.Doc.Solids.AsSpan(), Densities);
             baker.Wait();
             var worst = 0.0;
 
@@ -166,14 +166,14 @@ public class HullBakeTests
         }
     }
 
-    /// <summary>A brush nothing else reaches is drawn from its own polygons: every vertex lies on its surface.</summary>
+    /// <summary>A solid nothing else reaches is drawn from its own polygons: every vertex lies on its surface.</summary>
     [Fact]
-    public void ExactSurfaces_LieOnTheBrush()
+    public void ExactSurfaces_LieOnTheSolid()
     {
         var session = new DesignSession();
         session.Snap.Enabled = false;
-        var cylinder = HullCommands.AddBrush(session, BrushShape.Cylinder, BrushOp.Add, 0, 0, 0, 700, 1500, 700, BrushRotation.FromSteps(2, 5, 1), UndoTests.Alloy);
-        var box = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 40 * 1024, 333, -77, 1100, 500, 900, BrushRotation.FromSteps(3, 0, 0), UndoTests.Alloy);
+        var cylinder = HullCommands.AddSolid(session, SolidShape.Cylinder, SolidOp.Add, 0, 0, 0, 700, 1500, 700, SolidRotation.FromSteps(2, 5, 1), UndoTests.Alloy);
+        var box = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 40 * 1024, 333, -77, 1100, 500, 900, SolidRotation.FromSteps(3, 0, 0), UndoTests.Alloy);
         Mesh.MeshCommands.ConvertToMesh(session, box);
         Mesh.MeshCommands.Apply(session, box, b =>
         {
@@ -183,12 +183,12 @@ public class HullBakeTests
         });
 
         using var baker = new HullBaker(2);
-        baker.Start(session.Doc.Brushes.AsSpan(), session.Doc.Meshes, Densities);
+        baker.Start(session.Doc.Solids.AsSpan(), session.Doc.Meshes, Densities);
         baker.Wait();
         Assert.Equal(baker.Bricks.Count, baker.ExactBricks);
 
-        session.TryGetBrush(cylinder, out var c);
-        session.TryGetBrush(box, out var m);
+        session.TryGetSolid(cylinder, out var c);
+        session.TryGetSolid(box, out var m);
         var mesh = MeshCache.Get(session.Doc.Meshes[m.Param]);
         var rotation = new double[9];
         var worst = 0.0;
@@ -201,13 +201,13 @@ public class HullBakeTests
                 var p = v.DecodePosition(HullBins.CellMetres);
                 var ship = new Vector3d(brick.Origin.X + p.X, brick.Origin.Y + p.Y, brick.Origin.Z + p.Z);
                 var near = ship.X < 20 ? c : m;
-                BrushRotation.Matrix(near.Rotation, rotation);
+                SolidRotation.Matrix(near.Rotation, rotation);
                 double dx = ship.X - near.PositionX, dy = ship.Y - near.PositionY, dz = ship.Z - near.PositionZ;
                 var local = new System.Numerics.Vector3(
                     (float)(rotation[0] * dx + rotation[3] * dy + rotation[6] * dz),
                     (float)(rotation[1] * dx + rotation[4] * dy + rotation[7] * dz),
                     (float)(rotation[2] * dx + rotation[5] * dy + rotation[8] * dz));
-                var distance = near.Shape == BrushShape.Mesh ? mesh.Distance(local, 1f) : Math.Abs(BrushGeometry.Distance(BrushShape.Cylinder, local, BrushGeometry.Half(near)));
+                var distance = near.Shape == SolidShape.Mesh ? mesh.Distance(local, 1f) : Math.Abs(SolidGeometry.Distance(SolidShape.Cylinder, local, SolidGeometry.Half(near)));
                 worst = Math.Max(worst, distance);
                 vertices++;
             }
@@ -224,13 +224,13 @@ public class HullBakeTests
         var session = new DesignSession();
         SampleHulls.MeshHull(session, UndoTests.Alloy, UndoTests.Titanium);
         using var baker = new HullBaker(2);
-        baker.Start(session.Doc.Brushes.AsSpan(), session.Doc.Meshes, Densities);
+        baker.Start(session.Doc.Solids.AsSpan(), session.Doc.Meshes, Densities);
         baker.Wait();
 
         Assert.InRange(baker.ExactBricks, 1, baker.Bricks.Count - 1);
 
         using var grid = new HullBaker(2) { ExactSurfaces = false };
-        grid.Start(session.Doc.Brushes.AsSpan(), session.Doc.Meshes, Densities);
+        grid.Start(session.Doc.Solids.AsSpan(), session.Doc.Meshes, Densities);
         grid.Wait();
         Assert.Equal(grid.Mass, baker.Mass);
         Assert.Equal(0, grid.ExactBricks);
@@ -240,7 +240,7 @@ public class HullBakeTests
     public void SubtractOnly_HasNoBricks()
     {
         var session = new DesignSession();
-        HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Subtract, 0, 0, 0, 512, 512, 512, 0, UndoTests.Alloy);
+        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Subtract, 0, 0, 0, 512, 512, 512, 0, UndoTests.Alloy);
         using var baker = Bake(session.Doc, 2);
 
         Assert.Empty(baker.Bricks);
@@ -248,10 +248,10 @@ public class HullBakeTests
     }
 
     [Fact]
-    public void Picking_FindsTheNearestBrush()
+    public void Picking_FindsTheNearestSolid()
     {
         var session = Demo();
-        var cylinder = session.Doc.Brushes[2].Id;
+        var cylinder = session.Doc.Solids[2].Id;
 
         var hit = HullPicking.Pick(session.Doc, new Vector3d(0, 3, 30), new Vector3d(0, 0, -1), out var distance);
         Assert.Equal(cylinder, hit);
@@ -268,10 +268,10 @@ public class HullBakeTests
         Assert.False(HullPicking.ClosestOnAxis(new Vector3d(0, 1, 0), new Vector3d(1, 0, 0), new Vector3d(0, 0, 0), new Vector3d(1, 0, 0), out _));
     }
 
-    /// <summary>Wall time for a 100-brush hull: printed for the report, bounded loosely so a regression fails.</summary>
+    /// <summary>Wall time for a 100-solid hull: printed for the report, bounded loosely so a regression fails.</summary>
     [Fact]
     [Trait("Category", "Perf")]
-    public void Bake100Brushes_Timing()
+    public void Bake100Solids_Timing()
     {
         var session = new DesignSession();
         SampleHulls.Bench(session, 100, UndoTests.Alloy, UndoTests.Titanium);

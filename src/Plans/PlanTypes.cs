@@ -23,13 +23,13 @@ public readonly record struct DefId(uint Value)
     public override string ToString() => Value.ToString("x8");
 }
 
-public enum ElementKind : byte { Brush, Part, Connection, Route, Placement, Test, Material, Mesh }
+public enum ElementKind : byte { Solid, Part, Connection, Route, Placement, Test, Material, Mesh }
 
 public readonly record struct ElementRef(ElementKind Kind, uint Id);
 
 public static class PlanLimits
 {
-    public const int MaxBrushes = 8192;
+    public const int MaxSolids = 8192;
     public const int MaxMaterials = 256;
     public const int MaxBundleBytes = 1 << 20;
     public const int MaxSectionRawBytes = 8 << 20;
@@ -41,9 +41,9 @@ public static class PlanLimits
     public const int MaxMeshVertices = 131072;
     public const int MaxMeshTriangles = 1 << 20;
 
-    /// <summary>Ship extent: every brush's bounds within this many metres of the plan origin on each axis.</summary>
+    /// <summary>Ship extent: every solid's bounds within this many metres of the plan origin on each axis.</summary>
     public const double MaxReachMetres = 500.0;
 
-    /// <summary>Smallest half extent of a brush, 1/16 m (half a 0.125 m cell edge): anything thinner bakes to nothing.</summary>
-    public const int MinHalfUnits = HullBrush.HalfUnitsPerMetre / 16;
+    /// <summary>Smallest half extent of a solid, 1/16 m (half a 0.125 m cell edge): anything thinner bakes to nothing.</summary>
+    public const int MinHalfUnits = HullSolid.HalfUnitsPerMetre / 16;
 }

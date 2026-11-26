@@ -2,16 +2,16 @@ using System.Buffers.Binary;
 
 namespace BrutalGame.Ships;
 
-/// <summary>What a brush is in a layered hull (BrushFlags bits 6-7).</summary>
-public enum BrushRole : byte { Skin, Room, Component, Panel }
+/// <summary>What a solid is in a layered hull (SolidFlags bits 6-7).</summary>
+public enum SolidRole : byte { Skin, Room, Component, Panel }
 
-public static class BrushRoles
+public static class SolidRoles
 {
-    public const BrushFlags Mask = BrushFlags.RoleRoom | BrushFlags.RoleComponent;
+    public const SolidFlags Mask = SolidFlags.RoleRoom | SolidFlags.RoleComponent;
 
-    public static BrushRole Of(in HullBrush brush) => (BrushRole)(((int)brush.Flags >> 6) & 3);
+    public static SolidRole Of(in HullSolid solid) => (SolidRole)(((int)solid.Flags >> 6) & 3);
 
-    public static BrushFlags With(BrushFlags flags, BrushRole role) => (flags & ~Mask) | (BrushFlags)((int)role << 6);
+    public static SolidFlags With(SolidFlags flags, SolidRole role) => (flags & ~Mask) | (SolidFlags)((int)role << 6);
 }
 
 /// <summary>One layer of a stack: a plan material index and a thickness in millimetres.</summary>
@@ -59,10 +59,10 @@ public readonly record struct SectionCut(byte Axis, int Position);
 public readonly record struct SectionStack(int AnchorX, int AnchorY, int AnchorZ, byte Stack);
 
 /// <summary>
-/// A layered hull (ship design note "skin, sections and layers"): the skin brushes shape the outer shell; cut planes
+/// A layered hull (ship design note "skin, sections and layers"): the skin solids shape the outer shell; cut planes
 /// split the skin and hull into sections; each section's stack fills the shell inward from the skin by depth, and
-/// anything deeper is void. Room and component brushes are cut out and get their own wall stack outward from their
-/// surface, inside the skin. Panel brushes are solid add-ons. Treated as immutable once in a plan: edits replace it.
+/// anything deeper is void. Room and component solids are cut out and get their own wall stack outward from their
+/// surface, inside the skin. Panel solids are solid add-ons. Treated as immutable once in a plan: edits replace it.
 /// </summary>
 public sealed class HullLayering
 {
@@ -104,7 +104,7 @@ public sealed class HullLayering
         var axes = new double[3][];
 
         for (var axis = 0; axis < 3; axis++)
-            axes[axis] = Cuts.Where(c => c.Axis == axis).Select(c => c.Position * HullBrush.MetresPerPositionUnit).Distinct().Order().ToArray();
+            axes[axis] = Cuts.Where(c => c.Axis == axis).Select(c => c.Position * HullSolid.MetresPerPositionUnit).Distinct().Order().ToArray();
 
         return axes;
     }
@@ -138,7 +138,7 @@ public sealed class HullLayering
 
         foreach (var a in Assignments)
         {
-            var id = SectionId(cuts, Cell(cuts[0], a.AnchorX * HullBrush.MetresPerPositionUnit), Cell(cuts[1], a.AnchorY * HullBrush.MetresPerPositionUnit), Cell(cuts[2], a.AnchorZ * HullBrush.MetresPerPositionUnit));
+            var id = SectionId(cuts, Cell(cuts[0], a.AnchorX * HullSolid.MetresPerPositionUnit), Cell(cuts[1], a.AnchorY * HullSolid.MetresPerPositionUnit), Cell(cuts[2], a.AnchorZ * HullSolid.MetresPerPositionUnit));
             stacks[id] = a.Stack;
         }
 

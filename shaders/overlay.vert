@@ -1,5 +1,5 @@
 #version 450
-// Designer overlay: brush outlines, gizmos, mesh cages and drag previews. Camera-relative positions, depth tested
+// Designer overlay: solid outlines, gizmos, mesh cages and drag previews. Camera-relative positions, depth tested
 // against the hull. params.x pulls depth toward the camera (reverse-Z: larger is nearer) so lines lying on the hull win;
 // params.y scales alpha (the hidden pass draws what the hull covers, faint).
 

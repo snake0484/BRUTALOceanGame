@@ -13,13 +13,13 @@ public static class SampleHulls
     /// </summary>
     public static void HollowBoxWithCylinder(DesignSession session, DefId hull, DefId trim)
     {
-        const int m = HullBrush.PositionUnitsPerMetre;
-        const int h = HullBrush.HalfUnitsPerMetre;
-        var box = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, 3 * m, 0, 6 * h, 3 * h, 4 * h, BrushRotation.Identity, hull);
+        const int m = HullSolid.PositionUnitsPerMetre;
+        const int h = HullSolid.HalfUnitsPerMetre;
+        var box = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 3 * m, 0, 6 * h, 3 * h, 4 * h, SolidRotation.Identity, hull);
         HullCommands.Hollow(session, box, 0.5);
-        HullCommands.AddBrush(session, BrushShape.Cylinder, BrushOp.Add, 0, 3 * m, 7 * m, (ushort)(1.5 * h), 3 * h, (ushort)(1.5 * h), BrushRotation.FromSteps(0, 6, 0), trim);
-        HullCommands.AddBrush(session, BrushShape.Wedge, BrushOp.Add, 0, 7 * m, -2 * m, 3 * h, 1 * h, 2 * h, BrushRotation.Identity, trim);
-        HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Subtract, 6 * m, 3 * m, 0, 1 * h, 1 * h, 1 * h, BrushRotation.Identity, hull);
+        HullCommands.AddSolid(session, SolidShape.Cylinder, SolidOp.Add, 0, 3 * m, 7 * m, (ushort)(1.5 * h), 3 * h, (ushort)(1.5 * h), SolidRotation.FromSteps(0, 6, 0), trim);
+        HullCommands.AddSolid(session, SolidShape.Wedge, SolidOp.Add, 0, 7 * m, -2 * m, 3 * h, 1 * h, 2 * h, SolidRotation.Identity, trim);
+        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Subtract, 6 * m, 3 * m, 0, 1 * h, 1 * h, 1 * h, SolidRotation.Identity, hull);
     }
 
     /// <summary>
@@ -29,9 +29,9 @@ public static class SampleHulls
     /// </summary>
     public static void MeshHull(DesignSession session, DefId hull, DefId trim)
     {
-        const int m = HullBrush.PositionUnitsPerMetre;
-        const int h = HullBrush.HalfUnitsPerMetre;
-        var body = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, 3 * m, 0, 3 * h, 2 * h, 8 * h, BrushRotation.Identity, hull);
+        const int m = HullSolid.PositionUnitsPerMetre;
+        const int h = HullSolid.HalfUnitsPerMetre;
+        var body = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 3 * m, 0, 3 * h, 2 * h, 8 * h, SolidRotation.Identity, hull);
         MeshCommands.ConvertToMesh(session, body);
         var mesh = MeshCommands.MeshOf(session, body)!;
         var front = FaceAlong(mesh, 2, 1);
@@ -55,8 +55,8 @@ public static class SampleHulls
             b.Levels = 2;
             return true;
         });
-        HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Subtract, 3 * m, 2 * m, -2 * m, 1 * h, 1 * h, (ushort)(1.5 * h), BrushRotation.Identity, hull);
-        HullCommands.AddBrush(session, BrushShape.Cylinder, BrushOp.Add, 0, 6 * m, -4 * m, (ushort)(0.75 * h), (ushort)(0.5 * h), (ushort)(0.75 * h), BrushRotation.Identity, trim);
+        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Subtract, 3 * m, 2 * m, -2 * m, 1 * h, 1 * h, (ushort)(1.5 * h), SolidRotation.Identity, hull);
+        HullCommands.AddSolid(session, SolidShape.Cylinder, SolidOp.Add, 0, 6 * m, -4 * m, (ushort)(0.75 * h), (ushort)(0.5 * h), (ushort)(0.75 * h), SolidRotation.Identity, trim);
     }
 
     /// <summary>
@@ -65,21 +65,21 @@ public static class SampleHulls
     /// </summary>
     public static void LayeredHull(DesignSession session, DefId armour, DefId alloy, DefId titanium)
     {
-        const int m = HullBrush.PositionUnitsPerMetre;
-        const int h = HullBrush.HalfUnitsPerMetre;
+        const int m = HullSolid.PositionUnitsPerMetre;
+        const int h = HullSolid.HalfUnitsPerMetre;
         LayerCommands.Enable(session, titanium, alloy);
-        HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, 3 * m, 0, 4 * h, 3 * h, 6 * h, BrushRotation.Identity, alloy);
-        HullCommands.AddBrush(session, BrushShape.Wedge, BrushOp.Add, 0, 3 * m, 8 * m, 4 * h, 3 * h, 2 * h, BrushRotation.Identity, alloy);
-        HullCommands.AddBrush(session, BrushShape.Cylinder, BrushOp.Add, 0, 3 * m, -7 * m, (ushort)(2.5 * h), 2 * h, (ushort)(2.5 * h), BrushRotation.FromSteps(0, 6, 0), alloy);
+        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 3 * m, 0, 4 * h, 3 * h, 6 * h, SolidRotation.Identity, alloy);
+        HullCommands.AddSolid(session, SolidShape.Wedge, SolidOp.Add, 0, 3 * m, 8 * m, 4 * h, 3 * h, 2 * h, SolidRotation.Identity, alloy);
+        HullCommands.AddSolid(session, SolidShape.Cylinder, SolidOp.Add, 0, 3 * m, -7 * m, (ushort)(2.5 * h), 2 * h, (ushort)(2.5 * h), SolidRotation.FromSteps(0, 6, 0), alloy);
 
-        var cockpit = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, 3 * m, 4 * m, (ushort)(2.5 * h), (ushort)(1.5 * h), 1 * h, BrushRotation.Identity, alloy);
-        LayerCommands.SetRole(session, cockpit, Ships.BrushRole.Room);
-        var corridor = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, 3 * m, 0, 1 * h, (ushort)(1.25 * h), 3 * h, BrushRotation.Identity, alloy);
-        LayerCommands.SetRole(session, corridor, Ships.BrushRole.Room);
-        var reactor = HullCommands.AddBrush(session, BrushShape.Cylinder, BrushOp.Add, 0, 3 * m, -4 * m, (ushort)(1.25 * h), (ushort)(1.25 * h), (ushort)(1.25 * h), BrushRotation.Identity, alloy);
-        LayerCommands.SetRole(session, reactor, Ships.BrushRole.Component);
-        var plate = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, (int)(6.25 * m), 0, 3 * h, (ushort)(0.25 * h), 4 * h, BrushRotation.Identity, armour);
-        LayerCommands.SetRole(session, plate, Ships.BrushRole.Panel);
+        var cockpit = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 3 * m, 4 * m, (ushort)(2.5 * h), (ushort)(1.5 * h), 1 * h, SolidRotation.Identity, alloy);
+        LayerCommands.SetRole(session, cockpit, Ships.SolidRole.Room);
+        var corridor = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 3 * m, 0, 1 * h, (ushort)(1.25 * h), 3 * h, SolidRotation.Identity, alloy);
+        LayerCommands.SetRole(session, corridor, Ships.SolidRole.Room);
+        var reactor = HullCommands.AddSolid(session, SolidShape.Cylinder, SolidOp.Add, 0, 3 * m, -4 * m, (ushort)(1.25 * h), (ushort)(1.25 * h), (ushort)(1.25 * h), SolidRotation.Identity, alloy);
+        LayerCommands.SetRole(session, reactor, Ships.SolidRole.Component);
+        var plate = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, (int)(6.25 * m), 0, 3 * h, (ushort)(0.25 * h), 4 * h, SolidRotation.Identity, armour);
+        LayerCommands.SetRole(session, plate, Ships.SolidRole.Panel);
 
         LayerCommands.AddStack(session, armour);
         LayerCommands.Change(session, (s, l) =>
@@ -135,13 +135,13 @@ public static class SampleHulls
         return best;
     }
 
-    /// <summary>Converts every <paramref name="every"/>-th brush to a mesh brush, smoothed by <paramref name="levels"/> Catmull-Clark levels.</summary>
+    /// <summary>Converts every <paramref name="every"/>-th solid to a mesh solid, smoothed by <paramref name="levels"/> Catmull-Clark levels.</summary>
     public static void MeshifyEvery(DesignSession session, int every, int levels)
     {
         var ids = new List<uint>();
 
-        for (var i = 0; i < session.Doc.Brushes.Count; i += every)
-            ids.Add(session.Doc.Brushes[i].Id);
+        for (var i = 0; i < session.Doc.Solids.Count; i += every)
+            ids.Add(session.Doc.Solids[i].Id);
 
         foreach (var id in ids)
         {
@@ -158,20 +158,20 @@ public static class SampleHulls
     }
 
     /// <summary>
-    /// <paramref name="count"/> brushes on a 30 × 10 × 60 m frigate-like layout: a deterministic mix of Add boxes, wedges and
+    /// <paramref name="count"/> solids on a 30 × 10 × 60 m frigate-like layout: a deterministic mix of Add boxes, wedges and
     /// cylinders with every fourth a Subtract (rooms, cut-outs), rotations in 15 degree steps. Same output every call.
     /// </summary>
     public static void Bench(DesignSession session, int count, DefId hull, DefId trim)
     {
-        const int m = HullBrush.PositionUnitsPerMetre;
+        const int m = HullSolid.PositionUnitsPerMetre;
         var rng = new Random(12345);
         session.Edit(s =>
         {
             for (var i = 0; i < count; i++)
             {
-                var op = i % 4 == 3 ? BrushOp.Subtract : BrushOp.Add;
-                var shape = (BrushShape)(i % 3);
-                var brush = new HullBrush
+                var op = i % 4 == 3 ? SolidOp.Subtract : SolidOp.Add;
+                var shape = (SolidShape)(i % 3);
+                var solid = new HullSolid
                 {
                     Id = s.Doc.AllocateId(),
                     Shape = shape,
@@ -180,23 +180,23 @@ public static class SampleHulls
                     PosX = rng.Next(-12, 13) * m,
                     PosY = rng.Next(-4, 5) * m,
                     PosZ = rng.Next(-28, 29) * m,
-                    Rotation = BrushRotation.FromSteps(rng.Next(0, 4) * 6, i % 7 == 0 ? rng.Next(0, 24) : 0, 0),
-                    HalfX = (ushort)(rng.Next(2, 9) * HullBrush.HalfUnitsPerMetre / 2),
-                    HalfY = (ushort)(rng.Next(2, 7) * HullBrush.HalfUnitsPerMetre / 2),
-                    HalfZ = (ushort)(rng.Next(2, 13) * HullBrush.HalfUnitsPerMetre / 2),
+                    Rotation = SolidRotation.FromSteps(rng.Next(0, 4) * 6, i % 7 == 0 ? rng.Next(0, 24) : 0, 0),
+                    HalfX = (ushort)(rng.Next(2, 9) * HullSolid.HalfUnitsPerMetre / 2),
+                    HalfY = (ushort)(rng.Next(2, 7) * HullSolid.HalfUnitsPerMetre / 2),
+                    HalfZ = (ushort)(rng.Next(2, 13) * HullSolid.HalfUnitsPerMetre / 2),
                 };
 
-                if (op == BrushOp.Subtract)
+                if (op == SolidOp.Subtract)
                 {
-                    brush.HalfX = (ushort)(brush.HalfX / 2 + 64);
-                    brush.HalfY = (ushort)(brush.HalfY / 2 + 64);
-                    brush.HalfZ = (ushort)(brush.HalfZ / 2 + 64);
+                    solid.HalfX = (ushort)(solid.HalfX / 2 + 64);
+                    solid.HalfY = (ushort)(solid.HalfY / 2 + 64);
+                    solid.HalfZ = (ushort)(solid.HalfZ / 2 + 64);
                 }
 
-                if (shape == BrushShape.Cylinder)
-                    brush.HalfZ = brush.HalfX;
+                if (shape == SolidShape.Cylinder)
+                    solid.HalfZ = solid.HalfX;
 
-                s.Apply(PlanOp.Insert(s.Doc.Brushes.Count, brush));
+                s.Apply(PlanOp.Insert(s.Doc.Solids.Count, solid));
             }
         });
     }

@@ -16,11 +16,11 @@ public class UndoTests
         var session = new DesignSession();
         var states = new List<byte[]> { Body(session) };
 
-        var box = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, 0, 0, 1024, 512, 768, 0, Alloy);
+        var box = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 0, 0, 1024, 512, 768, 0, Alloy);
         states.Add(Body(session));
         HullCommands.Hollow(session, box, 0.5);
         states.Add(Body(session));
-        var cyl = HullCommands.AddBrush(session, BrushShape.Cylinder, BrushOp.Add, 0, 0, 4096, 256, 512, 256, BrushRotation.FromSteps(0, 6, 0), Titanium);
+        var cyl = HullCommands.AddSolid(session, SolidShape.Cylinder, SolidOp.Add, 0, 0, 4096, 256, 512, 256, SolidRotation.FromSteps(0, 6, 0), Titanium);
         states.Add(Body(session));
         HullCommands.SetMaterial(session, box, Titanium);
         states.Add(Body(session));
@@ -57,9 +57,9 @@ public class UndoTests
     public void UndoneInsert_NeverReusesItsId()
     {
         var session = new DesignSession();
-        var a = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, 0, 0, 512, 512, 512, 0, Alloy);
+        var a = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 0, 0, 512, 512, 512, 0, Alloy);
         session.UndoLast();
-        var b = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, 0, 0, 512, 512, 512, 0, Alloy);
+        var b = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 0, 0, 512, 512, 512, 0, Alloy);
 
         Assert.NotEqual(a, b);
         Assert.Equal(0, session.Undo.RedoCount);
@@ -69,12 +69,12 @@ public class UndoTests
     public void EmptyEdit_KeepsTheRedoTail()
     {
         var session = new DesignSession();
-        var id = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, 0, 0, 512, 512, 512, 0, Alloy);
+        var id = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 0, 0, 512, 512, 512, 0, Alloy);
         HullCommands.Duplicate(session, id);
         session.UndoLast();
-        session.TryGetBrush(id, out var same);
+        session.TryGetSolid(id, out var same);
 
-        Assert.False(HullCommands.SetBrush(session, id, same));
+        Assert.False(HullCommands.SetSolid(session, id, same));
         Assert.Equal(1, session.Undo.RedoCount);
     }
 
@@ -94,14 +94,14 @@ public class UndoTests
             switch (ids.Count == 0 ? 0 : rng.Next(8))
             {
                 case 0:
-                    ids.Add(HullCommands.AddBrush(session, (BrushShape)rng.Next(3), rng.Next(4) == 0 ? BrushOp.Subtract : BrushOp.Add,
+                    ids.Add(HullCommands.AddSolid(session, (SolidShape)rng.Next(3), rng.Next(4) == 0 ? SolidOp.Subtract : SolidOp.Add,
                         rng.Next(-40, 40) * 256, rng.Next(-10, 10) * 256, rng.Next(-40, 40) * 256,
-                        (ushort)rng.Next(64, 2048), (ushort)rng.Next(64, 2048), (ushort)rng.Next(64, 2048), BrushRotation.FromSteps(rng.Next(24), 0, 0), rng.Next(2) == 0 ? Alloy : Titanium));
+                        (ushort)rng.Next(64, 2048), (ushort)rng.Next(64, 2048), (ushort)rng.Next(64, 2048), SolidRotation.FromSteps(rng.Next(24), 0, 0), rng.Next(2) == 0 ? Alloy : Titanium));
                     break;
                 case 1:
-                    session.TryGetBrush(pick, out var moved);
+                    session.TryGetSolid(pick, out var moved);
                     moved.PosX += rng.Next(-8, 8) * 256;
-                    HullCommands.SetBrush(session, pick, moved);
+                    HullCommands.SetSolid(session, pick, moved);
                     break;
                 case 2:
                     HullCommands.Rotate(session, pick, rng.Next(3), rng.Next(-3, 4));
@@ -149,10 +149,10 @@ public class UndoTests
     public void Snap_PutsFacesOnTheGrid()
     {
         var snap = new Snap { Step = GridStep.Half };
-        var brush = new HullBrush { PosX = 1000, PosY = -300, PosZ = 77, HalfX = 300, HalfY = 129, HalfZ = 1 };
-        brush = snap.SnapBrush(brush);
+        var solid = new HullSolid { PosX = 1000, PosY = -300, PosZ = 77, HalfX = 300, HalfY = 129, HalfZ = 1 };
+        solid = snap.SnapSolid(solid);
 
-        foreach (var (pos, half) in new[] { (brush.PosX, brush.HalfX), (brush.PosY, brush.HalfY), (brush.PosZ, brush.HalfZ) })
+        foreach (var (pos, half) in new[] { (solid.PosX, solid.HalfX), (solid.PosY, solid.HalfY), (solid.PosZ, solid.HalfZ) })
         {
             Assert.Equal(0, half % 64);
             Assert.True(half >= 64);
@@ -170,9 +170,9 @@ public class UndoTests
     [Fact]
     public void Rotation_StepsWrapAt360()
     {
-        var r = BrushRotation.AddSteps(BrushRotation.Identity, 0, -1);
-        Assert.Equal((23, 0, 0), BrushRotation.ToSteps(r));
-        Assert.Equal(BrushRotation.Identity, BrushRotation.AddSteps(r, 0, 1));
-        Assert.Equal(15, BrushRotation.DegreesPerStep);
+        var r = SolidRotation.AddSteps(SolidRotation.Identity, 0, -1);
+        Assert.Equal((23, 0, 0), SolidRotation.ToSteps(r));
+        Assert.Equal(SolidRotation.Identity, SolidRotation.AddSteps(r, 0, 1));
+        Assert.Equal(15, SolidRotation.DegreesPerStep);
     }
 }

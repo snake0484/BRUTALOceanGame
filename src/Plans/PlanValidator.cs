@@ -7,7 +7,7 @@ public enum Severity : byte { Info, Warning, Error }
 public enum IssueCode : ushort
 {
     UnsupportedLevel,
-    TooManyBrushes,
+    TooManySolids,
     TooManyMaterials,
     ZeroId,
     DuplicateId,
@@ -67,11 +67,11 @@ public sealed class ValidationLog
 /// <summary>
 /// Schema and geometry checks of a hull plan, the same on the designer (every commit) and the server (import and save,
 /// where nothing from the client is trusted). Bounded by <see cref="PlanLimits"/>: counts are checked before any
-/// per-brush work, and binning runs only when every brush is in bounds.
+/// per-solid work, and binning runs only when every solid is in bounds.
 /// </summary>
 public static class PlanValidator
 {
-    private const BrushFlags AllowedFlags = BrushFlags.Interior | BrushFlags.NoCollide | BrushFlags.Mirrored | BrushRoles.Mask;
+    private const SolidFlags AllowedFlags = SolidFlags.Interior | SolidFlags.NoCollide | SolidFlags.Mirrored | SolidRoles.Mask;
 
     /// <summary>Stacks: 1..16, each 1..16 layers of known materials, 0.25..8 m in total; stack references in range; ≤ 64 cuts.</summary>
     private static void ValidateLayers(PlanDocument doc, ValidationLog log)
@@ -104,7 +104,7 @@ public static class PlanValidator
         if (layers.DefaultStack >= count || layers.RoomStack >= count || layers.ComponentStack >= count || layers.Assignments.Any(a => a.Stack >= count))
             log.Add(Severity.Error, IssueCode.LayerRefs, default);
 
-        if (layers.Cuts.Count > HullLayering.MaxCuts || layers.Cuts.Any(c => c.Axis > 2 || Math.Abs(c.Position * HullBrush.MetresPerPositionUnit) > PlanLimits.MaxReachMetres))
+        if (layers.Cuts.Count > HullLayering.MaxCuts || layers.Cuts.Any(c => c.Axis > 2 || Math.Abs(c.Position * HullSolid.MetresPerPositionUnit) > PlanLimits.MaxReachMetres))
             log.Add(Severity.Error, IssueCode.LayerCuts, default, layers.Cuts.Count);
     }
 
@@ -119,11 +119,11 @@ public static class PlanValidator
             return;
         }
 
-        var brushes = doc.Brushes.AsSpan();
+        var solids = doc.Solids.AsSpan();
 
-        if (brushes.Length > PlanLimits.MaxBrushes)
+        if (solids.Length > PlanLimits.MaxSolids)
         {
-            log.Add(Severity.Error, IssueCode.TooManyBrushes, default, brushes.Length);
+            log.Add(Severity.Error, IssueCode.TooManySolids, default, solids.Length);
             return;
         }
 
@@ -163,70 +163,70 @@ public static class PlanValidator
         }
 
         ValidateLayers(doc, log);
-        var ids = new HashSet<uint>(brushes.Length);
+        var ids = new HashSet<uint>(solids.Length);
         var inBounds = true;
         var anyAdd = false;
 
-        foreach (ref readonly var brush in brushes)
+        foreach (ref readonly var solid in solids)
         {
-            var element = new ElementRef(ElementKind.Brush, brush.Id);
+            var element = new ElementRef(ElementKind.Solid, solid.Id);
 
-            if (brush.Id == 0)
+            if (solid.Id == 0)
                 log.Add(Severity.Error, IssueCode.ZeroId, element);
-            else if (!ids.Add(brush.Id))
+            else if (!ids.Add(solid.Id))
                 log.Add(Severity.Error, IssueCode.DuplicateId, element);
 
-            if (brush.Shape == BrushShape.Mesh)
+            if (solid.Shape == SolidShape.Mesh)
             {
-                if (brush.Param >= doc.Meshes.Count)
+                if (solid.Param >= doc.Meshes.Count)
                 {
-                    log.Add(Severity.Error, IssueCode.MeshIndex, element, brush.Param);
+                    log.Add(Severity.Error, IssueCode.MeshIndex, element, solid.Param);
                     inBounds = false;
                     continue;
                 }
 
-                var (hx, hy, hz) = doc.Meshes[brush.Param].HalfUnits();
+                var (hx, hy, hz) = doc.Meshes[solid.Param].HalfUnits();
 
-                if (brush.HalfX < hx || brush.HalfY < hy || brush.HalfZ < hz)
-                    log.Add(Severity.Error, IssueCode.MeshBounds, element, brush.Param);
+                if (solid.HalfX < hx || solid.HalfY < hy || solid.HalfZ < hz)
+                    log.Add(Severity.Error, IssueCode.MeshBounds, element, solid.Param);
             }
-            else if (!BrushGeometry.IsSupported(brush.Shape))
+            else if (!SolidGeometry.IsSupported(solid.Shape))
             {
-                log.Add(Severity.Error, IssueCode.UnsupportedShape, element, (int)brush.Shape);
+                log.Add(Severity.Error, IssueCode.UnsupportedShape, element, (int)solid.Shape);
                 inBounds = false;
                 continue;
             }
 
-            if (brush.Op is not (BrushOp.Add or BrushOp.Subtract or BrushOp.Paint))
-                log.Add(Severity.Error, IssueCode.UnsupportedOp, element, (int)brush.Op);
+            if (solid.Op is not (SolidOp.Add or SolidOp.Subtract or SolidOp.Paint))
+                log.Add(Severity.Error, IssueCode.UnsupportedOp, element, (int)solid.Op);
 
-            anyAdd |= brush.Op == BrushOp.Add;
+            anyAdd |= solid.Op == SolidOp.Add;
 
-            if ((brush.Flags & ~AllowedFlags) != 0)
-                log.Add(Severity.Error, IssueCode.UnsupportedFlags, element, (int)brush.Flags);
+            if ((solid.Flags & ~AllowedFlags) != 0)
+                log.Add(Severity.Error, IssueCode.UnsupportedFlags, element, (int)solid.Flags);
 
-            if (BrushRoles.Of(brush) != BrushRole.Skin && doc.Layers is null)
-                log.Add(Severity.Error, IssueCode.RoleWithoutLayers, element, (int)BrushRoles.Of(brush));
+            if (SolidRoles.Of(solid) != SolidRole.Skin && doc.Layers is null)
+                log.Add(Severity.Error, IssueCode.RoleWithoutLayers, element, (int)SolidRoles.Of(solid));
 
-            if (brush.Bevel != 0)
-                log.Add(Severity.Error, IssueCode.BevelUnsupported, element, brush.Bevel);
+            if (solid.Bevel != 0)
+                log.Add(Severity.Error, IssueCode.BevelUnsupported, element, solid.Bevel);
 
-            if (brush.Material >= doc.Materials.Count)
-                log.Add(Severity.Error, IssueCode.MaterialIndex, element, brush.Material);
+            if (solid.Material >= doc.Materials.Count)
+                log.Add(Severity.Error, IssueCode.MaterialIndex, element, solid.Material);
 
-            if (!BrushRotation.IsValid(brush.Rotation))
+            if (!SolidRotation.IsValid(solid.Rotation))
             {
-                log.Add(Severity.Error, IssueCode.InvalidRotation, element, (int)brush.Rotation);
+                log.Add(Severity.Error, IssueCode.InvalidRotation, element, (int)solid.Rotation);
                 inBounds = false;
                 continue;
             }
 
-            var thinnest = brush.Shape == BrushShape.Mesh ? PlanLimits.MinHalfUnits : brush.Shape == BrushShape.Cylinder ? Math.Min(brush.HalfX, brush.HalfY) : Math.Min(brush.HalfX, Math.Min(brush.HalfY, brush.HalfZ));
+            var thinnest = solid.Shape == SolidShape.Mesh ? PlanLimits.MinHalfUnits : solid.Shape == SolidShape.Cylinder ? Math.Min(solid.HalfX, solid.HalfY) : Math.Min(solid.HalfX, Math.Min(solid.HalfY, solid.HalfZ));
 
             if (thinnest < PlanLimits.MinHalfUnits)
                 log.Add(Severity.Error, IssueCode.ExtentTooSmall, element, thinnest);
 
-            BrushGeometry.Bounds(brush, out var min, out var max);
+            SolidGeometry.Bounds(solid, out var min, out var max);
             var reach = Math.Max(Math.Max(Math.Abs(min.X), Math.Abs(max.X)), Math.Max(Math.Max(Math.Abs(min.Y), Math.Abs(max.Y)), Math.Max(Math.Abs(min.Z), Math.Abs(max.Z))));
 
             if (reach > PlanLimits.MaxReachMetres)
@@ -243,9 +243,9 @@ public static class PlanValidator
             return;
 
         bins ??= new HullBins();
-        bins.Build(brushes);
+        bins.Build(solids);
 
-        if (bins.MaxPerBrick > HullBins.MaxBrushesPerBrick)
+        if (bins.MaxPerBrick > HullBins.MaxSolidsPerBrick)
             log.Add(Severity.Error, IssueCode.BrickOverfull, default, bins.MaxPerBrick);
     }
 }

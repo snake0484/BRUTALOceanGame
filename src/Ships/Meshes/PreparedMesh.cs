@@ -4,7 +4,7 @@ using System.Numerics;
 namespace BrutalGame.Ships;
 
 /// <summary>
-/// A mesh ready for the bake and tools: its subdivided triangles in brush-local metres and an AABB tree over them
+/// A mesh ready for the bake and tools: its subdivided triangles in solid-local metres and an AABB tree over them
 /// (median split, ≤ 4 triangles a leaf). Queries: ray crossings (sign rows), first hit on a segment (Hermite data,
 /// picking), closest point within a radius (the distance band), triangles in a box. Read-only after build: shared
 /// across bake workers. Prepared once per (MeshHash, levels) through <see cref="MeshCache"/>.

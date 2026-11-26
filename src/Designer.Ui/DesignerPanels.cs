@@ -18,7 +18,7 @@ public sealed class DesignStats
     public float BakeCpuMs;
     public int Rebaked;
     public int Reused;
-    public int MaxBrushesPerBrick;
+    public int MaxSolidsPerBrick;
     public bool Baking;
     public float PrepareMs;
     public int ExactBricks;
@@ -28,7 +28,7 @@ public sealed class DesignStats
 }
 
 /// <summary>
-/// The designer's ImGui panels: file and tools, brush list, properties of the primary brush, stats and validation.
+/// The designer's ImGui panels: file and tools, solid list, properties of the primary solid, stats and validation.
 /// Field edits go to a draft and commit as one undo group when the field is left after an edit, never per keystroke.
 /// </summary>
 public sealed class DesignerPanels
@@ -86,14 +86,14 @@ public sealed class DesignerPanels
         }
     }
 
-    /// <summary>Where new brushes go: the host sets it to the camera target.</summary>
+    /// <summary>Where new solids go: the host sets it to the camera target.</summary>
     public double3 PlaceAt;
 
     public void Draw(DesignSession session, DesignStats stats, MeshEditState meshEdit)
     {
         Request = FileRequest.None;
         DrawTools(session, stats);
-        DrawBrushList(session);
+        DrawSolidList(session);
         DrawProperties(session);
         _meshPanel.Draw(session, meshEdit);
         _layersPanel.Draw(session);
@@ -105,7 +105,7 @@ public sealed class DesignerPanels
         if (ImGui.Begin("Designer"u8))
         {
             var name = session.Path.Length > 0 ? Path.GetFileName(session.Path) : "untitled";
-            ImGui.Text($"{name}{(session.Modified ? " *" : "")}  ({session.Doc.Brushes.Count} brushes)");
+            ImGui.Text($"{name}{(session.Modified ? " *" : "")}  ({session.Doc.Solids.Count} solids)");
 
             if (ImGui.Button("New"u8))
                 Request = FileRequest.New;
@@ -139,23 +139,23 @@ public sealed class DesignerPanels
             if (stats.Message.Length > 0)
                 ImGui.TextWrapped($"{stats.Message}");
 
-            ImGui.SeparatorText("Add brush"u8);
+            ImGui.SeparatorText("Add solid"u8);
             ImGui.Checkbox("Subtract"u8, ref _newSubtract);
             ImGui.SameLine();
             MaterialCombo("Material##new"u8, ref _newMaterial);
 
             if (ImGui.Button("Box"u8))
-                AddBrush(session, BrushShape.Box);
+                AddSolid(session, SolidShape.Box);
 
             ImGui.SameLine();
 
             if (ImGui.Button("Wedge"u8))
-                AddBrush(session, BrushShape.Wedge);
+                AddSolid(session, SolidShape.Wedge);
 
             ImGui.SameLine();
 
             if (ImGui.Button("Cylinder"u8))
-                AddBrush(session, BrushShape.Cylinder);
+                AddSolid(session, SolidShape.Cylinder);
 
             ImGui.SeparatorText("Snap"u8);
             ImGui.Checkbox("Grid"u8, ref session.Snap.Enabled);
@@ -204,27 +204,27 @@ public sealed class DesignerPanels
         ImGui.End();
     }
 
-    private void AddBrush(DesignSession session, BrushShape shape)
+    private void AddSolid(DesignSession session, SolidShape shape)
     {
-        var half = (ushort)(DefaultSizeMetres * 0.5f * HullBrush.HalfUnitsPerMetre);
+        var half = (ushort)(DefaultSizeMetres * 0.5f * HullSolid.HalfUnitsPerMetre);
         var material = _catalog.All.Count > 0 ? _catalog.All[Math.Clamp(_newMaterial, 0, _catalog.All.Count - 1)].Id : default;
-        var units = HullBrush.PositionUnitsPerMetre;
-        HullCommands.AddBrush(session, shape, _newSubtract ? BrushOp.Subtract : BrushOp.Add,
+        var units = HullSolid.PositionUnitsPerMetre;
+        HullCommands.AddSolid(session, shape, _newSubtract ? SolidOp.Subtract : SolidOp.Add,
             (int)Math.Round(PlaceAt.X * units), (int)Math.Round(PlaceAt.Y * units), (int)Math.Round(PlaceAt.Z * units),
-            half, half, half, BrushRotation.Identity, material);
+            half, half, half, SolidRotation.Identity, material);
     }
 
-    private void DrawBrushList(DesignSession session)
+    private void DrawSolidList(DesignSession session)
     {
 
-        if (ImGui.Begin("Brushes"u8))
+        if (ImGui.Begin("Solids"u8))
         {
-            var brushes = session.Doc.Brushes.AsSpan();
+            var solids = session.Doc.Solids.AsSpan();
 
-            for (var i = 0; i < brushes.Length; i++)
+            for (var i = 0; i < solids.Length; i++)
             {
-                ref readonly var b = ref brushes[i];
-                var interior = (b.Flags & BrushFlags.Interior) != 0 ? " interior" : "";
+                ref readonly var b = ref solids[i];
+                var interior = (b.Flags & SolidFlags.Interior) != 0 ? " interior" : "";
 
                 if (ImGui.Selectable($"{i,3}  #{b.Id}  {OpName(b.Op)} {ShapeName(b.Shape)}{interior}##{b.Id}", session.Selection.Contains(b.Id), ImGuiSelectableFlags.None, default))
                 {
@@ -245,33 +245,33 @@ public sealed class DesignerPanels
         {
             var id = session.Selection.Primary;
 
-            if (!session.TryGetBrush(id, out var brush))
+            if (!session.TryGetSolid(id, out var solid))
             {
-                ImGui.Text("No brush selected"u8);
+                ImGui.Text("No solid selected"u8);
                 ImGui.End();
                 return;
             }
 
             if (id != _draftId || session.Version != _draftVersion)
-                LoadDraft(brush, id, session.Version);
+                LoadDraft(solid, id, session.Version);
 
-            ImGui.Text($"Brush #{brush.Id}  index {session.Doc.Brushes.IndexOf(id)}");
+            ImGui.Text($"Solid #{solid.Id}  index {session.Doc.Solids.IndexOf(id)}");
 
-            var isMesh = brush.Shape == BrushShape.Mesh;
+            var isMesh = solid.Shape == SolidShape.Mesh;
 
             if (isMesh)
             {
-                ImGui.Text($"Mesh brush (table entry {brush.Param})");
+                ImGui.Text($"Mesh solid (table entry {solid.Param})");
             }
             else
             {
-                var shape = Math.Min((int)brush.Shape, ShapeNames.Length - 1);
+                var shape = Math.Min((int)solid.Shape, ShapeNames.Length - 1);
                 DesignerStyle.ItemWidth(120f);
 
                 if (Combo("Shape"u8, ref shape, ShapeNames))
                 {
-                    brush.Shape = (BrushShape)shape;
-                    HullCommands.SetBrush(session, id, brush);
+                    solid.Shape = (SolidShape)shape;
+                    HullCommands.SetSolid(session, id, solid);
                 }
 
                 ImGui.SameLine();
@@ -280,25 +280,25 @@ public sealed class DesignerPanels
                     Mesh.MeshCommands.ConvertToMesh(session, id);
             }
 
-            var op = Math.Min((int)brush.Op, OpNames.Length - 1);
+            var op = Math.Min((int)solid.Op, OpNames.Length - 1);
             DesignerStyle.ItemWidth(120f);
 
             if (Combo("Op"u8, ref op, OpNames))
             {
-                brush.Op = (BrushOp)op;
-                HullCommands.SetBrush(session, id, brush, snap: false);
+                solid.Op = (SolidOp)op;
+                HullCommands.SetSolid(session, id, solid, snap: false);
             }
 
             if (session.Doc.Layers is not null)
             {
-                var role = (int)BrushRoles.Of(brush);
+                var role = (int)SolidRoles.Of(solid);
                 DesignerStyle.ItemWidth(120f);
 
                 if (Combo("Role"u8, ref role, RoleNames))
-                    Designer.LayerCommands.SetRole(session, id, (BrushRole)role);
+                    Designer.LayerCommands.SetRole(session, id, (SolidRole)role);
             }
 
-            var material = MaterialSlot(session.Doc, brush.Material);
+            var material = MaterialSlot(session.Doc, solid.Material);
 
             if (MaterialCombo("Material"u8, ref material))
                 HullCommands.SetMaterial(session, id, _catalog.All[material].Id);
@@ -310,11 +310,11 @@ public sealed class DesignerPanels
             commit |= Field("Z##pos"u8, ref _draft.Z);
             if (!isMesh)
             {
-                ImGui.SeparatorText(brush.Shape == BrushShape.Cylinder ? "Diameter, height (m)"u8 : "Size (m)"u8);
+                ImGui.SeparatorText(solid.Shape == SolidShape.Cylinder ? "Diameter, height (m)"u8 : "Size (m)"u8);
                 commit |= Field("X##size"u8, ref _draft.SizeX);
                 commit |= Field("Y##size"u8, ref _draft.SizeY);
 
-                if (brush.Shape != BrushShape.Cylinder)
+                if (solid.Shape != SolidShape.Cylinder)
                     commit |= Field("Z##size"u8, ref _draft.SizeZ);
             }
 
@@ -327,7 +327,7 @@ public sealed class DesignerPanels
                 commit = true;
 
             if (commit)
-                HullCommands.SetBrush(session, id, FromDraft(brush));
+                HullCommands.SetSolid(session, id, FromDraft(solid));
 
             ImGui.Separator();
 
@@ -375,7 +375,7 @@ public sealed class DesignerPanels
             ImGui.Text($"CoM {com.X:F3}, {com.Y:F3}, {com.Z:F3} m");
             ImGui.Text($"inertia {inertia.Xx:E2}, {inertia.Yy:E2}, {inertia.Zz:E2} kg m2");
             ImGui.Separator();
-            ImGui.Text($"bricks {stats.Bricks} ({stats.ExactBricks} exact)  triangles {stats.Triangles}  max brushes/brick {stats.MaxBrushesPerBrick}");
+            ImGui.Text($"bricks {stats.Bricks} ({stats.ExactBricks} exact)  triangles {stats.Triangles}  max solids/brick {stats.MaxSolidsPerBrick}");
             ImGui.Text($"bake {stats.BakeMs:F2} ms wall  {stats.BakeCpuMs:F2} ms cpu  rebaked {stats.Rebaked} reused {stats.Reused}{(stats.Baking ? "  (baking)" : "")}");
             ImGui.Text($"mesh prepare {stats.PrepareMs:F2} ms (subdivide + BVH, cached by mesh hash)");
             ImGui.Text($"plan hash {stats.Hash}  undo {session.Undo.UndoCount} redo {session.Undo.RedoCount}");
@@ -388,43 +388,43 @@ public sealed class DesignerPanels
         ImGui.End();
     }
 
-    private void LoadDraft(in HullBrush brush, uint id, int version)
+    private void LoadDraft(in HullSolid solid, uint id, int version)
     {
-        var (yaw, pitch, roll) = BrushRotation.ToSteps(brush.Rotation);
+        var (yaw, pitch, roll) = SolidRotation.ToSteps(solid.Rotation);
         _draft = new Draft
         {
-            X = brush.PositionX,
-            Y = brush.PositionY,
-            Z = brush.PositionZ,
-            SizeX = brush.HalfX * 2.0 * HullBrush.MetresPerHalfUnit,
-            SizeY = brush.HalfY * 2.0 * HullBrush.MetresPerHalfUnit,
-            SizeZ = brush.HalfZ * 2.0 * HullBrush.MetresPerHalfUnit,
-            Yaw = yaw * BrushRotation.DegreesPerStep,
-            Pitch = pitch * BrushRotation.DegreesPerStep,
-            Roll = roll * BrushRotation.DegreesPerStep,
-            Interior = (brush.Flags & BrushFlags.Interior) != 0,
+            X = solid.PositionX,
+            Y = solid.PositionY,
+            Z = solid.PositionZ,
+            SizeX = solid.HalfX * 2.0 * HullSolid.MetresPerHalfUnit,
+            SizeY = solid.HalfY * 2.0 * HullSolid.MetresPerHalfUnit,
+            SizeZ = solid.HalfZ * 2.0 * HullSolid.MetresPerHalfUnit,
+            Yaw = yaw * SolidRotation.DegreesPerStep,
+            Pitch = pitch * SolidRotation.DegreesPerStep,
+            Roll = roll * SolidRotation.DegreesPerStep,
+            Interior = (solid.Flags & SolidFlags.Interior) != 0,
         };
         _draftId = id;
         _draftVersion = version;
     }
 
-    private HullBrush FromDraft(HullBrush brush)
+    private HullSolid FromDraft(HullSolid solid)
     {
-        const int units = HullBrush.PositionUnitsPerMetre;
-        const double halfUnits = HullBrush.HalfUnitsPerMetre * 0.5;
-        brush.PosX = (int)Math.Round(_draft.X * units);
-        brush.PosY = (int)Math.Round(_draft.Y * units);
-        brush.PosZ = (int)Math.Round(_draft.Z * units);
-        if (brush.Shape != BrushShape.Mesh)
+        const int units = HullSolid.PositionUnitsPerMetre;
+        const double halfUnits = HullSolid.HalfUnitsPerMetre * 0.5;
+        solid.PosX = (int)Math.Round(_draft.X * units);
+        solid.PosY = (int)Math.Round(_draft.Y * units);
+        solid.PosZ = (int)Math.Round(_draft.Z * units);
+        if (solid.Shape != SolidShape.Mesh)
         {
-            brush.HalfX = Half(_draft.SizeX * halfUnits);
-            brush.HalfY = Half(_draft.SizeY * halfUnits);
-            brush.HalfZ = brush.Shape == BrushShape.Cylinder ? brush.HalfX : Half(_draft.SizeZ * halfUnits);
+            solid.HalfX = Half(_draft.SizeX * halfUnits);
+            solid.HalfY = Half(_draft.SizeY * halfUnits);
+            solid.HalfZ = solid.Shape == SolidShape.Cylinder ? solid.HalfX : Half(_draft.SizeZ * halfUnits);
         }
 
-        brush.Rotation = BrushRotation.FromSteps(_draft.Yaw / BrushRotation.DegreesPerStep, _draft.Pitch / BrushRotation.DegreesPerStep, _draft.Roll / BrushRotation.DegreesPerStep);
-        brush.Flags = _draft.Interior ? brush.Flags | BrushFlags.Interior : brush.Flags & ~BrushFlags.Interior;
-        return brush;
+        solid.Rotation = SolidRotation.FromSteps(_draft.Yaw / SolidRotation.DegreesPerStep, _draft.Pitch / SolidRotation.DegreesPerStep, _draft.Roll / SolidRotation.DegreesPerStep);
+        solid.Flags = _draft.Interior ? solid.Flags | SolidFlags.Interior : solid.Flags & ~SolidFlags.Interior;
+        return solid;
     }
 
     private static ushort Half(double units) => (ushort)Math.Clamp(Math.Round(units), PlanLimits.MinHalfUnits, ushort.MaxValue);
@@ -440,9 +440,9 @@ public sealed class DesignerPanels
     private static bool StepField(ReadOnlySpan<byte> label, ref int degrees)
     {
         DesignerStyle.ItemWidth(140f);
-        var changed = ImGui.InputInt(label, ref degrees, BrushRotation.DegreesPerStep, 90, ImGuiInputTextFlags.None);
+        var changed = ImGui.InputInt(label, ref degrees, SolidRotation.DegreesPerStep, 90, ImGuiInputTextFlags.None);
         var edited = ImGui.IsItemDeactivatedAfterEdit() || (changed && !ImGui.IsItemActive());
-        degrees = (int)Math.Round(degrees / (double)BrushRotation.DegreesPerStep) * BrushRotation.DegreesPerStep;
+        degrees = (int)Math.Round(degrees / (double)SolidRotation.DegreesPerStep) * SolidRotation.DegreesPerStep;
         return edited;
     }
 
@@ -512,7 +512,7 @@ public sealed class DesignerPanels
         return 0;
     }
 
-    private static string ShapeName(BrushShape shape) => (int)shape < ShapeNames.Length ? ShapeNames[(int)shape] : shape.ToString();
+    private static string ShapeName(SolidShape shape) => (int)shape < ShapeNames.Length ? ShapeNames[(int)shape] : shape.ToString();
 
-    private static string OpName(BrushOp op) => (int)op < OpNames.Length ? OpNames[(int)op] : op.ToString();
+    private static string OpName(SolidOp op) => (int)op < OpNames.Length ? OpNames[(int)op] : op.ToString();
 }

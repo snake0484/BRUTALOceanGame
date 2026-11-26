@@ -4,9 +4,9 @@ using BrutalGame.Terrain;
 namespace BrutalGame.Ships;
 
 /// <summary>
-/// The exact render surface of one brush inside one brick: its own polygons (a mesh brush's subdivided triangles, or a
+/// The exact render surface of one solid inside one brick: its own polygons (a mesh solid's subdivided triangles, or a
 /// finely tessellated primitive), placed in ship space in double, made brick-relative and clipped to the brick's box.
-/// Used where the bake shows that brush is the only one reaching the brick, so the surface there is exactly the brush's:
+/// Used where the bake shows that solid is the only one reaching the brick, so the surface there is exactly the solid's:
 /// no grid, no resampling. Neighbouring exact bricks clip on the same planes from the same triangles, so they meet
 /// without cracks; next to a dual-contoured brick the box grows one cell toward it so the two overlap instead of gapping.
 /// Owns its scratch; one per worker.
@@ -33,42 +33,42 @@ public sealed class ExactSurface
     private readonly Vector3[] _ring = new Vector3[MaxCylinderSides];
 
     /// <summary>
-    /// Appends the brush's surface inside <c>[min, max]</c> (brick-relative metres) to <paramref name="output"/> as
+    /// Appends the solid's surface inside <c>[min, max]</c> (brick-relative metres) to <paramref name="output"/> as
     /// brick-relative vertices. The output is packed by the caller.
     /// </summary>
-    public void Append(in HullBrush brush, PreparedMesh? mesh, Vector3d brickOrigin, Vector3d min, Vector3d max, ChunkMesh output)
+    public void Append(in HullSolid solid, PreparedMesh? mesh, Vector3d brickOrigin, Vector3d min, Vector3d max, ChunkMesh output)
     {
-        BrushRotation.Matrix(brush.Rotation, _rotation);
-        var position = new Vector3d(brush.PositionX - brickOrigin.X, brush.PositionY - brickOrigin.Y, brush.PositionZ - brickOrigin.Z);
+        SolidRotation.Matrix(solid.Rotation, _rotation);
+        var position = new Vector3d(solid.PositionX - brickOrigin.X, solid.PositionY - brickOrigin.Y, solid.PositionZ - brickOrigin.Z);
 
-        if (brush.Shape == BrushShape.Mesh)
+        if (solid.Shape == SolidShape.Mesh)
         {
             if (mesh is null)
                 return;
 
-            AppendMesh(mesh, position, min, max, brush.Material, output);
+            AppendMesh(mesh, position, min, max, solid.Material, output);
             return;
         }
 
-        var h = BrushGeometry.Half(brush);
+        var h = SolidGeometry.Half(solid);
 
-        switch (brush.Shape)
+        switch (solid.Shape)
         {
-            case BrushShape.Cylinder:
-                AppendCylinder(h, position, min, max, brush.Material, output);
+            case SolidShape.Cylinder:
+                AppendCylinder(h, position, min, max, solid.Material, output);
                 break;
-            case BrushShape.Wedge:
-                AppendWedge(h, position, min, max, brush.Material, output);
+            case SolidShape.Wedge:
+                AppendWedge(h, position, min, max, solid.Material, output);
                 break;
             default:
-                AppendBox(h, position, min, max, brush.Material, output);
+                AppendBox(h, position, min, max, solid.Material, output);
                 break;
         }
     }
 
     private void AppendMesh(PreparedMesh mesh, Vector3d position, Vector3d min, Vector3d max, byte material, ChunkMesh output)
     {
-        // The clip box in brush-local axes (its local AABB) selects candidate triangles.
+        // The clip box in solid-local axes (its local AABB) selects candidate triangles.
         var lo = new Vector3(float.MaxValue);
         var hi = new Vector3(float.MinValue);
 
@@ -107,7 +107,7 @@ public sealed class ExactSurface
             Quad(corners[faces[f]], corners[faces[f + 1]], corners[faces[f + 2]], corners[faces[f + 3]], position, min, max, material, output);
     }
 
-    /// <summary>The wedge brush: bottom, back (-Z), slope, two side triangles.</summary>
+    /// <summary>The wedge solid: bottom, back (-Z), slope, two side triangles.</summary>
     private void AppendWedge(Vector3 h, Vector3d position, Vector3d min, Vector3d max, byte material, ChunkMesh output)
     {
         Vector3 v0 = new(-h.X, -h.Y, -h.Z), v1 = new(h.X, -h.Y, -h.Z), v2 = new(-h.X, -h.Y, h.Z), v3 = new(h.X, -h.Y, h.Z), v4 = new(-h.X, h.Y, -h.Z), v5 = new(h.X, h.Y, -h.Z);
@@ -181,7 +181,7 @@ public sealed class ExactSurface
         Emit(min, max, material, output);
     }
 
-    /// <summary>A brush-local corner into the brick frame: R · local + position, in double.</summary>
+    /// <summary>A solid-local corner into the brick frame: R · local + position, in double.</summary>
     private void Add(Vector3 local, Vector3 normal, Vector3d position)
     {
         var m = _rotation;

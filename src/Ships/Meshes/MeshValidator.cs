@@ -16,7 +16,7 @@ public enum MeshIssue : byte
 }
 
 /// <summary>
-/// ship-hulls "Mesh brushes" validation, run by the designer on commit and by the server on save and import: limits,
+/// ship-hulls "Mesh solids" validation, run by the designer on commit and by the server on save and import: limits,
 /// closed (every edge in exactly two faces), oriented (each directed edge once, its reverse present), manifold (one fan
 /// per vertex, no duplicate faces), positive volume, no degenerate triangle or edge under 1/64 m after subdivision, and
 /// no self-intersection between non-adjacent subdivided triangles. Predicates are exact: vertices are integers, so

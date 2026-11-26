@@ -6,13 +6,13 @@ using BrutalGame.Ships;
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>
-/// The mesh editor's panel for the primary mesh brush (ship-hulls "Mesh editor"): edit toggle (Tab), selection mode
+/// The mesh editor's panel for the primary mesh solid (ship-hulls "Mesh editor"): edit toggle (Tab), selection mode
 /// (1 vertex, 2 edge, 3 face), live mirror, subdivision levels and creases, and the modelling ops with their amounts.
 /// Each button is one undoable op; the mesh's validation result shows under it.
 /// </summary>
 public sealed class MeshPanel
 {
-    private const int Units = HullBrush.PositionUnitsPerMetre;
+    private const int Units = HullSolid.PositionUnitsPerMetre;
 
     private static readonly string[] Modes = ["Vertex", "Edge", "Face"];
     private static readonly string[] Axes = ["X", "Y", "Z"];

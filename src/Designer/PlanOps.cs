@@ -3,10 +3,10 @@ using BrutalGame.Ships;
 
 namespace BrutalGame.Designer;
 
-public enum OpKind : byte { InsertBrush, RemoveBrush, ModifyBrush, AddMaterial, RemoveMaterial, AddMesh, RemoveMesh, SetMesh, SetLayering }
+public enum OpKind : byte { InsertSolid, RemoveSolid, ModifySolid, AddMaterial, RemoveMaterial, AddMesh, RemoveMesh, SetMesh, SetLayering }
 
 /// <summary>
-/// One invertible edit, a brush-list diff (ship-hulls "undo = brush list diffs"). Insert and Remove carry the brush and
+/// One invertible edit, a solid-list diff (ship-hulls "undo = solid list diffs"). Insert and Remove carry the solid and
 /// its list index; Modify carries before and after; AddMaterial / RemoveMaterial append or drop the table's last entry
 /// (<see cref="Value"/> = DefId). Mesh ops (round 5) carry immutable mesh snapshots: AddMesh / RemoveMesh append or drop
 /// the mesh table's last entry, SetMesh replaces entry <see cref="Index"/> (one op per modelling step).
@@ -16,33 +16,33 @@ public struct PlanOp
     public OpKind Kind;
     public int Index;
     public uint Value;
-    public HullBrush Before;
-    public HullBrush After;
+    public HullSolid Before;
+    public HullSolid After;
     public HullMesh? MeshBefore;
     public HullMesh? MeshAfter;
     public HullLayering? LayersBefore;
     public HullLayering? LayersAfter;
 
-    /// <summary>Replaces the plan's layering (null: a solid brush hull). Snapshots are never mutated after this.</summary>
+    /// <summary>Replaces the plan's layering (null: a solid hull). Snapshots are never mutated after this.</summary>
     public static PlanOp SetLayering(HullLayering? before, HullLayering? after) => new() { Kind = OpKind.SetLayering, LayersBefore = before, LayersAfter = after };
 
     public static PlanOp AddMesh(int index, HullMesh mesh) => new() { Kind = OpKind.AddMesh, Index = index, MeshAfter = mesh };
 
     public static PlanOp SetMesh(int index, HullMesh before, HullMesh after) => new() { Kind = OpKind.SetMesh, Index = index, MeshBefore = before, MeshAfter = after };
 
-    public static PlanOp Insert(int index, in HullBrush brush) => new() { Kind = OpKind.InsertBrush, Index = index, After = brush };
+    public static PlanOp Insert(int index, in HullSolid solid) => new() { Kind = OpKind.InsertSolid, Index = index, After = solid };
 
-    public static PlanOp Remove(int index, in HullBrush brush) => new() { Kind = OpKind.RemoveBrush, Index = index, Before = brush };
+    public static PlanOp Remove(int index, in HullSolid solid) => new() { Kind = OpKind.RemoveSolid, Index = index, Before = solid };
 
-    public static PlanOp Modify(int index, in HullBrush before, in HullBrush after) => new() { Kind = OpKind.ModifyBrush, Index = index, Before = before, After = after };
+    public static PlanOp Modify(int index, in HullSolid before, in HullSolid after) => new() { Kind = OpKind.ModifySolid, Index = index, Before = before, After = after };
 
     public static PlanOp AddMaterial(int index, DefId material) => new() { Kind = OpKind.AddMaterial, Index = index, Value = material.Value };
 
     public readonly PlanOp Inverse() => Kind switch
     {
-        OpKind.InsertBrush => Remove(Index, After),
-        OpKind.RemoveBrush => Insert(Index, Before),
-        OpKind.ModifyBrush => Modify(Index, After, Before),
+        OpKind.InsertSolid => Remove(Index, After),
+        OpKind.RemoveSolid => Insert(Index, Before),
+        OpKind.ModifySolid => Modify(Index, After, Before),
         OpKind.AddMaterial => this with { Kind = OpKind.RemoveMaterial },
         OpKind.RemoveMaterial => this with { Kind = OpKind.AddMaterial },
         OpKind.AddMesh => new PlanOp { Kind = OpKind.RemoveMesh, Index = Index, MeshBefore = MeshAfter },
@@ -56,20 +56,20 @@ public struct PlanOp
     {
         switch (Kind)
         {
-            case OpKind.InsertBrush:
-                doc.Brushes.Insert(Index, After);
+            case OpKind.InsertSolid:
+                doc.Solids.Insert(Index, After);
 
                 if (After.Id >= doc.Meta.NextId)
                     doc.Meta.NextId = After.Id + 1;
 
                 break;
-            case OpKind.RemoveBrush:
-                Expect(doc.Brushes[Index] == Before);
-                doc.Brushes.RemoveAt(Index);
+            case OpKind.RemoveSolid:
+                Expect(doc.Solids[Index] == Before);
+                doc.Solids.RemoveAt(Index);
                 break;
-            case OpKind.ModifyBrush:
-                Expect(doc.Brushes[Index] == Before);
-                doc.Brushes[Index] = After;
+            case OpKind.ModifySolid:
+                Expect(doc.Solids[Index] == Before);
+                doc.Solids[Index] = After;
                 break;
             case OpKind.AddMaterial:
                 Expect(Index == doc.Materials.Count);

@@ -6,7 +6,7 @@ namespace BrutalGame.Designer;
 [Flags]
 public enum Dirty : byte { None = 0, Geometry = 1, Function = 2, Buildability = 4, Cost = 8 }
 
-/// <summary>Selected brush ids; the last one picked is primary (the properties panel and gizmo act on it).</summary>
+/// <summary>Selected solid ids; the last one picked is primary (the properties panel and gizmo act on it).</summary>
 public sealed class Selection
 {
     public readonly List<uint> Ids = new();
@@ -32,7 +32,7 @@ public sealed class Selection
     public void Clear() => Ids.Clear();
 
     /// <summary>Drops ids no longer in <paramref name="doc"/> (after undo, delete or load).</summary>
-    public void Prune(PlanDocument doc) => Ids.RemoveAll(id => doc.Brushes.IndexOf(id) < 0);
+    public void Prune(PlanDocument doc) => Ids.RemoveAll(id => doc.Solids.IndexOf(id) < 0);
 }
 
 /// <summary>
@@ -153,10 +153,10 @@ public sealed class DesignSession
         return (byte)index;
     }
 
-    public bool TryGetBrush(uint id, out HullBrush brush)
+    public bool TryGetSolid(uint id, out HullSolid solid)
     {
-        var index = Doc.Brushes.IndexOf(id);
-        brush = index >= 0 ? Doc.Brushes[index] : default;
+        var index = Doc.Solids.IndexOf(id);
+        solid = index >= 0 ? Doc.Solids[index] : default;
         return index >= 0;
     }
 

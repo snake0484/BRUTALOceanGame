@@ -72,9 +72,9 @@ public sealed class MeshSelection
 }
 
 /// <summary>
-/// Mesh brush commands, each one undo group: convert a primitive to a mesh brush (same solid, same op, so a cut stays a
-/// cut), and apply an editor op to a brush's mesh. Editing a mesh shared by several brushes changes all of them, and every
-/// brush using it gets the new half extents. Live mirror symmetrises after the op.
+/// Mesh solid commands, each one undo group: convert a primitive to a mesh solid (same solid, same op, so a cut stays a
+/// cut), and apply an editor op to a solid's mesh. Editing a mesh shared by several solids changes all of them, and every
+/// solid using it gets the new half extents. Live mirror symmetrises after the op.
 /// </summary>
 public static class MeshCommands
 {
@@ -82,17 +82,17 @@ public static class MeshCommands
 
     public static bool ConvertToMesh(DesignSession session, uint id)
     {
-        var index = session.Doc.Brushes.IndexOf(id);
+        var index = session.Doc.Solids.IndexOf(id);
 
         if (index < 0)
             return false;
 
-        var before = session.Doc.Brushes[index];
+        var before = session.Doc.Solids[index];
 
-        if (!BrushGeometry.IsSupported(before.Shape))
+        if (!SolidGeometry.IsSupported(before.Shape))
             return false;
 
-        var mesh = MeshPrimitives.FromBrush(before);
+        var mesh = MeshPrimitives.FromSolid(before);
 
         session.Edit(s =>
         {
@@ -100,18 +100,18 @@ public static class MeshCommands
             var slot = s.Doc.Meshes.Count;
             s.Apply(PlanOp.AddMesh(slot, mesh));
             var after = before;
-            after.Shape = BrushShape.Mesh;
+            after.Shape = SolidShape.Mesh;
             after.Param = (ushort)slot;
             (after.HalfX, after.HalfY, after.HalfZ) = mesh.HalfUnits();
             s.Apply(PlanOp.Modify(index, before, after));
 
-            // Partners become the reflected mesh, placed as the converted brush's reflection.
+            // Partners become the reflected mesh, placed as the converted solid's reflection.
             foreach (var (mask, partnerId) in partners)
             {
-                var partnerIndex = s.Doc.Brushes.IndexOf(partnerId);
-                var partner = s.Doc.Brushes[partnerIndex];
+                var partnerIndex = s.Doc.Solids.IndexOf(partnerId);
+                var partner = s.Doc.Solids[partnerIndex];
 
-                if (!BrushMirror.Mirror(after, mask, mesh, out var mirrored, out var mirroredMesh) || mirroredMesh is null)
+                if (!SolidMirror.Mirror(after, mask, mesh, out var mirrored, out var mirroredMesh) || mirroredMesh is null)
                     continue;
 
                 var partnerSlot = s.Doc.Meshes.FindIndex(m => m.ContentEquals(mirroredMesh));
@@ -132,16 +132,16 @@ public static class MeshCommands
     }
 
     public static HullMesh? MeshOf(DesignSession session, uint id) =>
-        session.TryGetBrush(id, out var brush) && brush.Shape == BrushShape.Mesh && brush.Param < session.Doc.Meshes.Count ? session.Doc.Meshes[brush.Param] : null;
+        session.TryGetSolid(id, out var solid) && solid.Shape == SolidShape.Mesh && solid.Param < session.Doc.Meshes.Count ? session.Doc.Meshes[solid.Param] : null;
 
-    /// <summary>Runs <paramref name="op"/> on a builder of the brush's mesh and commits the result. False if the op refused.</summary>
+    /// <summary>Runs <paramref name="op"/> on a builder of the solid's mesh and commits the result. False if the op refused.</summary>
     public static bool Apply(DesignSession session, uint id, Func<MeshBuilder, bool> op, bool mirror = false)
     {
         var mesh = MeshOf(session, id);
 
         if (mesh is null)
         {
-            LastError = "Select a mesh brush";
+            LastError = "Select a mesh solid";
             return false;
         }
 
@@ -163,13 +163,13 @@ public static class MeshCommands
         return Replace(session, id, builder.Build());
     }
 
-    /// <summary>Replaces the mesh of brush <paramref name="id"/> and refits every brush sharing it.</summary>
+    /// <summary>Replaces the mesh of solid <paramref name="id"/> and refits every solid sharing it.</summary>
     public static bool Replace(DesignSession session, uint id, HullMesh after)
     {
-        if (!session.TryGetBrush(id, out var brush) || brush.Shape != BrushShape.Mesh || brush.Param >= session.Doc.Meshes.Count)
+        if (!session.TryGetSolid(id, out var solid) || solid.Shape != SolidShape.Mesh || solid.Param >= session.Doc.Meshes.Count)
             return false;
 
-        var slot = brush.Param;
+        var slot = solid.Param;
         var before = session.Doc.Meshes[slot];
 
         if (before.ContentEquals(after))
@@ -178,14 +178,14 @@ public static class MeshCommands
         session.Edit(s =>
         {
             // Mirror partners with their own (reflected) mesh entry get the reflected edit; shared entries are already edited.
-            foreach (var (mask, partnerId) in s.Symmetry.Partners(s.Doc, brush))
+            foreach (var (mask, partnerId) in s.Symmetry.Partners(s.Doc, solid))
             {
-                s.TryGetBrush(partnerId, out var partner);
+                s.TryGetSolid(partnerId, out var partner);
 
                 if (partner.Param == slot || partner.Param >= s.Doc.Meshes.Count)
                     continue;
 
-                SetSlot(s, partner.Param, BrushMirror.Mirror(after, mask));
+                SetSlot(s, partner.Param, SolidMirror.Mirror(after, mask));
             }
 
             SetSlot(s, slot, after);
@@ -194,7 +194,7 @@ public static class MeshCommands
         return true;
     }
 
-    /// <summary>Replaces mesh entry <paramref name="slot"/> and refits every brush using it.</summary>
+    /// <summary>Replaces mesh entry <paramref name="slot"/> and refits every solid using it.</summary>
     private static void SetSlot(DesignSession s, int slot, HullMesh after)
     {
         var before = s.Doc.Meshes[slot];
@@ -204,13 +204,13 @@ public static class MeshCommands
 
         s.Apply(PlanOp.SetMesh(slot, before, after));
         var half = after.HalfUnits();
-        var brushes = s.Doc.Brushes;
+        var solids = s.Doc.Solids;
 
-        for (var i = 0; i < brushes.Count; i++)
+        for (var i = 0; i < solids.Count; i++)
         {
-            var b = brushes[i];
+            var b = solids[i];
 
-            if (b.Shape != BrushShape.Mesh || b.Param != slot)
+            if (b.Shape != SolidShape.Mesh || b.Param != slot)
                 continue;
 
             var refit = b;

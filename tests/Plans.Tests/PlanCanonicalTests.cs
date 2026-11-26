@@ -24,8 +24,8 @@ public class PlanCanonicalTests
         b.Materials.Add(Alloy);
         b.Materials.Add(Titanium);
 
-        foreach (ref var brush in b.Brushes.AsSpan())
-            brush.Material = brush.Material == 0 ? (byte)2 : (byte)3;
+        foreach (ref var solid in b.Solids.AsSpan())
+            solid.Material = solid.Material == 0 ? (byte)2 : (byte)3;
 
         Assert.NotEqual(PlanFormat.HashBody(a), PlanFormat.HashBody(b));
         Assert.Equal(CanonicalHash(a), CanonicalHash(b));
@@ -42,16 +42,16 @@ public class PlanCanonicalTests
 
         // Ry(180) Rx(t) Rz(180) = Rx(180 - t), so (12, 12, 12) is the identity and (12, 6, 12) is (0, 6, 0); at pitch
         // 90 degrees yaw and roll trade (gimbal lock): Ry(a) Rx(90) Rz(b) = Rx(90) Rz(b - a).
-        a.Brushes[2].Rotation = BrushRotation.FromSteps(0, 6, 0);
-        b.Brushes[0].Rotation = BrushRotation.FromSteps(12, 12, 12);
-        b.Brushes[2].Rotation = BrushRotation.FromSteps(12, 6, 12);
-        c.Brushes[2].Rotation = BrushRotation.FromSteps(3, 6, 3);
-        d.Brushes[2].Rotation = BrushRotation.FromSteps(3, 6, 0);
+        a.Solids[2].Rotation = SolidRotation.FromSteps(0, 6, 0);
+        b.Solids[0].Rotation = SolidRotation.FromSteps(12, 12, 12);
+        b.Solids[2].Rotation = SolidRotation.FromSteps(12, 6, 12);
+        c.Solids[2].Rotation = SolidRotation.FromSteps(3, 6, 3);
+        d.Solids[2].Rotation = SolidRotation.FromSteps(3, 6, 0);
 
         var ha = CanonicalHash(a);
         Assert.Equal(ha, CanonicalHash(b));
         Assert.Equal(ha, CanonicalHash(c));
-        Assert.Equal(BrushRotation.Identity, b.Brushes[0].Rotation);
+        Assert.Equal(SolidRotation.Identity, b.Solids[0].Rotation);
         Assert.NotEqual(ha, CanonicalHash(d));
     }
 
@@ -61,16 +61,16 @@ public class PlanCanonicalTests
         Span<double> m = stackalloc double[9];
         Span<double> n = stackalloc double[9];
 
-        for (var r = 0; r < BrushRotation.Steps; r += 5)
-            for (var p = 0; p < BrushRotation.Steps; p++)
-                for (var y = 0; y < BrushRotation.Steps; y += 3)
+        for (var r = 0; r < SolidRotation.Steps; r += 5)
+            for (var p = 0; p < SolidRotation.Steps; p++)
+                for (var y = 0; y < SolidRotation.Steps; y += 3)
                 {
-                    var rotation = BrushRotation.FromSteps(y, p, r);
-                    var canonical = BrushRotation.Canonical(rotation);
-                    BrushRotation.Matrix(rotation, m);
-                    BrushRotation.Matrix(canonical, n);
+                    var rotation = SolidRotation.FromSteps(y, p, r);
+                    var canonical = SolidRotation.Canonical(rotation);
+                    SolidRotation.Matrix(rotation, m);
+                    SolidRotation.Matrix(canonical, n);
                     Assert.True(canonical <= rotation);
-                    Assert.Equal(canonical, BrushRotation.Canonical(canonical));
+                    Assert.Equal(canonical, SolidRotation.Canonical(canonical));
 
                     for (var i = 0; i < 9; i++)
                         Assert.Equal(m[i], n[i], 9);
@@ -82,11 +82,11 @@ public class PlanCanonicalTests
     {
         var a = Sample();
         var b = Sample();
-        b.Brushes[0].Param = 77;
-        b.Brushes[2].HalfZ = 999;
+        b.Solids[0].Param = 77;
+        b.Solids[2].HalfZ = 999;
 
         Assert.Equal(CanonicalHash(a), CanonicalHash(b));
-        Assert.Equal(b.Brushes[2].HalfX, b.Brushes[2].HalfZ);
+        Assert.Equal(b.Solids[2].HalfX, b.Solids[2].HalfZ);
     }
 
     [Fact]
@@ -101,13 +101,13 @@ public class PlanCanonicalTests
     }
 
     [Fact]
-    public void BrushOrder_IsDesignAndChangesTheHash()
+    public void SolidOrder_IsDesignAndChangesTheHash()
     {
         var a = Sample();
         var b = Sample();
-        var first = b.Brushes[0];
-        b.Brushes.RemoveAt(0);
-        b.Brushes.Insert(1, first);
+        var first = b.Solids[0];
+        b.Solids.RemoveAt(0);
+        b.Solids.Insert(1, first);
 
         Assert.NotEqual(CanonicalHash(a), CanonicalHash(b));
     }

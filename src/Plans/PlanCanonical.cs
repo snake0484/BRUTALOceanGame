@@ -7,37 +7,37 @@ namespace BrutalGame.Plans;
 /// alone). Server flow: decode, validate, canonicalise, encode, hash; the designer canonicalises on save.
 /// - Rotation: the smallest snap triple naming the same rotation.
 /// - Unused fields: Param is zero for every v1 shape; a cylinder's half Z equals its radius.
-/// - Material table: only entries some brush uses, deduplicated, in order of first use; brush indices remapped.
-/// - Mesh table: the same for meshes (deduplicated by content); a mesh brush's half extents are its mesh's extent.
+/// - Material table: only entries some solid uses, deduplicated, in order of first use; solid indices remapped.
+/// - Mesh table: the same for meshes (deduplicated by content); a mesh solid's half extents are its mesh's extent.
 /// - Layers: cuts sorted and deduplicated; assignments in order, one per section (the last wins), anchors moved to the
 ///   section's centre point; layer materials join the material table.
-/// Brush order and ids are design (evaluation order, identity) and are kept.
+/// Solid order and ids are design (evaluation order, identity) and are kept.
 /// </summary>
 public static class PlanCanonical
 {
     public static void Canonicalise(PlanDocument doc)
     {
-        var brushes = doc.Brushes.AsSpan();
+        var solids = doc.Solids.AsSpan();
 
-        foreach (ref var brush in brushes)
+        foreach (ref var solid in solids)
         {
-            brush.Rotation = BrushRotation.Canonical(brush.Rotation);
+            solid.Rotation = SolidRotation.Canonical(solid.Rotation);
 
-            if (brush.Shape == BrushShape.Mesh)
+            if (solid.Shape == SolidShape.Mesh)
             {
-                if (brush.Param < doc.Meshes.Count)
-                    (brush.HalfX, brush.HalfY, brush.HalfZ) = doc.Meshes[brush.Param].HalfUnits();
+                if (solid.Param < doc.Meshes.Count)
+                    (solid.HalfX, solid.HalfY, solid.HalfZ) = doc.Meshes[solid.Param].HalfUnits();
 
                 continue;
             }
 
-            if (!BrushGeometry.IsSupported(brush.Shape))
+            if (!SolidGeometry.IsSupported(solid.Shape))
                 continue;
 
-            brush.Param = 0;
+            solid.Param = 0;
 
-            if (brush.Shape == BrushShape.Cylinder)
-                brush.HalfZ = brush.HalfX;
+            if (solid.Shape == SolidShape.Cylinder)
+                solid.HalfZ = solid.HalfX;
         }
 
         CompactMaterials(doc);
@@ -58,9 +58,9 @@ public static class PlanCanonical
 
         foreach (var a in layers.Assignments)
         {
-            int ix = HullLayering.Cell(metres[0], a.AnchorX * HullBrush.MetresPerPositionUnit);
-            int iy = HullLayering.Cell(metres[1], a.AnchorY * HullBrush.MetresPerPositionUnit);
-            int iz = HullLayering.Cell(metres[2], a.AnchorZ * HullBrush.MetresPerPositionUnit);
+            int ix = HullLayering.Cell(metres[0], a.AnchorX * HullSolid.MetresPerPositionUnit);
+            int iy = HullLayering.Cell(metres[1], a.AnchorY * HullSolid.MetresPerPositionUnit);
+            int iz = HullLayering.Cell(metres[2], a.AnchorZ * HullSolid.MetresPerPositionUnit);
             bySection[HullLayering.SectionId(metres, ix, iy, iz)] = new SectionStack(Centre(metres[0], ix), Centre(metres[1], iy), Centre(metres[2], iz), a.Stack);
         }
 
@@ -79,7 +79,7 @@ public static class PlanCanonical
         const double outside = 16.0;
         var lo = i == 0 ? (cuts.Length > 0 ? cuts[0] - outside : -outside) : cuts[i - 1];
         var hi = i == cuts.Length ? (cuts.Length > 0 ? cuts[^1] + outside : outside) : cuts[i];
-        return (int)Math.Round((lo + hi) * 0.5 * HullBrush.PositionUnitsPerMetre);
+        return (int)Math.Round((lo + hi) * 0.5 * HullSolid.PositionUnitsPerMetre);
     }
 
     private static void CompactMeshes(PlanDocument doc)
@@ -89,14 +89,14 @@ public static class PlanCanonical
         Array.Fill(remap, -1);
         var table = new List<HullMesh>(old.Count);
 
-        foreach (ref var brush in doc.Brushes.AsSpan())
+        foreach (ref var solid in doc.Solids.AsSpan())
         {
-            if (brush.Shape != BrushShape.Mesh || brush.Param >= old.Count)
+            if (solid.Shape != SolidShape.Mesh || solid.Param >= old.Count)
                 continue;
 
-            if (remap[brush.Param] < 0)
+            if (remap[solid.Param] < 0)
             {
-                var mesh = old[brush.Param];
+                var mesh = old[solid.Param];
                 var existing = table.FindIndex(m => m.ContentEquals(mesh));
 
                 if (existing < 0)
@@ -105,10 +105,10 @@ public static class PlanCanonical
                     table.Add(mesh);
                 }
 
-                remap[brush.Param] = existing;
+                remap[solid.Param] = existing;
             }
 
-            brush.Param = (ushort)remap[brush.Param];
+            solid.Param = (ushort)remap[solid.Param];
         }
 
         old.Clear();
@@ -122,14 +122,14 @@ public static class PlanCanonical
         remap.AsSpan().Fill(-1);
         var table = new List<DefId>(old.Count);
 
-        foreach (ref var brush in doc.Brushes.AsSpan())
+        foreach (ref var solid in doc.Solids.AsSpan())
         {
-            if (brush.Material >= old.Count)
+            if (solid.Material >= old.Count)
                 continue;
 
-            if (remap[brush.Material] < 0)
+            if (remap[solid.Material] < 0)
             {
-                var id = old[brush.Material];
+                var id = old[solid.Material];
                 var existing = table.IndexOf(id);
 
                 if (existing < 0)
@@ -138,13 +138,13 @@ public static class PlanCanonical
                     table.Add(id);
                 }
 
-                remap[brush.Material] = existing;
+                remap[solid.Material] = existing;
             }
 
-            brush.Material = (byte)remap[brush.Material];
+            solid.Material = (byte)remap[solid.Material];
         }
 
-        // Layer materials keep their entries too (after the brushes' ones).
+        // Layer materials keep their entries too (after the solids' ones).
         if (doc.Layers is not null)
         {
             foreach (var stack in doc.Layers.Stacks)

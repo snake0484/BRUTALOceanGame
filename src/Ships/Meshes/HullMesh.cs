@@ -3,14 +3,14 @@ using System.Runtime.InteropServices;
 
 namespace BrutalGame.Ships;
 
-/// <summary>Brush-local vertex in 1/1024 m; |coord| ≤ 2^18 (256 m), so integer predicates on it are exact.</summary>
+/// <summary>Solid-local vertex in 1/1024 m; |coord| ≤ 2^18 (256 m), so integer predicates on it are exact.</summary>
 [StructLayout(LayoutKind.Sequential)]
 public readonly record struct MeshVertex(int X, int Y, int Z);
 
 /// <summary>
-/// A closed polygon control mesh for <see cref="BrushShape.Mesh"/> brushes (ship-hulls "Mesh brushes", D11): n-gons of 3-16
+/// A closed polygon control mesh for <see cref="SolidShape.Mesh"/> solids (ship-hulls "Mesh solids", D11): n-gons of 3-16
 /// corners wound CCW seen from outside, sharp crease edges, a panel per face and 0-2 levels of integer Catmull-Clark.
-/// Several brushes may share one entry (mirror, duplicate, hollow). Immutable once built: edits make a new mesh, so undo
+/// Several solids may share one entry (mirror, duplicate, hollow). Immutable once built: edits make a new mesh, so undo
 /// keeps snapshots and caches key on <see cref="MeshHash"/>.
 /// </summary>
 public sealed class HullMesh
@@ -196,7 +196,7 @@ public sealed class HullMesh
         return new HullMesh(vertices, sizes, corners, panels, creases, levels);
     }
 
-    /// <summary>Largest |coordinate| per axis in 1/1024 m: the brush's half extent for binning.</summary>
+    /// <summary>Largest |coordinate| per axis in 1/1024 m: the solid's half extent for binning.</summary>
     public (int X, int Y, int Z) Extent()
     {
         int x = 0, y = 0, z = 0;
@@ -211,7 +211,7 @@ public sealed class HullMesh
         return (x, y, z);
     }
 
-    /// <summary>Half extents in 1/256 m covering the mesh (rounded up, at least 1/16 m): a mesh brush's HalfX..Z.</summary>
+    /// <summary>Half extents in 1/256 m covering the mesh (rounded up, at least 1/16 m): a mesh solid's HalfX..Z.</summary>
     public (ushort X, ushort Y, ushort Z) HalfUnits()
     {
         var (x, y, z) = Extent();

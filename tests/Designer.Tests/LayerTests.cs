@@ -10,12 +10,12 @@ public class LayerTests
     private const int Alloy = 1;
     private static readonly int[] Densities = [1100, 800];
 
-    private static HullBrush Box(uint id, double x, double y, double z, double hx, double hy, double hz, BrushRole role = BrushRole.Skin, byte material = Alloy, uint rotation = 0) => new()
+    private static HullSolid Box(uint id, double x, double y, double z, double hx, double hy, double hz, SolidRole role = SolidRole.Skin, byte material = Alloy, uint rotation = 0) => new()
     {
         Id = id,
-        Shape = BrushShape.Box,
-        Op = BrushOp.Add,
-        Flags = BrushRoles.With(BrushFlags.None, role),
+        Shape = SolidShape.Box,
+        Op = SolidOp.Add,
+        Flags = SolidRoles.With(SolidFlags.None, role),
         Material = material,
         PosX = (int)Math.Round(x * 1024),
         PosY = (int)Math.Round(y * 1024),
@@ -43,10 +43,10 @@ public class LayerTests
         return layers;
     }
 
-    private static HullBaker Bake(HullBrush[] brushes, HullLayering layers, bool exact = true)
+    private static HullBaker Bake(HullSolid[] solids, HullLayering layers, bool exact = true)
     {
         var baker = new HullBaker(4) { ExactSurfaces = exact };
-        baker.Start(brushes, [], Densities, layers);
+        baker.Start(solids, [], Densities, layers);
         baker.Wait();
         return baker;
     }
@@ -107,8 +107,8 @@ public class LayerTests
     public void Rooms_AreCutOutAndWalled_PanelsAdd()
     {
         var skin = Box(1, 0, 0, 0, 7.125, 4.125, 6.125);
-        var room = Box(2, 0, 0, 0, 2.125, 1.625, 2.125, BrushRole.Room);
-        var panel = Box(3, 0, 0, 8.125, 2.125, 2.125, 0.5, BrushRole.Panel, Ti);
+        var room = Box(2, 0, 0, 0, 2.125, 1.625, 2.125, SolidRole.Room);
+        var panel = Box(3, 0, 0, 8.125, 2.125, 2.125, 0.5, SolidRole.Panel, Ti);
         using var withRoom = Bake([skin, room], Layers());
         using var bare = Bake([skin], Layers());
         using var withPanel = Bake([skin, panel], Layers());
@@ -123,7 +123,7 @@ public class LayerTests
     public void RoomCrossingTheShell_CutsThroughIt()
     {
         var skin = Box(1, 0, 0, 0, 5.125, 3.125, 4.125);
-        var hangar = Box(2, 0, -2, 0, 2.125, 1.625, 2.125, BrushRole.Room);
+        var hangar = Box(2, 0, -2, 0, 2.125, 1.625, 2.125, SolidRole.Room);
         using var bare = Bake([skin], Layers());
         using var cut = Bake([skin, hangar], Layers());
 
@@ -131,11 +131,11 @@ public class LayerTests
         Assert.True(cut.TriangleCount > bare.TriangleCount);
     }
 
-    /// <summary>Exact skin with a layered inside: the outer surface is the brush's own faces, the inner one is still meshed.</summary>
+    /// <summary>Exact skin with a layered inside: the outer surface is the solid's own faces, the inner one is still meshed.</summary>
     [Fact]
     public void ExactSkin_KeepsTheInnerSurface()
     {
-        var skin = Box(1, 0.3, 0.1, 0.2, 5.2, 3.1, 4.3, rotation: BrushRotation.FromSteps(2, 1, 0));
+        var skin = Box(1, 0.3, 0.1, 0.2, 5.2, 3.1, 4.3, rotation: SolidRotation.FromSteps(2, 1, 0));
         using var exact = Bake([skin], Layers());
         using var grid = Bake([skin], Layers(), exact: false);
 
@@ -150,8 +150,8 @@ public class LayerTests
         var session = new DesignSession();
         var start = PlanFormat.EncodeBody(session.Doc);
         Assert.True(LayerCommands.Enable(session, UndoTests.Titanium, UndoTests.Alloy));
-        var room = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, 0, 0, 512, 512, 512, 0, UndoTests.Alloy);
-        Assert.True(LayerCommands.SetRole(session, room, BrushRole.Room));
+        var room = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 0, 0, 512, 512, 512, 0, UndoTests.Alloy);
+        Assert.True(LayerCommands.SetRole(session, room, SolidRole.Room));
         Assert.True(LayerCommands.AddCut(session, 2, 4096));
         var section = LayerCommands.Sections(session.Doc.Layers!).First(s => s.Section.Z == 1).Section;
         Assert.True(LayerCommands.AddStack(session, UndoTests.Titanium));
@@ -181,8 +181,8 @@ public class LayerTests
         var doc = new PlanDocument();
         doc.Materials.Add(DefId.FromName("mat.hull.titanium"));
         doc.Materials.Add(DefId.FromName("mat.hull.alloy"));
-        doc.Brushes.Add(Box(1, 0, 0, 0, 5, 3, 4));
-        doc.Brushes.Add(Box(2, 0, 0, 0, 2, 1.5, 2, BrushRole.Room));
+        doc.Solids.Add(Box(1, 0, 0, 0, 5, 3, 4));
+        doc.Solids.Add(Box(2, 0, 0, 0, 2, 1.5, 2, SolidRole.Room));
         doc.Layers = Layers();
         doc.Layers.Cuts.Add(new SectionCut(2, 2048));
         doc.Layers.Cuts.Add(new SectionCut(0, 0));
@@ -206,7 +206,7 @@ public class LayerTests
 
         var plain = new PlanDocument();
         plain.Materials.Add(DefId.FromName("mat.hull.alloy"));
-        plain.Brushes.Add(Box(1, 0, 0, 0, 2, 2, 2, BrushRole.Room, 0));
+        plain.Solids.Add(Box(1, 0, 0, 0, 2, 2, 2, SolidRole.Room, 0));
         PlanValidator.Validate(plain, log);
         Assert.Contains(log.Issues, i => i.Code == IssueCode.RoleWithoutLayers);
     }

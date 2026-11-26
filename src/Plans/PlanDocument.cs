@@ -2,16 +2,16 @@ using BrutalGame.Ships;
 
 namespace BrutalGame.Plans;
 
-/// <summary>Growable brush array in evaluation order. Span access, no per-call allocation.</summary>
-public sealed class BrushList
+/// <summary>Growable solid array in evaluation order. Span access, no per-call allocation.</summary>
+public sealed class SolidList
 {
-    private HullBrush[] _items = new HullBrush[16];
+    private HullSolid[] _items = new HullSolid[16];
 
     public int Count { get; private set; }
 
-    public Span<HullBrush> AsSpan() => _items.AsSpan(0, Count);
+    public Span<HullSolid> AsSpan() => _items.AsSpan(0, Count);
 
-    public ref HullBrush this[int index]
+    public ref HullSolid this[int index]
     {
         get
         {
@@ -22,9 +22,9 @@ public sealed class BrushList
         }
     }
 
-    public void Add(in HullBrush brush) => Insert(Count, brush);
+    public void Add(in HullSolid solid) => Insert(Count, solid);
 
-    public void Insert(int index, in HullBrush brush)
+    public void Insert(int index, in HullSolid solid)
     {
         if ((uint)index > (uint)Count)
             throw new ArgumentOutOfRangeException(nameof(index));
@@ -33,7 +33,7 @@ public sealed class BrushList
             Array.Resize(ref _items, _items.Length * 2);
 
         Array.Copy(_items, index, _items, index + 1, Count - index);
-        _items[index] = brush;
+        _items[index] = solid;
         Count++;
     }
 
@@ -73,7 +73,7 @@ public sealed class PlanMeta
 
 /// <summary>
 /// A hull plan (ship or hull chunk level) in memory: BODY fields (level, class, data version, parent, material table,
-/// brush list) plus <see cref="PlanMeta"/>. Brush ids are allocated here, monotonic, never reused.
+/// solid list) plus <see cref="PlanMeta"/>. Solid ids are allocated here, monotonic, never reused.
 /// </summary>
 public sealed class PlanDocument
 {
@@ -82,15 +82,15 @@ public sealed class PlanDocument
     public uint DataVersion;
     public PlanHash Parent;
     public PlanMeta Meta = new();
-    public readonly BrushList Brushes = new();
+    public readonly SolidList Solids = new();
 
-    /// <summary>Material table: <see cref="HullBrush.Material"/> indexes it.</summary>
+    /// <summary>Material table: <see cref="HullSolid.Material"/> indexes it.</summary>
     public readonly List<DefId> Materials = new();
 
-    /// <summary>Mesh table (D11): a <see cref="BrushShape.Mesh"/> brush's Param indexes it; brushes may share entries.</summary>
+    /// <summary>Mesh table (D11): a <see cref="SolidShape.Mesh"/> solid's Param indexes it; solids may share entries.</summary>
     public readonly List<HullMesh> Meshes = new();
 
-    /// <summary>Layered hull (skin, sections, depth stacks, rooms, components, panels); null for a solid brush hull.</summary>
+    /// <summary>Layered hull (skin, sections, depth stacks, rooms, components, panels); null for a solid hull.</summary>
     public HullLayering? Layers;
 
     public uint AllocateId() => Meta.NextId++;
@@ -98,13 +98,13 @@ public sealed class PlanDocument
     /// <summary>Index of <paramref name="material"/> in the table, or -1.</summary>
     public int MaterialIndex(DefId material) => Materials.IndexOf(material);
 
-    /// <summary>Moves <see cref="PlanMeta.NextId"/> past every brush id (after a load without META).</summary>
+    /// <summary>Moves <see cref="PlanMeta.NextId"/> past every solid id (after a load without META).</summary>
     public void FixNextId()
     {
-        foreach (ref readonly var brush in Brushes.AsSpan())
+        foreach (ref readonly var solid in Solids.AsSpan())
         {
-            if (brush.Id >= Meta.NextId)
-                Meta.NextId = brush.Id + 1;
+            if (solid.Id >= Meta.NextId)
+                Meta.NextId = solid.Id + 1;
         }
     }
 
@@ -124,8 +124,8 @@ public sealed class PlanDocument
         copy.Meshes.AddRange(Meshes);
         copy.Layers = Layers?.Clone();
 
-        foreach (ref readonly var brush in Brushes.AsSpan())
-            copy.Brushes.Add(brush);
+        foreach (ref readonly var solid in Solids.AsSpan())
+            copy.Solids.Add(solid);
 
         return copy;
     }

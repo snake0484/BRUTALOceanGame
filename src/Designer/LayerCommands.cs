@@ -19,7 +19,7 @@ public static class LayerCommands
 
     public static string LastError { get; private set; } = "";
 
-    /// <summary>Turns a solid brush hull into a layered one: a hull stack (outer, inner) and a wall stack for rooms.</summary>
+    /// <summary>Turns a solid hull into a layered one: a hull stack (outer, inner) and a wall stack for rooms.</summary>
     public static bool Enable(DesignSession session, DefId outer, DefId inner)
     {
         if (session.Doc.Layers is not null)
@@ -41,15 +41,15 @@ public static class LayerCommands
         return true;
     }
 
-    /// <summary>Back to a solid brush hull; refused while any brush is a room, component or panel.</summary>
+    /// <summary>Back to a solid hull; refused while any solid is a room, component or panel.</summary>
     public static bool Disable(DesignSession session)
     {
         if (session.Doc.Layers is null)
             return false;
 
-        foreach (ref readonly var brush in session.Doc.Brushes.AsSpan())
+        foreach (ref readonly var solid in session.Doc.Solids.AsSpan())
         {
-            if (BrushRoles.Of(brush) != BrushRole.Skin)
+            if (SolidRoles.Of(solid) != SolidRole.Skin)
             {
                 LastError = "Set every room, component and panel back to skin first";
                 return false;
@@ -214,22 +214,22 @@ public static class LayerCommands
     {
         var lo = i == 0 ? (cuts.Length > 0 ? cuts[0] - OutsideMetres : -OutsideMetres) : cuts[i - 1];
         var hi = i == cuts.Length ? (cuts.Length > 0 ? cuts[^1] + OutsideMetres : OutsideMetres) : cuts[i];
-        return (int)Math.Round((lo + hi) * 0.5 * HullBrush.PositionUnitsPerMetre);
+        return (int)Math.Round((lo + hi) * 0.5 * HullSolid.PositionUnitsPerMetre);
     }
 
-    /// <summary>Sets a brush's role (and its mirror partners'); roles need a layered hull.</summary>
-    public static bool SetRole(DesignSession session, uint id, BrushRole role)
+    /// <summary>Sets a solid's role (and its mirror partners'); roles need a layered hull.</summary>
+    public static bool SetRole(DesignSession session, uint id, SolidRole role)
     {
-        if (session.Doc.Layers is null && role != BrushRole.Skin)
+        if (session.Doc.Layers is null && role != SolidRole.Skin)
         {
             LastError = "Turn on the layered hull first";
             return false;
         }
 
-        if (!session.TryGetBrush(id, out var brush))
+        if (!session.TryGetSolid(id, out var solid))
             return false;
 
-        brush.Flags = BrushRoles.With(brush.Flags, role);
-        return HullCommands.SetBrush(session, id, brush, snap: false);
+        solid.Flags = SolidRoles.With(solid.Flags, role);
+        return HullCommands.SetSolid(session, id, solid, snap: false);
     }
 }

@@ -7,22 +7,22 @@ using BrutalGame.Ships;
 
 namespace BrutalGame.Designer.Ui;
 
-/// <summary>State of the mesh editor for the primary brush: on or off, selection mode and elements, live mirror.</summary>
+/// <summary>State of the mesh editor for the primary solid: on or off, selection mode and elements, live mirror.</summary>
 public sealed class MeshEditState
 {
     public bool Enabled;
     public bool Mirror;
     public readonly MeshSelection Selection = new();
-    public uint BrushId;
+    public uint SolidId;
     public ulong MeshHash;
 
-    /// <summary>Drops the selection when the edited brush or its mesh changed under it (undo, another op).</summary>
-    public void Sync(uint brush, HullMesh? mesh)
+    /// <summary>Drops the selection when the edited solid or its mesh changed under it (undo, another op).</summary>
+    public void Sync(uint solid, HullMesh? mesh)
     {
-        if (brush != BrushId || mesh is null)
+        if (solid != SolidId || mesh is null)
         {
             Selection.Clear();
-            BrushId = brush;
+            SolidId = solid;
         }
 
         if (mesh is not null && mesh.MeshHash != MeshHash)
@@ -35,9 +35,9 @@ public sealed class MeshEditState
 
 /// <summary>
 /// The 3D viewport's mouse tool and overlay (drawn by <see cref="OverlayRenderer"/>, depth tested against the hull,
-/// faint where hidden): brush outlines (Add grey, Subtract red, Paint amber, selection thick white), a move gizmo on ship
-/// axes and resize handles on the primary brush's local axes, and a translucent ghost of the brush being dragged
-/// (nothing bakes until release, which commits one undo group). With the mesh editor on, the primary mesh brush's cage
+/// faint where hidden): solid outlines (Add grey, Subtract red, Paint amber, selection thick white), a move gizmo on ship
+/// axes and resize handles on the primary solid's local axes, and a translucent ghost of the solid being dragged
+/// (nothing bakes until release, which commits one undo group). With the mesh editor on, the primary mesh solid's cage
 /// is drawn instead, clicks pick vertices, edges or faces, and the gizmo moves the selection.
 /// </summary>
 public sealed class ViewportTool
@@ -72,8 +72,8 @@ public sealed class ViewportTool
     private Vector3d _dragOrigin;
     private Vector3d _dragDirection;
     private double _dragStart;
-    private HullBrush _dragBrush;
-    private HullBrush _preview;
+    private HullSolid _dragSolid;
+    private HullSolid _preview;
     private HullMesh? _previewMesh;
     private HashSet<int>? _dragVertices;
     private int _hoverAxis = -1;
@@ -88,38 +88,38 @@ public sealed class ViewportTool
         var io = ImGui.GetIO();
         var mouse = new Vector2(io.MousePos.X, io.MousePos.Y);
         var primary = session.Selection.Primary;
-        var hasPrimary = session.TryGetBrush(primary, out var brush);
+        var hasPrimary = session.TryGetSolid(primary, out var solid);
         var mesh = hasPrimary ? MeshCommands.MeshOf(session, primary) : null;
         edit.Sync(primary, mesh);
         var editing = edit.Enabled && mesh is not null;
         DrawGuides(session, camera, viewport, viewProj, overlay);
 
-        foreach (ref readonly var b in session.Doc.Brushes.AsSpan())
+        foreach (ref readonly var b in session.Doc.Solids.AsSpan())
         {
             if ((_drag != DragKind.None || editing) && b.Id == primary)
                 continue;
 
             var selected = session.Selection.Contains(b.Id);
-            var colour = selected ? SelectedColour : session.Doc.Layers is not null && BrushRoles.Of(b) != BrushRole.Skin ? BrushRoles.Of(b) switch
+            var colour = selected ? SelectedColour : session.Doc.Layers is not null && SolidRoles.Of(b) != SolidRole.Skin ? SolidRoles.Of(b) switch
             {
-                BrushRole.Room => RoomColour,
-                BrushRole.Component => ComponentColour,
+                SolidRole.Room => RoomColour,
+                SolidRole.Component => ComponentColour,
                 _ => PanelColour,
             } : b.Op switch
             {
-                BrushOp.Subtract => SubtractColour,
-                BrushOp.Paint => PaintColour,
+                SolidOp.Subtract => SubtractColour,
+                SolidOp.Paint => PaintColour,
                 _ => AddColour,
             };
-            DrawBrush(overlay, session, b, null, camera, colour, selected);
+            DrawSolid(overlay, session, b, null, camera, colour, selected);
         }
 
         if (_drag == DragKind.MeshMove)
         {
             UpdateMeshDrag(session, edit, camera, viewport, mouse, io.MouseDown[0]);
-            DrawCage(overlay, brush, _previewMesh ?? mesh!, edit, camera, -1, -1, (-1, -1));
-            DrawGhost(overlay, brush, _previewMesh ?? mesh, session);
-            DrawMoveGizmo(overlay, SelectionCentre(brush, _previewMesh ?? mesh!, _dragVertices!), camera, viewProj, viewport, mouse, hover: false);
+            DrawCage(overlay, solid, _previewMesh ?? mesh!, edit, camera, -1, -1, (-1, -1));
+            DrawGhost(overlay, solid, _previewMesh ?? mesh, session);
+            DrawMoveGizmo(overlay, SelectionCentre(solid, _previewMesh ?? mesh!, _dragVertices!), camera, viewProj, viewport, mouse, hover: false);
             return;
         }
 
@@ -127,7 +127,7 @@ public sealed class ViewportTool
         {
             UpdateDrag(session, camera, viewport, mouse, io.MouseDown[0]);
             DrawGhost(overlay, _preview, MeshCommands.MeshOf(session, _preview.Id), session);
-            DrawBrush(overlay, session, _preview, null, camera, SelectedColour, true);
+            DrawSolid(overlay, session, _preview, null, camera, SelectedColour, true);
             DrawHandles(overlay, _preview, camera, viewProj, viewport, mouse, hover: false, resize: true);
             return;
         }
@@ -136,19 +136,19 @@ public sealed class ViewportTool
 
         if (editing)
         {
-            UpdateMeshEdit(session, edit, brush, mesh!, camera, viewport, viewProj, mouse, mouseFree, io.KeyCtrl, overlay);
+            UpdateMeshEdit(session, edit, solid, mesh!, camera, viewport, viewProj, mouse, mouseFree, io.KeyCtrl, overlay);
             return;
         }
 
         if (hasPrimary)
-            DrawHandles(overlay, brush, camera, viewProj, viewport, mouse, hover: mouseFree, resize: brush.Shape != BrushShape.Mesh);
+            DrawHandles(overlay, solid, camera, viewProj, viewport, mouse, hover: mouseFree, resize: solid.Shape != SolidShape.Mesh);
 
         if (!mouseFree || !ImGui.IsMouseClicked(ImGuiMouseButton.Left, false))
             return;
 
         if (hasPrimary && _hoverAxis >= 0)
         {
-            BeginDrag(brush, camera, viewport, mouse);
+            BeginDrag(solid, camera, viewport, mouse);
             return;
         }
 
@@ -166,14 +166,14 @@ public sealed class ViewportTool
         }
     }
 
-    private void BeginDrag(in HullBrush brush, OrbitCamera camera, Vector2 viewport, Vector2 mouse)
+    private void BeginDrag(in HullSolid solid, OrbitCamera camera, Vector2 viewport, Vector2 mouse)
     {
         _drag = _hoverKind;
         _dragAxis = _hoverAxis;
-        _dragBrush = brush;
-        _preview = brush;
-        _dragOrigin = new Vector3d(brush.PositionX, brush.PositionY, brush.PositionZ);
-        _dragDirection = _drag == DragKind.Move ? ShipAxis(_dragAxis) : LocalAxis(brush, _dragAxis);
+        _dragSolid = solid;
+        _preview = solid;
+        _dragOrigin = new Vector3d(solid.PositionX, solid.PositionY, solid.PositionZ);
+        _dragDirection = _drag == DragKind.Move ? ShipAxis(_dragAxis) : LocalAxis(solid, _dragAxis);
         var ray = camera.Ray(mouse, viewport);
 
         if (!HullPicking.ClosestOnAxis(ToVector3d(camera.Position), ray, _dragOrigin, _dragDirection, out _dragStart))
@@ -187,71 +187,71 @@ public sealed class ViewportTool
         if (HullPicking.ClosestOnAxis(ToVector3d(camera.Position), ray, _dragOrigin, _dragDirection, out var along))
         {
             var delta = along - _dragStart;
-            var brush = _dragBrush;
+            var solid = _dragSolid;
 
             if (_drag == DragKind.Move)
             {
-                var units = (int)Math.Round(delta * HullBrush.PositionUnitsPerMetre);
+                var units = (int)Math.Round(delta * HullSolid.PositionUnitsPerMetre);
 
                 if (_dragAxis == 0)
-                    brush.PosX += units;
+                    solid.PosX += units;
                 else if (_dragAxis == 1)
-                    brush.PosY += units;
+                    solid.PosY += units;
                 else
-                    brush.PosZ += units;
+                    solid.PosZ += units;
             }
             else
             {
-                Resize(ref brush, delta);
+                Resize(ref solid, delta);
             }
 
-            _preview = session.Snap.SnapBrush(brush);
+            _preview = session.Snap.SnapSolid(solid);
         }
 
         if (held)
             return;
 
         _drag = DragKind.None;
-        HullCommands.SetBrush(session, _dragBrush.Id, _preview);
+        HullCommands.SetSolid(session, _dragSolid.Id, _preview);
     }
 
-    /// <summary>Grows the brush along one local axis by <paramref name="delta"/> metres, keeping the opposite face still.</summary>
-    private void Resize(ref HullBrush brush, double delta)
+    /// <summary>Grows the solid along one local axis by <paramref name="delta"/> metres, keeping the opposite face still.</summary>
+    private void Resize(ref HullSolid solid, double delta)
     {
         var axis = _dragAxis;
-        var cylinderRadius = brush.Shape == BrushShape.Cylinder && axis != 1;
-        int half = axis == 0 || cylinderRadius ? brush.HalfX : axis == 1 ? brush.HalfY : brush.HalfZ;
-        var newHalf = Math.Clamp(half + (int)Math.Round(delta * 0.5 * HullBrush.HalfUnitsPerMetre), 16, ushort.MaxValue);
-        var moved = (newHalf - half) * (HullBrush.PositionUnitsPerMetre / HullBrush.HalfUnitsPerMetre);
+        var cylinderRadius = solid.Shape == SolidShape.Cylinder && axis != 1;
+        int half = axis == 0 || cylinderRadius ? solid.HalfX : axis == 1 ? solid.HalfY : solid.HalfZ;
+        var newHalf = Math.Clamp(half + (int)Math.Round(delta * 0.5 * HullSolid.HalfUnitsPerMetre), 16, ushort.MaxValue);
+        var moved = (newHalf - half) * (HullSolid.PositionUnitsPerMetre / HullSolid.HalfUnitsPerMetre);
 
         if (cylinderRadius)
         {
-            brush.HalfX = (ushort)newHalf;
-            brush.HalfZ = (ushort)newHalf;
+            solid.HalfX = (ushort)newHalf;
+            solid.HalfZ = (ushort)newHalf;
             return;
         }
 
         if (axis == 0)
-            brush.HalfX = (ushort)newHalf;
+            solid.HalfX = (ushort)newHalf;
         else if (axis == 1)
-            brush.HalfY = (ushort)newHalf;
+            solid.HalfY = (ushort)newHalf;
         else
-            brush.HalfZ = (ushort)newHalf;
+            solid.HalfZ = (ushort)newHalf;
 
-        brush.PosX += (int)Math.Round(_dragDirection.X * moved);
-        brush.PosY += (int)Math.Round(_dragDirection.Y * moved);
-        brush.PosZ += (int)Math.Round(_dragDirection.Z * moved);
+        solid.PosX += (int)Math.Round(_dragDirection.X * moved);
+        solid.PosY += (int)Math.Round(_dragDirection.Y * moved);
+        solid.PosZ += (int)Math.Round(_dragDirection.Z * moved);
     }
 
     // ---- mesh editing ----
 
-    private void UpdateMeshEdit(DesignSession session, MeshEditState edit, in HullBrush brush, HullMesh mesh, OrbitCamera camera, Vector2 viewport, in Matrix4x4 viewProj,
+    private void UpdateMeshEdit(DesignSession session, MeshEditState edit, in HullSolid solid, HullMesh mesh, OrbitCamera camera, Vector2 viewport, in Matrix4x4 viewProj,
         Vector2 mouse, bool mouseFree, bool ctrl, OverlayRenderer overlay)
     {
         var selection = edit.Selection;
         var moved = selection.MovedVertices(mesh);
         var hasGizmo = moved.Count > 0;
-        var centre = hasGizmo ? SelectionCentre(brush, mesh, moved) : default;
+        var centre = hasGizmo ? SelectionCentre(solid, mesh, moved) : default;
 
         if (hasGizmo)
             DrawMoveGizmo(overlay, centre, camera, viewProj, viewport, mouse, hover: mouseFree);
@@ -261,10 +261,10 @@ public sealed class ViewportTool
         var hoverEdge = (-1, -1);
 
         if (mouseFree && _hoverAxis < 0)
-            Hover(brush, mesh, selection.Mode, camera, viewport, viewProj, mouse, out hoverVertex, out hoverEdge, out hoverFace);
+            Hover(solid, mesh, selection.Mode, camera, viewport, viewProj, mouse, out hoverVertex, out hoverEdge, out hoverFace);
 
-        DrawCage(overlay, brush, mesh, edit, camera, hoverVertex, hoverFace, hoverEdge);
-        DrawGhost(overlay, brush, mesh, session);
+        DrawCage(overlay, solid, mesh, edit, camera, hoverVertex, hoverFace, hoverEdge);
+        DrawGhost(overlay, solid, mesh, session);
 
         if (!mouseFree || !ImGui.IsMouseClicked(ImGuiMouseButton.Left, false))
             return;
@@ -275,7 +275,7 @@ public sealed class ViewportTool
             _dragAxis = _hoverAxis;
             _dragOrigin = centre;
             _dragDirection = ShipAxis(_dragAxis);
-            _dragBrush = brush;
+            _dragSolid = solid;
             _dragVertices = moved;
             _previewMesh = mesh;
 
@@ -310,7 +310,7 @@ public sealed class ViewportTool
 
     private void UpdateMeshDrag(DesignSession session, MeshEditState edit, OrbitCamera camera, Vector2 viewport, Vector2 mouse, bool held)
     {
-        var mesh = MeshCommands.MeshOf(session, _dragBrush.Id);
+        var mesh = MeshCommands.MeshOf(session, _dragSolid.Id);
 
         if (mesh is null)
         {
@@ -320,10 +320,10 @@ public sealed class ViewportTool
 
         if (HullPicking.ClosestOnAxis(ToVector3d(camera.Position), camera.Ray(mouse, viewport), _dragOrigin, _dragDirection, out var along))
         {
-            var delta = (along - _dragStart) * HullBrush.PositionUnitsPerMetre;
-            BrushRotation.Matrix(_dragBrush.Rotation, _matrix);
+            var delta = (along - _dragStart) * HullSolid.PositionUnitsPerMetre;
+            SolidRotation.Matrix(_dragSolid.Rotation, _matrix);
 
-            // Ship-axis delta into brush-local units (Rᵀ · d), snapped to the 1/64 m mesh grid.
+            // Ship-axis delta into solid-local units (Rᵀ · d), snapped to the 1/64 m mesh grid.
             var d = _dragDirection;
             var lx = Snap((_matrix[0] * d.X + _matrix[3] * d.Y + _matrix[6] * d.Z) * delta);
             var ly = Snap((_matrix[1] * d.X + _matrix[4] * d.Y + _matrix[7] * d.Z) * delta);
@@ -343,14 +343,14 @@ public sealed class ViewportTool
         _drag = DragKind.None;
 
         if (_previewMesh is not null && !ReferenceEquals(_previewMesh, mesh))
-            MeshCommands.Replace(session, _dragBrush.Id, _previewMesh);
+            MeshCommands.Replace(session, _dragSolid.Id, _previewMesh);
 
         _previewMesh = null;
     }
 
     private static int Snap(double units) => (int)Math.Round(units / MeshSnapUnits) * MeshSnapUnits;
 
-    private Vector3d SelectionCentre(in HullBrush brush, HullMesh mesh, HashSet<int> vertices)
+    private Vector3d SelectionCentre(in HullSolid solid, HullMesh mesh, HashSet<int> vertices)
     {
         double x = 0, y = 0, z = 0;
         var n = 0;
@@ -366,33 +366,33 @@ public sealed class ViewportTool
         }
 
         if (n == 0)
-            return new Vector3d(brush.PositionX, brush.PositionY, brush.PositionZ);
+            return new Vector3d(solid.PositionX, solid.PositionY, solid.PositionZ);
 
-        BrushRotation.Matrix(brush.Rotation, _matrix);
-        return MeshToShip(brush, x / n, y / n, z / n);
+        SolidRotation.Matrix(solid.Rotation, _matrix);
+        return MeshToShip(solid, x / n, y / n, z / n);
     }
 
-    private Vector3d MeshToShip(in HullBrush brush, double x, double y, double z)
+    private Vector3d MeshToShip(in HullSolid solid, double x, double y, double z)
     {
-        const double k = HullBrush.MetresPerPositionUnit;
+        const double k = HullSolid.MetresPerPositionUnit;
         var m = _matrix;
         x *= k;
         y *= k;
         z *= k;
-        return new Vector3d(brush.PositionX + m[0] * x + m[1] * y + m[2] * z, brush.PositionY + m[3] * x + m[4] * y + m[5] * z, brush.PositionZ + m[6] * x + m[7] * y + m[8] * z);
+        return new Vector3d(solid.PositionX + m[0] * x + m[1] * y + m[2] * z, solid.PositionY + m[3] * x + m[4] * y + m[5] * z, solid.PositionZ + m[6] * x + m[7] * y + m[8] * z);
     }
 
-    private Vector3d MeshPoint(in HullBrush brush, MeshVertex v) => MeshToShip(brush, v.X, v.Y, v.Z);
+    private Vector3d MeshPoint(in HullSolid solid, MeshVertex v) => MeshToShip(solid, v.X, v.Y, v.Z);
 
     /// <summary>Element under the cursor: nearest projected vertex or edge within a few pixels, or the nearest face the ray hits.</summary>
-    private void Hover(in HullBrush brush, HullMesh mesh, MeshSelectMode mode, OrbitCamera camera, Vector2 viewport, in Matrix4x4 viewProj, Vector2 mouse,
+    private void Hover(in HullSolid solid, HullMesh mesh, MeshSelectMode mode, OrbitCamera camera, Vector2 viewport, in Matrix4x4 viewProj, Vector2 mouse,
         out int vertex, out (int, int) edge, out int face)
     {
         vertex = -1;
         edge = (-1, -1);
         face = -1;
-        BrushRotation.Matrix(brush.Rotation, _matrix);
-        var faceDistance = FaceUnder(brush, mesh, camera, viewport, mouse, out face);
+        SolidRotation.Matrix(solid.Rotation, _matrix);
+        var faceDistance = FaceUnder(solid, mesh, camera, viewport, mouse, out face);
 
         if (mode == MeshSelectMode.Vertex)
         {
@@ -400,7 +400,7 @@ public sealed class ViewportTool
 
             for (var v = 0; v < mesh.Vertices.Length; v++)
             {
-                var p = MeshPoint(brush, mesh.Vertices[v]);
+                var p = MeshPoint(solid, mesh.Vertices[v]);
 
                 if (!camera.Project(p, viewProj, viewport, out var pixel) || Hidden(camera, p, faceDistance))
                     continue;
@@ -431,8 +431,8 @@ public sealed class ViewportTool
                     if (a > b)
                         continue;
 
-                    var pa = MeshPoint(brush, mesh.Vertices[a]);
-                    var pb = MeshPoint(brush, mesh.Vertices[b]);
+                    var pa = MeshPoint(solid, mesh.Vertices[a]);
+                    var pb = MeshPoint(solid, mesh.Vertices[b]);
                     var mid = new Vector3d((pa.X + pb.X) * 0.5, (pa.Y + pb.Y) * 0.5, (pa.Z + pb.Z) * 0.5);
 
                     if (!camera.Project(pa, viewProj, viewport, out var sa) || !camera.Project(pb, viewProj, viewport, out var sb) || Hidden(camera, mid, faceDistance))
@@ -468,13 +468,13 @@ public sealed class ViewportTool
     }
 
     /// <summary>Nearest cage face under the cursor (control mesh, level 0) and its distance; MaxValue when none.</summary>
-    private double FaceUnder(in HullBrush brush, HullMesh mesh, OrbitCamera camera, Vector2 viewport, Vector2 mouse, out int face)
+    private double FaceUnder(in HullSolid solid, HullMesh mesh, OrbitCamera camera, Vector2 viewport, Vector2 mouse, out int face)
     {
         face = -1;
         var ray = camera.Ray(mouse, viewport);
         var c = camera.Position;
         var m = _matrix;
-        double ox = (c.X - brush.PositionX) * HullBrush.PositionUnitsPerMetre, oy = (c.Y - brush.PositionY) * HullBrush.PositionUnitsPerMetre, oz = (c.Z - brush.PositionZ) * HullBrush.PositionUnitsPerMetre;
+        double ox = (c.X - solid.PositionX) * HullSolid.PositionUnitsPerMetre, oy = (c.Y - solid.PositionY) * HullSolid.PositionUnitsPerMetre, oz = (c.Z - solid.PositionZ) * HullSolid.PositionUnitsPerMetre;
         var o = new Vector3d(m[0] * ox + m[3] * oy + m[6] * oz, m[1] * ox + m[4] * oy + m[7] * oz, m[2] * ox + m[5] * oy + m[8] * oz);
         var d = new Vector3d(m[0] * ray.X + m[3] * ray.Y + m[6] * ray.Z, m[1] * ray.X + m[4] * ray.Y + m[7] * ray.Z, m[2] * ray.X + m[5] * ray.Y + m[8] * ray.Z);
         var best = double.MaxValue;
@@ -498,7 +498,7 @@ public sealed class ViewportTool
             }
         }
 
-        return best == double.MaxValue ? double.MaxValue : best / HullBrush.PositionUnitsPerMetre;
+        return best == double.MaxValue ? double.MaxValue : best / HullSolid.PositionUnitsPerMetre;
     }
 
     private static int[] Ints(ReadOnlySpan<ushort> corners)
@@ -513,9 +513,9 @@ public sealed class ViewportTool
 
     private static Vector3 ToVector3(MeshVertex v) => new(v.X, v.Y, v.Z);
 
-    private void DrawCage(OverlayRenderer overlay, in HullBrush brush, HullMesh mesh, MeshEditState edit, OrbitCamera camera, int hoverVertex, int hoverFace, (int, int) hoverEdge)
+    private void DrawCage(OverlayRenderer overlay, in HullSolid solid, HullMesh mesh, MeshEditState edit, OrbitCamera camera, int hoverVertex, int hoverFace, (int, int) hoverEdge)
     {
-        BrushRotation.Matrix(brush.Rotation, _matrix);
+        SolidRotation.Matrix(solid.Rotation, _matrix);
         var selection = edit.Selection;
         var scale = camera.Distance * 0.0025;
 
@@ -531,7 +531,7 @@ public sealed class ViewportTool
                 var colour = OverlayRenderer.WithAlpha(picked ? PickColour : HoverColour, 110);
 
                 for (var t = 0; t < _triangles.Count; t += 3)
-                    overlay.Triangle(MeshPoint(brush, mesh.Vertices[_triangles[t]]), MeshPoint(brush, mesh.Vertices[_triangles[t + 1]]), MeshPoint(brush, mesh.Vertices[_triangles[t + 2]]), colour);
+                    overlay.Triangle(MeshPoint(solid, mesh.Vertices[_triangles[t]]), MeshPoint(solid, mesh.Vertices[_triangles[t + 1]]), MeshPoint(solid, mesh.Vertices[_triangles[t + 2]]), colour);
             }
 
             for (var i = 0; i < corners.Length; i++)
@@ -541,8 +541,8 @@ public sealed class ViewportTool
                 if (a > b)
                     continue;
 
-                var pa = MeshPoint(brush, mesh.Vertices[a]);
-                var pb = MeshPoint(brush, mesh.Vertices[b]);
+                var pa = MeshPoint(solid, mesh.Vertices[a]);
+                var pb = MeshPoint(solid, mesh.Vertices[b]);
                 var edge = (a, b);
 
                 if (selection.Mode == MeshSelectMode.Edge && selection.Edges.Contains(edge))
@@ -562,7 +562,7 @@ public sealed class ViewportTool
         for (var v = 0; v < mesh.Vertices.Length; v++)
         {
             var picked = selection.Vertices.Contains(v);
-            overlay.Cube(MeshPoint(brush, mesh.Vertices[v]), scale * (picked || v == hoverVertex ? 2.5 : 1.5), picked ? PickColour : v == hoverVertex ? HoverColour : CageColour);
+            overlay.Cube(MeshPoint(solid, mesh.Vertices[v]), scale * (picked || v == hoverVertex ? 2.5 : 1.5), picked ? PickColour : v == hoverVertex ? HoverColour : CageColour);
         }
     }
 
@@ -604,7 +604,7 @@ public sealed class ViewportTool
         {
             foreach (var cut in layers.Cuts)
             {
-                var c = cut.Position * HullBrush.MetresPerPositionUnit;
+                var c = cut.Position * HullSolid.MetresPerPositionUnit;
                 var (a, b, cc, d) = cut.Axis switch
                 {
                     0 => (new Vector3d(c, -hy, -hz), new Vector3d(c, hy, -hz), new Vector3d(c, hy, hz), new Vector3d(c, -hy, hz)),
@@ -644,9 +644,9 @@ public sealed class ViewportTool
     {
         double x0 = 0, y0 = 0, z0 = 0, x1 = 0, y1 = 0, z1 = 0;
 
-        foreach (ref readonly var b in session.Doc.Brushes.AsSpan())
+        foreach (ref readonly var b in session.Doc.Solids.AsSpan())
         {
-            BrushGeometry.Bounds(b, out var min, out var max);
+            SolidGeometry.Bounds(b, out var min, out var max);
             (x0, y0, z0) = (Math.Min(x0, min.X), Math.Min(y0, min.Y), Math.Min(z0, min.Z));
             (x1, y1, z1) = (Math.Max(x1, max.X), Math.Max(y1, max.Y), Math.Max(z1, max.Z));
         }
@@ -654,15 +654,15 @@ public sealed class ViewportTool
         return (new Vector3d(x0, y0, z0), new Vector3d(x1, y1, z1));
     }
 
-    // ---- brushes, ghosts, gizmos ----
+    // ---- solids, ghosts, gizmos ----
 
-    /// <summary>The translucent ghost of a brush (primitive or mesh cage): what the drag or edit will commit.</summary>
-    private void DrawGhost(OverlayRenderer overlay, in HullBrush brush, HullMesh? mesh, DesignSession session)
+    /// <summary>The translucent ghost of a solid (primitive or mesh cage): what the drag or edit will commit.</summary>
+    private void DrawGhost(OverlayRenderer overlay, in HullSolid solid, HullMesh? mesh, DesignSession session)
     {
-        var colour = brush.Op == BrushOp.Subtract ? OverlayRenderer.Rgba(240, 80, 70, 70) : OverlayRenderer.Rgba(120, 200, 255, 60);
-        BrushRotation.Matrix(brush.Rotation, _matrix);
+        var colour = solid.Op == SolidOp.Subtract ? OverlayRenderer.Rgba(240, 80, 70, 70) : OverlayRenderer.Rgba(120, 200, 255, 60);
+        SolidRotation.Matrix(solid.Rotation, _matrix);
 
-        if (brush.Shape == BrushShape.Mesh)
+        if (solid.Shape == SolidShape.Mesh)
         {
             if (mesh is null)
                 return;
@@ -673,13 +673,13 @@ public sealed class ViewportTool
                 MeshSubdivision.Triangulate(mesh.Vertices, Ints(mesh.Face(f)), _triangles);
 
                 for (var t = 0; t < _triangles.Count; t += 3)
-                    overlay.Triangle(MeshPoint(brush, mesh.Vertices[_triangles[t]]), MeshPoint(brush, mesh.Vertices[_triangles[t + 1]]), MeshPoint(brush, mesh.Vertices[_triangles[t + 2]]), colour);
+                    overlay.Triangle(MeshPoint(solid, mesh.Vertices[_triangles[t]]), MeshPoint(solid, mesh.Vertices[_triangles[t + 1]]), MeshPoint(solid, mesh.Vertices[_triangles[t + 2]]), colour);
             }
 
             return;
         }
 
-        var primitive = MeshPrimitives.FromBrush(brush);
+        var primitive = MeshPrimitives.FromSolid(solid);
 
         for (var f = 0; f < primitive.FaceCount; f++)
         {
@@ -687,7 +687,7 @@ public sealed class ViewportTool
             MeshSubdivision.Triangulate(primitive.Vertices, Ints(primitive.Face(f)), _triangles);
 
             for (var t = 0; t < _triangles.Count; t += 3)
-                overlay.Triangle(MeshPoint(brush, primitive.Vertices[_triangles[t]]), MeshPoint(brush, primitive.Vertices[_triangles[t + 1]]), MeshPoint(brush, primitive.Vertices[_triangles[t + 2]]), colour);
+                overlay.Triangle(MeshPoint(solid, primitive.Vertices[_triangles[t]]), MeshPoint(solid, primitive.Vertices[_triangles[t + 1]]), MeshPoint(solid, primitive.Vertices[_triangles[t + 2]]), colour);
         }
     }
 
@@ -721,24 +721,24 @@ public sealed class ViewportTool
         }
     }
 
-    private void DrawHandles(OverlayRenderer overlay, in HullBrush brush, OrbitCamera camera, in Matrix4x4 viewProj, Vector2 viewport, Vector2 mouse, bool hover, bool resize)
+    private void DrawHandles(OverlayRenderer overlay, in HullSolid solid, OrbitCamera camera, in Matrix4x4 viewProj, Vector2 viewport, Vector2 mouse, bool hover, bool resize)
     {
-        var centre = new Vector3d(brush.PositionX, brush.PositionY, brush.PositionZ);
+        var centre = new Vector3d(solid.PositionX, solid.PositionY, solid.PositionZ);
         DrawMoveGizmo(overlay, centre, camera, viewProj, viewport, mouse, hover);
 
         if (!resize)
             return;
 
         var length = Math.Max(0.5, camera.Depth(centre) * GizmoScreenFraction);
-        var half = BrushGeometry.Half(brush);
+        var half = SolidGeometry.Half(solid);
         var best = _hoverAxis >= 0 ? 0f : HandlePixels;
 
         for (var axis = 0; axis < 3; axis++)
         {
-            if (brush.Shape == BrushShape.Cylinder && axis == 2)
+            if (solid.Shape == SolidShape.Cylinder && axis == 2)
                 continue;
 
-            var d = LocalAxis(brush, axis);
+            var d = LocalAxis(solid, axis);
             var reach = (axis == 0 ? half.X : axis == 1 ? half.Y : half.Z) + 0.03 * length;
             var face = new Vector3d(centre.X + d.X * reach, centre.Y + d.Y * reach, centre.Z + d.Z * reach);
             var active = (_drag == DragKind.Resize && _dragAxis == axis) || (_hoverKind == DragKind.Resize && _hoverAxis == axis);
@@ -752,13 +752,13 @@ public sealed class ViewportTool
         }
     }
 
-    private void DrawBrush(OverlayRenderer overlay, DesignSession session, in HullBrush brush, HullMesh? meshOverride, OrbitCamera camera, uint colour, bool thick)
+    private void DrawSolid(OverlayRenderer overlay, DesignSession session, in HullSolid solid, HullMesh? meshOverride, OrbitCamera camera, uint colour, bool thick)
     {
-        BrushRotation.Matrix(brush.Rotation, _matrix);
+        SolidRotation.Matrix(solid.Rotation, _matrix);
         var width = thick ? camera.Distance * 0.0025 : 0.0;
-        var mesh = brush.Shape == BrushShape.Mesh ? meshOverride ?? MeshCommands.MeshOf(session, brush.Id) : null;
+        var mesh = solid.Shape == SolidShape.Mesh ? meshOverride ?? MeshCommands.MeshOf(session, solid.Id) : null;
 
-        if (brush.Shape == BrushShape.Mesh)
+        if (solid.Shape == SolidShape.Mesh)
         {
             if (mesh is null)
                 return;
@@ -772,17 +772,17 @@ public sealed class ViewportTool
                     int a = corners[i], b = corners[(i + 1) % corners.Length];
 
                     if (a < b)
-                        Edge(overlay, MeshPoint(brush, mesh.Vertices[a]), MeshPoint(brush, mesh.Vertices[b]), colour, width);
+                        Edge(overlay, MeshPoint(solid, mesh.Vertices[a]), MeshPoint(solid, mesh.Vertices[b]), colour, width);
                 }
             }
 
             return;
         }
 
-        var h = BrushGeometry.Half(brush);
-        var c = new Vector3d(brush.PositionX, brush.PositionY, brush.PositionZ);
+        var h = SolidGeometry.Half(solid);
+        var c = new Vector3d(solid.PositionX, solid.PositionY, solid.PositionZ);
 
-        if (brush.Shape == BrushShape.Cylinder)
+        if (solid.Shape == SolidShape.Cylinder)
         {
             for (var s = 0; s < CircleSegments; s++)
             {
@@ -805,7 +805,7 @@ public sealed class ViewportTool
             corners8[i] = Transform(c, (i & 1) != 0 ? h.X : -h.X, (i & 2) != 0 ? h.Y : -h.Y, (i & 4) != 0 ? h.Z : -h.Z);
 
         // Bit 0 = +X, bit 1 = +Y, bit 2 = +Z. The wedge's top front corners (+Y, +Z) fold onto the top back ones.
-        if (brush.Shape == BrushShape.Wedge)
+        if (solid.Shape == SolidShape.Wedge)
         {
             corners8[2 | 4] = corners8[2];
             corners8[1 | 2 | 4] = corners8[1 | 2];
@@ -831,9 +831,9 @@ public sealed class ViewportTool
         return new Vector3d(centre.X + m[0] * x + m[1] * y + m[2] * z, centre.Y + m[3] * x + m[4] * y + m[5] * z, centre.Z + m[6] * x + m[7] * y + m[8] * z);
     }
 
-    private Vector3d LocalAxis(in HullBrush brush, int axis)
+    private Vector3d LocalAxis(in HullSolid solid, int axis)
     {
-        BrushRotation.Matrix(brush.Rotation, _matrix);
+        SolidRotation.Matrix(solid.Rotation, _matrix);
         return new Vector3d(_matrix[axis], _matrix[3 + axis], _matrix[6 + axis]);
     }
 

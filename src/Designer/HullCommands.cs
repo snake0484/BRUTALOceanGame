@@ -4,23 +4,23 @@ using BrutalGame.Ships;
 namespace BrutalGame.Designer;
 
 /// <summary>
-/// The hull tool's commands, each one undo group of brush-list ops. Brush ids come from the document (monotonic, never
-/// reused, so a redone insert gets its old id back). New and edited brushes are snapped by the session's settings.
-/// With mirror planes on (<see cref="Symmetry"/>), each command also adds, edits or removes the brush's mirror partners
+/// The hull tool's commands, each one undo group of solid-list ops. Solid ids come from the document (monotonic, never
+/// reused, so a redone insert gets its old id back). New and edited solids are snapped by the session's settings.
+/// With mirror planes on (<see cref="Symmetry"/>), each command also adds, edits or removes the solid's mirror partners
 /// in the same group.
 /// </summary>
 public static class HullCommands
 {
     public const double MinWallMetres = 0.5;
 
-    /// <summary>A new brush at the end of the list, selected. Returns its id.</summary>
-    public static uint AddBrush(DesignSession session, BrushShape shape, BrushOp op, int posX, int posY, int posZ, ushort halfX, ushort halfY, ushort halfZ, uint rotation, DefId material)
+    /// <summary>A new solid at the end of the list, selected. Returns its id.</summary>
+    public static uint AddSolid(DesignSession session, SolidShape shape, SolidOp op, int posX, int posY, int posZ, ushort halfX, ushort halfY, ushort halfZ, uint rotation, DefId material)
     {
         uint id = 0;
 
         session.Edit(s =>
         {
-            var brush = new HullBrush
+            var solid = new HullSolid
             {
                 Shape = shape,
                 Op = op,
@@ -33,32 +33,32 @@ public static class HullCommands
                 HalfY = halfY,
                 HalfZ = halfZ,
             };
-            brush = s.Snap.SnapBrush(brush);
-            brush.Id = s.Doc.AllocateId();
-            id = brush.Id;
-            s.Apply(PlanOp.Insert(s.Doc.Brushes.Count, brush));
+            solid = s.Snap.SnapSolid(solid);
+            solid.Id = s.Doc.AllocateId();
+            id = solid.Id;
+            s.Apply(PlanOp.Insert(s.Doc.Solids.Count, solid));
 
-            foreach (var (_, mirrored, mesh) in s.Symmetry.Reflections(s.Doc, brush))
-                PlaceMirror(s, mirrored, mesh, s.Doc.Brushes.Count);
+            foreach (var (_, mirrored, mesh) in s.Symmetry.Reflections(s.Doc, solid))
+                PlaceMirror(s, mirrored, mesh, s.Doc.Solids.Count);
         });
 
         session.Selection.Set(id);
         return id;
     }
 
-    /// <summary>Replaces brush <paramref name="id"/> with <paramref name="after"/> (id kept), optionally snapped. False if missing or unchanged.</summary>
-    public static bool SetBrush(DesignSession session, uint id, HullBrush after, bool snap = true)
+    /// <summary>Replaces solid <paramref name="id"/> with <paramref name="after"/> (id kept), optionally snapped. False if missing or unchanged.</summary>
+    public static bool SetSolid(DesignSession session, uint id, HullSolid after, bool snap = true)
     {
-        var index = session.Doc.Brushes.IndexOf(id);
+        var index = session.Doc.Solids.IndexOf(id);
 
         if (index < 0)
             return false;
 
-        var before = session.Doc.Brushes[index];
+        var before = session.Doc.Solids[index];
         after.Id = id;
 
         if (snap)
-            after = session.Snap.SnapBrush(after);
+            after = session.Snap.SnapSolid(after);
 
         if (after == before)
             return false;
@@ -67,25 +67,25 @@ public static class HullCommands
         return true;
     }
 
-    /// <summary>Inside a group: brush <paramref name="index"/> becomes <paramref name="after"/>, its mirror partners its reflections.</summary>
-    public static void Modify(DesignSession s, int index, HullBrush after)
+    /// <summary>Inside a group: solid <paramref name="index"/> becomes <paramref name="after"/>, its mirror partners its reflections.</summary>
+    public static void Modify(DesignSession s, int index, HullSolid after)
     {
-        var before = s.Doc.Brushes[index];
+        var before = s.Doc.Solids[index];
         var partners = s.Symmetry.Partners(s.Doc, before);
         s.Apply(PlanOp.Modify(index, before, after));
         var mesh = Symmetry.MeshOf(s.Doc, after);
 
         foreach (var (mask, partnerId) in partners)
         {
-            var partnerIndex = s.Doc.Brushes.IndexOf(partnerId);
-            var partner = s.Doc.Brushes[partnerIndex];
+            var partnerIndex = s.Doc.Solids.IndexOf(partnerId);
+            var partner = s.Doc.Solids[partnerIndex];
 
-            if (!BrushMirror.Mirror(after, mask, mesh, out var mirrored, out _))
+            if (!SolidMirror.Mirror(after, mask, mesh, out var mirrored, out _))
                 continue;
 
             mirrored.Id = partner.Id;
 
-            if (mirrored.Shape == BrushShape.Mesh)
+            if (mirrored.Shape == SolidShape.Mesh)
                 mirrored.Param = partner.Param;
 
             if (mirrored != partner)
@@ -93,10 +93,10 @@ public static class HullCommands
         }
     }
 
-    /// <summary>Inserts a reflection as a new brush at <paramref name="index"/>; a mesh reflection reuses an equal mesh entry or adds one.</summary>
-    public static uint PlaceMirror(DesignSession s, HullBrush mirrored, HullMesh? mesh, int index)
+    /// <summary>Inserts a reflection as a new solid at <paramref name="index"/>; a mesh reflection reuses an equal mesh entry or adds one.</summary>
+    public static uint PlaceMirror(DesignSession s, HullSolid mirrored, HullMesh? mesh, int index)
     {
-        if (mirrored.Shape == BrushShape.Mesh && mesh is not null)
+        if (mirrored.Shape == SolidShape.Mesh && mesh is not null)
         {
             var slot = s.Doc.Meshes.FindIndex(m => m.ContentEquals(mesh));
 
@@ -116,7 +116,7 @@ public static class HullCommands
 
     public static bool SetMaterial(DesignSession session, uint id, DefId material)
     {
-        var index = session.Doc.Brushes.IndexOf(id);
+        var index = session.Doc.Solids.IndexOf(id);
 
         if (index < 0)
             return false;
@@ -125,7 +125,7 @@ public static class HullCommands
 
         session.Edit(s =>
         {
-            var before = s.Doc.Brushes[index];
+            var before = s.Doc.Solids[index];
             var after = before;
             after.Material = s.EnsureMaterial(material);
 
@@ -142,14 +142,14 @@ public static class HullCommands
     /// <summary>Flips Add and Subtract.</summary>
     public static bool ToggleOp(DesignSession session, uint id)
     {
-        if (!session.TryGetBrush(id, out var brush) || brush.Op is not (BrushOp.Add or BrushOp.Subtract))
+        if (!session.TryGetSolid(id, out var solid) || solid.Op is not (SolidOp.Add or SolidOp.Subtract))
             return false;
 
-        brush.Op = brush.Op == BrushOp.Add ? BrushOp.Subtract : BrushOp.Add;
-        return SetBrush(session, id, brush, snap: false);
+        solid.Op = solid.Op == SolidOp.Add ? SolidOp.Subtract : SolidOp.Add;
+        return SetSolid(session, id, solid, snap: false);
     }
 
-    /// <summary>Removes every selected brush, and their mirror partners, in one group.</summary>
+    /// <summary>Removes every selected solid, and their mirror partners, in one group.</summary>
     public static int DeleteSelected(DesignSession session)
     {
         var removed = 0;
@@ -160,13 +160,13 @@ public static class HullCommands
 
             foreach (var id in s.Selection.Ids)
             {
-                if (!s.TryGetBrush(id, out var brush))
+                if (!s.TryGetSolid(id, out var solid))
                     continue;
 
                 if (!ids.Contains(id))
                     ids.Add(id);
 
-                foreach (var (_, partner) in s.Symmetry.Partners(s.Doc, brush))
+                foreach (var (_, partner) in s.Symmetry.Partners(s.Doc, solid))
                 {
                     if (!ids.Contains(partner))
                         ids.Add(partner);
@@ -175,12 +175,12 @@ public static class HullCommands
 
             foreach (var id in ids)
             {
-                var index = s.Doc.Brushes.IndexOf(id);
+                var index = s.Doc.Solids.IndexOf(id);
 
                 if (index < 0)
                     continue;
 
-                s.Apply(PlanOp.Remove(index, s.Doc.Brushes[index]));
+                s.Apply(PlanOp.Remove(index, s.Doc.Solids[index]));
                 removed++;
             }
         });
@@ -189,10 +189,10 @@ public static class HullCommands
         return removed;
     }
 
-    /// <summary>Copies brush <paramref name="id"/> right after itself, offset by one grid step on X; selects the copy.</summary>
+    /// <summary>Copies solid <paramref name="id"/> right after itself, offset by one grid step on X; selects the copy.</summary>
     public static uint Duplicate(DesignSession session, uint id)
     {
-        var index = session.Doc.Brushes.IndexOf(id);
+        var index = session.Doc.Solids.IndexOf(id);
 
         if (index < 0)
             return 0;
@@ -201,11 +201,11 @@ public static class HullCommands
 
         session.Edit(s =>
         {
-            var source = s.Doc.Brushes[index];
+            var source = s.Doc.Solids[index];
             var partners = s.Symmetry.Partners(s.Doc, source);
             var copy = source;
             copy.Id = s.Doc.AllocateId();
-            copy.PosX += Math.Max(s.Snap.PositionStep, HullBrush.PositionUnitsPerMetre);
+            copy.PosX += Math.Max(s.Snap.PositionStep, HullSolid.PositionUnitsPerMetre);
             copyId = copy.Id;
             s.Apply(PlanOp.Insert(index + 1, copy));
             MirrorAfterPartners(s, copy, partners);
@@ -216,27 +216,27 @@ public static class HullCommands
     }
 
     /// <summary>
-    /// "Cut the interior" (ship-hulls Hollow): a Subtract brush flagged Interior right after an Add box or cylinder,
-    /// inset by <paramref name="wallMetres"/> (≥ 0.5 m) on every side. Returns its id, or 0 if the brush is too thin.
+    /// "Cut the interior" (ship-hulls Hollow): a Subtract solid flagged Interior right after an Add box or cylinder,
+    /// inset by <paramref name="wallMetres"/> (≥ 0.5 m) on every side. Returns its id, or 0 if the solid is too thin.
     /// </summary>
     public static uint Hollow(DesignSession session, uint id, double wallMetres)
     {
-        var index = session.Doc.Brushes.IndexOf(id);
+        var index = session.Doc.Solids.IndexOf(id);
 
         if (index < 0)
             return 0;
 
-        var source = session.Doc.Brushes[index];
+        var source = session.Doc.Solids[index];
 
-        if (source.Op != BrushOp.Add || source.Shape is not (BrushShape.Box or BrushShape.Cylinder))
+        if (source.Op != SolidOp.Add || source.Shape is not (SolidShape.Box or SolidShape.Cylinder))
             return 0;
 
-        var wall = (int)Math.Round(Math.Max(wallMetres, MinWallMetres) * HullBrush.HalfUnitsPerMetre);
+        var wall = (int)Math.Round(Math.Max(wallMetres, MinWallMetres) * HullSolid.HalfUnitsPerMetre);
         var hx = source.HalfX - wall;
         var hy = source.HalfY - wall;
         var hz = source.HalfZ - wall;
 
-        if (hx < PlanLimits.MinHalfUnits || hy < PlanLimits.MinHalfUnits || (source.Shape == BrushShape.Box && hz < PlanLimits.MinHalfUnits))
+        if (hx < PlanLimits.MinHalfUnits || hy < PlanLimits.MinHalfUnits || (source.Shape == SolidShape.Box && hz < PlanLimits.MinHalfUnits))
             return 0;
 
         uint innerId = 0;
@@ -245,8 +245,8 @@ public static class HullCommands
         {
             var inner = source;
             inner.Id = s.Doc.AllocateId();
-            inner.Op = BrushOp.Subtract;
-            inner.Flags |= BrushFlags.Interior;
+            inner.Op = SolidOp.Subtract;
+            inner.Flags |= SolidFlags.Interior;
             inner.HalfX = (ushort)hx;
             inner.HalfY = (ushort)hy;
             inner.HalfZ = (ushort)Math.Max(hz, PlanLimits.MinHalfUnits);
@@ -260,32 +260,32 @@ public static class HullCommands
         return innerId;
     }
 
-    /// <summary>Inserts <paramref name="brush"/>'s reflection right after each partner of its source (Duplicate, Hollow).</summary>
-    private static void MirrorAfterPartners(DesignSession s, in HullBrush brush, List<(int Mask, uint Id)> partners)
+    /// <summary>Inserts <paramref name="solid"/>'s reflection right after each partner of its source (Duplicate, Hollow).</summary>
+    private static void MirrorAfterPartners(DesignSession s, in HullSolid solid, List<(int Mask, uint Id)> partners)
     {
-        var mesh = Symmetry.MeshOf(s.Doc, brush);
+        var mesh = Symmetry.MeshOf(s.Doc, solid);
 
         foreach (var (mask, partnerId) in partners)
         {
-            if (BrushMirror.Mirror(brush, mask, mesh, out var mirrored, out var mirroredMesh))
-                PlaceMirror(s, mirrored, mirroredMesh, s.Doc.Brushes.IndexOf(partnerId) + 1);
+            if (SolidMirror.Mirror(solid, mask, mesh, out var mirrored, out var mirroredMesh))
+                PlaceMirror(s, mirrored, mirroredMesh, s.Doc.Solids.IndexOf(partnerId) + 1);
         }
     }
 
-    /// <summary>Moves a brush one place earlier (-1) or later (+1) in evaluation order.</summary>
+    /// <summary>Moves a solid one place earlier (-1) or later (+1) in evaluation order.</summary>
     public static bool Move(DesignSession session, uint id, int delta)
     {
-        var index = session.Doc.Brushes.IndexOf(id);
+        var index = session.Doc.Solids.IndexOf(id);
         var target = index + delta;
 
-        if (index < 0 || target < 0 || target >= session.Doc.Brushes.Count)
+        if (index < 0 || target < 0 || target >= session.Doc.Solids.Count)
             return false;
 
         session.Edit(s =>
         {
-            var brush = s.Doc.Brushes[index];
-            s.Apply(PlanOp.Remove(index, brush));
-            s.Apply(PlanOp.Insert(target, brush));
+            var solid = s.Doc.Solids[index];
+            s.Apply(PlanOp.Remove(index, solid));
+            s.Apply(PlanOp.Insert(target, solid));
         });
 
         return true;
@@ -294,10 +294,10 @@ public static class HullCommands
     /// <summary>Rotates by whole 15 degree steps about one Euler axis (0 yaw, 1 pitch, 2 roll).</summary>
     public static bool Rotate(DesignSession session, uint id, int axis, int steps)
     {
-        if (!session.TryGetBrush(id, out var brush))
+        if (!session.TryGetSolid(id, out var solid))
             return false;
 
-        brush.Rotation = BrushRotation.AddSteps(brush.Rotation, axis, steps);
-        return SetBrush(session, id, brush, snap: false);
+        solid.Rotation = SolidRotation.AddSteps(solid.Rotation, axis, steps);
+        return SetSolid(session, id, solid, snap: false);
     }
 }

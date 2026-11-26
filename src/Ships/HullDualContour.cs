@@ -20,7 +20,7 @@ public interface IHermiteField
 /// Dual contouring over a padded 34³ density (ship-hulls: same cell and quad topology as <see cref="SurfaceNetsMesher"/>,
 /// only the vertex placement differs). Each mixed cell takes its sign-change edges' Hermite data (computed once per
 /// edge and cached) and places its vertex at the QEF minimiser Σ (n·(x − p))², solved about the mass point with small
-/// eigenvalues truncated, clamped to the cell: corners and creases land where the brushes put them. A sibling of the
+/// eigenvalues truncated, clamped to the cell: corners and creases land where the solids put them. A sibling of the
 /// terrain mesher so terrain output stays untouched. Positions snap to 1/256 cell like surface nets; the vertex normal
 /// is the mean Hermite normal (hull.frag sharpens creases with the face normal).
 /// </summary>

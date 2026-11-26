@@ -1,13 +1,13 @@
 namespace BrutalGame.Ships;
 
 /// <summary>
-/// Brush rotation as a 15 degree snap index (review X2): yaw about Y, pitch about X, roll about Z, 0..23 steps each, in
-/// bits 0-4, 5-9 and 10-14. Brush to ship is R = Ry(yaw) · Rx(pitch) · Rz(roll). Bits 15-31 are reserved for a later
+/// Solid rotation as a 15 degree snap index (review X2): yaw about Y, pitch about X, roll about Z, 0..23 steps each, in
+/// bits 0-4, 5-9 and 10-14. Solid to ship is R = Ry(yaw) · Rx(pitch) · Rz(roll). Bits 15-31 are reserved for a later
 /// free-rotation form and must be zero. The step table is built from square roots only (no trig), so every peer decodes
 /// the same doubles. Several triples name one rotation (gimbal lock, the 180 degree identity); <see cref="Canonical"/>
 /// maps each to the smallest encoded triple of its rotation.
 /// </summary>
-public static class BrushRotation
+public static class SolidRotation
 {
     public const int Steps = 24;
     public const int DegreesPerStep = 15;
@@ -21,7 +21,7 @@ public static class BrushRotation
     private static ushort[]? _canonical;
     private static Dictionary<RotationKey, ushort>? _byMatrix;
 
-    static BrushRotation()
+    static SolidRotation()
     {
         var r2 = Math.Sqrt(2.0) * 0.5;
         var r3 = Math.Sqrt(3.0) * 0.5;
@@ -68,7 +68,7 @@ public static class BrushRotation
         return FromSteps(yaw, pitch, roll);
     }
 
-    /// <summary>Row-major brush-to-ship matrix: ship = M · local. An invalid index decodes as identity.</summary>
+    /// <summary>Row-major solid-to-ship matrix: ship = M · local. An invalid index decodes as identity.</summary>
     public static void Matrix(uint rotation, Span<double> m)
     {
         if (!IsValid(rotation))

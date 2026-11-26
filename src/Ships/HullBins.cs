@@ -16,17 +16,17 @@ public readonly record struct BrickKey(short X, short Y, short Z) : IComparable<
 }
 
 /// <summary>
-/// Brush binning: which bricks exist (those an Add brush's bounds plus band reach) and, per brick, the indices of every
-/// brush whose bounds plus band overlap it, in list order. Bricks are sorted by key. CSR arrays, reused across builds.
+/// Solid binning: which bricks exist (those an Add solid's bounds plus band reach) and, per brick, the indices of every
+/// solid whose bounds plus band overlap it, in list order. Bricks are sorted by key. CSR arrays, reused across builds.
 /// </summary>
 public sealed class HullBins
 {
     public const float CellMetres = 0.25f;
     public const int BrickCells = 32;
     public const float BrickMetres = CellMetres * BrickCells;
-    public const int MaxBrushesPerBrick = 256;
+    public const int MaxSolidsPerBrick = 256;
 
-    /// <summary>Reach beyond a brush's bounds that still changes the clamped density (±127 at 128 per metre), plus the apron cell.</summary>
+    /// <summary>Reach beyond a solid's bounds that still changes the clamped density (±127 at 128 per metre), plus the apron cell.</summary>
     public const double Reach = 127.0 / 128.0 + CellMetres;
 
     private readonly Dictionary<BrickKey, int> _slots = new();
@@ -40,27 +40,27 @@ public sealed class HullBins
 
     public ReadOnlySpan<BrickKey> Keys => _keys.AsSpan(0, _brickCount);
 
-    public ReadOnlySpan<int> Brushes(int brick) => _indices.AsSpan(_start[brick], _start[brick + 1] - _start[brick]);
+    public ReadOnlySpan<int> Solids(int brick) => _indices.AsSpan(_start[brick], _start[brick + 1] - _start[brick]);
 
-    /// <summary>The most brushes binned to one brick.</summary>
+    /// <summary>The most solids binned to one brick.</summary>
     public int MaxPerBrick { get; private set; }
 
-    /// <summary>Extra reach (metres) for room and component brushes of a layered hull: their walls extend outward.</summary>
+    /// <summary>Extra reach (metres) for room and component solids of a layered hull: their walls extend outward.</summary>
     public double RoomReach;
     public double ComponentReach;
 
-    public void Build(ReadOnlySpan<HullBrush> brushes)
+    public void Build(ReadOnlySpan<HullSolid> solids)
     {
         _slots.Clear();
         _brickCount = 0;
 
-        // Bricks exist only where Add brushes reach.
-        for (var i = 0; i < brushes.Length; i++)
+        // Bricks exist only where Add solids reach.
+        for (var i = 0; i < solids.Length; i++)
         {
-            if (brushes[i].Op != BrushOp.Add)
+            if (solids[i].Op != SolidOp.Add)
                 continue;
 
-            Range(brushes[i], out var x0, out var y0, out var z0, out var x1, out var y1, out var z1, Extra(brushes[i]));
+            Range(solids[i], out var x0, out var y0, out var z0, out var x1, out var y1, out var z1, Extra(solids[i]));
 
             for (var z = z0; z <= z1; z++)
                 for (var y = y0; y <= y1; y++)
@@ -82,7 +82,7 @@ public sealed class HullBins
             _counts[i] = 0;
         }
 
-        Visit(brushes, fill: false);
+        Visit(solids, fill: false);
 
         _start[0] = 0;
         MaxPerBrick = 0;
@@ -97,13 +97,13 @@ public sealed class HullBins
         if (_indices.Length < _start[_brickCount])
             _indices = new int[Math.Max(_start[_brickCount], _indices.Length * 2)];
 
-        Visit(brushes, fill: true);
+        Visit(solids, fill: true);
     }
 
-    /// <summary>Inclusive brick range a brush's bounds plus <see cref="Reach"/> overlap.</summary>
-    public static void Range(in HullBrush brush, out int x0, out int y0, out int z0, out int x1, out int y1, out int z1, double extra = 0.0)
+    /// <summary>Inclusive brick range a solid's bounds plus <see cref="Reach"/> overlap.</summary>
+    public static void Range(in HullSolid solid, out int x0, out int y0, out int z0, out int x1, out int y1, out int z1, double extra = 0.0)
     {
-        BrushGeometry.Bounds(brush, out var min, out var max);
+        SolidGeometry.Bounds(solid, out var min, out var max);
         var reach = Reach + extra;
         x0 = BrickOf(min.X - reach);
         y0 = BrickOf(min.Y - reach);
@@ -113,10 +113,10 @@ public sealed class HullBins
         z1 = BrickOf(max.Z + reach);
     }
 
-    private double Extra(in HullBrush brush) => BrushRoles.Of(brush) switch
+    private double Extra(in HullSolid solid) => SolidRoles.Of(solid) switch
     {
-        BrushRole.Room => RoomReach,
-        BrushRole.Component => ComponentReach,
+        SolidRole.Room => RoomReach,
+        SolidRole.Component => ComponentReach,
         _ => 0.0,
     };
 
@@ -135,11 +135,11 @@ public sealed class HullBins
         _keys[_brickCount++] = key;
     }
 
-    private void Visit(ReadOnlySpan<HullBrush> brushes, bool fill)
+    private void Visit(ReadOnlySpan<HullSolid> solids, bool fill)
     {
-        for (var i = 0; i < brushes.Length; i++)
+        for (var i = 0; i < solids.Length; i++)
         {
-            Range(brushes[i], out var x0, out var y0, out var z0, out var x1, out var y1, out var z1, Extra(brushes[i]));
+            Range(solids[i], out var x0, out var y0, out var z0, out var x1, out var y1, out var z1, Extra(solids[i]));
 
             for (var z = z0; z <= z1; z++)
                 for (var y = y0; y <= y1; y++)

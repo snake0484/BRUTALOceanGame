@@ -53,8 +53,8 @@ public enum PlanFormatError
 /// files, saves and the network. Decoding checks every size against <see cref="PlanLimits"/> before inflating.
 ///
 /// BODY format 1 (hull levels): <c>u8 class, u8 0, u16 0, u32 materialCount, u32 DefId[materialCount],
-/// u32 brushCount</c>, then the brushes column by column: id deltas (i32), shape, op, flags, material (u8 each),
-/// position X, Y, Z deltas from the previous brush (i32), rotation (u32), half X, Y, Z, bevel, param (u16).
+/// u32 solidCount</c>, then the solids column by column: id deltas (i32), shape, op, flags, material (u8 each),
+/// position X, Y, Z deltas from the previous solid (i32), rotation (u32), half X, Y, Z, bevel, param (u16).
 /// Format 2 appends the mesh table: <c>u32 meshCount</c>, then each <see cref="HullMesh"/>'s canonical bytes. Format 3
 /// (layered hulls) writes the mesh table even when empty, then the <see cref="HullLayering"/> block. Each plan is written
 /// in the oldest format that holds it, so older plans keep their bytes and hashes.
@@ -76,8 +76,8 @@ public static class PlanFormat
     /// <summary>The canonical BODY bytes of <paramref name="doc"/> as it stands (call <see cref="PlanCanonical.Canonicalise"/> first for a canonical hash).</summary>
     public static byte[] EncodeBody(PlanDocument doc)
     {
-        var brushes = doc.Brushes.AsSpan();
-        var n = brushes.Length;
+        var solids = doc.Solids.AsSpan();
+        var n = solids.Length;
         var meshBytes = 0;
 
         foreach (var mesh in doc.Meshes)
@@ -85,7 +85,7 @@ public static class PlanFormat
 
         var format = FormatOf(doc);
         var layers = doc.Layers?.ToBytes() ?? [];
-        var bytes = new byte[BodyFixedBytes + doc.Materials.Count * 4 + n * HullBrush.SizeInBytes + (format >= MeshFormat ? 4 + meshBytes : 0) + layers.Length];
+        var bytes = new byte[BodyFixedBytes + doc.Materials.Count * 4 + n * HullSolid.SizeInBytes + (format >= MeshFormat ? 4 + meshBytes : 0) + layers.Length];
         var w = new Writer(bytes);
 
         w.U8((byte)doc.Class);
@@ -99,44 +99,44 @@ public static class PlanFormat
         w.U32((uint)n);
 
         uint prevId = 0;
-        foreach (ref readonly var b in brushes)
+        foreach (ref readonly var b in solids)
         {
             w.I32((int)(b.Id - prevId));
             prevId = b.Id;
         }
 
-        foreach (ref readonly var b in brushes)
+        foreach (ref readonly var b in solids)
             w.U8((byte)b.Shape);
 
-        foreach (ref readonly var b in brushes)
+        foreach (ref readonly var b in solids)
             w.U8((byte)b.Op);
 
-        foreach (ref readonly var b in brushes)
+        foreach (ref readonly var b in solids)
             w.U8((byte)b.Flags);
 
-        foreach (ref readonly var b in brushes)
+        foreach (ref readonly var b in solids)
             w.U8(b.Material);
 
-        WriteDeltas(ref w, brushes, 0);
-        WriteDeltas(ref w, brushes, 1);
-        WriteDeltas(ref w, brushes, 2);
+        WriteDeltas(ref w, solids, 0);
+        WriteDeltas(ref w, solids, 1);
+        WriteDeltas(ref w, solids, 2);
 
-        foreach (ref readonly var b in brushes)
+        foreach (ref readonly var b in solids)
             w.U32(b.Rotation);
 
-        foreach (ref readonly var b in brushes)
+        foreach (ref readonly var b in solids)
             w.U16(b.HalfX);
 
-        foreach (ref readonly var b in brushes)
+        foreach (ref readonly var b in solids)
             w.U16(b.HalfY);
 
-        foreach (ref readonly var b in brushes)
+        foreach (ref readonly var b in solids)
             w.U16(b.HalfZ);
 
-        foreach (ref readonly var b in brushes)
+        foreach (ref readonly var b in solids)
             w.U16(b.Bevel);
 
-        foreach (ref readonly var b in brushes)
+        foreach (ref readonly var b in solids)
             w.U16(b.Param);
 
         if (format >= MeshFormat)
@@ -314,65 +314,65 @@ public static class PlanFormat
 
         var meshes = format >= MeshFormat;
 
-        if (!r.U32(out var count) || count > PlanLimits.MaxBrushes || r.Remaining < count * HullBrush.SizeInBytes || (!meshes && r.Remaining != count * HullBrush.SizeInBytes))
+        if (!r.U32(out var count) || count > PlanLimits.MaxSolids || r.Remaining < count * HullSolid.SizeInBytes || (!meshes && r.Remaining != count * HullSolid.SizeInBytes))
             return false;
 
         var n = (int)count;
-        var brushes = new HullBrush[n];
+        var solids = new HullSolid[n];
         uint id0 = 0;
 
         for (var i = 0; i < n; i++)
         {
             r.I32(out var delta);
             id0 = (uint)(id0 + delta);
-            brushes[i].Id = id0;
+            solids[i].Id = id0;
         }
 
         for (var i = 0; i < n; i++)
         {
             r.U8(out var v);
-            brushes[i].Shape = (BrushShape)v;
+            solids[i].Shape = (SolidShape)v;
         }
 
         for (var i = 0; i < n; i++)
         {
             r.U8(out var v);
-            brushes[i].Op = (BrushOp)v;
+            solids[i].Op = (SolidOp)v;
         }
 
         for (var i = 0; i < n; i++)
         {
             r.U8(out var v);
-            brushes[i].Flags = (BrushFlags)v;
+            solids[i].Flags = (SolidFlags)v;
         }
 
         for (var i = 0; i < n; i++)
-            r.U8(out brushes[i].Material);
+            r.U8(out solids[i].Material);
 
-        ReadDeltas(ref r, brushes, 0);
-        ReadDeltas(ref r, brushes, 1);
-        ReadDeltas(ref r, brushes, 2);
-
-        for (var i = 0; i < n; i++)
-            r.U32(out brushes[i].Rotation);
+        ReadDeltas(ref r, solids, 0);
+        ReadDeltas(ref r, solids, 1);
+        ReadDeltas(ref r, solids, 2);
 
         for (var i = 0; i < n; i++)
-            r.U16(out brushes[i].HalfX);
+            r.U32(out solids[i].Rotation);
 
         for (var i = 0; i < n; i++)
-            r.U16(out brushes[i].HalfY);
+            r.U16(out solids[i].HalfX);
 
         for (var i = 0; i < n; i++)
-            r.U16(out brushes[i].HalfZ);
+            r.U16(out solids[i].HalfY);
 
         for (var i = 0; i < n; i++)
-            r.U16(out brushes[i].Bevel);
+            r.U16(out solids[i].HalfZ);
 
         for (var i = 0; i < n; i++)
-            r.U16(out brushes[i].Param);
+            r.U16(out solids[i].Bevel);
 
-        foreach (ref readonly var b in brushes.AsSpan())
-            doc.Brushes.Add(b);
+        for (var i = 0; i < n; i++)
+            r.U16(out solids[i].Param);
+
+        foreach (ref readonly var b in solids.AsSpan())
+            doc.Solids.Add(b);
 
         if (meshes)
         {
@@ -401,11 +401,11 @@ public static class PlanFormat
         return r.Remaining == 0;
     }
 
-    private static void WriteDeltas(ref Writer w, ReadOnlySpan<HullBrush> brushes, int axis)
+    private static void WriteDeltas(ref Writer w, ReadOnlySpan<HullSolid> solids, int axis)
     {
         var prev = 0;
 
-        foreach (ref readonly var b in brushes)
+        foreach (ref readonly var b in solids)
         {
             var v = axis == 0 ? b.PosX : axis == 1 ? b.PosY : b.PosZ;
             w.I32(unchecked(v - prev));
@@ -413,21 +413,21 @@ public static class PlanFormat
         }
     }
 
-    private static void ReadDeltas(ref Reader r, HullBrush[] brushes, int axis)
+    private static void ReadDeltas(ref Reader r, HullSolid[] solids, int axis)
     {
         var prev = 0;
 
-        for (var i = 0; i < brushes.Length; i++)
+        for (var i = 0; i < solids.Length; i++)
         {
             r.I32(out var delta);
             prev = unchecked(prev + delta);
 
             if (axis == 0)
-                brushes[i].PosX = prev;
+                solids[i].PosX = prev;
             else if (axis == 1)
-                brushes[i].PosY = prev;
+                solids[i].PosY = prev;
             else
-                brushes[i].PosZ = prev;
+                solids[i].PosZ = prev;
         }
     }
 

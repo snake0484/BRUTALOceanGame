@@ -177,7 +177,7 @@ public sealed class DesignerApp : IDisposable
         var copy = doc.Clone();
         PlanCanonical.Canonicalise(copy);
         _stats.Hash = PlanFormat.HashBody(copy);
-        _baker.Start(doc.Brushes.AsSpan(), doc.Meshes, _catalog.Densities(doc), doc.Layers);
+        _baker.Start(doc.Solids.AsSpan(), doc.Meshes, _catalog.Densities(doc), doc.Layers);
         UpdatePalette(doc);
     }
 
@@ -198,7 +198,7 @@ public sealed class DesignerApp : IDisposable
         _stats.BakeCpuMs = _baker.LastCpuMs;
         _stats.Rebaked = _baker.LastRebaked;
         _stats.Reused = _baker.LastReused;
-        _stats.MaxBrushesPerBrick = _baker.MaxBrushesPerBrick;
+        _stats.MaxSolidsPerBrick = _baker.MaxSolidsPerBrick;
         _stats.PrepareMs = _baker.LastPrepareMs;
         _stats.ExactBricks = _baker.ExactBricks;
         var com = _baker.Mass.CentreOfMass;
@@ -336,7 +336,7 @@ public sealed class DesignerApp : IDisposable
             _session.MarkSaved(path);
             _panels.PathText = path;
             _stats.Message = $"Saved {Path.GetFileName(path)} ({hash})";
-            Console.WriteLine($"saved {path}: {_session.Doc.Brushes.Count} brushes, hash {hash}");
+            Console.WriteLine($"saved {path}: {_session.Doc.Solids.Count} solids, hash {hash}");
         }
         catch (IOException e)
         {
@@ -356,7 +356,7 @@ public sealed class DesignerApp : IDisposable
         _session.Open(doc, path);
         _panels.PathText = path;
         _stats.Message = $"Opened {Path.GetFileName(path)}";
-        Console.WriteLine($"opened {path}: {doc.Brushes.Count} brushes, hash {PlanFormat.HashBody(doc)}");
+        Console.WriteLine($"opened {path}: {doc.Solids.Count} solids, hash {PlanFormat.HashBody(doc)}");
         FrameHull();
     }
 
@@ -383,16 +383,16 @@ public sealed class DesignerApp : IDisposable
 
     private void FrameHull()
     {
-        var brushes = _session.Doc.Brushes.AsSpan();
+        var solids = _session.Doc.Solids.AsSpan();
 
-        if (brushes.Length == 0)
+        if (solids.Length == 0)
             return;
 
         double x0 = double.MaxValue, y0 = double.MaxValue, z0 = double.MaxValue, x1 = double.MinValue, y1 = double.MinValue, z1 = double.MinValue;
 
-        foreach (ref readonly var b in brushes)
+        foreach (ref readonly var b in solids)
         {
-            BrushGeometry.Bounds(b, out var min, out var max);
+            SolidGeometry.Bounds(b, out var min, out var max);
             (x0, y0, z0) = (Math.Min(x0, min.X), Math.Min(y0, min.Y), Math.Min(z0, min.Z));
             (x1, y1, z1) = (Math.Max(x1, max.X), Math.Max(y1, max.Y), Math.Max(z1, max.Z));
         }

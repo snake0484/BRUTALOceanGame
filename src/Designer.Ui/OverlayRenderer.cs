@@ -11,7 +11,7 @@ using BrutalGame.Ships;
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>
-/// The designer's 3D overlay: lines and translucent triangles (brush outlines, gizmos, mesh cages, drag ghosts) depth
+/// The designer's 3D overlay: lines and translucent triangles (solid outlines, gizmos, mesh cages, drag ghosts) depth
 /// tested against the hull, drawn after it in the second scene pass. Each primitive is drawn twice: where it is in front
 /// (full colour, a small depth pull so lines on the surface win) and where the hull hides it (faint), so gizmos and
 /// selections stay readable through the hull. Geometry is rebuilt on the CPU each frame into a per-frame host-visible

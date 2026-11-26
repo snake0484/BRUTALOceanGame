@@ -468,7 +468,7 @@ public static class MeshOps
     }
 
     /// <summary>
-    /// Knife along the plane coordinate[<paramref name="axis"/>] = <paramref name="offset"/> (brush-local, 1/1024 m): edges
+    /// Knife along the plane coordinate[<paramref name="axis"/>] = <paramref name="offset"/> (solid-local, 1/1024 m): edges
     /// it crosses gain a vertex, and every face it crosses splits in two. Faces it would cut into more than two are left.
     /// </summary>
     public static bool Knife(MeshBuilder b, int axis, int offset)

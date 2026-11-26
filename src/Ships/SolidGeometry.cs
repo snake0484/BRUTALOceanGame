@@ -4,29 +4,29 @@ using System.Runtime.CompilerServices;
 namespace BrutalGame.Ships;
 
 /// <summary>
-/// Primitive signed distances in brush-local metres (negative inside) and ship-space bounds. Scalar float, fixed
+/// Primitive signed distances in solid-local metres (negative inside) and ship-space bounds. Scalar float, fixed
 /// operation order, no trig. Wedge: the box below the plane through its bottom front edge (y = -hy, z = +hz) and top
 /// back edge (y = +hy, z = -hz), so its full face is the bottom and its vertical face the back (-Z). Cylinder: along
 /// local Y, radius = half X, half height = half Y.
 /// </summary>
-public static class BrushGeometry
+public static class SolidGeometry
 {
-    public static bool IsSupported(BrushShape shape) => shape is BrushShape.Box or BrushShape.Wedge or BrushShape.Cylinder;
+    public static bool IsSupported(SolidShape shape) => shape is SolidShape.Box or SolidShape.Wedge or SolidShape.Cylinder;
 
     /// <summary>Half extents in metres as the SDF uses them (a cylinder's Z mirrors its radius).</summary>
-    public static Vector3 Half(in HullBrush brush)
+    public static Vector3 Half(in HullSolid solid)
     {
-        var x = (float)(brush.HalfX * HullBrush.MetresPerHalfUnit);
-        var y = (float)(brush.HalfY * HullBrush.MetresPerHalfUnit);
-        var z = brush.Shape == BrushShape.Cylinder ? x : (float)(brush.HalfZ * HullBrush.MetresPerHalfUnit);
+        var x = (float)(solid.HalfX * HullSolid.MetresPerHalfUnit);
+        var y = (float)(solid.HalfY * HullSolid.MetresPerHalfUnit);
+        var z = solid.Shape == SolidShape.Cylinder ? x : (float)(solid.HalfZ * HullSolid.MetresPerHalfUnit);
         return new Vector3(x, y, z);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static float Distance(BrushShape shape, Vector3 p, Vector3 half) => shape switch
+    public static float Distance(SolidShape shape, Vector3 p, Vector3 half) => shape switch
     {
-        BrushShape.Wedge => Wedge(p, half),
-        BrushShape.Cylinder => Cylinder(p, half),
+        SolidShape.Wedge => Wedge(p, half),
+        SolidShape.Cylinder => Cylinder(p, half),
         _ => Box(p, half),
     };
 
@@ -59,29 +59,29 @@ public static class BrushGeometry
         return MathF.Min(MathF.Max(dr, dy), 0f) + MathF.Sqrt(ox * ox + oy * oy);
     }
 
-    /// <summary>Ship-space AABB in metres of the brush's local box (a cylinder's bounding box).</summary>
-    public static void Bounds(in HullBrush brush, out Vector3d min, out Vector3d max)
+    /// <summary>Ship-space AABB in metres of the solid's local box (a cylinder's bounding box).</summary>
+    public static void Bounds(in HullSolid solid, out Vector3d min, out Vector3d max)
     {
         Span<double> m = stackalloc double[9];
-        BrushRotation.Matrix(brush.Rotation, m);
-        var h = Half(brush);
+        SolidRotation.Matrix(solid.Rotation, m);
+        var h = Half(solid);
         var ex = Math.Abs(m[0]) * h.X + Math.Abs(m[1]) * h.Y + Math.Abs(m[2]) * h.Z;
         var ey = Math.Abs(m[3]) * h.X + Math.Abs(m[4]) * h.Y + Math.Abs(m[5]) * h.Z;
         var ez = Math.Abs(m[6]) * h.X + Math.Abs(m[7]) * h.Y + Math.Abs(m[8]) * h.Z;
-        var c = new Vector3d(brush.PositionX, brush.PositionY, brush.PositionZ);
+        var c = new Vector3d(solid.PositionX, solid.PositionY, solid.PositionZ);
         min = new Vector3d(c.X - ex, c.Y - ey, c.Z - ez);
         max = new Vector3d(c.X + ex, c.Y + ey, c.Z + ez);
     }
 
     /// <summary>Exact solid volume in m³ of one primitive.</summary>
-    public static double Volume(in HullBrush brush)
+    public static double Volume(in HullSolid solid)
     {
-        double hx = brush.HalfX * HullBrush.MetresPerHalfUnit, hy = brush.HalfY * HullBrush.MetresPerHalfUnit, hz = brush.HalfZ * HullBrush.MetresPerHalfUnit;
+        double hx = solid.HalfX * HullSolid.MetresPerHalfUnit, hy = solid.HalfY * HullSolid.MetresPerHalfUnit, hz = solid.HalfZ * HullSolid.MetresPerHalfUnit;
 
-        return brush.Shape switch
+        return solid.Shape switch
         {
-            BrushShape.Wedge => 4.0 * hx * hy * hz,
-            BrushShape.Cylinder => Math.PI * hx * hx * 2.0 * hy,
+            SolidShape.Wedge => 4.0 * hx * hy * hz,
+            SolidShape.Cylinder => Math.PI * hx * hx * 2.0 * hy,
             _ => 8.0 * hx * hy * hz,
         };
     }

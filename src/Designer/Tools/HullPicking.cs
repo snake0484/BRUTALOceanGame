@@ -5,7 +5,7 @@ using BrutalGame.Ships;
 namespace BrutalGame.Designer.Tools;
 
 /// <summary>
-/// Headless tool maths: ray picking against brushes (slab test on the brush box, then sphere tracing its SDF), and
+/// Headless tool maths: ray picking against solids (slab test on the solid box, then sphere tracing its SDF), and
 /// closest points between a view ray and a gizmo axis. Rays are in ship metres, double.
 /// </summary>
 public static class HullPicking
@@ -13,29 +13,29 @@ public static class HullPicking
     private const int MaxSteps = 64;
     private const float HitEpsilon = 1e-3f;
 
-    /// <summary>Nearest brush the ray hits (any op), or 0. <paramref name="distance"/> is along the unit ray.</summary>
+    /// <summary>Nearest solid the ray hits (any op), or 0. <paramref name="distance"/> is along the unit ray.</summary>
     public static uint Pick(PlanDocument doc, Vector3d origin, Vector3d direction, out double distance)
     {
         distance = double.MaxValue;
         uint hit = 0;
         Span<double> m = stackalloc double[9];
 
-        foreach (ref readonly var brush in doc.Brushes.AsSpan())
+        foreach (ref readonly var solid in doc.Solids.AsSpan())
         {
-            var mesh = brush.Shape == BrushShape.Mesh && brush.Param < doc.Meshes.Count ? doc.Meshes[brush.Param] : null;
+            var mesh = solid.Shape == SolidShape.Mesh && solid.Param < doc.Meshes.Count ? doc.Meshes[solid.Param] : null;
 
-            if ((!BrushGeometry.IsSupported(brush.Shape) && mesh is null) || !BrushRotation.IsValid(brush.Rotation))
+            if ((!SolidGeometry.IsSupported(solid.Shape) && mesh is null) || !SolidRotation.IsValid(solid.Rotation))
                 continue;
 
-            BrushRotation.Matrix(brush.Rotation, m);
-            var o = ToLocal(m, new Vector3d(origin.X - brush.PositionX, origin.Y - brush.PositionY, origin.Z - brush.PositionZ));
+            SolidRotation.Matrix(solid.Rotation, m);
+            var o = ToLocal(m, new Vector3d(origin.X - solid.PositionX, origin.Y - solid.PositionY, origin.Z - solid.PositionZ));
             var d = ToLocal(m, direction);
-            var hitBrush = mesh is not null ? TraceMesh(MeshCache.Get(mesh), o, d, out var t) : Trace(brush.Shape, BrushGeometry.Half(brush), o, d, out t);
+            var hitSolid = mesh is not null ? TraceMesh(MeshCache.Get(mesh), o, d, out var t) : Trace(solid.Shape, SolidGeometry.Half(solid), o, d, out t);
 
-            if (hitBrush && t < distance)
+            if (hitSolid && t < distance)
             {
                 distance = t;
-                hit = brush.Id;
+                hit = solid.Id;
             }
         }
 
@@ -75,7 +75,7 @@ public static class HullPicking
 
     public const double MaxRayMetres = 4000.0;
 
-    private static bool Trace(BrushShape shape, Vector3 half, Vector3d o, Vector3d d, out double t)
+    private static bool Trace(SolidShape shape, Vector3 half, Vector3d o, Vector3d d, out double t)
     {
         t = 0.0;
 
@@ -87,7 +87,7 @@ public static class HullPicking
         for (var i = 0; i < MaxSteps && t <= t1 + HitEpsilon; i++)
         {
             var p = new Vector3((float)(o.X + d.X * t), (float)(o.Y + d.Y * t), (float)(o.Z + d.Z * t));
-            var dist = BrushGeometry.Distance(shape, p, half);
+            var dist = SolidGeometry.Distance(shape, p, half);
 
             if (dist < HitEpsilon)
                 return true;

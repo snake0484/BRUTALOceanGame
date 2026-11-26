@@ -6,7 +6,7 @@ namespace BrutalGame.Designer.Tests;
 
 public class MeshTests
 {
-    private const int M = HullBrush.PositionUnitsPerMetre;
+    private const int M = HullSolid.PositionUnitsPerMetre;
 
     private static HullMesh Box(int hx = 2 * M, int hy = M, int hz = 3 * M / 2)
     {
@@ -62,17 +62,17 @@ public class MeshTests
     [Fact]
     public void Primitives_AreValidClosedSolids()
     {
-        foreach (var shape in new[] { BrushShape.Box, BrushShape.Wedge, BrushShape.Cylinder })
+        foreach (var shape in new[] { SolidShape.Box, SolidShape.Wedge, SolidShape.Cylinder })
         {
-            var brush = new HullBrush { Shape = shape, HalfX = 512, HalfY = 768, HalfZ = 1024 };
+            var solid = new HullSolid { Shape = shape, HalfX = 512, HalfY = 768, HalfZ = 1024 };
 
-            if (shape == BrushShape.Cylinder)
-                brush.HalfZ = brush.HalfX;
+            if (shape == SolidShape.Cylinder)
+                solid.HalfZ = solid.HalfX;
 
-            var mesh = MeshPrimitives.FromBrush(brush);
+            var mesh = MeshPrimitives.FromSolid(solid);
             AssertValid(mesh);
-            var expected = BrushGeometry.Volume(brush);
-            var tolerance = shape == BrushShape.Cylinder ? 0.03 : 1e-9;
+            var expected = SolidGeometry.Volume(solid);
+            var tolerance = shape == SolidShape.Cylinder ? 0.03 : 1e-9;
             Assert.Equal(1.0, Volume(mesh) / expected, tolerance);
         }
     }
@@ -239,24 +239,24 @@ public class MeshTests
         Assert.Equal(MeshIssue.ShortEdge, MeshValidator.Validate(b.Build(), out _));
     }
 
-    /// <summary>A box converted to a mesh brush bakes to the same solid as the box primitive: same mass and volume.</summary>
+    /// <summary>A box converted to a mesh solid bakes to the same solid as the box primitive: same mass and volume.</summary>
     [Fact]
     public void ConvertedBox_BakesLikeThePrimitive()
     {
         var session = new DesignSession();
         session.Snap.Step = GridStep.Eighth;
-        var id = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 1152, 2048, -640, 4 * 256, 2 * 256, 3 * 256, BrushRotation.FromSteps(3, 0, 0), UndoTests.Alloy);
+        var id = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 1152, 2048, -640, 4 * 256, 2 * 256, 3 * 256, SolidRotation.FromSteps(3, 0, 0), UndoTests.Alloy);
         HullCommands.Hollow(session, id, 0.5);
         int[] densities = [800];
 
         using var primitive = new HullBaker(4);
-        primitive.Start(session.Doc.Brushes.AsSpan(), session.Doc.Meshes, densities);
+        primitive.Start(session.Doc.Solids.AsSpan(), session.Doc.Meshes, densities);
         primitive.Wait();
 
         Assert.True(MeshCommands.ConvertToMesh(session, id));
-        Assert.True(MeshCommands.ConvertToMesh(session, session.Doc.Brushes[1].Id));
+        Assert.True(MeshCommands.ConvertToMesh(session, session.Doc.Solids[1].Id));
         using var mesh = new HullBaker(4);
-        mesh.Start(session.Doc.Brushes.AsSpan(), session.Doc.Meshes, densities);
+        mesh.Start(session.Doc.Solids.AsSpan(), session.Doc.Meshes, densities);
         mesh.Wait();
 
         Assert.Equal(primitive.Mass.VolumeM3, mesh.Mass.VolumeM3, 2);
@@ -272,7 +272,7 @@ public class MeshTests
     public void MeshEdits_UndoToExactBytesAndRoundTripTheFile()
     {
         var session = new DesignSession();
-        var id = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, 0, 0, 1024, 512, 768, 0, UndoTests.Alloy);
+        var id = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 0, 0, 1024, 512, 768, 0, UndoTests.Alloy);
         var start = PlanFormat.EncodeBody(session.Doc);
 
         Assert.True(MeshCommands.ConvertToMesh(session, id));
@@ -281,8 +281,8 @@ public class MeshTests
         Assert.True(MeshCommands.Apply(session, id, b => MeshOps.InsetFaces(b, [top], M / 4)));
         Assert.True(MeshCommands.SetLevels(session, id, 1));
         var end = PlanFormat.EncodeBody(session.Doc);
-        Assert.True(session.TryGetBrush(id, out var brush));
-        Assert.True(brush.HalfY >= 2 * 256 * 3 / 2);
+        Assert.True(session.TryGetSolid(id, out var solid));
+        Assert.True(solid.HalfY >= 2 * 256 * 3 / 2);
 
         var copy = session.Doc.Clone();
         PlanCanonical.Canonicalise(copy);
@@ -309,8 +309,8 @@ public class MeshTests
     public void SharedMeshes_DedupeInTheCanonicalTable()
     {
         var session = new DesignSession();
-        var a = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, 0, 0, 512, 512, 512, 0, UndoTests.Alloy);
-        var c = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 8 * M, 0, 0, 512, 512, 512, 0, UndoTests.Alloy);
+        var a = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 0, 0, 512, 512, 512, 0, UndoTests.Alloy);
+        var c = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 8 * M, 0, 0, 512, 512, 512, 0, UndoTests.Alloy);
         MeshCommands.ConvertToMesh(session, a);
         MeshCommands.ConvertToMesh(session, c);
         Assert.Equal(2, session.Doc.Meshes.Count);
@@ -318,14 +318,14 @@ public class MeshTests
         var copy = session.Doc.Clone();
         PlanCanonical.Canonicalise(copy);
         Assert.Single(copy.Meshes);
-        Assert.Equal(copy.Brushes[0].Param, copy.Brushes[1].Param);
+        Assert.Equal(copy.Solids[0].Param, copy.Solids[1].Param);
     }
 
     [Fact]
-    public void MeshBrush_Picks()
+    public void MeshSolid_Picks()
     {
         var session = new DesignSession();
-        var id = HullCommands.AddBrush(session, BrushShape.Cylinder, BrushOp.Add, 0, 0, 0, 512, 1024, 512, 0, UndoTests.Alloy);
+        var id = HullCommands.AddSolid(session, SolidShape.Cylinder, SolidOp.Add, 0, 0, 0, 512, 1024, 512, 0, UndoTests.Alloy);
         MeshCommands.ConvertToMesh(session, id);
 
         Assert.Equal(id, Tools.HullPicking.Pick(session.Doc, new Vector3d(10, 0, 0), new Vector3d(-1, 0, 0), out var d));

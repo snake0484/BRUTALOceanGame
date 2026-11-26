@@ -12,8 +12,8 @@ public enum GridStep
 }
 
 /// <summary>
-/// Grid and rotation snapping. Positions snap so an unrotated brush's faces sit on the grid: the minimum face is snapped
-/// and the size is a whole number of steps. Rotation is always in 15 degree steps (the brush's snap index).
+/// Grid and rotation snapping. Positions snap so an unrotated solid's faces sit on the grid: the minimum face is snapped
+/// and the size is a whole number of steps. Rotation is always in 15 degree steps (the solid's snap index).
 /// </summary>
 public sealed class Snap
 {
@@ -27,7 +27,7 @@ public sealed class Snap
     /// <summary>Half-extent step in 1/256 m: half a grid step, so sizes are whole steps.</summary>
     public int HalfStep => Enabled ? Math.Max(1, (int)Step / 8) : 1;
 
-    public double StepMetres => PositionStep * HullBrush.MetresPerPositionUnit;
+    public double StepMetres => PositionStep * HullSolid.MetresPerPositionUnit;
 
     public int SnapPosition(int units) => SnapTo(units, PositionStep);
 
@@ -39,27 +39,27 @@ public sealed class Snap
     }
 
     /// <summary>Snaps sizes to whole steps, then the centre so the minimum face is on the grid.</summary>
-    public HullBrush SnapBrush(HullBrush brush)
+    public HullSolid SnapSolid(HullSolid solid)
     {
         if (!Enabled)
-            return brush;
+            return solid;
 
-        // A mesh brush's half extents are its mesh's bounds: only its origin snaps.
-        if (brush.Shape == BrushShape.Mesh)
+        // A mesh solid's half extents are its mesh's bounds: only its origin snaps.
+        if (solid.Shape == SolidShape.Mesh)
         {
-            brush.PosX = SnapPosition(brush.PosX);
-            brush.PosY = SnapPosition(brush.PosY);
-            brush.PosZ = SnapPosition(brush.PosZ);
-            return brush;
+            solid.PosX = SnapPosition(solid.PosX);
+            solid.PosY = SnapPosition(solid.PosY);
+            solid.PosZ = SnapPosition(solid.PosZ);
+            return solid;
         }
 
-        brush.HalfX = SnapHalf(brush.HalfX);
-        brush.HalfY = SnapHalf(brush.HalfY);
-        brush.HalfZ = SnapHalf(brush.HalfZ);
-        brush.PosX = SnapCentre(brush.PosX, brush.HalfX);
-        brush.PosY = SnapCentre(brush.PosY, brush.HalfY);
-        brush.PosZ = SnapCentre(brush.PosZ, brush.HalfZ);
-        return brush;
+        solid.HalfX = SnapHalf(solid.HalfX);
+        solid.HalfY = SnapHalf(solid.HalfY);
+        solid.HalfZ = SnapHalf(solid.HalfZ);
+        solid.PosX = SnapCentre(solid.PosX, solid.HalfX);
+        solid.PosY = SnapCentre(solid.PosY, solid.HalfY);
+        solid.PosZ = SnapCentre(solid.PosZ, solid.HalfZ);
+        return solid;
     }
 
     private int SnapCentre(int centre, ushort half)

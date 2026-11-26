@@ -42,7 +42,7 @@ public sealed class LayersPanel
 
             if (layers is null)
             {
-                ImGui.TextWrapped("Solid brush hull. A layered hull models the skin; sections fill it inward with depth stacks, rooms and components are cut out and walled."u8);
+                ImGui.TextWrapped("Solid hull. A layered hull models the skin; sections fill it inward with depth stacks, rooms and components are cut out and walled."u8);
 
                 if (ImGui.Button("Make layered hull"u8) && _catalog.All.Count > 0)
                     LayerCommands.Enable(session, _catalog.All[Math.Min(1, _catalog.All.Count - 1)].Id, _catalog.All[0].Id);
@@ -128,12 +128,12 @@ public sealed class LayersPanel
             ImGui.PushID(1000 + c);
             ImGui.Text($"{AxisNames[cut.Axis]} =");
             ImGui.SameLine();
-            var metres = cut.Position * HullBrush.MetresPerPositionUnit;
+            var metres = cut.Position * HullSolid.MetresPerPositionUnit;
             DesignerStyle.ItemWidth(130f);
             ImGui.InputDouble("m"u8, ref metres, 0.25, 1.0, "%.2f"u8, ImGuiInputTextFlags.None);
 
             if (ImGui.IsItemDeactivatedAfterEdit() || (ImGui.IsItemEdited() && !ImGui.IsItemActive()))
-                LayerCommands.MoveCut(session, c, (int)Math.Round(metres * HullBrush.PositionUnitsPerMetre));
+                LayerCommands.MoveCut(session, c, (int)Math.Round(metres * HullSolid.PositionUnitsPerMetre));
 
             ImGui.SameLine();
 

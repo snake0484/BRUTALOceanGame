@@ -65,7 +65,7 @@ public sealed class DesignerStyle
     }
 
     /// <summary>
-    /// Once, before the first frame: the default docked layout, unless ImGui has a saved one to load. Tools and brushes
+    /// Once, before the first frame: the default docked layout, unless ImGui has a saved one to load. Tools and solids
     /// on the left; properties, mesh and hull layers as tabs top right; stats bottom right; the middle is the 3D view.
     /// </summary>
     public static void SeedLayout(float width, float height)
@@ -81,7 +81,7 @@ public sealed class DesignerStyle
             [Window][Designer]
             DockId=0x00000007,0
 
-            [Window][Brushes]
+            [Window][Solids]
             DockId=0x00000008,0
 
             [Window][Properties]
