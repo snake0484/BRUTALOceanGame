@@ -34,6 +34,9 @@ public sealed class SimWorld : IDisposable
     public readonly PlanetParams Planet;
     public readonly PlanetGenerator Generator;
 
+    /// <summary>Terrain params of every rocky body (planets and moons) by celestial index; null for stars.</summary>
+    public readonly PlanetParams?[] BodyParams;
+
     /// <summary>Authoritative edits (D32: permanent); Seq stamped here.</summary>
     public readonly EditStore EditStore = new();
 
@@ -73,6 +76,10 @@ public sealed class SimWorld : IDisposable
         ref readonly var body = ref Celestial[PlanetIndex];
         Planet = PlanetParams.Generate(PlanetParams.BodySeed(seed, PlanetIndex), body.Radius, body.Mu / (body.Radius * body.Radius));
         Generator = new PlanetGenerator(Planet);
+        BodyParams = new PlanetParams?[Celestial.Count];
+
+        for (var i = 0; i < Celestial.Count; i++)
+            BodyParams[i] = i == PlanetIndex ? Planet : RockyParams(Celestial, seed, i);
 
         PlanetSpawn.FindCoast(Generator.Surface, body.SpinAxis, out var coast, out Seaward);
         var level = Planet.HasSea ? Planet.SeaRadius : Planet.Radius + Generator.Surface.Height(coast.X, coast.Y, coast.Z);
@@ -210,6 +217,19 @@ public sealed class SimWorld : IDisposable
         }
 
         throw new InvalidOperationException("The celestial system has no planet for the terrain.");
+    }
+
+    /// <summary>A moon's terrain: airless and dry, barren rock; null for a star. Planets other than the terrain's get seas.</summary>
+    private static PlanetParams? RockyParams(CelestialSystem celestial, ulong seed, int index)
+    {
+        ref readonly var body = ref celestial[index];
+
+        if (body.Kind is not (CelestialKind.Planet or CelestialKind.Moon))
+            return null;
+
+        var moon = body.Kind == CelestialKind.Moon;
+        var p = PlanetParams.Generate(PlanetParams.BodySeed(seed, index), body.Radius, body.Mu / (body.Radius * body.Radius), ocean: !moon);
+        return moon ? p with { Materials = PlanetMaterials.Barren } : p;
     }
 
     /// <summary>

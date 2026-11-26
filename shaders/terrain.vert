@@ -9,9 +9,10 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     mat4 viewProj;
     vec4 planet;      // xyz = planet centre relative to the camera, w = sea radius (0 = no sea)
     vec4 sunDir;      // xyz toward sun, w = intensity
-    vec4 skyZenith;
+    vec4 skyZenith;   // w = the star's intensity in the space look
     vec4 skyHorizon;  // w = fog density
     vec4 water;       // rgb = seabed fade colour, w = distance past which it applies (no ocean surface there)
+    vec4 space;       // x = space look weight (0 ground, 1 orbit), y = atmosphere top radius (0 = none), z = scale height, w = its base radius
 } frame;
 
 // PackedTerrainVertex.OffsetVoxels * StepsPerVoxel.

@@ -25,4 +25,15 @@ public struct TerrainLighting
 
     /// <summary>Distance from the camera (m) past which seabeds get <see cref="WaterColour"/>: the ocean surface's reach, 0 with no surface drawn.</summary>
     public float SeaFillStart;
+
+    /// <summary>0 on the ground (sun, sky and fog above); 1 from orbit, where the terrain is shaded as the body's impostor is (<see cref="DetailLadder.SpaceLook"/>).</summary>
+    public float SpaceLook;
+
+    /// <summary>The star's light in the space look.</summary>
+    public float StarIntensity;
+
+    /// <summary>The body's atmosphere for the space look: top and base radius (m from its centre) and scale height; top 0 for none.</summary>
+    public float AtmosphereTop;
+    public float AtmosphereBase;
+    public float AtmosphereScaleHeight;
 }

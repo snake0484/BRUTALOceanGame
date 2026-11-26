@@ -13,6 +13,7 @@ var editTest = false;
 var hideUi = false;
 var benchSeconds = 0.0;
 var planetFly = false;
+var moonTest = false;
 OrbitTestFrame? orbitTest = null;
 
 // Weather drives the ocean wind and the sky unless --wind pins the sea (tests, benchmarks); --weather forces it on.
@@ -62,6 +63,8 @@ for (var i = 0; i < args.Length; i++)
     }
     else if (args[i] == "--planet-fly")
         planetFly = true;
+    else if (args[i] == "--moon-test")
+        moonTest = true;
     else if (args[i] == "--orbit-test")
     {
         orbitTest = OrbitTestFrame.Surface;
@@ -80,5 +83,5 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
-using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest);
+using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest);
 app.Run();

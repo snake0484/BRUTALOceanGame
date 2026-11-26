@@ -24,6 +24,9 @@ public sealed class GameApp : IDisposable
     private const string Title = "BRUTALGame";
     private const float OrbitSunIntensity = 1.5f;
 
+    /// <summary>Seconds the focus body's impostor takes to hand over to its octree once that has loaded.</summary>
+    private const double CoverSeconds = 0.5;
+
     /// <summary>The atmosphere's density scale height (m): fog and the sky's clear colour fade with altitude by it.</summary>
     private const double ScaleHeight = 8000.0;
 
@@ -72,7 +75,10 @@ public sealed class GameApp : IDisposable
     private readonly GpuBenchmark? _bench;
     private readonly PlanetFlyTest? _planetFly;
     private readonly OrbitTest? _orbitTest;
+    private readonly MoonTest? _moonTest;
     private readonly PlanetRenderer? _planets;
+    private readonly CelestialView _celestial;
+    private readonly int _planetTerrainBody;
     private FrameSections _sections;
     private readonly long _startTime = Stopwatch.GetTimestamp();
     private readonly int _fftScope;
@@ -83,8 +89,14 @@ public sealed class GameApp : IDisposable
     private readonly int _uploadScope;
     private readonly int _planetScope = -1;
     private double3 _lastCamera;
+    private double3 _sunCamera;
+    private float _sunElevation = 1f;
     private double _cameraSpeed;
     private bool _oceanDrawn;
+    private bool _octreeActive = true;
+    private bool _octreeLoaded;
+    private float _octreeCover;
+    private FocusBlend _focusBlend = FocusBlend.Alone;
 
     /// <summary>Pipeline statistics scopes (<see cref="PipelineStats"/>): sequential, never nested.</summary>
     private readonly int _terrainStats;
@@ -93,8 +105,9 @@ public sealed class GameApp : IDisposable
 
     /// <param name="camera">Optional start pose in the spawn's sea frame (y up, sea level 0, +x out to sea): x, y, z, yaw degrees, pitch degrees.</param>
     /// <param name="planetFly">--planet-fly: scripted flights over the planet at 30, 300 and 3000 m/s and a descent from 800 km, logging streaming numbers.</param>
-    /// <param name="orbitTest">--orbit-test [inertial]: the test planet as a smooth sphere with the terrain round the spawn on it, flown from 2 m to 1e8 m with the camera in its surface or inertial frame; no ocean.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null)
+    /// <param name="orbitTest">--orbit-test [inertial]: the test planet as a smooth sphere below the impostor switch and on the detail ladder above it, with the terrain round the spawn on it, flown from 2 m to 1e8 m with the camera in its surface or inertial frame; no ocean.</param>
+    /// <param name="moonTest">--moon-test: the camera falls onto the moon from 1e9 m (a point of light) through disc, impostor and the focus switch to its octree, logging the ladder's GPU time per stage.</param>
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false)
     {
         var weatherField = new WeatherField(new WeatherClimate());
         _sim = new SimWorld(seed: 1, WorkerBudget.Tick, weatherField) { DriveWind = weather, WeatherTimeOffset = weatherOffset * 60.0 };
@@ -142,13 +155,17 @@ public sealed class GameApp : IDisposable
         _instances = new InstanceBuffer(_renderer);
         _terrainRenderer = new TerrainRenderer(_renderer, _instances);
 
+        _celestial = new CelestialView(_renderer, _sim) { Pinned = orbitTest is not null || planetFly };
+        _planetTerrainBody = _celestial.FocusTerrainBody;
+
         if (orbitTest is { } orbitFrame)
         {
-            _orbitTest = new OrbitTest(_camera, _sim.Celestial, orbitFrame);
+            var surface = _sim.Generator.Surface;
+            _orbitTest = new OrbitTest(_camera, _sim.Celestial, orbitFrame, d => PlanetImpostor.VisibleHeight(surface, d.X, d.Y, d.Z));
             _planets = new PlanetRenderer(_renderer, _instances);
         }
 
-        _terrain = new TerrainWorld(_terrainRenderer, _sim.Physics, _sim.Generator);
+        _terrain = new TerrainWorld(_terrainRenderer, _sim.Physics, _celestial.TerrainGenerators, _planetTerrainBody, _planetTerrainBody);
         _brush = new TerrainBrush(_sim, _camera);
         _editTest = editTest ? new EditTest(_sim, _terrain, _brush, _camera) : null;
         _terrainPanel = new TerrainPanel(_terrain, _terrainRenderer, _sim.Physics);
@@ -168,6 +185,8 @@ public sealed class GameApp : IDisposable
         if (_planets is not null)
             _planetScope = _renderer.GpuTimer.Register("Planet");
 
+        _moonTest = moonTest ? new MoonTest(_camera, _sim, _terrain, _celestial, _renderer.GpuTimer, _terrainScope) : null;
+
         var pipelineStats = _renderer.PipelineStats;
         _terrainStats = pipelineStats.Register("Terrain", PipelinePass.Opaque);
         _oceanStats = pipelineStats.Register("Ocean", PipelinePass.Water);
@@ -179,7 +198,7 @@ public sealed class GameApp : IDisposable
         if (benchSeconds > 0.0)
             _bench = new GpuBenchmark(_renderer.GpuTimer, benchSeconds, ["CPU frame", "CPU record", "Terrain rec"], [_stats.Frame, _stats.Record, _terrainRenderer.DrawMs]);
 
-        if (hideUi || _bench is not null || _planetFly is not null)
+        if (hideUi || _bench is not null || _planetFly is not null || _moonTest is not null)
         {
             _profiler.Open = false;
             _oceanPanel.Open = false;
@@ -226,22 +245,31 @@ public sealed class GameApp : IDisposable
             _sim.UpdateRenderPoses();
             _sections.Ticks = Lap(ref mark);
 
-            if (_orbitTest is null && _planetFly is null)
+            if (_orbitTest is null && _planetFly is null && _moonTest is null)
                 _camera.Update(_window, frameSeconds, _imgui.WantCaptureMouse, _imgui.WantCaptureKeyboard);
 
             _planetFly?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds);
             _orbitTest?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady, OutputAspect, RenderViewport, _sim.RenderTime);
+            _moonTest?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady);
+            _celestial.Update(_camera);
             UpdateCameraSpeed(frameSeconds);
 
             var terrainStart = Stopwatch.GetTimestamp();
             mark = terrainStart;
-            _brush.Update(_window, (float)frameSeconds, _imgui.WantCaptureMouse);
+
+            if (_camera.Frame == _planetFrame)
+                _brush.Update(_window, (float)frameSeconds, _imgui.WantCaptureMouse);
+
             _editTest?.Update(_sim.Clock.SimTime);
             _terrainPanel.BrushRadius = _brush.Radius;
             SyncEdits();
+            UpdateOctree();
             var terrain = TerrainView(out var terrainCamera, out var terrainAxes);
             _terrain.Update(_orbitTest is null ? terrainCamera : _sim.Bubble.Origin, _planetFly?.Speed ?? _cameraSpeed);
+            terrain &= _terrain.Focus == (_orbitTest is null ? _celestial.FocusTerrainBody : _planetTerrainBody);
+            UpdateOctreeCover(terrain, frameSeconds);
             _sections.Terrain = Lap(ref mark);
+            UpdateSun(terrainCamera, terrainAxes);
             UpdateWeather();
             UpdateBench();
             _sections.Weather = Lap(ref mark);
@@ -261,7 +289,7 @@ public sealed class GameApp : IDisposable
 
                 // The ocean is drawn in the sea frame (the physics bubble at the spawn) with the camera in the planet's frame, near the frame's origin; not in the orbit test.
                 var seaCamera = _sim.Bubble.LocalDouble(terrainCamera);
-                var ocean = terrain && _orbitTest is null && _camera.Frame == _planetFrame && _sim.Planet.HasSea
+                var ocean = terrain && _orbitTest is null && _camera.Frame == _planetFrame && _celestial.Focus == _sim.PlanetIndex && _sim.Planet.HasSea
                     && seaCamera.X * seaCamera.X + seaCamera.Z * seaCamera.Z < OceanReach * OceanReach && seaCamera.Y < OceanReach;
                 _oceanDrawn = ocean;
 
@@ -270,6 +298,7 @@ public sealed class GameApp : IDisposable
                 gpu.Begin(commands, _uploadScope);
                 _terrainRenderer.RecordUploads(commands, _renderer.FrameIndex);
                 _bathymetry.Record(commands, _renderer.FrameIndex, _depthGrid);
+                _celestial.RecordUploads(commands);
                 gpu.End(commands, _uploadScope);
                 _sections.Uploads = Lap(ref mark);
 
@@ -315,6 +344,10 @@ public sealed class GameApp : IDisposable
                     DrawPlanet(commands, extent, aspect);
                     gpu.End(commands, _planetScope);
                 }
+                else
+                {
+                    _celestial.Draw(commands, _renderer.FrameIndex, extent, _camera, aspect, _focusBlend);
+                }
 
                 _renderer.EndOpaquePass(commands);
 
@@ -348,20 +381,28 @@ public sealed class GameApp : IDisposable
             _sections.Present = _stats.Present.Last;
             _sections.GpuWait = _stats.GpuWait.Last;
             _planetFly?.Record(_sections, _camera.ViewProjection(OutputAspect));
+            _moonTest?.Record(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, _stats.Frame.Last, _sections.Work, _terrainRenderer.DrawnLastFrame, _camera.ViewProjection(OutputAspect), _renderer.Extent.Height, _focusBlend.Covers);
             RecordOrbitTest();
 
-            if (_planetFly is { Done: true } || _orbitTest is { Done: true })
+            if (_planetFly is { Done: true } || _orbitTest is { Done: true } || _moonTest is { Done: true })
                 _window.ShouldClose = true;
         }
     }
 
     /// <summary>
     /// Weather at the camera into the sky; the clear colour follows the fogged horizon, fading to space with altitude
-    /// (space in the orbit test).
+    /// (space in the orbit test). The clear sky dims with the star's elevation at the camera.
     /// </summary>
     private void UpdateWeather()
     {
-        _weather.Update(CameraXZ, _ocean, _clearSky, _weatherPanel.DriveSky);
+        var day = Smooth(-0.12f, 0.1f, _sunElevation);
+        var clear = _clearSky with
+        {
+            SunIntensity = _clearSky.SunIntensity * Smooth(-0.02f, 0.06f, _sunElevation),
+            SkyZenith = _clearSky.SkyZenith * (0.02f + 0.98f * day),
+            SkyHorizon = _clearSky.SkyHorizon * (0.03f + 0.97f * day),
+        };
+        _weather.Update(CameraXZ, _ocean, clear, _weatherPanel.DriveSky);
         var horizon = _orbitTest is null ? System.Numerics.Vector3.Lerp(SpaceColour, _ocean.SkyHorizon, Atmosphere) : SpaceColour;
         _renderer.ClearColor = new float4(horizon.X, horizon.Y, horizon.Z, 1f);
     }
@@ -374,6 +415,75 @@ public sealed class GameApp : IDisposable
             var altitude = _camera.Frame == _planetFrame ? _camera.Position.Length() - _sim.Planet.Radius : double.PositiveInfinity;
             return (float)Math.Exp(-Math.Max(altitude, 0.0) / ScaleHeight);
         }
+    }
+
+    private static float Smooth(float from, float to, float x)
+    {
+        var t = Math.Clamp((x - from) / (to - from), 0f, 1f);
+        return t * t * (3f - 2f * t);
+    }
+
+    /// <summary>
+    /// The star lights the focus body's terrain and the ocean (planets.md "Precision, frames, gravity, rotation": the sun
+    /// direction moved into the body frame), so the octree and its impostor agree at the switch. The star's direction is
+    /// in the camera frame's axes; the ocean takes it in the sea frame.
+    /// </summary>
+    private void UpdateSun(double3 terrainCamera, doubleQuat terrainAxes)
+    {
+        _sunCamera = _celestial.SunFrom(_celestial.Focus);
+
+        if (_sunCamera == double3.Zero)
+            return;
+
+        var sunBody = doubleQuat.Conjugate(terrainAxes) * _sunCamera;
+        var up = terrainCamera.Length() > 0.0 ? double3.Normalize(terrainCamera) : double3.UnitY;
+        _sunElevation = (float)double3.Dot(sunBody, up);
+
+        if (_celestial.Focus == _sim.PlanetIndex)
+        {
+            var sea = doubleQuat.Conjugate(_sim.Bubble.Axes) * sunBody;
+            _ocean.SunDirection = new System.Numerics.Vector3((float)sea.X, (float)sea.Y, (float)sea.Z);
+        }
+    }
+
+    /// <summary>
+    /// The octree may show once it has loaded round the camera: until then the focus body's impostor covers it, then
+    /// hands over in <see cref="CoverSeconds"/> (<see cref="DetailLadder.Blend"/>).
+    /// </summary>
+    private void UpdateOctreeCover(bool terrain, double frameSeconds)
+    {
+        if (!terrain)
+        {
+            (_octreeLoaded, _octreeCover) = (false, 0f);
+            _focusBlend = FocusBlend.Alone;
+            return;
+        }
+
+        _octreeLoaded |= _terrain.Settled;
+
+        if (_octreeLoaded)
+            _octreeCover = MathF.Min(1f, _octreeCover + (float)(frameSeconds / CoverSeconds));
+
+        _focusBlend = DetailLadder.Blend(_celestial.FocusAltitude, _octreeCover);
+    }
+
+    /// <summary>The octree streams below <see cref="DetailLadder.OctreeTop"/> over the focus body and unloads above <see cref="DetailLadder.OctreeRelease"/>; the orbit test keeps it at the spawn.</summary>
+    private void UpdateOctree()
+    {
+        if (_orbitTest is not null)
+        {
+            _terrain.SetFocus(_planetTerrainBody);
+            return;
+        }
+
+        var altitude = _celestial.FocusAltitude;
+
+        if (altitude < DetailLadder.OctreeTop)
+            _octreeActive = true;
+        else if (altitude > DetailLadder.OctreeRelease)
+            _octreeActive = false;
+
+        _terrain.SetFocus(_octreeActive ? _celestial.FocusTerrainBody : -1);
     }
 
     /// <summary>Camera speed (m/s) in its frame for the terrain's speed LOD bias, smoothed over ~0.25 s; a teleport resets it.</summary>
@@ -403,12 +513,23 @@ public sealed class GameApp : IDisposable
     /// <summary>No depth map until M2b's planet ShoreDepthMap: every lookup falls outside it and reads open water.</summary>
     private static readonly System.Numerics.Vector4 NoDepthMap = new(1e7f, 1e7f, 1f, BathymetryGrid.UnknownDepth);
 
-    /// <summary>--orbit-test: the planet sphere and the marker, lit by the star through the frame tree. The marker probe of this slot's last frame goes to the test.</summary>
+    /// <summary>
+    /// --orbit-test: the smooth sphere through the marker stands in for the octree below the impostor switch (the test's
+    /// octree stays at the spawn); every body on the detail ladder above it, the planet's impostor fading in across the
+    /// switch band over the sphere; then the marker. Lit by the star through the frame tree. The marker probe of this
+    /// slot's last frame goes to the test.
+    /// </summary>
     private void DrawPlanet(Brutal.VulkanApi.CommandBuffer commands, Brutal.VulkanApi.VkExtent2D extent, float aspect)
     {
+        var fade = DetailLadder.ImpostorFade(_celestial.FocusAltitude);
         _planets!.Begin(commands, _renderer.FrameIndex, extent, _camera, aspect, _orbitTest!.SunDirection, OrbitSunIntensity, _orbitTest.ProbeTag);
         _orbitTest.ResolveProbe(_planets.Probe);
-        _planets.DrawSphere(commands, _orbitTest.PlanetCentre, _orbitTest.PlanetRadius, _orbitTest.PlanetAxes);
+
+        if (fade < 1f)
+            _planets.DrawSphere(commands, _orbitTest.PlanetCentre, _orbitTest.PlanetRadius, _orbitTest.PlanetAxes);
+
+        _celestial.Draw(commands, _renderer.FrameIndex, extent, _camera, aspect, fade < 1f ? new FocusBlend(fade, 0f, MathF.Min(1f, 4f * fade), DetailLadder.OverlayDepthScale) : FocusBlend.Alone);
+        _planets.Bind(commands, extent);
         _planets.DrawMarker(commands, _orbitTest.Marker, _orbitTest.MarkerRadius, MarkerColour);
     }
 
@@ -417,7 +538,9 @@ public sealed class GameApp : IDisposable
         if (_orbitTest is null)
             return;
 
-        _orbitTest.Record(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, OutputAspect, RenderViewport, _stats.Frame.Last, _sections.Work, _renderer.GpuTimer.Ring(_planetScope).Last, _terrainRenderer.DrawnLastFrame);
+        var timer = _renderer.GpuTimer;
+        var bodies = new System.Numerics.Vector3(timer.Ring(_celestial.PointScope).Last, timer.Ring(_celestial.DiscScope).Last, timer.Ring(_celestial.ImpostorScope).Last);
+        _orbitTest.Record(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, OutputAspect, RenderViewport, _stats.Frame.Last, _sections.Work, timer.Ring(_planetScope).Last, bodies, _terrainRenderer.DrawnLastFrame);
     }
 
     /// <summary>The aspect the view-projection is built with.</summary>
@@ -426,42 +549,60 @@ public sealed class GameApp : IDisposable
     /// <summary>The render target's size (render scale applied): the pixels the scene is drawn in.</summary>
     private System.Numerics.Vector2 RenderViewport => new(_renderer.Extent.Width, _renderer.Extent.Height);
 
-    private bool WorldReady => _terrain.Settled;
+    private bool WorldReady => (_terrain.Settled || !_octreeActive) && _celestial.Ready;
 
     /// <summary>
-    /// The camera in the planet's frame and the planet's axes in the camera frame's, through the frame tree at render
-    /// time when the camera is in another frame. False outside the planet's SOI, so a heliocentric camera never casts
-    /// its position into chunk coordinates.
+    /// The camera in the focus body's frame and that body's axes in the camera frame's, through the frame tree at render
+    /// time when the camera is in another frame. False while the octree is off (above the impostor switch); in the orbit
+    /// test, outside the planet's SOI, so a heliocentric camera never casts its position into chunk coordinates.
     /// </summary>
     private bool TerrainView(out double3 camera, out doubleQuat axes)
     {
+        var frame = _orbitTest is null ? _celestial.FocusSurface : _planetFrame;
         camera = _camera.Position;
         axes = doubleQuat.Identity;
 
-        if (_camera.Frame != _planetFrame)
+        if (_camera.Frame != frame)
         {
-            if (!_sim.Celestial.Frames.TryRelativeRender(_planetFrame, _camera.Frame, out var planet))
+            if (!_sim.Celestial.Frames.TryRelativeRender(frame, _camera.Frame, out var body))
                 return false;
 
-            camera = doubleQuat.Conjugate(planet.Rotation) * (camera - planet.Position);
-            axes = planet.Rotation;
+            camera = doubleQuat.Conjugate(body.Rotation) * (camera - body.Position);
+            axes = body.Rotation;
         }
 
-        return camera.Length() < _planetSoi;
+        return _orbitTest is null ? _octreeActive : camera.Length() < _planetSoi;
     }
 
     /// <summary>
-    /// Terrain lit like the ocean: the ocean's sun and sky are in the sea frame, so the sun turns through its axes into the
-    /// camera's. Fog thins with altitude; seabeds past the ocean surface take the water's colour.
+    /// Terrain lit by the star (<see cref="UpdateSun"/>) under the ocean's sky, which the weather and the star's elevation
+    /// set. Fog thins with altitude; seabeds past the ocean surface take the water's colour. From altitude the look turns
+    /// into the impostor's (<see cref="DetailLadder.SpaceLook"/>): the star alone under the body's atmosphere. An airless
+    /// focus body (the moon) has that look at every height.
     /// </summary>
     private TerrainLighting PlanetTerrainLighting(double3 camera, doubleQuat axes)
     {
-        var sun = axes * _sim.Bubble.ToPlanetDirection(_ocean.SunDirection);
+        var sun = new System.Numerics.Vector3((float)_sunCamera.X, (float)_sunCamera.Y, (float)_sunCamera.Z);
+
+        if (_celestial.Focus != _sim.PlanetIndex)
+        {
+            return new TerrainLighting
+            {
+                SunDirection = sun,
+                SunIntensity = CelestialView.SunIntensity,
+                SkyZenith = SpaceColour,
+                SkyHorizon = SpaceColour,
+                PlanetCentre = PlanetCentre(camera, axes),
+                SpaceLook = 1f,
+                StarIntensity = CelestialView.SunIntensity,
+            };
+        }
+
         var water = (_ocean.WaterDeep + _ocean.WaterScatter) * (0.5f * _ocean.SunIntensity);
 
         return new TerrainLighting
         {
-            SunDirection = new System.Numerics.Vector3((float)sun.X, (float)sun.Y, (float)sun.Z),
+            SunDirection = sun,
             SunIntensity = _ocean.SunIntensity,
             SkyZenith = _ocean.SkyZenith,
             SkyHorizon = _ocean.SkyHorizon,
@@ -470,6 +611,11 @@ public sealed class GameApp : IDisposable
             SeaRadius = _sim.Planet.HasSea ? (float)_sim.Planet.SeaRadius : 0f,
             WaterColour = water,
             SeaFillStart = _oceanDrawn ? OceanSurfaceReach : 0f,
+            SpaceLook = DetailLadder.SpaceLook(_celestial.FocusAltitude),
+            StarIntensity = CelestialView.SunIntensity,
+            AtmosphereTop = _celestial.FocusAtmosphereTop,
+            AtmosphereBase = _celestial.FocusAtmosphereBase,
+            AtmosphereScaleHeight = _celestial.FocusScaleHeight,
         };
     }
 
@@ -548,8 +694,8 @@ public sealed class GameApp : IDisposable
     {
         var edits = _sim.Edits;
 
-        for (var i = _terrain.EditCount; i < edits.Length; i++)
-            _terrain.ApplyEdit(edits[i]);
+        for (var i = _terrain.EditCountOf(_planetTerrainBody); i < edits.Length; i++)
+            _terrain.ApplyEdit(_planetTerrainBody, edits[i]);
     }
 
     private SceneLighting SceneLightingFromOcean() => new()
@@ -569,7 +715,7 @@ public sealed class GameApp : IDisposable
         _imgui.NewFrame();
         _profiler.Draw();
         _renderer.PipelineStats.Enabled = _profiler.Open && _profiler.PipelineStatsOn;
-        _terrainRenderer.StatsEnabled = _profiler.Open || _terrainPanel.Open || _orbitTest is not null;
+        _terrainRenderer.StatsEnabled = _profiler.Open || _terrainPanel.Open || _orbitTest is not null || _moonTest is not null;
         _oceanPanel.Draw();
         _terrainPanel.Draw();
         _weatherPanel.Draw(CameraXZ);
@@ -601,6 +747,7 @@ public sealed class GameApp : IDisposable
         _terrain.Dispose();
         _terrainRenderer.Dispose();
         _planets?.Dispose();
+        _celestial.Dispose();
         _instances.Dispose();
         _sim.Dispose();
         _ocean.Dispose();

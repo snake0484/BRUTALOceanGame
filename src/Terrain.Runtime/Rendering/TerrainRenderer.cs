@@ -148,6 +148,7 @@ public sealed unsafe class TerrainRenderer : IDisposable
         public Vector4 SkyZenith;
         public Vector4 SkyHorizon;
         public Vector4 Water;
+        public Vector4 Space;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -608,9 +609,10 @@ public sealed unsafe class TerrainRenderer : IDisposable
             uniforms->ViewProj = viewProj;
             uniforms->CameraPos = new Vector4(lighting.PlanetCentre, lighting.SeaRadius);
             uniforms->SunDir = new Vector4(lighting.SunDirection, lighting.SunIntensity);
-            uniforms->SkyZenith = new Vector4(lighting.SkyZenith, 0f);
+            uniforms->SkyZenith = new Vector4(lighting.SkyZenith, lighting.StarIntensity);
             uniforms->SkyHorizon = new Vector4(lighting.SkyHorizon, lighting.FogDensity);
             uniforms->Water = new Vector4(lighting.WaterColour, lighting.SeaFillStart);
+            uniforms->Space = new Vector4(lighting.SpaceLook, lighting.AtmosphereTop, lighting.AtmosphereScaleHeight, lighting.AtmosphereBase);
 
             commands.BindPipeline(VkPipelineBindPoint.Graphics, _pipeline);
             commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex], _instances.GpuSet], []);

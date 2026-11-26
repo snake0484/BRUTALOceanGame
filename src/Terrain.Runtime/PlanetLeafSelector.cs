@@ -279,12 +279,13 @@ public sealed class PlanetLeafSelector
 }
 
 /// <summary>Runs one <see cref="PlanetLeafSelector.Select"/> on a worker.</summary>
-internal sealed class SelectJob(PlanetLeafSelector selector) : IJob
+internal sealed class SelectJob : IJob
 {
+    public PlanetLeafSelector Selector = null!;
     public LeafSet Output = new();
     public double3 Camera;
     public int MinLod;
     public double HorizonMargin;
 
-    public void Run() => selector.Select(Camera, MinLod, HorizonMargin, Output);
+    public void Run() => Selector.Select(Camera, MinLod, HorizonMargin, Output);
 }

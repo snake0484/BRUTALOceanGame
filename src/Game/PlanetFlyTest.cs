@@ -202,6 +202,8 @@ public sealed class PlanetFlyTest
         var jobs = _world.JobsCompleted - _jobs;
         var holeFrames = 0;
         var maxHoles = 0;
+        var firstHole = -1;
+        var lastHole = -1;
         var desired = 0L;
         var maxDesired = 0;
 
@@ -209,6 +211,8 @@ public sealed class PlanetFlyTest
         {
             holeFrames += _holes[i] > 0 ? 1 : 0;
             maxHoles = Math.Max(maxHoles, _holes[i]);
+            firstHole = _holes[i] > 0 && firstHole < 0 ? i : firstHole;
+            lastHole = _holes[i] > 0 ? i : lastHole;
             desired += _desired[i];
             maxDesired = Math.Max(maxDesired, _desired[i]);
         }
@@ -220,16 +224,16 @@ public sealed class PlanetFlyTest
 
         Log.Info($"{leg.Name}: {_count} frames in {seconds:F1} s; leaves {leaves / seconds:F0}/s ({leaves}), chunk jobs {jobs / seconds:F0}/s ({jobs}), selections {_world.Selects - _selects}, finest speed LOD {_maxMinLod}, leaves desired avg {desired / _count} max {maxDesired}");
         Log.Info($"{leg.Name}: terrain main-thread ms p50 {Pick(update, 0.5):F3} p95 {Pick(update, 0.95):F3} p99 {Pick(update, 0.99):F3} max {update[^1]:F3}; frame work ms p50 {Pick(work, 0.5):F2} p95 {Pick(work, 0.95):F2} max {work[^1]:F2}; gen0 GCs {GC.CollectionCount(0) - _collections}, allocated {allocated / 1024} KB (all threads)");
-        Log.Info($"{leg.Name}: holes in {holeFrames} of {_count} frames, at most {maxHoles} leaves, leaf-frames per LOD [{string.Join(' ', _holeLods)}]; last selection {_world.LastSelectMs:F2} ms worker, {_world.LastSelectVisits} nodes; with geometry max {_maxMeshed} ({_maxMeshBytes / 1048576.0:F1} MB), forced retires {_world.ForcedRetires - _forced}; collision bodies {_world.CollisionBodies}");
+        Log.Info($"{leg.Name}: holes in {holeFrames} of {_count} frames (first {firstHole}, last {lastHole}), at most {maxHoles} leaves, leaf-frames per LOD [{string.Join(' ', _holeLods)}]; last selection {_world.LastSelectMs:F2} ms worker, {_world.LastSelectVisits} nodes; with geometry max {_maxMeshed} ({_maxMeshBytes / 1048576.0:F1} MB), forced retires {_world.ForcedRetires - _forced}; collision bodies {_world.CollisionBodies}");
     }
 
-    private static float Pick(float[] sorted, double q) => sorted[Math.Min(sorted.Length - 1, (int)(q * sorted.Length))];
+    internal static float Pick(float[] sorted, double q) => sorted[Math.Min(sorted.Length - 1, (int)(q * sorted.Length))];
 
     /// <summary>
     /// Frustum planes (n, d), n·p + d ≥ 0 inside, of a translation-free row-vector view-projection with infinite
     /// reverse-Z: four sides and the near plane.
     /// </summary>
-    private static void ExtractPlanes(in Matrix4x4 m, Span<Vector4> planes)
+    internal static void ExtractPlanes(in Matrix4x4 m, Span<Vector4> planes)
     {
         var c0 = new Vector4(m.M11, m.M21, m.M31, m.M41);
         var c1 = new Vector4(m.M12, m.M22, m.M32, m.M42);

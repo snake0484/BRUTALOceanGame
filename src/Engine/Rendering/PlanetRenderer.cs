@@ -10,7 +10,8 @@ using BrutalGame.Engine.Scene;
 namespace BrutalGame.Engine.Rendering;
 
 /// <summary>
-/// Placeholder bodies until the voxel planet (M2): smooth spheres ray-cast per pixel and camera-facing surface markers,
+/// --orbit-test's precision instruments: a smooth sphere ray-cast per pixel (the octree's stand-in below the impostor
+/// switch, the test's octree staying at the spawn) and camera-facing surface markers,
 /// each placed by an instance record (review C9). Precise from metres above a 1000 km sphere out to 1e8 m: the record
 /// carries centre − camera in float only as a direction; altitude and h (2R + h) come from double. Main thread only.
 /// Per frame inside the opaque pass: <see cref="Begin"/>, then <see cref="DrawSphere"/> and <see cref="DrawMarker"/>.
@@ -40,6 +41,7 @@ public sealed unsafe class PlanetRenderer : IDisposable
     private readonly VkPipelineLayout _layout;
     private readonly VkPipeline _pipeline;
     private double3 _camera;
+    private int _frameIndex;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct FrameUniforms
@@ -108,9 +110,15 @@ public sealed unsafe class PlanetRenderer : IDisposable
         uniforms->Up = new Vector4(ToFloat(camera.Rotation * double3.UnitY) / f, 0f);
         uniforms->Forward = new Vector4(ToFloat(camera.Forward), 2f / (f * extent.Height));
         uniforms->Sun = new Vector4(sun, sunIntensity);
+        _frameIndex = frameIndex;
+        Bind(commands, extent);
+    }
 
+    /// <summary>Binds the pipeline again after other draws inside the same pass (after <see cref="Begin"/>).</summary>
+    public void Bind(CommandBuffer commands, VkExtent2D extent)
+    {
         commands.BindPipeline(VkPipelineBindPoint.Graphics, _pipeline);
-        commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex], _instances.Set], []);
+        commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[_frameIndex], _instances.Set], []);
         commands.SetViewport(0, [new VkViewport { Width = extent.Width, Height = extent.Height, MaxDepth = 1f }]);
         commands.SetScissor(0, [new VkRect2D { Extent = extent }]);
     }

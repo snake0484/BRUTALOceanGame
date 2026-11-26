@@ -9,11 +9,14 @@ using BrutalGame.Terrain.Runtime.Rendering;
 namespace BrutalGame.Terrain.Runtime;
 
 /// <summary>
-/// Streams one planet's octree of chunks around the camera (planets.md "Streaming at flight speeds"), in the planet's
+/// Streams the focus body's octree of chunks around the camera (planets.md "Streaming at flight speeds"), in the body's
 /// rotating frame with its centre at the origin: leaf selection runs on its own job (<see cref="PlanetLeafSelector"/>),
 /// chunk jobs generate + replay edits + mesh (+ collision for LOD-0 leaves in a ring round the camera), and the main
 /// thread uploads and swaps LODs without holes. Never waits on the job system; one chunk batch is in flight at a time.
-/// Collision bodies sit in the physics world's bubble (<see cref="PhysicsBubble"/>); their shapes are pooled.
+/// Collision bodies sit in the physics world's bubble (<see cref="PhysicsBubble"/>), for the one body that has it; their
+/// shapes are pooled. Every rocky body's height bounds are built at load; <see cref="SetFocus"/> moves the octree to another
+/// body (or none, past the impostor switch) once nothing is in flight, freeing the old body's leaves at once: the switch
+/// happens where neither octree is drawn. Each body keeps its own edit replica.
 /// </summary>
 public sealed class TerrainWorld : IDisposable
 {
@@ -40,18 +43,12 @@ public sealed class TerrainWorld : IDisposable
 
     private static readonly long RetireBudget = Stopwatch.Frequency / 2000;
 
-    public readonly PlanetGenerator Generator;
-    public readonly PlanetHeightBounds Bounds;
-
-    /// <summary>This client's replica of the planet's edits, written only between selections.</summary>
-    public readonly EditStore Edits = new();
-
     private readonly TerrainRenderer _renderer;
     private readonly PhysicsWorld _physics;
     private readonly JobScheduler _scheduler;
     private readonly JobScheduler _selectScheduler;
-    private readonly PlanetLeafSelector _selector;
-    private readonly SelectJob _selectJob;
+    private readonly Body[] _bodies;
+    private readonly SelectJob _selectJob = new();
     private readonly Stack<ChunkJob> _pool = new(JobPoolSize);
     private readonly List<ChunkJob> _inFlight = new(JobPoolSize);
     private readonly List<ChunkJob> _awaitingUpload = new(JobPoolSize);
@@ -64,6 +61,9 @@ public sealed class TerrainWorld : IDisposable
     private readonly HashSet<ulong> _readyAncestors = new(16384);
     private readonly int[] _holeLods = new int[PlanetLeafSelector.MaxLeafLod + 1];
     private LeafSet _desired = new();
+    private Body? _body;
+    private int _focus = -1;
+    private int _requestedFocus;
     private int _retireCursor;
     private double3 _camera;
     private double _speed;
@@ -106,27 +106,59 @@ public sealed class TerrainWorld : IDisposable
         public void Run() => bounds.BuildFace(face);
     }
 
-    /// <summary>Builds the planet's height bounds on the streaming workers (blocks, once at load).</summary>
-    public TerrainWorld(TerrainRenderer renderer, PhysicsWorld physics, PlanetGenerator generator)
+    /// <summary>One rocky body the octree can stream: generator, height bounds, this client's edit replica and selector.</summary>
+    private sealed class Body
     {
-        Generator = generator;
+        public readonly PlanetGenerator Generator;
+        public readonly PlanetHeightBounds Bounds;
+
+        /// <summary>Written only between selections while this body is the focus.</summary>
+        public readonly EditStore Edits = new();
+        public readonly bool Collision;
+
+        public Body(PlanetGenerator generator, bool collision)
+        {
+            Generator = generator;
+            Bounds = new PlanetHeightBounds(generator);
+            Collision = collision;
+        }
+
+        /// <summary>Made once the bounds are built: its horizon occluder is their lowest ground.</summary>
+        public PlanetLeafSelector Selector { get; private set; } = null!;
+
+        public void BoundsBuilt() => Selector = new PlanetLeafSelector(Bounds, Edits);
+    }
+
+    /// <summary>
+    /// Builds every body's height bounds on the streaming workers (blocks, once at load). Only
+    /// <paramref name="collisionBody"/> gets collision (the physics bubble is on it); <paramref name="focus"/> streams first.
+    /// </summary>
+    public TerrainWorld(TerrainRenderer renderer, PhysicsWorld physics, ReadOnlySpan<PlanetGenerator> bodies, int collisionBody, int focus)
+    {
         _renderer = renderer;
         _physics = physics;
         _scheduler = new JobScheduler((uint)WorkerBudget.Streaming, "Terrain", ThreadPriority.BelowNormal);
         _selectScheduler = new JobScheduler(1, "TerrainSelect", ThreadPriority.BelowNormal);
+        _bodies = new Body[bodies.Length];
 
         var start = Stopwatch.GetTimestamp();
-        Bounds = new PlanetHeightBounds(generator);
 
-        for (var face = 0; face < CubeLattice.Faces; face++)
-            _scheduler.Queue(new BoundsJob(Bounds, face), 1);
+        for (var i = 0; i < bodies.Length; i++)
+        {
+            _bodies[i] = new Body(bodies[i], i == collisionBody);
+
+            for (var face = 0; face < CubeLattice.Faces; face++)
+                _scheduler.Queue(new BoundsJob(_bodies[i].Bounds, face), 1);
+        }
 
         _scheduler.ExecuteJobs();
         _scheduler.Wait();
-        BoundsMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
 
-        _selector = new PlanetLeafSelector(Bounds, Edits);
-        _selectJob = new SelectJob(_selector);
+        foreach (var body in _bodies)
+            body.BoundsBuilt();
+
+        BoundsMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+        _requestedFocus = focus;
 
         for (var i = 0; i < JobPoolSize; i++)
             _pool.Push(new ChunkJob());
@@ -135,8 +167,29 @@ public sealed class TerrainWorld : IDisposable
             _shapes.Push(new StaticMeshShape());
     }
 
-    /// <summary>Wall time the height bounds took to build at load.</summary>
+    /// <summary>Wall time every body's height bounds took to build at load.</summary>
     public float BoundsMs { get; }
+
+    /// <summary>The body the octree streams (index into the constructor's list), −1 for none.</summary>
+    public int Focus => _focus;
+
+    /// <summary>A focus change waits for the selection and batch in flight.</summary>
+    public bool Switching => _requestedFocus != _focus;
+
+    /// <summary>The focus body's generator; null with no focus.</summary>
+    public PlanetGenerator? Generator => _body?.Generator;
+
+    /// <summary>Focus switches made, since start.</summary>
+    public int FocusSwitches { get; private set; }
+
+    /// <summary>Streams <paramref name="body"/> (−1: none, every leaf freed) from the next <see cref="Update"/> that finds nothing in flight.</summary>
+    public void SetFocus(int body)
+    {
+        if ((uint)(body + 1) > (uint)_bodies.Length)
+            throw new ArgumentOutOfRangeException(nameof(body));
+
+        _requestedFocus = body;
+    }
 
     public int LoadedChunks => _chunks.Count;
 
@@ -160,7 +213,11 @@ public sealed class TerrainWorld : IDisposable
 
     public int DirtyChunks => _dirty.Count;
 
-    public int EditCount => Edits.Count + _pendingOps.Count;
+    /// <summary>The focus body's edits, accepted ones included.</summary>
+    public int EditCount => _focus < 0 ? 0 : EditCountOf(_focus);
+
+    /// <summary>Edits this client holds for <paramref name="body"/>, accepted ones included.</summary>
+    public int EditCountOf(int body) => _bodies[body].Edits.Count + (body == _focus ? _pendingOps.Count : 0);
 
     public int CollisionBodies { get; private set; }
 
@@ -195,9 +252,15 @@ public sealed class TerrainWorld : IDisposable
     /// <summary>Nothing left to do: the selection is current and every desired leaf is loaded and ready.</summary>
     public bool Settled { get; private set; }
 
-    /// <summary>Records an edit the sim accepted and schedules every loaded leaf it shows on for regeneration.</summary>
-    public void ApplyEdit(in EditOp op)
+    /// <summary>Records an edit the sim accepted on <paramref name="body"/>; on the focus body, every loaded leaf it shows on regenerates.</summary>
+    public void ApplyEdit(int body, in EditOp op)
     {
+        if (body != _focus)
+        {
+            _bodies[body].Edits.Add(op);
+            return;
+        }
+
         if (_selecting)
         {
             _pendingOps.Add(op);
@@ -209,14 +272,15 @@ public sealed class TerrainWorld : IDisposable
 
     private void AddEdit(in EditOp op)
     {
-        Edits.Add(op);
+        var edits = _body!.Edits;
+        edits.Add(op);
         _reselect = true;
 
         foreach (var record in _chunks.Values)
         {
             var coord = record.Coord;
 
-            if (record.Dirty || !EditStore.Applies(op.Radius, coord.Lod, NodeDistance(coord), Edits.EditRadius) || !PlanetEditor.Intersects(op, coord))
+            if (record.Dirty || !EditStore.Applies(op.Radius, coord.Lod, NodeDistance(coord), edits.EditRadius) || !PlanetEditor.Intersects(op, coord))
                 continue;
 
             record.Dirty = true;
@@ -224,7 +288,7 @@ public sealed class TerrainWorld : IDisposable
         }
     }
 
-    /// <param name="camera">The camera in the planet's frame (m from its centre).</param>
+    /// <param name="camera">The camera in the focus body's frame (m from its centre).</param>
     /// <param name="speed">The camera's speed (m/s) for the speed LOD bias.</param>
     public void Update(double3 camera, double speed)
     {
@@ -233,6 +297,16 @@ public sealed class TerrainWorld : IDisposable
         _frame++;
 
         var mark = Stopwatch.GetTimestamp();
+
+        if (_requestedFocus != _focus && !_selectScheduler.IsExecuting && !_scheduler.IsExecuting)
+            SwitchBody();
+
+        if (_body is null)
+        {
+            Settled = false;
+            LastUpdate = default;
+            return;
+        }
 
         if (_selecting && !_selectScheduler.IsExecuting)
             CompleteSelection();
@@ -299,6 +373,45 @@ public sealed class TerrainWorld : IDisposable
         var threshold = ReselectShare * ChunkConstants.Size * (double)(1 << _desired.FinestLod);
         var moved = _camera - _selectedAt;
         return double3.Dot(moved, moved) > threshold * threshold;
+    }
+
+    /// <summary>
+    /// Moves the octree to the requested body with nothing in flight: the finished selection and batch are dropped, every
+    /// leaf is freed, and edits accepted during the last selection go into the old body's store.
+    /// </summary>
+    private void SwitchBody()
+    {
+        if (_selecting)
+            CompleteSelection();
+
+        foreach (var job in _inFlight)
+            Recycle(job);
+
+        foreach (var job in _awaitingUpload)
+            Recycle(job);
+
+        foreach (var record in _chunks.Values)
+        {
+            if (record.MeshHandle >= 0)
+                _renderer.Free(record.MeshHandle);
+
+            RemoveBody(record);
+            _recordPool.Push(record);
+        }
+
+        _inFlight.Clear();
+        _awaitingUpload.Clear();
+        _chunks.Clear();
+        _dirty.Clear();
+        _desired.Clear();
+        (_batchJobs, _retireCursor) = (0, 0);
+        _focus = _requestedFocus;
+        _body = _focus >= 0 ? _bodies[_focus] : null;
+        _selectJob.Selector = _body?.Selector!;
+        _cameraChunk = new ChunkCoord(int.MinValue, 0, 0);
+        _reselect = true;
+        Settled = false;
+        FocusSwitches++;
     }
 
     private void StartSelection()
@@ -574,8 +687,8 @@ public sealed class TerrainWorld : IDisposable
     {
         var job = _pool.Pop();
         job.Chunk.Coord = coord;
-        job.Generator = Generator;
-        job.GatherOps(Edits, NodeDistance(coord));
+        job.Generator = _body!.Generator;
+        job.GatherOps(_body.Edits, NodeDistance(coord));
         job.Shape = InCollisionRange(coord) ? RentShape() : null;
         job.BubbleRotation = _physics.Bubble.PlanetToLocal;
         _scheduler.Queue(job, 1 + coord.Lod / 4);
@@ -597,7 +710,7 @@ public sealed class TerrainWorld : IDisposable
 
     private bool InCollisionRange(ChunkCoord coord)
     {
-        if (coord.Lod != 0)
+        if (coord.Lod != 0 || !_body!.Collision)
             return false;
 
         var centre = coord.Origin + new double3(0.5 * ChunkConstants.Size);
@@ -638,6 +751,9 @@ public sealed class TerrainWorld : IDisposable
     /// </summary>
     public int CountHoles(ReadOnlySpan<Vector4> planes)
     {
+        if (_body is null)
+            return 0;
+
         _readyAncestors.Clear();
         Array.Clear(_holeLods);
         var holes = 0;
@@ -645,7 +761,7 @@ public sealed class TerrainWorld : IDisposable
 
         foreach (var leaf in _desired.Order)
         {
-            if (IsReady(leaf) || !InFrustum(leaf, planes) || AncestorReady(leaf) || _selector.ProvablyUnseen(leaf, _camera))
+            if (IsReady(leaf) || !InFrustum(leaf, planes) || AncestorReady(leaf) || _body.Selector.ProvablyUnseen(leaf, _camera))
                 continue;
 
             if (!built)

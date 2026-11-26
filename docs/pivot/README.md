@@ -125,6 +125,36 @@ Left for later in M2 and beyond:
 - **Spawn:** coasts are gentle everywhere (continent ramp), so the spawn beach is a wide flat with tide pools; a steeper coast needs the generator's coastal profile.
 - **Collision anchors:** collision is still driven by the camera, not sim-owned anchors (planets.md "Collision"); the headless sim has no ground.
 
+### M2 step 3: impostors and the detail ladder (2026-11-26)
+
+Every body is drawn on stages 1-3 of the ladder (planets.md "Detail ladder") by `CelestialView` + `BodyRenderer`, inside the opaque pass after terrain, lit by the star through the frame tree's render poses, with eclipses by the two bodies that look largest from each (ray-sphere, penumbra from the star's size):
+
+- **Point of light** (under 1.5 px, gone by 3 px): one instanced draw for all bodies; colour from mean albedo, Lambert phase and size, set on the CPU.
+- **Disc** (to 48 px): the base sphere with albedo from the impostor mip the pixel asks for, antialiased limb, atmosphere rim. The star is an emissive disc.
+- **Impostor** (relief fades in 48-96 px): a cube map per rocky body, R16 height + sRGB albedo (alpha = water), full mips, 256² per face at load and 1024² for the focus body on one worker. The heightfield is marched with steps bounded by the steepest baked slope, so mountains show on the limb. Normals come from four height taps, not a third texture.
+- **Switch to the octree:** the octree streams below 1000 km (unloads above 1100 km). The impostor stays opaque in front until the octree has settled, fades out from 900 to 700 km, then draws behind the octree down to 100 km so gaps and the limb never show sky. Between 100 and 20 km the terrain's shading turns from the impostor's look (star only, same atmosphere code, `atmosphere.glsl`) into the ground's sky and fog.
+- **Focus body:** the rocky body the camera is lowest over (0.8 hysteresis). A switch moves the free camera into that body's surface frame and `TerrainWorld.SetFocus` moves the octree once nothing is in flight. Each body has its own `PlanetParams`, height bounds, selector and edit replica; moons are airless and dry (`PlanetMaterials.Barren`). Collision and the ocean stay on the spawn planet (bubbles are M3).
+
+`--moon-test` falls from 1e9 m onto the moon in 60 s. Measured (Release, RTX 4090, 1600x900, GPU ms p50 / max):
+
+| Stage | Points | Discs | Impostors | Terrain |
+| --- | --- | --- | --- | --- |
+| Point (under 1.5 px) | 0.002 / 0.011 | 0.009 / 0.030 | 0 | 0 |
+| Disc (3-48 px) | 0 / 0.007 | 0.009 / 0.032 | 0 / 0.012 | 0 |
+| Relief fade-in (48-96 px) | 0 | 0 / 0.008 | 0.015 / 0.040 | 0 |
+| Impostor (96 px to 900 km) | 0 | 0 | 0.031 / 0.103 | 0 / 0.045 |
+| Switch band (900-700 km) | 0 | 0 | 0.089 / 0.342 | 0.040 / 0.169 |
+| Octree with backdrop (700-100 km) | 0 | 0 | 0.024 / 0.302 | 0.043 / 0.390 |
+| Octree, ground (under 100 km) | 0 | 0 | 0 / 0.245 | 0.051 / 0.363 |
+
+Focus moved to the moon at 11,500 km; its 1024² impostor was on screen 1.6 s later (bake 1.63 s on one worker; the 256² bakes take 0.39 s at load); the octree settled at 963 km, before the switch band; no hole frame went uncovered. A 256² impostor is 3.1 MB with mips (not planets.md's 1.2 MB: albedo is RGBA8), the 1024² one 50 MB. `--orbit-test` passes in both variants with unchanged limits; its sphere now passes through the marker at the visible height there (999.968 km), since the impostor above the switch is that surface. `--planet-fly` is unchanged from step 2 (0 holes in every leg).
+
+Left for later:
+- **Focus impostor size:** 50 MB plus the same in staging while it uploads; BC4/BC1 or 512² would cut it.
+- **Other bodies' ground:** no collision, ocean or brush off the spawn planet until bubbles (M3).
+- **Gas giants and rings:** not on the ladder yet (planets.md "Gas giants").
+- **Edits in the impostor:** it never sees them (planets.md allows baking large ones into the focus body's later).
+
 ## Open questions
 
 Decisions so far are logged in [decisions.md](decisions.md) (D9-D74) and in the Decided table above. Remaining open questions live in each doc's own list; the index after item 34 says where.

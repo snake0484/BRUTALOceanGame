@@ -1,15 +1,26 @@
 #version 450
 // Terrain fragment shader: material palette, Lambert sun + hemispheric sky about the planet's radial up, underwater
 // absorption below the sea sphere (and the water's colour where no ocean surface covers it), ocean-matched tonemap/fog.
+// From altitude (space.x -> 1) it turns into the impostor's look (body.frag): the star alone on the palette, the sea in
+// the impostor's colours with its glint, under the same atmosphere, so the impostor-to-octree switch shows no change.
+#extension GL_GOOGLE_include_directive : require
 
 layout(set = 0, binding = 0, std140) uniform Frame {
     mat4 viewProj;
     vec4 planet;      // xyz = planet centre relative to the camera, w = sea radius (0 = no sea)
     vec4 sunDir;      // xyz toward sun, w = intensity
-    vec4 skyZenith;
+    vec4 skyZenith;   // w = the star's intensity in the space look
     vec4 skyHorizon;  // w = fog density
     vec4 water;       // rgb = seabed fade colour, w = distance past which it applies (no ocean surface there)
+    vec4 space;       // x = space look weight (0 ground, 1 orbit), y = atmosphere top radius (0 = none), z = scale height, w = its base radius
 } frame;
+
+#include "atmosphere.glsl"
+
+float sunVisibility(vec3 p)
+{
+    return 1.0;
+}
 
 layout(location = 0) in vec3 vWorldPos; // camera-relative, camera frame axes
 layout(location = 1) in vec3 vNormal;
@@ -19,6 +30,13 @@ layout(location = 0) out vec4 outColor;
 
 const vec3 ABSORPTION = vec3(0.30, 0.09, 0.06);  // per metre below sea level
 const vec3 GROUND_BOUNCE = vec3(0.10, 0.09, 0.08);
+
+// The impostor's (PlanetImpostor, body.frag): sea albedo by depth, night-side ambient, sun glint.
+const vec3 SEA_SHALLOW = vec3(0.04, 0.12, 0.13);
+const vec3 SEA_DEEP = vec3(0.010, 0.030, 0.060);
+const float SEA_RAMP = 200.0;
+const float SPACE_AMBIENT = 0.004;
+const float GLINT = 0.5;
 
 // Linear albedo, indexed by VoxelMaterial (Air, Rock, Sand, Grass, Dirt).
 const vec3 PALETTE[5] = vec3[5](
@@ -45,22 +63,55 @@ void main()
     // ~1e6 m here, so heights are good to ~0.1 m: plenty for absorption.
     vec3 fromCentre = vWorldPos - frame.planet.xyz;
     float radius = length(fromCentre);
-    float up = dot(N, fromCentre / radius);
+    vec3 upDir = fromCentre / radius;
+    float up = dot(N, upDir);
     vec3 skyAmbient = mix(frame.skyHorizon.rgb, frame.skyZenith.rgb, clamp(up, 0.0, 1.0));
     vec3 ambient = mix(skyAmbient, GROUND_BOUNCE, clamp(-up, 0.0, 1.0));
 
-    vec3 colour = albedo * (max(dot(N, L), 0.0) * intensity + ambient);
+    float space = frame.space.x;
+    float star = frame.skyZenith.w;
+    float lambert = max(dot(N, L), 0.0);
+    vec3 colour = albedo * mix(lambert * intensity + ambient, vec3(lambert * star + SPACE_AMBIENT), space);
 
     float dist = length(vWorldPos);
+    vec3 dir = vWorldPos / dist;
 
     // Light lost through the water column above; past the ocean surface's reach the water's own colour fills in.
     if (frame.planet.w > 0.0)
     {
-        vec3 through = exp(-ABSORPTION * max(frame.planet.w - radius, 0.0));
+        float depth = max(frame.planet.w - radius, 0.0);
+        vec3 through = exp(-ABSORPTION * depth);
         colour *= through;
 
         if (dist > frame.water.w)
-            colour += frame.water.rgb * (1.0 - through);
+        {
+            float day = dot(upDir, L);
+            vec3 sea = mix(SEA_SHALLOW, SEA_DEEP, smoothstep(0.0, SEA_RAMP, depth)) * (max(day, 0.0) * star + SPACE_AMBIENT);
+            colour += mix(frame.water.rgb, sea, space) * (1.0 - through);
+            colour += space * (1.0 - through.b) * GLINT * star * pow(max(dot(upDir, normalize(L - dir)), 0.0), 200.0) * step(0.0, day);
+        }
+    }
+
+    // The air between the camera and the ground, as the impostor's.
+    float top = frame.space.y;
+
+    if (space > 0.0 && top > 0.0)
+    {
+        vec3 o = -frame.planet.xyz;
+        float bo = dot(o, dir);
+        float q = length(o - bo * dir);
+
+        if (q < top)
+        {
+            float a0 = max(-bo - sqrt((top - q) * (top + q)), 0.0);
+
+            if (dist > a0)
+            {
+                vec3 transmittance;
+                vec3 inscatter = atmosphereScatter(o, dir, a0, dist, frame.space.w, frame.space.z, L, star, transmittance);
+                colour = mix(colour, colour * transmittance + inscatter, space);
+            }
+        }
     }
 
     // Tonemap + gamma (same as ocean).
