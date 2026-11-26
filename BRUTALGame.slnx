@@ -8,7 +8,10 @@
     <Project Path="src/Frames/Frames.csproj" />
     <Project Path="src/Game/Game.csproj" />
     <Project Path="src/Physics/Physics.csproj" />
+    <Project Path="src/Net/Net.csproj" />
+    <Project Path="src/Net.Client/Net.Client.csproj" />
     <Project Path="src/Plans/Plans.csproj" />
+    <Project Path="src/Server/Server.csproj" />
     <Project Path="src/Ships/Ships.csproj" />
     <Project Path="src/Sim/Sim.csproj" />
     <Project Path="src/Terrain/Terrain.csproj" />
@@ -20,6 +23,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/Designer.Tests/Designer.Tests.csproj" />
     <Project Path="tests/Frames.Tests/Frames.Tests.csproj" />
+    <Project Path="tests/Net.Tests/Net.Tests.csproj" />
     <Project Path="tests/Physics.Tests/Physics.Tests.csproj" />
     <Project Path="tests/Plans.Tests/Plans.Tests.csproj" />
     <Project Path="tests/Sim.Tests/Sim.Tests.csproj" />
