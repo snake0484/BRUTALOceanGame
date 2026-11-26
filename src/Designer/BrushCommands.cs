@@ -2,8 +2,8 @@ using BrutalGame.Ships;
 
 namespace BrutalGame.Designer;
 
-/// <summary>Sweep profile presets. Adding profiles sit mostly above the surface, cutting ones mostly below it.</summary>
-public enum ProfilePreset : byte { Rib, HalfRound, VGroove, Channel }
+/// <summary>Sweep profile presets: raised detail, with a short skirt under the surface so it seats on curved hulls.</summary>
+public enum ProfilePreset : byte { Rib, HalfRound, Ridge }
 
 /// <summary>
 /// Brush and stroke commands, each one undo group. The brush set is replaced whole on every edit (a
@@ -11,7 +11,7 @@ public enum ProfilePreset : byte { Rib, HalfRound, VGroove, Channel }
 /// </summary>
 public static class BrushCommands
 {
-    public static readonly string[] PresetNames = ["Rib", "Half round", "V groove", "Channel"];
+    public static readonly string[] PresetNames = ["Rib", "Half round", "Ridge"];
 
     private const int Units = HullSolid.PositionUnitsPerMetre;
     private const int HalfRoundSegments = 8;
@@ -37,18 +37,12 @@ public static class BrushCommands
 
                 points.Add(new ProfilePoint(-w, -skirt));
                 break;
-            case ProfilePreset.VGroove:
-                points.Add(new ProfilePoint(0, -h));
+            case ProfilePreset.Ridge:
+                points.Add(new ProfilePoint(-w, -skirt));
+                points.Add(new ProfilePoint(w, -skirt));
                 points.Add(new ProfilePoint(w, 0));
-                points.Add(new ProfilePoint(w, skirt));
-                points.Add(new ProfilePoint(-w, skirt));
+                points.Add(new ProfilePoint(0, h));
                 points.Add(new ProfilePoint(-w, 0));
-                break;
-            case ProfilePreset.Channel:
-                points.Add(new ProfilePoint(-w, -h));
-                points.Add(new ProfilePoint(w, -h));
-                points.Add(new ProfilePoint(w, skirt));
-                points.Add(new ProfilePoint(-w, skirt));
                 break;
             default:
                 points.Add(new ProfilePoint(-w, -skirt));
@@ -147,7 +141,7 @@ public static class BrushCommands
     }
 
     /// <summary>A new stroke through <paramref name="points"/> (≥ 2); returns its id, or 0.</summary>
-    public static uint AddStroke(DesignSession session, int brush, IReadOnlyList<StrokePoint> points, SolidOp op, byte material)
+    public static uint AddStroke(DesignSession session, int brush, IReadOnlyList<StrokePoint> points, byte material)
     {
         var set = session.Doc.Brushes;
 
@@ -166,14 +160,14 @@ public static class BrushCommands
         var id = session.Doc.AllocateId();
         Change(session, s =>
         {
-            var stroke = new HullStroke { Id = id, Brush = (ushort)brush, Op = op, Material = material };
+            var stroke = new HullStroke { Id = id, Brush = (ushort)brush, Material = material };
             stroke.Points.AddRange(points);
             s.Strokes.Add(stroke);
         });
         return id;
     }
 
-    /// <summary>Edits a stroke (points, op, material, offset, scale, brush) as one undo group.</summary>
+    /// <summary>Edits a stroke (points, material, offset, scale, brush) as one undo group.</summary>
     public static bool SetStroke(DesignSession session, uint id, Action<HullStroke> edit)
     {
         var set = session.Doc.Brushes;

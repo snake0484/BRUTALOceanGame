@@ -23,6 +23,13 @@ public sealed class DesignStats
     public float PrepareMs;
     public int Generated;
     public int Unstuck;
+    public float SurfaceMs;
+    public int SurfacePieces;
+    public int SurfaceTriangles;
+    public double FlairKg;
+
+    /// <summary>Debug: draw the 0.25 m grid mesh (mass and collision's view of the hull) instead of the exact surface.</summary>
+    public bool ShowGrid;
     public int ExactBricks;
     public PlanHash Hash;
     public readonly ValidationLog Validation = new();
@@ -382,12 +389,16 @@ public sealed class DesignerPanels
             ImGui.Text($"CoM {com.X:F3}, {com.Y:F3}, {com.Z:F3} m");
             ImGui.Text($"inertia {inertia.Xx:E2}, {inertia.Yy:E2}, {inertia.Zz:E2} kg m2");
             ImGui.Separator();
-            ImGui.Text($"bricks {stats.Bricks} ({stats.ExactBricks} exact)  triangles {stats.Triangles}  max solids/brick {stats.MaxSolidsPerBrick}");
+            ImGui.Text($"grid (mass, collision): {stats.Bricks} bricks, {stats.Triangles} triangles, max solids/brick {stats.MaxSolidsPerBrick}");
             ImGui.Text($"bake {stats.BakeMs:F2} ms wall  {stats.BakeCpuMs:F2} ms cpu  rebaked {stats.Rebaked} reused {stats.Reused}{(stats.Baking ? "  (baking)" : "")}");
             ImGui.Text($"mesh prepare {stats.PrepareMs:F2} ms (subdivide + BVH, cached by mesh hash)");
 
+            ImGui.Text($"surface: {stats.SurfacePieces} exact pieces, {stats.SurfaceTriangles} triangles, {stats.SurfaceMs:F2} ms");
+
             if (stats.Generated > 0 || stats.Unstuck > 0)
-                ImGui.Text($"strokes: {stats.Generated} generated solids, {stats.Unstuck} points off the hull");
+                ImGui.Text($"brushes: {stats.Generated} pieces, {stats.FlairKg:F0} kg, {stats.Unstuck} points off the hull");
+
+            ImGui.Checkbox("Show grid mesh (debug)"u8, ref stats.ShowGrid);
             ImGui.Text($"plan hash {stats.Hash}  undo {session.Undo.UndoCount} redo {session.Undo.RedoCount}");
             ImGui.SeparatorText($"Validation: {stats.Validation.Errors} errors, {stats.Validation.Warnings} warnings");
 

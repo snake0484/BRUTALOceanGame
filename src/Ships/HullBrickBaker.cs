@@ -114,6 +114,9 @@ public sealed class HullBrickBaker : IHermiteField
 
     public HullMesher Mesher = HullMesher.DualContouring;
 
+    /// <summary>Mesh only a layered hull's inner surfaces (the outer skin is drawn exactly elsewhere); nothing for a plain hull.</summary>
+    public bool InnerOnly;
+
     /// <param name="exact">
     /// Index into <paramref name="binned"/> of the only solid reaching this brick (an Add): its own polygons are the mesh,
     /// clipped to the brick; -1 meshes the grid. <paramref name="grow"/> bits 0-2 grow the clip box one cell down X, Y, Z
@@ -177,10 +180,14 @@ public sealed class HullBrickBaker : IHermiteField
             _exact.Append(b.Source, b.Mesh, _origin, min, max, _mesh);
             _mesh.Pack(HullBins.CellMetres);
         }
-        else if (_chunk.HasSurface)
+        else if (_chunk.HasSurface && !(InnerOnly && layers is null))
         {
             if (Mesher == HullMesher.DualContouring)
+            {
+                _skipOuter = InnerOnly;
                 _dualContour.Mesh(_chunk, _mesh, HullBins.CellMetres, this);
+                _skipOuter = false;
+            }
             else
                 _surfaceNets.Mesh(_chunk, _mesh, skirts: false, HullBins.CellMetres);
         }

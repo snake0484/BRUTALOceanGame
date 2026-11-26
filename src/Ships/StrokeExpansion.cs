@@ -2,7 +2,7 @@ using static BrutalGame.Ships.HullSurface;
 
 namespace BrutalGame.Ships;
 
-/// <summary>The bake's input once strokes are expanded: the plan's solids plus generated mesh solids, and the mesh table plus their meshes.</summary>
+/// <summary>Strokes expanded: the plan's solids plus generated flair mesh solids after them, and the mesh table plus their meshes.</summary>
 public sealed class ExpandedHull
 {
     public HullSolid[] Solids = [];
@@ -29,12 +29,11 @@ public sealed class StrokePath
 }
 
 /// <summary>
-/// Expands brush strokes into ordinary mesh solids for the bake, deterministically from the plan (every peer gets the
-/// same solids). Each control point is stuck to the hull (cast back along its normal from <see cref="Reach"/> out), the
+/// Expands brush strokes into flair mesh solids, deterministically from the plan (every peer gets the same ones). They are
+/// drawn as they are and counted for mass, never baked into the hull grid. Each control point is stuck to the hull (cast back along its normal from <see cref="Reach"/> out), the
 /// segments between are resampled every <see cref="SampleMetres"/> and stuck too, so the line hugs curved hulls. A stamp
 /// brush places a copy of its mesh every spacing, +Y on the normal and +Z along the line; a sweep brush builds a tube of
-/// its profile along the path (split into pieces within the mesh limits), capped at both ends. Adding strokes become
-/// panels on a layered hull (outside the skin); cutting strokes cut the skin, so the layers follow the groove.
+/// its profile along the path (split into pieces within the mesh limits), capped at both ends.
 /// </summary>
 public static class StrokeExpansion
 {
@@ -45,7 +44,7 @@ public static class StrokeExpansion
     public const uint GeneratedIdBase = 0xF0000000;
     private const double MinStep = 1e-3;
 
-    public static ExpandedHull Expand(ReadOnlySpan<HullSolid> solids, IReadOnlyList<HullMesh> meshes, HullBrushSet? set, bool layered)
+    public static ExpandedHull Expand(ReadOnlySpan<HullSolid> solids, IReadOnlyList<HullMesh> meshes, HullBrushSet? set)
     {
         var result = new ExpandedHull();
         result.Meshes.AddRange(meshes);
@@ -65,16 +64,15 @@ public static class StrokeExpansion
             var path = Path(surface, stroke, ref result.Unstuck);
             result.Paths.Add(path);
 
-            if (stroke.Brush >= set.Brushes.Count || path.Points.Count < 2 || stroke.Op is not (SolidOp.Add or SolidOp.Subtract))
+            if (stroke.Brush >= set.Brushes.Count || path.Points.Count < 2)
                 continue;
 
             var brush = set.Brushes[stroke.Brush];
             var template = new HullSolid
             {
                 Shape = SolidShape.Mesh,
-                Op = stroke.Op,
+                Op = SolidOp.Add,
                 Material = stroke.Material,
-                Flags = layered && stroke.Op == SolidOp.Add ? SolidRoles.With(SolidFlags.None, SolidRole.Panel) : SolidFlags.None,
                 Rotation = SolidRotation.Identity,
             };
             var scale = stroke.Scale / (double)HullStroke.UnitScale;

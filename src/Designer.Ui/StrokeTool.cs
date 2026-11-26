@@ -17,7 +17,6 @@ public sealed class StrokeTool
     private const double LiftMetres = 0.02;
 
     private static readonly uint AddLine = OverlayRenderer.Rgba(90, 230, 200, 255);
-    private static readonly uint CutLine = OverlayRenderer.Rgba(255, 90, 90, 255);
     private static readonly uint DrawLine = OverlayRenderer.Rgba(255, 196, 40, 255);
     private static readonly uint HandleColour = OverlayRenderer.Rgba(255, 255, 255, 255);
     private static readonly uint HoverHandle = OverlayRenderer.Rgba(255, 196, 40, 255);
@@ -34,9 +33,6 @@ public sealed class StrokeTool
 
     /// <summary>Brush index new strokes use.</summary>
     public int Brush = -1;
-
-    /// <summary>New strokes add (false) or cut (true).</summary>
-    public bool Cut;
 
     /// <summary>Catalog index of the material new strokes use.</summary>
     public int Material;
@@ -237,7 +233,7 @@ public sealed class StrokeTool
         {
             var path = Expanded.Paths[s];
             var selected = set.Strokes[s].Id == Selected;
-            var colour = set.Strokes[s].Op == SolidOp.Subtract ? CutLine : AddLine;
+            var colour = AddLine;
 
             if (!selected)
                 colour = OverlayRenderer.WithAlpha(colour, 150);

@@ -81,6 +81,12 @@ public sealed class HullBaker : IDisposable
     /// </summary>
     public bool ExactSurfaces = true;
 
+    /// <summary>
+    /// The outer surface is drawn elsewhere (<see cref="HullCsg"/>): the grid meshes only a layered hull's inner layer
+    /// surfaces, and nothing at all for a plain hull. Mass and occupancy are unchanged. Applies to the next bake.
+    /// </summary>
+    public bool InnerSurfacesOnly;
+
     /// <summary>Bricks of the last bake drawn from exact solid polygons.</summary>
     public int ExactBricks { get; private set; }
 
@@ -182,7 +188,7 @@ public sealed class HullBaker : IDisposable
         {
             var key = _bins.Keys[b];
             var mode = _exactSolid[b] >= 0 ? 1UL + (ulong)_grow[b] : 0UL;
-            var hash = InputHash(key, _bins.Solids(b)) ^ (ulong)Mesher ^ (mode * 0x9E3779B97F4A7C15UL) ^ _layerHash;
+            var hash = InputHash(key, _bins.Solids(b)) ^ (ulong)Mesher ^ (mode * 0x9E3779B97F4A7C15UL) ^ _layerHash ^ (InnerSurfacesOnly ? 0xC2B2AE3D27D4EB4FUL : 0UL);
 
             if (_current.TryGetValue(key, out var old) && old.InputHash == hash)
             {
@@ -278,7 +284,7 @@ public sealed class HullBaker : IDisposable
             _exactSolid[b] = -1;
             _grow[b] = 0;
 
-            if (ExactSurfaces && binned.Length == 1)
+            if (ExactSurfaces && !InnerSurfacesOnly && binned.Length == 1)
             {
                 ref readonly var solid = ref _solids[binned[0]];
                 var drawable = SolidGeometry.IsSupported(solid.Shape) || (solid.Shape == SolidShape.Mesh && solid.Param < _meshes.Count && _meshes[solid.Param] is not null);
@@ -368,6 +374,7 @@ public sealed class HullBaker : IDisposable
             var brick = _work[index];
             var slot = BinIndex(brick.Key);
             baker.Mesher = Mesher;
+            baker.InnerOnly = InnerSurfacesOnly;
             baker.Bake(brick.Key, solids, _bins.Solids(slot), _meshes, brick, _exactSolid[slot], _grow[slot], _layers);
         }
 

@@ -60,6 +60,7 @@ public sealed class DesignerApp : IDisposable
         _saveOnExit = saveOnExit;
         _closeAfterFrames = closeAfterFrames;
         _baker = new HullBaker(WorkerBudget.Background);
+        _surfaceBuilder = new HullSurfaceBuilder(WorkerBudget.Background);
 
         if (!Glfw.Init())
             throw new InvalidOperationException("Failed to initialize GLFW");
@@ -177,24 +178,83 @@ public sealed class DesignerApp : IDisposable
         var copy = doc.Clone();
         PlanCanonical.Canonicalise(copy);
         _stats.Hash = PlanFormat.HashBody(copy);
-        var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), doc.Meshes, doc.Brushes, doc.Layers is not null);
+        var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), doc.Meshes, doc.Brushes);
         _panels.Strokes.Expanded = expanded;
         _stats.Generated = expanded.Generated;
         _stats.Unstuck = expanded.Unstuck;
-        _baker.Start(expanded.Solids, expanded.Meshes, _catalog.Densities(doc), doc.Layers);
+        var densities = _catalog.Densities(doc);
+        _baker.InnerSurfacesOnly = !_stats.ShowGrid;
+        _baker.Start(doc.Solids.AsSpan(), doc.Meshes, densities, doc.Layers);
+
+        // The drawn surface: exact polygons from the solids plus the brush flair, rebuilt on the job workers.
+        _surfaceBuilder.Start(doc.Solids.AsSpan(), doc.Meshes, doc.Layers is not null, expanded);
+        _densities = densities;
+        _shownGrid = _stats.ShowGrid;
+        _surfaceChanged = true;
         UpdatePalette(doc);
+    }
+
+    private readonly HullSurfaceBuilder _surfaceBuilder;
+    private int[] _densities = [];
+    private HullCsgResult? _surface;
+    private bool _surfaceChanged;
+    private bool _shownGrid;
+
+    /// <summary>What the hull renderer draws: the exact surface, plus the grid's inner layer surfaces (or the grid alone, for debugging).</summary>
+    private void UploadSurface()
+    {
+        var bricks = new List<HullBrick>();
+
+        if (_stats.ShowGrid)
+            bricks.AddRange(_baker.Bricks);
+        else
+        {
+            if (_surface is not null)
+                bricks.AddRange(_surface.Bricks);
+
+            if (_session.Doc.Layers is not null)
+                bricks.AddRange(_baker.Bricks);
+        }
+
+        _hull.Upload(bricks);
     }
 
     private void PollBake()
     {
         _baker.Poll();
-        _stats.Baking = _baker.Busy;
+        _stats.Baking = _baker.Busy || _surfaceBuilder.Busy;
+
+        if (_surfaceBuilder.Poll())
+        {
+            _surface = _surfaceBuilder.Result;
+            _stats.SurfaceMs = _surfaceBuilder.LastMs;
+            _stats.SurfacePieces = _surface!.Fragments;
+            _stats.SurfaceTriangles = _surface.Triangles;
+            _stats.FlairKg = 0;
+
+            foreach (var (material, volume) in _surface.FlairVolume)
+                _stats.FlairKg += volume * (material < _densities.Length ? _densities[material] : 0);
+
+            _surfaceChanged = true;
+        }
+
+        if (_stats.ShowGrid != _shownGrid)
+            _seenVersion = -1;
 
         if (_baker.Version == _uploadedBake)
+        {
+            if (_surfaceChanged)
+            {
+                _surfaceChanged = false;
+                UploadSurface();
+            }
+
             return;
+        }
 
         _uploadedBake = _baker.Version;
-        _hull.Upload(_baker.Bricks);
+        _surfaceChanged = false;
+        UploadSurface();
         _stats.Mass = _baker.Mass;
         _stats.Bricks = _baker.Bricks.Count;
         _stats.Triangles = _baker.TriangleCount;
@@ -447,6 +507,8 @@ public sealed class DesignerApp : IDisposable
     {
         _window.OnKey -= OnKey;
         _baker.Wait();
+        _surfaceBuilder.Wait();
+        _surfaceBuilder.Dispose();
         _renderer.WaitIdle();
         _baker.Dispose();
         _hull.Dispose();

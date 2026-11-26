@@ -3,11 +3,9 @@ using BrutalGame.Ships;
 
 namespace BrutalGame.Designer.Tests;
 
-/// <summary>Hull brushes: strokes stick to the hull, sweeps and stamps expand to solids, cuts remove, plans round-trip.</summary>
+/// <summary>Hull brushes: strokes stick to the hull, sweeps and stamps expand to flair meshes, plans round-trip.</summary>
 public class BrushTests
 {
-    private static readonly int[] Densities = [1000, 1000];
-
     private static HullSolid Box(uint id, double x, double y, double z, double hx, double hy, double hz, SolidOp op = SolidOp.Add) => new()
     {
         Id = id,
@@ -22,26 +20,17 @@ public class BrushTests
     };
 
     /// <summary>A stroke along X on top of a box whose top is at y = 3, drawn 0.4 m above it (sticking pulls it down).</summary>
-    private static HullBrushSet RibAlongTop(ProfilePreset preset = ProfilePreset.Rib, SolidOp op = SolidOp.Add)
+    private static HullBrushSet RibAlongTop(ProfilePreset preset = ProfilePreset.Rib)
     {
         var set = new HullBrushSet();
         var brush = new HullBrush { Kind = BrushKind.Sweep };
         brush.Profile.AddRange(BrushCommands.Profile(preset, 0.5, 0.5));
         set.Brushes.Add(brush);
-        var stroke = new HullStroke { Id = 10, Brush = 0, Op = op };
+        var stroke = new HullStroke { Id = 10, Brush = 0 };
         stroke.Points.Add(StrokePoint.From(new Vector3d(-3, 3.4, 0), new Vector3d(0, 1, 0)));
         stroke.Points.Add(StrokePoint.From(new Vector3d(3, 3.4, 0), new Vector3d(0, 1, 0)));
         set.Strokes.Add(stroke);
         return set;
-    }
-
-    private static double Volume(HullSolid[] solids, IReadOnlyList<HullMesh> meshes, HullBrushSet? set)
-    {
-        var expanded = StrokeExpansion.Expand(solids, meshes, set, layered: false);
-        using var baker = new HullBaker(4) { ExactSurfaces = false };
-        baker.Start(expanded.Solids, expanded.Meshes, Densities);
-        baker.Wait();
-        return baker.Mass.VolumeM3;
     }
 
     [Fact]
@@ -66,24 +55,17 @@ public class BrushTests
     }
 
     [Fact]
-    public void Sweep_AddsTheProfileAlongTheStroke()
+    public void Sweep_IsFlairWithItsOwnVolume()
     {
         HullSolid[] solids = [Box(1, 0, 0, 0, 4, 3, 4)];
-        var bare = Volume(solids, [], null);
-        var withRib = Volume(solids, [], RibAlongTop());
+        var expanded = StrokeExpansion.Expand(solids, [], RibAlongTop());
+        var surface = HullCsg.Build(solids, [], false, expanded);
+        var plain = HullCsg.Build(solids, [], false);
 
-        // 0.5 m wide, 0.5 m proud of the surface, 6 m long.
-        Assert.InRange(withRib - bare, 1.5 * 0.9, 1.5 * 1.1);
-    }
-
-    [Fact]
-    public void Sweep_CutsAChannel()
-    {
-        HullSolid[] solids = [Box(1, 0, 0, 0, 4, 3, 4)];
-        var bare = Volume(solids, [], null);
-        var cut = Volume(solids, [], RibAlongTop(ProfilePreset.Channel, SolidOp.Subtract));
-
-        Assert.InRange(bare - cut, 1.5 * 0.9, 1.5 * 1.1);
+        // 0.5 m wide, from 0.125 m under the surface to 0.5 m above it, 6 m long.
+        Assert.Equal(0.5 * 0.625 * 6.0, surface.FlairVolume[0], 3);
+        Assert.True(surface.Triangles > plain.Triangles);
+        Assert.Equal(plain.Fragments, surface.Fragments);
     }
 
     [Fact]
@@ -106,12 +88,12 @@ public class BrushTests
         var cube = MeshPrimitives.FromSolid(Box(0, 0, 0, 0, 0.25, 0.25, 0.25));
         var set = new HullBrushSet();
         set.Brushes.Add(new HullBrush { Kind = BrushKind.Stamp, Mesh = 0, Spacing = 1024 });
-        var stroke = new HullStroke { Id = 10, Brush = 0, Op = SolidOp.Add };
+        var stroke = new HullStroke { Id = 10, Brush = 0 };
         stroke.Points.Add(StrokePoint.From(new Vector3d(-3, 3, 0), new Vector3d(0, 1, 0)));
         stroke.Points.Add(StrokePoint.From(new Vector3d(3, 3, 0), new Vector3d(0, 1, 0)));
         set.Strokes.Add(stroke);
 
-        var expanded = StrokeExpansion.Expand([Box(1, 0, 0, 0, 4, 3, 4)], [cube], set, layered: false);
+        var expanded = StrokeExpansion.Expand([Box(1, 0, 0, 0, 4, 3, 4)], [cube], set);
 
         Assert.Equal(7, expanded.Generated);
         Assert.Equal(8, expanded.Solids.Length);
@@ -131,7 +113,7 @@ public class BrushTests
         Assert.Equal(1, sweep);
         var id = BrushCommands.AddStroke(session, sweep,
             [StrokePoint.From(new Vector3d(-3, 3, 0), new Vector3d(0, 1, 0)), StrokePoint.From(new Vector3d(3, 3, 0), new Vector3d(0, 1, 0))],
-            SolidOp.Subtract, 0);
+            0);
         Assert.NotEqual(0u, id);
         Assert.True(BrushCommands.SetStroke(session, id, s => s.Offset = 100));
         Assert.False(BrushCommands.RemoveBrush(session, sweep));

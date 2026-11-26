@@ -117,7 +117,7 @@ public static class PlanValidator
             if (stroke.Brush >= set.Brushes.Count)
                 log.Add(Severity.Error, IssueCode.StrokeBrush, element, stroke.Brush);
 
-            if (stroke.Points.Count is < HullStroke.MinPoints or > HullStroke.MaxPoints || stroke.Op is not (SolidOp.Add or SolidOp.Subtract)
+            if (stroke.Points.Count is < HullStroke.MinPoints or > HullStroke.MaxPoints
                 || stroke.Scale is < 100 or > 10000 || Math.Abs(stroke.Offset * HullSolid.MetresPerPositionUnit) > 16.0
                 || stroke.Points.Any(p => (p.NX | p.NY | p.NZ) == 0 || p.Position.Length() > PlanLimits.MaxReachMetres))
                 log.Add(Severity.Error, IssueCode.StrokeShape, element, stroke.Points.Count);

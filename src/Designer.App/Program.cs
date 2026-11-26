@@ -125,6 +125,30 @@ static void BakeBench(string data, int count, bool meshes, bool surfaceNets)
         Console.WriteLine($"  mass {mass.MassKg / 1000.0:F2} t, volume {mass.VolumeM3:F1} m3, mesh prepare (main thread, first run) {prepare[0]:F2} ms");
         last.Dispose();
     }
+
+    // The drawn surface: exact polygons from the solids (main thread in the app).
+    var surface = new float[runs];
+    HullCsgResult? csg = null;
+
+    for (var r = 0; r < runs; r++)
+    {
+        csg = HullCsg.Build(doc.Solids.AsSpan(), doc.Meshes, doc.Layers is not null);
+        surface[r] = csg.Ms;
+    }
+
+    Console.WriteLine($"  exact surface, one thread: median {Median(surface):F2} ms (first {surface[0]:F2}), finish {csg!.FinishMs:F2} ms, {csg.Fragments} pieces, {csg.Triangles} triangles, {csg.Bricks.Count} bricks");
+
+    using var builder = new HullSurfaceBuilder(WorkerBudget.Background);
+    var jobbed = new float[runs];
+
+    for (var r = 0; r < runs; r++)
+    {
+        builder.Start(doc.Solids.AsSpan(), doc.Meshes, doc.Layers is not null, null);
+        builder.Wait();
+        jobbed[r] = builder.LastMs;
+    }
+
+    Console.WriteLine($"  exact surface, {WorkerBudget.Background} workers: median {Median(jobbed):F2} ms wall (off the main thread)");
 }
 
 static float Median(float[] values)

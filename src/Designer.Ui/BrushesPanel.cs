@@ -6,7 +6,8 @@ namespace BrutalGame.Designer.Ui;
 
 /// <summary>
 /// The Brushes panel: the plan's brushes (stamps made from a solid, swept profiles from presets) and the strokes drawn
-/// with them. Draw a stroke, pick it to edit its brush, add or cut, material, offset and size; drag its points in the view.
+/// with them: small raised detail drawn from its own geometry, counted for mass. Draw a stroke, pick it to edit its brush,
+/// material, offset and size; drag its points in the view.
 /// </summary>
 public sealed class BrushesPanel
 {
@@ -157,15 +158,6 @@ public sealed class BrushesPanel
         if (!canDraw && !tool.Drawing)
             ImGui.TextDisabled("Pick a brush to draw with."u8);
 
-        if (ImGui.RadioButton("Add"u8, !tool.Cut))
-            tool.Cut = false;
-
-        ImGui.SameLine();
-
-        if (ImGui.RadioButton("Cut"u8, tool.Cut))
-            tool.Cut = true;
-
-        ImGui.SameLine();
         MaterialCombo("Material##stroke"u8, ref tool.Material);
 
         if (tool.Drawing)
@@ -177,7 +169,7 @@ public sealed class BrushesPanel
         for (var i = 0; i < set.Strokes.Count; i++)
         {
             var s = set.Strokes[i];
-            var name = $"#{s.Id}  brush {s.Brush + 1}, {(s.Op == SolidOp.Subtract ? "cut" : "add")}, {s.Points.Count} points";
+            var name = $"#{s.Id}  brush {s.Brush + 1}, {s.Points.Count} points";
 
             if (ImGui.Selectable($"{name}##stroke{s.Id}", s.Id == tool.Selected, ImGuiSelectableFlags.None, default))
             {
@@ -212,18 +204,7 @@ public sealed class BrushesPanel
         if (Combo("Brush"u8, ref brushIndex, names))
             BrushCommands.SetStroke(session, stroke.Id, s => s.Brush = (ushort)brushIndex);
 
-        var cut = stroke.Op == SolidOp.Subtract;
-
-        if (ImGui.RadioButton("Add##sel"u8, !cut) && cut)
-            BrushCommands.SetStroke(session, stroke.Id, s => s.Op = SolidOp.Add);
-
-        ImGui.SameLine();
-
-        if (ImGui.RadioButton("Cut##sel"u8, cut) && !cut)
-            BrushCommands.SetStroke(session, stroke.Id, s => s.Op = SolidOp.Subtract);
-
         var material = CatalogIndex(session.Doc, stroke.Material);
-        ImGui.SameLine();
 
         if (MaterialCombo("Material##sel"u8, ref material))
         {
@@ -283,7 +264,7 @@ public sealed class BrushesPanel
         if (_catalog.All.Count > 0)
         {
             var material = _catalog.All[Math.Clamp(tool.Material, 0, _catalog.All.Count - 1)].Id;
-            session.Edit(s => id = BrushCommands.AddStroke(s, tool.Brush, tool.Pending, tool.Cut ? SolidOp.Subtract : SolidOp.Add, s.EnsureMaterial(material)));
+            session.Edit(s => id = BrushCommands.AddStroke(s, tool.Brush, tool.Pending, s.EnsureMaterial(material)));
         }
 
         tool.Message = id == 0 ? BrushCommands.LastError : "";

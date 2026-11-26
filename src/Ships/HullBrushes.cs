@@ -63,8 +63,9 @@ public readonly record struct StrokePoint(int X, int Y, int Z, short NX, short N
 }
 
 /// <summary>
-/// A line drawn on the hull that lays a brush along it. The points stick to the hull: each bake re-projects them onto
-/// the current surface along their normal, so the stroke follows the hull as it is reshaped. Adds material or cuts it.
+/// A line drawn on the hull that lays a brush along it: small visual flair, drawn from its own geometry (not the hull
+/// grid), counted for mass only. The points stick to the hull: each rebuild re-projects them onto the current surface
+/// along their normal, so the stroke follows the hull as it is reshaped.
 /// </summary>
 public sealed class HullStroke
 {
@@ -74,10 +75,6 @@ public sealed class HullStroke
 
     public uint Id;
     public ushort Brush;
-
-    /// <summary>Add (ribs, greebles) or Subtract (grooves, recesses).</summary>
-    public SolidOp Op;
-
     public byte Material;
 
     /// <summary>Along the surface normal, 1/1024 m: lifts the design off the hull (+) or sinks it in (−).</summary>
@@ -90,7 +87,7 @@ public sealed class HullStroke
 
     public HullStroke Clone()
     {
-        var copy = new HullStroke { Id = Id, Brush = Brush, Op = Op, Material = Material, Offset = Offset, Scale = Scale };
+        var copy = new HullStroke { Id = Id, Brush = Brush, Material = Material, Offset = Offset, Scale = Scale };
         copy.Points.AddRange(Points);
         return copy;
     }
@@ -126,11 +123,11 @@ public sealed class HullBrushSet
 
     /// <summary>
     /// u8 brush count; per brush u8 kind, u16 mesh, i32 spacing, u8 profile count, (i32 x, i32 y) each. u16 stroke count;
-    /// per stroke u32 id, u16 brush, u8 op, u8 material, i32 offset, u16 scale, u8 point count, (i32 x, y, z, i16 nx, ny, nz) each.
+    /// per stroke u32 id, u16 brush, u8 material, i32 offset, u16 scale, u8 point count, (i32 x, y, z, i16 nx, ny, nz) each.
     /// </summary>
     public byte[] ToBytes()
     {
-        var size = 1 + Brushes.Sum(b => 8 + b.Profile.Count * 8) + 2 + Strokes.Sum(s => 15 + s.Points.Count * 18);
+        var size = 1 + Brushes.Sum(b => 8 + b.Profile.Count * 8) + 2 + Strokes.Sum(s => 14 + s.Points.Count * 18);
         var b = new byte[size];
         var o = 0;
         b[o++] = (byte)Brushes.Count;
@@ -158,12 +155,11 @@ public sealed class HullBrushSet
         {
             BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(o), s.Id);
             BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(o + 4), s.Brush);
-            b[o + 6] = (byte)s.Op;
-            b[o + 7] = s.Material;
-            BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(o + 8), s.Offset);
-            BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(o + 12), s.Scale);
-            b[o + 14] = (byte)s.Points.Count;
-            o += 15;
+            b[o + 6] = s.Material;
+            BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(o + 7), s.Offset);
+            BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(o + 11), s.Scale);
+            b[o + 13] = (byte)s.Points.Count;
+            o += 14;
 
             foreach (var p in s.Points)
             {
@@ -228,20 +224,19 @@ public sealed class HullBrushSet
 
         for (var i = 0; i < strokes; i++)
         {
-            if (s.Length < o + 15)
+            if (s.Length < o + 14)
                 return null;
 
             var stroke = new HullStroke
             {
                 Id = BinaryPrimitives.ReadUInt32LittleEndian(s[o..]),
                 Brush = BinaryPrimitives.ReadUInt16LittleEndian(s[(o + 4)..]),
-                Op = (SolidOp)s[o + 6],
-                Material = s[o + 7],
-                Offset = BinaryPrimitives.ReadInt32LittleEndian(s[(o + 8)..]),
-                Scale = BinaryPrimitives.ReadUInt16LittleEndian(s[(o + 12)..]),
+                Material = s[o + 6],
+                Offset = BinaryPrimitives.ReadInt32LittleEndian(s[(o + 7)..]),
+                Scale = BinaryPrimitives.ReadUInt16LittleEndian(s[(o + 11)..]),
             };
-            int points = s[o + 14];
-            o += 15;
+            int points = s[o + 13];
+            o += 14;
 
             if (points > HullStroke.MaxPoints || s.Length < o + points * 18)
                 return null;
