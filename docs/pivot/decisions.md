@@ -109,3 +109,4 @@ Round 6 designs: D55, D56 and D59 in combat-and-sensors.md; D54, D57, D58, D68, 
 - D76 Full 3D terrain features must be possible (caves, arches, overhangs).
 - D77 Terrain decoration (rocks, trees and so on) is generated too. (Design: terrain-decoration.md.)
 - D78 A planet designer tool may be needed: brushes that paint biomes and weight modifiers onto a planet. (Not designed yet. Likely shape: painted low-resolution cube-sphere maps per body that the planet kind's layers read as masks and weights, authored in the designer app shell.)
+- D79 Bring back shore waves (waves rolling in and breaking). Shorelines are fixed (D30), so coastal maps and break lines can be baked once per coast region from the planet function and never rebuilt; adapt the breaker and coastal code from the `island-final` tag. After M2b.
