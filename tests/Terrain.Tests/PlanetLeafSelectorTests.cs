@@ -181,6 +181,120 @@ public sealed class PlanetLeafSelectorTests(ITestOutputHelper output)
         Assert.Equal(under == 1, TerrainWorld.DescendantsCover(node, drawable, ancestors, selector, camera));
     }
 
+    /// <summary>A selector that remembers shell classes from earlier passes picks the same leaves, in the same order, as one that starts fresh.</summary>
+    [Theory]
+    [InlineData(TestKinds.Temperate)]
+    [InlineData(TestKinds.Barren)]
+    [InlineData(TestKinds.Desert)]
+    public void RememberedClassesChangeNoSelection(string kind)
+    {
+        var generator = TestKinds.Generator(kind);
+        var bounds = new PlanetHeightBounds(generator, 64);
+        bounds.Build();
+        var edits = new EditStore();
+        var warm = new PlanetLeafSelector(bounds, edits);
+        LeafSet kept = new(), fresh = new();
+        var d = double3.Normalize(new double3(0.3, 0.8, -0.5));
+        var along = double3.Normalize(double3.Cross(d, double3.UnitX));
+        var remembered = 0;
+
+        for (var step = 0; step < 40; step++)
+        {
+            var at = double3.Normalize(d + along * (step * 37.0 / generator.Params.Radius));
+            var camera = at * (generator.Params.Radius + generator.Surface.Height(at.X, at.Y, at.Z) + 60.0 + 25.0 * (step % 5));
+            var minLod = step % 9 == 8 ? 3 : 0;
+            warm.Select(camera, minLod, 2000.0, kept);
+            new PlanetLeafSelector(bounds, edits).Select(camera, minLod, 2000.0, fresh);
+
+            Assert.Equal(fresh.Order, kept.Order);
+            Assert.Equal(fresh.Keys, kept.Keys);
+            Assert.Equal((fresh.Visits, fresh.Pruned, fresh.Uniform), (kept.Visits, kept.Pruned, kept.Uniform));
+            remembered += kept.Visits - kept.Classified;
+        }
+
+        Assert.True(remembered > 100_000, $"{remembered} classes remembered");
+    }
+
+    /// <summary>
+    /// Selection over a kind's steep ground at 100 m: the first pass (every node bounded), the same camera again (every
+    /// node remembered) and a flight at 300 m/s, reselecting every 8 m as the game does. Release numbers only.
+    /// </summary>
+    [Theory]
+    [Trait("Category", "Perf")]
+    [InlineData("legacy-rolling")]
+    [InlineData(TestKinds.Temperate)]
+    [InlineData(TestKinds.Barren)]
+    [InlineData(TestKinds.Desert)]
+    public void SelectionCost(string kind)
+    {
+        var generator = new PlanetGenerator(PlanetParams.Generate(PlanetParams.BodySeed(0x5EED_2026UL, 1), 1.0e6, kind: kind));
+        var surface = generator.Surface;
+        var bounds = new PlanetHeightBounds(generator);
+        bounds.Build();
+        var random = new Random(67);
+        var sea = surface.HasSea ? surface.SeaHeight + 50f : float.NegativeInfinity;
+        var start = double3.UnitY;
+        var along = double3.UnitX;
+        var steepest = -1f;
+
+        for (var n = 0; n < 2000; n++)
+        {
+            TestKinds.RandomDirection(random, out var x, out var y, out var z);
+            var d = new double3(x, y, z);
+            var tangent = double3.Normalize(double3.Cross(d, Math.Abs(y) < 0.9 ? double3.UnitY : double3.UnitX));
+            var next = double3.Normalize(d + tangent * (500.0 / surface.Radius));
+            var h = surface.Height(x, y, z, 4);
+            var rise = MathF.Abs(surface.Height(next.X, next.Y, next.Z, 4) - h);
+
+            if (h > sea && rise > steepest)
+                (steepest, start, along) = (rise, d, tangent);
+        }
+
+        double3 Camera(double metres)
+        {
+            var d = double3.Normalize(start + along * (metres / surface.Radius));
+            return d * (surface.Radius + surface.Height(d.X, d.Y, d.Z) + 100.0);
+        }
+
+        var set = new LeafSet();
+        var jit = new PlanetLeafSelector(bounds, new EditStore());
+
+        var settle = System.Diagnostics.Stopwatch.StartNew();
+
+        for (var i = 1; settle.ElapsedMilliseconds < 1000; i++)
+            jit.Select(Camera(-8.0 * i), 0, 2600.0, set);
+
+        var selector = new PlanetLeafSelector(bounds, new EditStore());
+        selector.Select(Camera(0.0), 0, 2600.0, set);
+        var cold = (set.Ms, set.Visits, set.Classified, set.Count);
+        var warm = new float[21];
+
+        for (var i = 0; i < warm.Length; i++)
+        {
+            selector.Select(Camera(0.0), 0, 2600.0, set);
+            warm[i] = set.Ms;
+        }
+
+        Array.Sort(warm);
+        var still = set.Classified;
+        var flight = new float[400];
+        long bounded = 0, visited = 0;
+
+        for (var i = 0; i < flight.Length; i++)
+        {
+            selector.Select(Camera(8.0 * (i + 1)), 0, 2600.0, set);
+            flight[i] = set.Ms;
+            bounded += set.Classified;
+            visited += set.Visits;
+        }
+
+        Array.Sort(flight);
+        var mean = flight.Average();
+        output.WriteLine($"{kind}: cold {cold.Ms:F2} ms ({cold.Visits} nodes, {cold.Classified} bounded, {cold.Count} leaves, {cold.Ms * 1e6 / cold.Visits:F0} ns/node); " +
+            $"warm {warm[warm.Length / 2]:F2} ms ({still} bounded, {warm[warm.Length / 2] * 1e6 / cold.Visits:F0} ns/node); " +
+            $"300 m/s p50 {flight[flight.Length / 2]:F2} p95 {flight[flight.Length * 95 / 100]:F2} max {flight[^1]:F2} mean {mean:F2} ms, {bounded / flight.Length} of {visited / flight.Length} nodes bounded a selection, {mean * 1e6 * flight.Length / visited:F0} ns/node");
+    }
+
     [Fact]
     public void SelectionIsAllocationFree()
     {

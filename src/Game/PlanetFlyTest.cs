@@ -69,6 +69,7 @@ public sealed class PlanetFlyTest
     private readonly float[] _work = new float[MaxFrames];
     private readonly int[] _holes = new int[MaxFrames];
     private readonly int[] _desired = new int[MaxFrames];
+    private readonly float[] _select = new float[MaxFrames];
     private readonly Vector4[] _planes = new Vector4[5];
     private readonly long[] _holeLods = new long[PlanetLeafSelector.MaxLeafLod + 1];
     private int _leg;
@@ -78,6 +79,10 @@ public sealed class PlanetFlyTest
     private long _leaves;
     private long _jobs;
     private int _selects;
+    private int _selectCount;
+    private int _selectSeen;
+    private long _bounded;
+    private long _visited;
     private int _collections;
     private long _allocated;
     private int _maxMinLod;
@@ -135,6 +140,7 @@ public sealed class PlanetFlyTest
             (_phase, _phaseStart, _count) = (Phase.Flying, time, 0);
             (_leaves, _jobs, _selects, _collections, _maxMinLod, _maxMeshed) = (_world.LeavesLoaded, _world.JobsCompleted, _world.Selects, GC.CollectionCount(0), 0, 0);
             (_maxMeshBytes, _forced) = (0, _world.ForcedRetires);
+            (_selectCount, _selectSeen, _bounded, _visited) = (0, _world.Selects, 0, 0);
             Array.Clear(_holeLods);
             _allocated = GC.GetTotalAllocatedBytes();
         }
@@ -165,6 +171,15 @@ public sealed class PlanetFlyTest
         _work[_count] = sections.Work;
         _holes[_count] = _world.CountHoles(_planes);
         _desired[_count] = _world.DesiredLeaves;
+
+        if (_world.Selects != _selectSeen)
+        {
+            _selectSeen = _world.Selects;
+            _select[_selectCount++] = _world.LastSelectMs;
+            _bounded += _world.LastSelectClassified;
+            _visited += _world.LastSelectVisits;
+        }
+
         _maxMinLod = Math.Max(_maxMinLod, _world.MinLod);
         _maxMeshed = Math.Max(_maxMeshed, _world.MeshedChunks);
         _maxMeshBytes = Math.Max(_maxMeshBytes, _world.MeshBytes);
@@ -227,12 +242,15 @@ public sealed class PlanetFlyTest
 
         var update = _update.AsSpan(0, _count).ToArray();
         var work = _work.AsSpan(0, _count).ToArray();
+        var select = _select.AsSpan(0, Math.Max(_selectCount, 1)).ToArray();
         Array.Sort(update);
         Array.Sort(work);
+        Array.Sort(select);
 
         Log.Info($"{leg.Name}: {_count} frames in {seconds:F1} s; leaves {leaves / seconds:F0}/s ({leaves}), chunk jobs {jobs / seconds:F0}/s ({jobs}), selections {_world.Selects - _selects}, finest speed LOD {_maxMinLod}, leaves desired avg {desired / _count} max {maxDesired}");
         Log.Info($"{leg.Name}: terrain main-thread ms p50 {Pick(update, 0.5):F3} p95 {Pick(update, 0.95):F3} p99 {Pick(update, 0.99):F3} max {update[^1]:F3}; frame work ms p50 {Pick(work, 0.5):F2} p95 {Pick(work, 0.95):F2} max {work[^1]:F2}; gen0 GCs {GC.CollectionCount(0) - _collections}, allocated {allocated / 1024} KB (all threads)");
-        Log.Info($"{leg.Name}: holes in {holeFrames} of {_count} frames (first {firstHole}, last {lastHole}), at most {maxHoles} leaves, leaf-frames per LOD [{string.Join(' ', _holeLods)}]; last selection {_world.LastSelectMs:F2} ms worker, {_world.LastSelectVisits} nodes; with geometry max {_maxMeshed} ({_maxMeshBytes / 1048576.0:F1} MB), forced retires {_world.ForcedRetires - _forced}; collision bodies {_world.CollisionBodies}");
+        Log.Info($"{leg.Name}: selection ms worker p50 {Pick(select, 0.5):F2} p95 {Pick(select, 0.95):F2} max {select[^1]:F2} over {_selectCount} selections, {_bounded / Math.Max(_selectCount, 1)} of {_visited / Math.Max(_selectCount, 1)} nodes bounded a selection");
+        Log.Info($"{leg.Name}: holes in {holeFrames} of {_count} frames (first {firstHole}, last {lastHole}), at most {maxHoles} leaves, leaf-frames per LOD [{string.Join(' ', _holeLods)}]; last selection {_world.LastSelectMs:F2} ms worker, {_world.LastSelectVisits} nodes ({_world.LastSelectClassified} bounded); with geometry max {_maxMeshed} ({_maxMeshBytes / 1048576.0:F1} MB), forced retires {_world.ForcedRetires - _forced}; collision bodies {_world.CollisionBodies}");
     }
 
     internal static float Pick(float[] sorted, double q) => sorted[Math.Min(sorted.Length - 1, (int)(q * sorted.Length))];

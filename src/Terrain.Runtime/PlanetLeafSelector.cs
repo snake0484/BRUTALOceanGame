@@ -29,6 +29,9 @@ public sealed class LeafSet
     /// <summary>Finest LOD with a leaf; <see cref="PlanetLeafSelector.MaxLeafLod"/> when there are none.</summary>
     public int FinestLod;
     public int Visits;
+
+    /// <summary>Nodes whose shell class had to be worked out: the rest were remembered from earlier selections.</summary>
+    public int Classified;
     public int Pruned;
     public int Uniform;
     public float Ms;
@@ -43,7 +46,7 @@ public sealed class LeafSet
         Keys.Clear();
         Array.Clear(PerLod);
         FinestLod = PlanetLeafSelector.MaxLeafLod;
-        (Visits, Pruned, Uniform, Ms) = (0, 0, 0, 0f);
+        (Visits, Classified, Pruned, Uniform, Ms) = (0, 0, 0, 0, 0f);
     }
 }
 
@@ -54,8 +57,10 @@ public sealed class LeafSet
 /// rock (<see cref="PlanetHeightBounds"/>) are dropped unless an edit shows on them (leaves) or lies anywhere under them
 /// (split nodes, so the LOD-0 leaf of a deep mine or a tower is still reached), and so are nodes below the horizon of
 /// the planet's lowest ground (view-independent, so turning never pops), by a margin so terrain loads before it can rise
-/// into view. Allocation-free once the output has grown.
-/// Reads the bounds and the edit store: nothing may write the store while a selection runs.
+/// into view. A node's shell class is a pure function of the node, the LOD range asked and the body's kind, so
+/// selections remember it in a fixed table (edits are asked apart, every pass); only nodes new to the camera's
+/// neighbourhood pay for bounds. Allocation-free once the output has grown.
+/// Reads the bounds and the edit store: nothing may write the store while a selection runs, and one selection runs at a time.
 /// </summary>
 public sealed class PlanetLeafSelector
 {
@@ -69,9 +74,28 @@ public sealed class PlanetLeafSelector
     /// <summary>Levels below a leaf <see cref="ProvablyUnseen"/> classifies to prove it empty.</summary>
     public const int EmptyDepth = 3;
 
+    /// <summary>
+    /// Remembered shell classes: 2^15 buckets of four entries (2 MB, a cache line a bucket), most recently used first,
+    /// so a new node drops the one its bucket has gone longest without: nodes still in use outlast the ones the camera
+    /// left behind. Made at the body's first selection; a body nobody stands on holds none.
+    /// </summary>
+    private const int MemoBits = 15;
+    private const int MemoWays = 4;
+    private const ulong MemoUsed = 1UL << 63;
+    private const int MemoLodShift = 58;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Memo
+    {
+        public ulong Key;
+        public float Top;
+        public NodeClass Class;
+    }
+
     public readonly PlanetHeightBounds Bounds;
     public readonly EditStore Edits;
 
+    private Memo[]? _memo;
     private readonly double _radius;
     private readonly float _maxHeight;
     private readonly float _minHeight;
@@ -107,6 +131,7 @@ public sealed class PlanetLeafSelector
         output.Camera = camera;
         output.MinLod = minLod;
         output.HorizonMargin = horizonMargin;
+        _memo ??= GC.AllocateArray<Memo>(MemoWays << MemoBits, pinned: true);
         _camera = camera;
         _minLod = minLod;
         _margin = horizonMargin;
@@ -136,7 +161,7 @@ public sealed class PlanetLeafSelector
 
         // A node that splits stands for leaves down to the finest LOD: its class must hold at each of their band limits.
         var shell = lod <= MaxLeafLod
-            ? Bounds.Classify(node, split ? _minLod : lod, lod, out top)
+            ? Classify(node, split ? _minLod : lod, output, out top)
             : GlobalClass(ox - s, oy - s, oz - s, ox + size, oy + size, oz + size, rMax, lod);
 
         if (shell != NodeClass.Surface && !(split ? Edits.Under(node) : Edits.Reaches(node, distance)))
@@ -171,6 +196,46 @@ public sealed class PlanetLeafSelector
         output.Keys.Add((float)(distance / (s * (1 + lod))));
         output.PerLod[lod]++;
         output.FinestLod = Math.Min(output.FinestLod, lod);
+    }
+
+    /// <summary>The node's shell class and highest ground for leaves from <paramref name="wantLod"/> up to its own LOD, remembered by node and LOD.</summary>
+    private NodeClass Classify(in ChunkCoord node, int wantLod, LeafSet output, out float top)
+    {
+        var key = node.Key | (ulong)wantLod << MemoLodShift | MemoUsed;
+        var bucket = _memo!.AsSpan((int)(Mix(key) >> (64 - MemoBits)) * MemoWays, MemoWays);
+
+        for (var way = 0; way < MemoWays; way++)
+        {
+            if (bucket[way].Key != key)
+                continue;
+
+            var memo = bucket[way];
+
+            if (way > 0)
+            {
+                bucket[..way].CopyTo(bucket[1..]);
+                bucket[0] = memo;
+            }
+
+            top = memo.Top;
+            return memo.Class;
+        }
+
+        output.Classified++;
+        var cls = Bounds.Classify(node, wantLod, node.Lod, out top);
+        bucket[..(MemoWays - 1)].CopyTo(bucket[1..]);
+        bucket[0] = new Memo { Key = key, Top = top, Class = cls };
+        return cls;
+    }
+
+    /// <summary>Node keys are a lattice, and a multiply alone sends whole rows of it to one bucket: the 64-bit finaliser mixes them apart.</summary>
+    private static ulong Mix(ulong key)
+    {
+        key ^= key >> 33;
+        key *= 0xFF51AFD7ED558CCDUL;
+        key ^= key >> 33;
+        key *= 0xC4CEB9FE1A85EC53UL;
+        return key ^ key >> 33;
     }
 
     /// <summary>
