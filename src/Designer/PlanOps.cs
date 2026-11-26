@@ -3,7 +3,7 @@ using BrutalGame.Ships;
 
 namespace BrutalGame.Designer;
 
-public enum OpKind : byte { InsertSolid, RemoveSolid, ModifySolid, AddMaterial, RemoveMaterial, AddMesh, RemoveMesh, SetMesh, SetLayering }
+public enum OpKind : byte { InsertSolid, RemoveSolid, ModifySolid, AddMaterial, RemoveMaterial, AddMesh, RemoveMesh, SetMesh, SetLayering, SetBrushes }
 
 /// <summary>
 /// One invertible edit, a solid-list diff (ship-hulls "undo = solid list diffs"). Insert and Remove carry the solid and
@@ -22,9 +22,13 @@ public struct PlanOp
     public HullMesh? MeshAfter;
     public HullLayering? LayersBefore;
     public HullLayering? LayersAfter;
+    public HullBrushSet? BrushesBefore;
+    public HullBrushSet? BrushesAfter;
 
     /// <summary>Replaces the plan's layering (null: a solid hull). Snapshots are never mutated after this.</summary>
     public static PlanOp SetLayering(HullLayering? before, HullLayering? after) => new() { Kind = OpKind.SetLayering, LayersBefore = before, LayersAfter = after };
+
+    public static PlanOp SetBrushes(HullBrushSet? before, HullBrushSet? after) => new() { Kind = OpKind.SetBrushes, BrushesBefore = before, BrushesAfter = after };
 
     public static PlanOp AddMesh(int index, HullMesh mesh) => new() { Kind = OpKind.AddMesh, Index = index, MeshAfter = mesh };
 
@@ -48,6 +52,7 @@ public struct PlanOp
         OpKind.AddMesh => new PlanOp { Kind = OpKind.RemoveMesh, Index = Index, MeshBefore = MeshAfter },
         OpKind.RemoveMesh => new PlanOp { Kind = OpKind.AddMesh, Index = Index, MeshAfter = MeshBefore },
         OpKind.SetLayering => SetLayering(LayersAfter, LayersBefore),
+        OpKind.SetBrushes => SetBrushes(BrushesAfter, BrushesBefore),
         _ => SetMesh(Index, MeshAfter!, MeshBefore!),
     };
 
@@ -94,6 +99,10 @@ public struct PlanOp
             case OpKind.SetLayering:
                 Expect(ReferenceEquals(doc.Layers, LayersBefore));
                 doc.Layers = LayersAfter;
+                break;
+            case OpKind.SetBrushes:
+                Expect(ReferenceEquals(doc.Brushes, BrushesBefore));
+                doc.Brushes = BrushesAfter;
                 break;
         }
     }

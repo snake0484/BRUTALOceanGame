@@ -33,6 +33,13 @@ public enum IssueCode : ushort
     LayerRefs,
     LayerCuts,
     RoleWithoutLayers,
+    BrushCount,
+    BrushMesh,
+    BrushProfile,
+    BrushSpacing,
+    StrokeBrush,
+    StrokeShape,
+    StrokeMaterial,
 }
 
 public readonly record struct ValidationIssue(Severity Severity, IssueCode Code, ElementRef Element, int Value);
@@ -74,6 +81,66 @@ public static class PlanValidator
     private const SolidFlags AllowedFlags = SolidFlags.Interior | SolidFlags.NoCollide | SolidFlags.Mirrored | SolidRoles.Mask;
 
     /// <summary>Stacks: 1..16, each 1..16 layers of known materials, 0.25..8 m in total; stack references in range; ≤ 64 cuts.</summary>
+    private static void ValidateBrushes(PlanDocument doc, ValidationLog log)
+    {
+        var set = doc.Brushes;
+
+        if (set is null)
+            return;
+
+        if (set.Brushes.Count > HullBrushSet.MaxBrushes || set.Strokes.Count > HullBrushSet.MaxStrokes)
+            log.Add(Severity.Error, IssueCode.BrushCount, default, set.Brushes.Count);
+
+        for (var i = 0; i < set.Brushes.Count; i++)
+        {
+            var brush = set.Brushes[i];
+
+            if (brush.Kind == BrushKind.Stamp)
+            {
+                if (brush.Mesh >= doc.Meshes.Count)
+                    log.Add(Severity.Error, IssueCode.BrushMesh, default, i);
+
+                if (brush.Spacing < HullBrush.MinSpacing || brush.Spacing * HullSolid.MetresPerPositionUnit > PlanLimits.MaxReachMetres)
+                    log.Add(Severity.Error, IssueCode.BrushSpacing, default, i);
+            }
+            else if (brush.Kind != BrushKind.Sweep || brush.Profile.Count is < HullBrush.MinProfilePoints or > HullBrush.MaxProfilePoints
+                || brush.Profile.Any(p => Math.Abs(p.X) > HullBrush.MaxProfileUnits || Math.Abs(p.Y) > HullBrush.MaxProfileUnits) || ProfileArea(brush.Profile) == 0)
+            {
+                log.Add(Severity.Error, IssueCode.BrushProfile, default, i);
+            }
+        }
+
+        foreach (var stroke in set.Strokes)
+        {
+            var element = new ElementRef(ElementKind.Solid, stroke.Id);
+
+            if (stroke.Brush >= set.Brushes.Count)
+                log.Add(Severity.Error, IssueCode.StrokeBrush, element, stroke.Brush);
+
+            if (stroke.Points.Count is < HullStroke.MinPoints or > HullStroke.MaxPoints || stroke.Op is not (SolidOp.Add or SolidOp.Subtract)
+                || stroke.Scale is < 100 or > 10000 || Math.Abs(stroke.Offset * HullSolid.MetresPerPositionUnit) > 16.0
+                || stroke.Points.Any(p => (p.NX | p.NY | p.NZ) == 0 || p.Position.Length() > PlanLimits.MaxReachMetres))
+                log.Add(Severity.Error, IssueCode.StrokeShape, element, stroke.Points.Count);
+
+            if (stroke.Material >= doc.Materials.Count)
+                log.Add(Severity.Error, IssueCode.StrokeMaterial, element, stroke.Material);
+        }
+    }
+
+    private static long ProfileArea(List<ProfilePoint> profile)
+    {
+        var area = 0L;
+
+        for (var j = 0; j < profile.Count; j++)
+        {
+            var a = profile[j];
+            var b = profile[(j + 1) % profile.Count];
+            area += (long)a.X * b.Y - (long)b.X * a.Y;
+        }
+
+        return area;
+    }
+
     private static void ValidateLayers(PlanDocument doc, ValidationLog log)
     {
         var layers = doc.Layers;
@@ -163,6 +230,7 @@ public static class PlanValidator
         }
 
         ValidateLayers(doc, log);
+        ValidateBrushes(doc, log);
         var ids = new HashSet<uint>(solids.Length);
         var inBounds = true;
         var anyAdd = false;

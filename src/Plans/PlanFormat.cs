@@ -57,15 +57,18 @@ public enum PlanFormatError
 /// position X, Y, Z deltas from the previous solid (i32), rotation (u32), half X, Y, Z, bevel, param (u16).
 /// Format 2 appends the mesh table: <c>u32 meshCount</c>, then each <see cref="HullMesh"/>'s canonical bytes. Format 3
 /// (layered hulls) writes the mesh table even when empty, then the <see cref="HullLayering"/> block. Each plan is written
-/// in the oldest format that holds it, so older plans keep their bytes and hashes.
+/// in the oldest format that holds it, so older plans keep their bytes and hashes. Format 4 (brushes) writes the mesh
+/// table, <c>u8 layered</c> and the layering block when set, then the <see cref="HullBrushSet"/> block.
 /// </summary>
 public static class PlanFormat
 {
     public const ushort Format = 1;
     public const ushort MeshFormat = 2;
     public const ushort LayerFormat = 3;
+    public const ushort BrushFormat = 4;
 
-    public static ushort FormatOf(PlanDocument doc) => doc.Layers is not null ? LayerFormat : doc.Meshes.Count > 0 ? MeshFormat : Format;
+    public static ushort FormatOf(PlanDocument doc) =>
+        doc.Brushes is { IsEmpty: false } ? BrushFormat : doc.Layers is not null ? LayerFormat : doc.Meshes.Count > 0 ? MeshFormat : Format;
     public const uint BodyTag = 'B' | ('O' << 8) | ('D' << 16) | ((uint)'Y' << 24);
     public const uint MetaTag = 'M' | ('E' << 8) | ('T' << 16) | ((uint)'A' << 24);
     private const int SectionHeaderBytes = 13;
@@ -85,7 +88,9 @@ public static class PlanFormat
 
         var format = FormatOf(doc);
         var layers = doc.Layers?.ToBytes() ?? [];
-        var bytes = new byte[BodyFixedBytes + doc.Materials.Count * 4 + n * HullSolid.SizeInBytes + (format >= MeshFormat ? 4 + meshBytes : 0) + layers.Length];
+        var brushes = format == BrushFormat ? doc.Brushes!.ToBytes() : [];
+        var bytes = new byte[BodyFixedBytes + doc.Materials.Count * 4 + n * HullSolid.SizeInBytes + (format >= MeshFormat ? 4 + meshBytes : 0)
+            + (format == BrushFormat ? 1 : 0) + layers.Length + brushes.Length];
         var w = new Writer(bytes);
 
         w.U8((byte)doc.Class);
@@ -147,7 +152,11 @@ public static class PlanFormat
                 w.Mesh(mesh);
         }
 
+        if (format == BrushFormat)
+            w.U8(doc.Layers is not null ? (byte)1 : (byte)0);
+
         w.Bytes(layers);
+        w.Bytes(brushes);
         return bytes;
     }
 
@@ -213,7 +222,7 @@ public static class PlanFormat
         if (header.Magic != PlanHeader.MagicValue)
             return PlanFormatError.BadMagic;
 
-        if (header.Format is not (Format or MeshFormat or LayerFormat))
+        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat))
             return PlanFormatError.UnsupportedFormat;
 
         if (header.Level is not (PlanLevel.Ship or PlanLevel.HullChunk))
@@ -390,11 +399,29 @@ public static class PlanFormat
             }
         }
 
-        if (format == LayerFormat)
+        var layered = format == LayerFormat;
+
+        if (format == BrushFormat)
+        {
+            if (!r.U8(out var flag) || flag > 1)
+                return false;
+
+            layered = flag == 1;
+        }
+
+        if (layered)
         {
             doc.Layers = r.Layers();
 
             if (doc.Layers is null)
+                return false;
+        }
+
+        if (format == BrushFormat)
+        {
+            doc.Brushes = r.Brushes();
+
+            if (doc.Brushes is null)
                 return false;
         }
 
@@ -554,6 +581,13 @@ public static class PlanFormat
             var layers = HullLayering.Read(_bytes[_offset..], out var consumed);
             _offset += consumed;
             return layers;
+        }
+
+        public HullBrushSet? Brushes()
+        {
+            var set = HullBrushSet.Read(_bytes[_offset..], out var consumed);
+            _offset += consumed;
+            return set;
         }
 
         public HullMesh? Mesh()

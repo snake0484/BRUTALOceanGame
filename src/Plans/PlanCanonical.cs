@@ -40,6 +40,9 @@ public static class PlanCanonical
                 solid.HalfZ = solid.HalfX;
         }
 
+        if (doc.Brushes is { IsEmpty: true })
+            doc.Brushes = null;
+
         CompactMaterials(doc);
         CompactMeshes(doc);
         CanonicaliseLayers(doc.Layers);
@@ -111,6 +114,32 @@ public static class PlanCanonical
             solid.Param = (ushort)remap[solid.Param];
         }
 
+        // Stamp brushes keep their meshes (after the solids' ones).
+        if (doc.Brushes is not null)
+        {
+            foreach (var brush in doc.Brushes.Brushes)
+            {
+                if (brush.Kind != BrushKind.Stamp || brush.Mesh >= old.Count)
+                    continue;
+
+                if (remap[brush.Mesh] < 0)
+                {
+                    var mesh = old[brush.Mesh];
+                    var existing = table.FindIndex(m => m.ContentEquals(mesh));
+
+                    if (existing < 0)
+                    {
+                        existing = table.Count;
+                        table.Add(mesh);
+                    }
+
+                    remap[brush.Mesh] = existing;
+                }
+
+                brush.Mesh = (ushort)remap[brush.Mesh];
+            }
+        }
+
         old.Clear();
         old.AddRange(table);
     }
@@ -172,6 +201,32 @@ public static class PlanCanonical
 
                     stack.Layers[i] = layer with { Material = (byte)remap[layer.Material] };
                 }
+            }
+        }
+
+        // Stroke materials too.
+        if (doc.Brushes is not null)
+        {
+            foreach (var stroke in doc.Brushes.Strokes)
+            {
+                if (stroke.Material >= old.Count)
+                    continue;
+
+                if (remap[stroke.Material] < 0)
+                {
+                    var id = old[stroke.Material];
+                    var existing = table.IndexOf(id);
+
+                    if (existing < 0)
+                    {
+                        existing = table.Count;
+                        table.Add(id);
+                    }
+
+                    remap[stroke.Material] = existing;
+                }
+
+                stroke.Material = (byte)remap[stroke.Material];
             }
         }
 

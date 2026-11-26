@@ -93,6 +93,9 @@ public sealed class PlanDocument
     /// <summary>Layered hull (skin, sections, depth stacks, rooms, components, panels); null for a solid hull.</summary>
     public HullLayering? Layers;
 
+    /// <summary>Brushes (stamp meshes, swept profiles) and the strokes drawn with them; null when there are none.</summary>
+    public HullBrushSet? Brushes;
+
     public uint AllocateId() => Meta.NextId++;
 
     /// <summary>Index of <paramref name="material"/> in the table, or -1.</summary>
@@ -105,6 +108,15 @@ public sealed class PlanDocument
         {
             if (solid.Id >= Meta.NextId)
                 Meta.NextId = solid.Id + 1;
+        }
+
+        if (Brushes is not null)
+        {
+            foreach (var stroke in Brushes.Strokes)
+            {
+                if (stroke.Id >= Meta.NextId)
+                    Meta.NextId = stroke.Id + 1;
+            }
         }
     }
 
@@ -123,6 +135,7 @@ public sealed class PlanDocument
         copy.Materials.AddRange(Materials);
         copy.Meshes.AddRange(Meshes);
         copy.Layers = Layers?.Clone();
+        copy.Brushes = Brushes?.Clone();
 
         foreach (ref readonly var solid in Solids.AsSpan())
             copy.Solids.Add(solid);
