@@ -7,9 +7,11 @@ using Brutal.Numerics;
 namespace BrutalGame.Physics;
 
 /// <summary>
-/// Pre-built static triangle mesh collision shape. <see cref="Create"/> is thread-safe and meant to run on worker
-/// threads. The Jolt shape is reference counted: bodies hold their own reference, so disposing this right after
-/// <see cref="PhysicsWorld.AddStatic"/> is fine, and one shape may back many bodies.
+/// Static triangle mesh collision shape. <see cref="Build"/> is thread-safe per instance and meant to run on worker
+/// threads; an instance is reusable (pooled by its owner, review P2): its index and ray cast buffers only grow, so a
+/// warmed instance builds without managed allocations. The Jolt shape is reference counted: bodies hold their own
+/// reference, so <see cref="Release"/> right after <see cref="PhysicsWorld.AddStatic"/> is fine. The managed ray cast BVH
+/// is not: an instance must not be rebuilt while a body made from it is in a world.
 /// <para>
 /// Uses a Jolt MeshShape when the native library supports it, otherwise a StaticCompoundShape of TriangleShapes
 /// (see <see cref="JoltRuntime"/>). A managed ray cast BVH is kept only when native ray casts are unavailable.
@@ -21,25 +23,42 @@ public sealed class StaticMeshShape : IDisposable
     const float MinAreaSq = 1e-14f;
 
     Shape _shape;
+    uint[] _kept = new uint[3 * 2048];
+    readonly TriangleBvh? _bvh;
 
-    StaticMeshShape(Shape shape, TriangleBvh? bvh, int triangleCount)
+    public StaticMeshShape()
     {
-        _shape = shape;
-        Bvh = bvh;
-        TriangleCount = triangleCount;
+        JoltRuntime.EnsureInitialized();
+        _bvh = JoltRuntime.NativeRayCast ? null : new TriangleBvh();
     }
 
-    internal TriangleBvh? Bvh { get; }
+    internal TriangleBvh? Bvh => _bvh;
     internal Shape JoltShape => _shape.IsNull() ? throw new ObjectDisposedException(nameof(StaticMeshShape)) : _shape;
-    public int TriangleCount { get; }
+    public int TriangleCount { get; private set; }
+    public bool IsBuilt => !_shape.IsNull();
 
-    /// <summary>Builds the shape. Vertices are body-local. Degenerate triangles are dropped; returns null if none remain.</summary>
+    /// <summary>Builds a new shape. Vertices are body-local. Degenerate triangles are dropped; returns null if none remain.</summary>
     public static StaticMeshShape? Create(ReadOnlySpan<Vector3> vertices, ReadOnlySpan<uint> indices)
+    {
+        var shape = new StaticMeshShape();
+        return shape.Build(vertices, indices) ? shape : null;
+    }
+
+    /// <summary>
+    /// (Re)builds this instance from body-local vertices, dropping its previous Jolt reference. Degenerate triangles are
+    /// dropped; returns false (and holds no shape) if none remain.
+    /// </summary>
+    public bool Build(ReadOnlySpan<Vector3> vertices, ReadOnlySpan<uint> indices)
     {
         if (indices.Length % 3 != 0)
             throw new ArgumentException("Index count must be a multiple of 3.", nameof(indices));
 
-        var kept = new uint[indices.Length];
+        Release();
+
+        if (_kept.Length < indices.Length)
+            _kept = new uint[Math.Max(indices.Length + indices.Length / 2, _kept.Length * 2)];
+
+        var kept = _kept;
         int keptCount = 0;
 
         for (int i = 0; i < indices.Length; i += 3)
@@ -58,13 +77,13 @@ public sealed class StaticMeshShape : IDisposable
         }
 
         if (keptCount == 0)
-            return null;
+            return false;
 
-        JoltRuntime.EnsureInitialized();
         var keptSpan = kept.AsSpan(0, keptCount);
-        var shape = JoltRuntime.NativeMeshShape ? CreateMeshShape(vertices, keptSpan) : CreateTriangleCompound(vertices, keptSpan);
-        var bvh = JoltRuntime.NativeRayCast ? null : new TriangleBvh(vertices, keptSpan);
-        return new StaticMeshShape(shape, bvh, keptCount / 3);
+        _shape = JoltRuntime.NativeMeshShape ? CreateMeshShape(vertices, keptSpan) : CreateTriangleCompound(vertices, keptSpan);
+        _bvh?.Build(vertices, keptSpan);
+        TriangleCount = keptCount / 3;
+        return true;
     }
 
     static bool IsDegenerate(Vector3 a, Vector3 b, Vector3 c)
@@ -121,13 +140,17 @@ public sealed class StaticMeshShape : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     static float3 ToJolt(Vector3 v) => Unsafe.BitCast<Vector3, float3>(v);
 
-    /// <summary>Drops this wrapper's Jolt reference. Bodies already using the shape keep it alive.</summary>
-    public void Dispose()
+    /// <summary>Drops this wrapper's Jolt reference; buffers are kept for the next <see cref="Build"/>. Bodies already using the shape keep it alive.</summary>
+    public void Release()
     {
+        TriangleCount = 0;
+
         if (_shape.IsNull())
             return;
 
         _shape.Dispose();
         _shape = default;
     }
+
+    public void Dispose() => Release();
 }

@@ -7,7 +7,7 @@ namespace BrutalGame.Sim;
 /// <summary>
 /// The swell's wind from the weather, camera-independent so a headless host reproduces it. The client's WeatherMap is
 /// baked around the camera, so this samples the analytic <see cref="WeatherField"/> directly, about a fixed reference
-/// point (the world origin, the main island). A new wind is queued only when the sea wind has moved past a threshold,
+/// point (the sea frame's origin at the spawn). A new wind is queued only when the sea wind has moved past a threshold,
 /// and the swell blends to it over its own <see cref="OceanSwell.BlendSeconds"/>, so a sea builds as a storm arrives.
 /// </summary>
 internal sealed class SwellWind(WeatherField field)

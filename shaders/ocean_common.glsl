@@ -20,6 +20,7 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 depthRect;      // xy = depth map origin relative to the camera, z = world size, w = depth outside the map
     vec4 carrier;        // surf carrier (OceanSwell.GpuCarrier): x = omega, y = phase, z = set group ratio (a set every 1 / this waves), w = set group phase
     vec4 shore;          // xy = carrier travel direction, z = its breaker height (0 = no shore wash), w = open swell Hs
+    vec4 planet;         // xy = camera x, z in the sea frame, z = 1 / (2 sea radius): the sea frame's tangent plane drops to the sphere by |xz|^2 z (0 = flat)
     int waveCount;
     float debugView;     // 1 = Jacobian/foam
     Wave waves[512];

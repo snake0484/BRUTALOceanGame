@@ -78,7 +78,7 @@ Each ends with a measured exit check (details in review.md).
 
 M0 landed on `space-pivot` (2f70258..1df5d87). Review items left for the milestone that replaces the island placeholder:
 
-- **M2b shore depth:** the GPU swell has no depth cap past the ~1 km bathymetry window (no far field since layer B was cut); the CPU cap costs ~0.56 us per sample with no edits and ~3.3 us with 1000 edits (`TerrainShoreDepth` rebuilds the island set and scans every edit). The planet `IShoreDepth` must bin edits and cache the generator.
+- **M2b shore depth:** the GPU swell has no depth cap past the ~1 km bathymetry window (no far field since layer B was cut); the CPU cap costs ~0.56 us per sample with no edits and ~3.3 us with 1000 edits (`TerrainShoreDepth` rebuilds the island set and scans every edit). The planet `IShoreDepth` must bin edits and cache the generator. (M2 step 2: `PlanetShoreDepth` reads the generator, ignoring edits; the GPU has no depth map until M2b.)
 - **M2 protected shores (D30):** `ShoreGuard` refuses whole digs within 16 m of ground below sea + 2 m. planets.md specifies `ShoreProtectHeight` 6 m, clamping removal to the generated surface, letting players remove what they placed, and a per-chunk column mask instead of ~800 generator calls per big brush.
 - **M2 pit rule:** CPU uses one voxel below sea level, the GPU uses 2^lod m at coarser LODs; base both on the generated sea mask (planets.md).
 - **M4 networking:** the swell carrier phase is now integrated per tick (no snapping), which makes it history-dependent; give it a closed form or put it in the sim snapshot before late join.
@@ -90,7 +90,30 @@ M0 landed on `space-pivot` (2f70258..1df5d87). Review items left for the milesto
 - **Orbit test:** smoothness can only fail in the inertial variant and does not catch uneven render time (also log the second difference of RenderTime against wall-clock); the GPU marker probe counts occluded fragments (wrap it in an occlusion query).
 - **Instance store:** the device-local instance store (8192) equals terrain's max handles, so a second GPU-culled user (hulls) would silently get nothing; size it for every user or fail loudly.
 - **Frames:** `CelestialSystem.Read` leaves render poses at identity until `Evaluate` runs; grids must write `FrameTree.Render` once they exist (M3). SimWorld still regenerates the test system each launch (save/load in M4).
-- **Ocean:** the foam lace now tiles every 182.9 m; check it from altitude with fly-test screenshot sheets.
+- **Ocean:** the foam lace now tiles every 182.9 m; check it from altitude with `--planet-fly` screenshot sheets.
+
+### M2 step 2: planet streaming (2026-11-26)
+
+The island is gone (`TerrainGenerator`, `TerrainParams`, `Coastline`, `IslandFrame`, `ShoreGuard`, `TerrainShoreDepth`; D30 is now `PlanetGenerator.IsFullyProtected` plus the clamped removal). `TerrainWorld` streams the test planet's octree in its rotating frame: 8 roots at LOD 15, leaves LOD 0..12, maps keyed by `ChunkCoord.Key` (ulong), selection on a job (`PlanetLeafSelector`: shell classify, horizon pruning nested parent to child with a 2 km + 2 s of travel margin, speed LOD bias with hysteresis), retire by walking the selection's split nodes. Empty leaves take no renderer slot; terrain indices are 16-bit (planets.md "Memory"); arenas 80 MB vertex + 64 MB index. Collision: LOD-0 leaves within 128 m of the camera, pooled `StaticMeshShape`s with growable buffers (review P2). The camera spawns on a coast found by `PlanetSpawn`.
+
+**Physics bubble (interim):** one Jolt world in a surface bubble (`PhysicsBubble`) with its origin fixed on the sea sphere at the spawn, +Y radially up, scene gravity g + centrifugal there. Float precision falls off with distance from it (about 1 mm at 10 km); collision chunks are placed in it from planet-frame doubles. The sea frame and the weather plane share it. Rebasing in 32 m steps and several bubbles are M3.
+
+Measured with `--planet-fly` (Release, RTX 4090, 1600x900; each leg starts settled; holes = frames where a desired leaf in view, not provably below the horizon or empty, has nothing loaded over it):
+
+| Leg | Leaves loaded/s | Chunk jobs/s | Terrain main-thread ms p50 / p95 / p99 | Frame work ms p50 / p95 | Holes |
+| --- | --- | --- | --- | --- | --- |
+| 30 m/s at 30 m AGL | 140 | 152 | 0.12 / 0.16 / 0.38 | 0.36 / 0.50 | 0 of 2876 frames |
+| 300 m/s at 100 m | 1371 | 1456 | 0.13 / 0.74 / 1.41 | 0.38 / 1.02 | 0 of 2864 |
+| 3000 m/s at 300 m (finest LOD 3) | 2164 | 2164 | 0.02 / 0.24 / 0.29 | 0.34 / 0.58 | 0 of 2861 |
+| Descent 800 km to 30 m in 60 s | 182 | 183 | 0.06 / 0.12 / 0.17 | 0.32 / 0.55 | 0 of 8559 |
+
+Selection runs 1.5-2.5 ms on its worker (12-16k nodes). At the ground ~8,000 leaves are desired but only ~2,800 have geometry (81-83 MB of arena): the shell's conservative band keeps 2-3 chunks per column, most of them at LOD 5-7. Before the fixes above, the 32-bit index arena filled at the 300 m/s leg and streaming deadlocked (old leaves wait for new ones that cannot upload); a full arena now frees a few uncovered leaves per frame instead (`ForcedRetires`, 0 in every leg). Smoke bench (`--bench`, Debug, one view): skipping empty leaves and 16-bit indices took terrain GPU from 0.121 to 0.072 ms and the frame from 0.223 to 0.153 ms; at the final spawn view (the offshore-depth probe moved it) terrain is 0.108 ms and the frame 0.252 ms.
+
+Left for later in M2 and beyond:
+- **Shell tightness:** ~65% of leaves mesh empty (LOD 5-7 worst). Tighten `PlanetHeightBounds` or early-out in the job from the height grid before the volume fill.
+- **Collision allocations:** pooled shapes grow their buffers on first use: 22 MB in the first 20 s of low flight, 3-5 MB a leg after; the managed BVH exists only because native ray casts are missing (review P1).
+- **Spawn:** coasts are gentle everywhere (continent ramp), so the spawn beach is a wide flat with tide pools; a steeper coast needs the generator's coastal profile.
+- **Collision anchors:** collision is still driven by the camera, not sim-owned anchors (planets.md "Collision"); the headless sim has no ground.
 
 ## Open questions
 

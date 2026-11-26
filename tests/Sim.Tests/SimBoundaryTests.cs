@@ -2,6 +2,7 @@ using System.Numerics;
 using System.Reflection;
 using System.Text.Json;
 using System.Xml.Linq;
+using Brutal.Numerics;
 using BrutalGame.Terrain;
 using BrutalGame.Water.Ocean;
 using BrutalGame.Weather;
@@ -10,6 +11,9 @@ namespace BrutalGame.Sim.Tests;
 
 public class SimBoundaryTests
 {
+    /// <summary>16 km out from the spawn's waterline, along the sea frame's +x.</summary>
+    private const float OffshoreX = 16_000f;
+
     private static readonly string[] Forbidden = ["Brutal.Vulkan", "Brutal.Glfw", "Brutal.ImGui", "Brutal.ShaderC", "Engine", "Debug"];
     private static readonly string[] ForbiddenProjects = ["Engine", "Water.Rendering", "Terrain.Runtime", "Debug", "Game"];
     private static readonly string[] ForbiddenPackages = ["BRUTAL.Vulkan", "BRUTAL.Glfw", "BRUTAL.ImGui", "BRUTAL.ShaderC"];
@@ -108,13 +112,13 @@ public class SimBoundaryTests
     }
 
     /// <summary>
-    /// Ticks with no renderer, window or camera. Known M0 gap: terrain collision is still streamed by the client's
-    /// TerrainWorld until M2, so a headless sim has no ground and the ball falls through empty space.
+    /// Ticks with no renderer, window or camera. Known gap: terrain collision is still streamed by the client's
+    /// TerrainWorld round the camera (sim-owned anchors are M3), so a headless sim has no ground and the ball falls.
     /// </summary>
     [Fact]
     public void SimWorld_TicksHeadless()
     {
-        using var sim = new SimWorld(seed: 1, workerThreads: 2, new TerrainParams());
+        using var sim = new SimWorld(seed: 1, workerThreads: 2);
         var ball = sim.Physics.AddDynamicSphere(new Vector3(0f, 50f, 0f), 0.5f);
 
         for (var i = 0; i < 60; i++)
@@ -132,8 +136,8 @@ public class SimBoundaryTests
     public void SwellWind_IsTickQuantisedAndCameraIndependent()
     {
         var climate = new WeatherClimate();
-        using var a = new SimWorld(seed: 1, workerThreads: 1, new TerrainParams(), new WeatherField(climate)) { WeatherTimeOffset = 3600.0 };
-        using var b = new SimWorld(seed: 1, workerThreads: 1, new TerrainParams(), new WeatherField(climate)) { WeatherTimeOffset = 3600.0 };
+        using var a = new SimWorld(seed: 1, workerThreads: 1, new WeatherField(climate)) { WeatherTimeOffset = 3600.0 };
+        using var b = new SimWorld(seed: 1, workerThreads: 1, new WeatherField(climate)) { WeatherTimeOffset = 3600.0 };
         var swell = new SwellParams { WindSpeed = 3f, SwellHeight = 1f, SwellPeriod = 12f };
         a.SetSwell(swell);
         b.SetSwell(swell);
@@ -156,11 +160,19 @@ public class SimBoundaryTests
         Assert.Equal(a.Ocean.SampleHeight(10f, -400f), b.Ocean.SampleHeight(10f, -400f));
     }
 
+    /// <summary>An edit <paramref name="below"/> m under the generated ground at a point of the bubble's plane (x out to sea).</summary>
+    private static EditOp Under(SimWorld sim, float x, float below, BrushMode mode)
+    {
+        var d = double3.Normalize(sim.Bubble.ToPlanet(new Vector3(x, 0f, 0f)));
+        var r = sim.Planet.Radius + sim.Generator.Surface.Height(d.X, d.Y, d.Z) - below;
+        return EditOp.At(d.X * r, d.Y * r, d.Z * r, 3f, mode, mode == BrushMode.Dig ? VoxelMaterial.Air : VoxelMaterial.Rock);
+    }
+
     [Fact]
     public void Edits_ApplyAtTheirTickStart()
     {
-        using var sim = new SimWorld(seed: 1, workerThreads: 1, new TerrainParams());
-        var land = TerrainShoreDepthTests.InlandDig(sim.Terrain);
+        using var sim = new SimWorld(seed: 1, workerThreads: 1);
+        var land = Under(sim, -400f, 1f, BrushMode.Dig);
 
         sim.QueueEdit(land);
         Assert.Equal(0, sim.Edits.Length);
@@ -168,25 +180,43 @@ public class SimBoundaryTests
         sim.Tick();
         Assert.Equal(1, sim.Edits.Length);
         Assert.Equal(1, sim.EditVersion);
-        Assert.Equal(land, sim.Edits[0]);
+        Assert.Equal(land with { Seq = 1 }, sim.Edits[0]);
     }
 
-    /// <summary>D30: shores and seabeds are unminable; a dig there is refused, a place is not.</summary>
+    /// <summary>D30: shores and seabeds are unminable; an edit wholly inside the protected band is dropped unlogged, inland is not.</summary>
     [Fact]
-    public void Edits_DiggingTheShoreOrSeabedIsRefused()
+    public void Edits_InsideTheProtectedSeabedAreDropped()
     {
-        using var sim = new SimWorld(seed: 1, workerThreads: 1, new TerrainParams());
-        var p = sim.Terrain;
-        var shore = TerrainShoreDepthTests.WaterlineX(p, 0f);
+        using var sim = new SimWorld(seed: 1, workerThreads: 1);
+        // 16 km out the sea is ~90 m deep: the seabed's conservative bounds (±12 m here) sit wholly under the protected band.
+        var sea = Dir(sim, OffshoreX);
+        Assert.True(sim.Generator.Surface.Height(sea.X, sea.Y, sea.Z) < sim.Generator.Surface.ProtectHeight - 30f, "16 km out from the spawn's waterline is deep sea");
 
-        sim.QueueEdit(new BrushOp(new Vector3(shore - 60f, -8f, 0f), 3f, BrushMode.Dig, VoxelMaterial.Air));
-        sim.QueueEdit(new BrushOp(new Vector3(shore, 0f, 0f), 3f, BrushMode.Dig, VoxelMaterial.Air));
-        sim.QueueEdit(new BrushOp(new Vector3(shore + ShoreGuard.Band, 1f, 0f), 3f, BrushMode.Dig, VoxelMaterial.Air));
-        sim.QueueEdit(new BrushOp(new Vector3(shore, 0f, 0f), 3f, BrushMode.Place, VoxelMaterial.Rock));
+        sim.QueueEdit(Under(sim, OffshoreX, 400f, BrushMode.Dig));
+        sim.QueueEdit(Under(sim, OffshoreX, 400f, BrushMode.Place));
+        sim.QueueEdit(Under(sim, -400f, 150f, BrushMode.Dig));
         sim.Tick();
 
-        Assert.Equal(3, sim.RefusedEdits);
+        Assert.Equal(2, sim.RefusedEdits);
         Assert.Equal(1, sim.Edits.Length);
-        Assert.Equal(BrushMode.Place, sim.Edits[0].Mode);
+        Assert.Equal(BrushMode.Dig, sim.Edits[0].Mode);
     }
+
+    /// <summary>The spawn is on a coast: sea level at the bubble's origin, sea out along +x, land in along -x.</summary>
+    [Fact]
+    public void Spawn_IsOnACoastFacingTheSea()
+    {
+        using var sim = new SimWorld(seed: 1, workerThreads: 1);
+        var surface = sim.Generator.Surface;
+        var origin = double3.Normalize(sim.Bubble.Origin);
+
+        Assert.InRange(surface.Height(origin.X, origin.Y, origin.Z) - surface.SeaHeight, -1.0f, 1.0f);
+        Assert.InRange(sim.Bubble.Origin.Length(), sim.Planet.SeaRadius - 1e-6, sim.Planet.SeaRadius + 1e-6);
+        var depth = new PlanetShoreDepth(surface, sim.Bubble);
+        Assert.True(depth.Depth(200f, 0f) > 0f, "out to sea is water");
+        Assert.True(depth.Depth(-400f, 0f) < -3f, "inland is dry land");
+        Assert.True(sim.Physics.Gravity.Y < -9.7f && MathF.Abs(sim.Physics.Gravity.X) < 0.1f && MathF.Abs(sim.Physics.Gravity.Z) < 0.1f);
+    }
+
+    private static double3 Dir(SimWorld sim, float x) => double3.Normalize(sim.Bubble.ToPlanet(new Vector3(x, 0f, 0f)));
 }

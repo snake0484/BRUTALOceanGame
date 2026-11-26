@@ -21,7 +21,7 @@ public enum OrbitTestFrame
 
 /// <summary>
 /// --orbit-test, the M1 precision exit check: once the world has loaded, flies the camera from 2 m above the test planet
-/// (drawn as a smooth sphere, lit by the star through the frame tree, with the island's terrain on it) out to 1e8 m along
+/// (drawn as a smooth sphere, lit by the star through the frame tree, with the terrain round the spawn on it) out to 1e8 m along
 /// <see cref="OrbitPath"/>. The camera moves by per-frame deltas in double, as a flown camera would, and looks about the
 /// marker's closed-form position so it never follows the drawn one. Each frame records:
 /// <list type="bullet">

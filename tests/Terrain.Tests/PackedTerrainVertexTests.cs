@@ -29,7 +29,7 @@ public sealed class PackedTerrainVertexTests(ITestOutputHelper output)
         const float lo = -MarginVoxels;
         const float hi = ChunkConstants.Size + MarginVoxels;
 
-        for (var lod = 0; lod <= TerrainWorld.MaxLod; lod++)
+        for (var lod = 0; lod <= PlanetGenerator.MaxLod; lod++)
         {
             var scale = new ChunkCoord(0, 0, 0, lod).VoxelScale;
             var bound = BoundVoxels * scale;
@@ -53,23 +53,25 @@ public sealed class PackedTerrainVertexTests(ITestOutputHelper output)
     [Fact]
     public void MeshedSurfaceVerticesAreExactAndSkirtsWithinHalfAStep()
     {
-        var p = new TerrainParams();
+        var scratch = new PlanetChunkScratch();
         var mesher = new SurfaceNetsMesher();
         var mesh = new ChunkMesh();
 
-        for (var lod = 0; lod <= TerrainWorld.MaxLod; lod++)
+        for (var lod = 0; lod <= PlanetGenerator.MaxLod; lod++)
         {
             var surface = 0;
             var skirts = 0;
             var worstSkirt = 0f;
             var worstNormal = 0f;
 
-            for (var y = -2; y <= 2; y++)
-            for (var z = -2; z <= 2; z++)
-            for (var x = -2; x <= 2; x++)
+            var centre = TestPlanet.SurfaceChunk(0.3, 0.8, -0.5, lod);
+
+            for (var y = -1; y <= 1; y++)
+            for (var z = -1; z <= 1; z++)
+            for (var x = -1; x <= 1; x++)
             {
-                var chunk = new VoxelChunk { Coord = new ChunkCoord(x, y, z, lod) };
-                TerrainGenerator.Generate(chunk, p);
+                var chunk = new VoxelChunk { Coord = centre with { X = centre.X + x, Y = centre.Y + y, Z = centre.Z + z } };
+                TestPlanet.Generator.Generate(chunk, scratch);
                 mesher.Mesh(chunk, mesh);
 
                 var scale = chunk.Coord.VoxelScale;

@@ -44,5 +44,8 @@ void main()
     vSurfFoam = p.surfFoam;
     vSwashEdge = p.swashEdge;
 
-    gl_Position = frame.viewProj * vec4(vWorldPos, 1.0);
+    // The sea frame is a tangent plane at its origin: drawn on the sea sphere, shaded as the plane.
+    vec2 fromOrigin = frame.planet.xy + vWorldPos.xz;
+    float drop = dot(fromOrigin, fromOrigin) * frame.planet.z;
+    gl_Position = frame.viewProj * vec4(vWorldPos.x, vWorldPos.y - drop, vWorldPos.z, 1.0);
 }

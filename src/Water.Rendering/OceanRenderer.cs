@@ -84,6 +84,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         public Vector4 DepthRect;
         public Vector4 Carrier;
         public Vector4 Shore;
+        public Vector4 Planet;
         public int WaveCount;
         public float DebugView;
     }
@@ -467,7 +468,8 @@ public sealed unsafe class OceanRenderer : IDisposable
     /// <param name="viewProj">Translation-free view-projection.</param>
     /// <param name="camera">The camera in the sea's frame, whose sea level is y = 0.</param>
     /// <param name="depthRect">(origin x, origin z, world size, depth outside the map).</param>
-    public void Prepare(int frameIndex, OceanSwell swell, double renderTime, in Matrix4x4 viewProj, double3 camera, Vector4 depthRect)
+    /// <param name="seaRadius">The sea sphere the sea frame's tangent plane is drawn on (its origin at the frame's origin); 0 draws it flat.</param>
+    public void Prepare(int frameIndex, OceanSwell swell, double renderTime, in Matrix4x4 viewProj, double3 camera, Vector4 depthRect, double seaRadius = 0.0)
     {
         var block = (byte*)_buffer.Mapped + _frameOffsets[frameIndex];
         var header = (FrameHeader*)block;
@@ -480,8 +482,12 @@ public sealed unsafe class OceanRenderer : IDisposable
         ExtractFrustum(header->ViewProj);
 
         // Vertical cull range: the tallest swell crests and troughs.
+        // On a sphere the clipmap's far corner (from the frame's origin) lies lower by its drop.
         var reach = 2f * swell.SignificantWaveHeight + 4f;
-        (_cullTop, _cullBottom) = (reach, -reach);
+        var curvature = seaRadius > 0.0 ? (float)(0.5 / seaRadius) : 0f;
+        var corner = MathF.Sqrt(2f) * HalfCells * BaseSpacing * (1 << (Levels - 1)) + (float)Math.Sqrt(camera.X * camera.X + camera.Z * camera.Z);
+        (_cullTop, _cullBottom) = (reach, -reach - corner * corner * curvature);
+        header->Planet = new Vector4((float)camera.X, (float)camera.Z, curvature, 0f);
         header->CameraPos = new Vector4(0f, height, 0f, (float)(renderTime % TimeWrap));
         header->SunDir = new Vector4(SunDirection, SunIntensity);
         header->SkyZenith = new Vector4(SkyZenith, 0f);

@@ -1,22 +1,22 @@
 #version 450
-// Terrain fragment shader: material palette, Lambert sun + hemispheric sky, underwater absorption, ocean-matched
-// tonemap/fog.
+// Terrain fragment shader: material palette, Lambert sun + hemispheric sky about the planet's radial up, underwater
+// absorption below the sea sphere (and the water's colour where no ocean surface covers it), ocean-matched tonemap/fog.
 
 layout(set = 0, binding = 0, std140) uniform Frame {
     mat4 viewProj;
-    vec4 cameraPos;   // (0, camera height above sea level, 0), the frame vWorldPos is in
+    vec4 planet;      // xyz = planet centre relative to the camera, w = sea radius (0 = no sea)
     vec4 sunDir;      // xyz toward sun, w = intensity
     vec4 skyZenith;
     vec4 skyHorizon;  // w = fog density
+    vec4 water;       // rgb = seabed fade colour, w = distance past which it applies (no ocean surface there)
 } frame;
 
-layout(location = 0) in vec3 vWorldPos; // camera-relative x, z; height above sea level y
+layout(location = 0) in vec3 vWorldPos; // camera-relative, camera frame axes
 layout(location = 1) in vec3 vNormal;
 layout(location = 2) flat in uint vMaterial;
 
 layout(location = 0) out vec4 outColor;
 
-const float SEA_LEVEL = 0.0;
 const vec3 ABSORPTION = vec3(0.30, 0.09, 0.06);  // per metre below sea level
 const vec3 GROUND_BOUNCE = vec3(0.10, 0.09, 0.08);
 
@@ -41,18 +41,27 @@ void main()
     float intensity = frame.sunDir.w;
     vec3 albedo = PALETTE[min(vMaterial, 4u)];
 
-    // Hemispheric ambient: zenith above, horizon at the side, dim bounce below.
-    float up = N.y;
+    // Hemispheric ambient about the radial up: zenith above, horizon at the side, dim bounce below. Float radii are
+    // ~1e6 m here, so heights are good to ~0.1 m: plenty for absorption.
+    vec3 fromCentre = vWorldPos - frame.planet.xyz;
+    float radius = length(fromCentre);
+    float up = dot(N, fromCentre / radius);
     vec3 skyAmbient = mix(frame.skyHorizon.rgb, frame.skyZenith.rgb, clamp(up, 0.0, 1.0));
     vec3 ambient = mix(skyAmbient, GROUND_BOUNCE, clamp(-up, 0.0, 1.0));
 
     vec3 colour = albedo * (max(dot(N, L), 0.0) * intensity + ambient);
 
-    // Light lost through the water column above.
-    float depth = max(SEA_LEVEL - vWorldPos.y, 0.0);
-    colour *= exp(-ABSORPTION * depth);
+    float dist = length(vWorldPos);
 
-    float dist = length(vWorldPos - frame.cameraPos.xyz);
+    // Light lost through the water column above; past the ocean surface's reach the water's own colour fills in.
+    if (frame.planet.w > 0.0)
+    {
+        vec3 through = exp(-ABSORPTION * max(frame.planet.w - radius, 0.0));
+        colour *= through;
+
+        if (dist > frame.water.w)
+            colour += frame.water.rgb * (1.0 - through);
+    }
 
     // Tonemap + gamma (same as ocean).
     colour = pow(acesFit(colour), vec3(1.0 / 2.2));
