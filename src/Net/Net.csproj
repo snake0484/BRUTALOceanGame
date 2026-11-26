@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>BrutalGame.Net</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Ahwoo.BRUTAL.RakNet" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Sim\Sim.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Net.Tests" />
+  </ItemGroup>
+</Project>

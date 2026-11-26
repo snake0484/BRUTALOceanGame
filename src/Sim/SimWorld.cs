@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Brutal.Numerics;
 using BrutalGame.Frames;
 using BrutalGame.Physics;
+using BrutalGame.Sim.Entities;
 using BrutalGame.Terrain;
 using BrutalGame.Water.Ocean;
 using BrutalGame.Weather;
@@ -56,6 +57,9 @@ public sealed class SimWorld : IDisposable
 
     public readonly CelestialSystem Celestial;
 
+    /// <summary>Every entity; probes step from their <see cref="EntityTable.Input"/> each tick, before physics.</summary>
+    public readonly EntityTable Entities;
+
     /// <summary>Weather the swell wind follows when <see cref="DriveWind"/> is set; null pins the swell to <see cref="SetSwell"/>.</summary>
     public readonly WeatherField? Weather;
 
@@ -71,12 +75,14 @@ public sealed class SimWorld : IDisposable
 
     private readonly record struct EditCommand(long Tick, EditOp Op);
 
-    public SimWorld(ulong seed, int workerThreads, WeatherField? weather = null)
+    public SimWorld(ulong seed, int workerThreads, WeatherField? weather = null, int entityCapacity = EntityTable.DefaultCapacity)
     {
+        Seed = seed;
         Weather = weather;
         Physics = new PhysicsWorld(workerThreads: workerThreads);
         Frames = new FrameTree();
         Celestial = CelestialSystem.CreateTest(Frames, seed, _clock.TickSeconds);
+        Entities = new EntityTable(entityCapacity);
         PlanetIndex = FirstPlanet(Celestial);
         ref readonly var body = ref Celestial[PlanetIndex];
         Planet = PlanetParams.Generate(PlanetParams.BodySeed(seed, PlanetIndex), body.Radius, body.Mu / (body.Radius * body.Radius));
@@ -104,6 +110,8 @@ public sealed class SimWorld : IDisposable
             _wind = new SwellWind(weather, (float)Math.Atan2(double3.Dot(x, south), double3.Dot(x, east)));
         }
     }
+
+    public ulong Seed { get; }
 
     public ref readonly FixedClock Clock => ref _clock;
 
@@ -171,6 +179,7 @@ public sealed class SimWorld : IDisposable
         Celestial.Update(_clock.TickIndex + 1);
 
         var dt = _clock.TickSeconds;
+        StepEntities(dt);
         Physics.Step((float)dt);
 
         var start = Stopwatch.GetTimestamp();
@@ -203,6 +212,19 @@ public sealed class SimWorld : IDisposable
 
         if (applied > 0)
             _pending.RemoveRange(0, applied);
+    }
+
+    private void StepEntities(double dt)
+    {
+        var entities = Entities;
+
+        foreach (var index in entities.Alive)
+        {
+            ref var placement = ref entities.Placement[index];
+
+            if (entities.Kind[index] == EntityKind.Probe && placement.Mode == PlacementMode.Simulated)
+                ProbeMotion.Step(ref placement, entities.Input[index], dt);
+        }
     }
 
     /// <summary>Tick-quantised: the sea wind is sampled every <see cref="WindInterval"/> ticks at the tick's weather time.</summary>
