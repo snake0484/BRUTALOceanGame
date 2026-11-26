@@ -1,7 +1,8 @@
 // Water shading for the ocean surface (ocean.frag): the body by depth, sky reflection, sun, foam lace, tonemap and fog.
-// Needs a uniform block named frame with cameraPos (w = time), sunDir (w = intensity), skyZenith, skyHorizon (w = fog
-// density), waterDeep, waterScatter and cascadeAnchorX/Z (w = camera in the sea frame mod LACE_PERIOD / LACE_SCALE).
-// Fragment stage only (fwidth).
+// Works in the surface point's own frame (y = the sea sphere's up there): the caller passes the vector to the camera and
+// the sun's direction in it. Needs a uniform block named frame with cameraPos (w = time), sunDir (w = intensity),
+// skyZenith (w = unresolved slope variance), skyHorizon (w = fog density), waterDeep, waterScatter and
+// cascadeAnchorX/Z (w = camera in the sea frame mod LACE_PERIOD / LACE_SCALE). Fragment stage only (fwidth).
 #ifndef WATER_SHADING_GLSL
 #define WATER_SHADING_GLSL
 
@@ -30,6 +31,7 @@ float valueNoise(vec2 p)
 
 const float PI = 3.14159265359;
 const float ROUGHNESS = 0.08;
+const float ROUGH_MIRROR = 0.5; // a sea whose waves a pixel can't resolve reflects at most this much of the sky: toward the horizon their slopes show their faces, not the mirror
 const vec3 FOAM_ALBEDO = vec3(0.85);
 const vec3 SAND_ALBEDO = vec3(0.62, 0.56, 0.38);         // terrain.frag palette: sand
 const vec3 SEABED_ABSORPTION = vec3(0.45, 0.07, 0.04);  // sea water, per metre: red goes first
@@ -37,9 +39,8 @@ const vec3 SHALLOW_SCATTER = vec3(0.04, 0.24, 0.22);     // turquoise in-scatter
 const float WET_SAND = 0.7;                              // sand under water is darker than the dry beach
 
 // Sky gradient plus sun glow (disk handled by specular on water).
-vec3 sky(vec3 dir)
+vec3 sky(vec3 dir, vec3 L)
 {
-    vec3 L = frame.sunDir.xyz;
     float t = pow(clamp(dir.y, 0.0, 1.0), 0.45);
     vec3 c = mix(frame.skyHorizon.rgb, frame.skyZenith.rgb, t);
     float s = max(dot(dir, L), 0.0);
@@ -54,16 +55,16 @@ float fresnelSchlick(float cosTheta)
 }
 
 // GGX distribution * Smith-Schlick visibility.
-float ggxSpecular(vec3 N, vec3 V, vec3 L)
+float ggxSpecular(vec3 N, vec3 V, vec3 L, float roughness)
 {
     vec3 H = normalize(V + L);
     float NdotH = max(dot(N, H), 0.0);
     float NdotL = max(dot(N, L), 0.0);
     float NdotV = max(dot(N, V), 1e-4);
-    float a2 = ROUGHNESS * ROUGHNESS * ROUGHNESS * ROUGHNESS;
+    float a2 = roughness * roughness * roughness * roughness;
     float d = NdotH * NdotH * (a2 - 1.0) + 1.0;
     float D = a2 / (PI * d * d);
-    float k = ROUGHNESS * 0.5;
+    float k = roughness * 0.5;
     float vis = 1.0 / ((NdotL * (1.0 - k) + k) * (NdotV * (1.0 - k) + k));
     return D * vis * 0.25 * NdotL;
 }
@@ -118,14 +119,14 @@ float foamLace(vec2 xz, float coverage, float churn)
     return laceVeins(lace(sea * LACE_SCALE, t), footprint, coverage);
 }
 
-// The water body by depth: deep tint, scatter through crests, and the sand seen through the shallows.
-vec3 waterBodyDepth(vec3 worldPos, vec3 N, vec3 V, float depth, float thickness)
+// The water body by depth: deep tint, scatter through crests (height = the surface above sea level), and the sand seen
+// through the shallows.
+vec3 waterBodyDepth(float height, vec3 N, vec3 V, vec3 L, float depth, float thickness)
 {
-    vec3 L = frame.sunDir.xyz;
     float intensity = frame.sunDir.w;
 
     // Body colour: deep tint + subsurface scatter through wave crests + wrap diffuse.
-    float sss = pow(max(dot(V, -L), 0.0), 4.0) * clamp((worldPos.y + 1.5) * 0.25, 0.0, 1.0);
+    float sss = pow(max(dot(V, -L), 0.0), 4.0) * clamp((height + 1.5) * 0.25, 0.0, 1.0);
     float wrap = max((dot(N, L) + 0.5) / 1.5, 0.0);
     vec3 deepColour = mix(vec3(0.03, 0.20, 0.18), frame.waterDeep.rgb, smoothstep(0.0, 10.0, depth));
     vec3 body = deepColour * (0.2 + 0.3 * wrap * intensity)
@@ -141,25 +142,27 @@ vec3 waterBodyDepth(vec3 worldPos, vec3 N, vec3 V, float depth, float thickness)
     return mix(sand, body, smoothstep(0.0, 2.5, thickness));
 }
 
-// Display colour of water at worldPos with normal N: body colour (depth = water depth under it, thickness = water above
-// the ground there), sky reflection, sun, foam over it, then tonemap and fog.
-vec3 shadeWater(vec3 worldPos, vec3 N, float depth, float thickness, float foam)
+// Display colour of water whose surface stands height above sea level, with normal N, seen from toCam away and lit
+// from L (all in the surface point's frame): body colour (depth = water depth under it, thickness = water above the
+// ground there), sky reflection, sun, foam over it, then tonemap and fog. unresolved (0..1) is how much of the waves'
+// slope the pixel can't see: their glint widens into the sea's glitter path by the slope variance (frame.skyZenith.w).
+vec3 shadeWater(float height, vec3 toCam, vec3 L, vec3 N, float depth, float thickness, float foam, float unresolved)
 {
-    vec3 toCam = frame.cameraPos.xyz - worldPos;
     float dist = length(toCam);
     vec3 V = toCam / max(dist, 1e-4);
-    vec3 L = frame.sunDir.xyz;
     float intensity = frame.sunDir.w;
     float F = fresnelSchlick(max(dot(N, V), 0.0));
+    F = mix(F, min(F, ROUGH_MIRROR), unresolved);
 
     // Sky reflection, kept above the horizon.
     vec3 R = reflect(-V, N);
     R.y = max(R.y, 0.01);
-    vec3 reflection = sky(normalize(R));
-    vec3 colour = mix(waterBodyDepth(worldPos, N, V, depth, thickness), reflection, F);
+    vec3 reflection = sky(normalize(R), L);
+    vec3 colour = mix(waterBodyDepth(height, N, V, L, depth, thickness), reflection, F);
 
     // Sun specular.
-    colour += vec3(1.0, 0.95, 0.85) * intensity * ggxSpecular(N, V, L) * F * (1.0 - foam);
+    float roughness = sqrt(ROUGHNESS * ROUGHNESS + unresolved * frame.skyZenith.w);
+    colour += vec3(1.0, 0.95, 0.85) * intensity * ggxSpecular(N, V, L, roughness) * F * (1.0 - foam);
 
     // Foam: rough diffuse white lit by sun + sky ambient, replaces water colour (before tonemap/fog).
     vec3 ambient = 0.5 * (frame.skyZenith.rgb + frame.skyHorizon.rgb);

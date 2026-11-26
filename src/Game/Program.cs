@@ -6,7 +6,7 @@ LogSystem.Initialize(builder => builder.AddSimpleConsole(o => o.SingleLine = tru
 
 var windSpeed = 10f;
 
-// Groundswell: significant height (m), peak period (s), direction it travels toward (degrees). 0 height = none.
+// Groundswell: significant height (m), peak period (s), direction it travels toward (degrees from east toward south). 0 height = none.
 float[] swell = [1.2f, 13f, 0f];
 var foamDebug = false;
 var editTest = false;
@@ -14,6 +14,7 @@ var hideUi = false;
 var benchSeconds = 0.0;
 var planetFly = false;
 var moonTest = false;
+var shoreFly = false;
 OrbitTestFrame? orbitTest = null;
 
 // Weather drives the ocean wind and the sky unless --wind pins the sea (tests, benchmarks); --weather forces it on.
@@ -65,6 +66,8 @@ for (var i = 0; i < args.Length; i++)
         planetFly = true;
     else if (args[i] == "--moon-test")
         moonTest = true;
+    else if (args[i] == "--shore-fly")
+        shoreFly = true;
     else if (args[i] == "--orbit-test")
     {
         orbitTest = OrbitTestFrame.Surface;
@@ -83,5 +86,5 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
-using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest);
+using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest, shoreFly);
 app.Run();

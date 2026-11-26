@@ -10,11 +10,11 @@ namespace BrutalGame.Sim;
 
 /// <summary>
 /// The simulation behind the client: the fixed tick, the physics world, the ocean's gameplay queries, the swell's wind
-/// and the planet's terrain edits. It knows no renderer, window or UI, so a headless host can drive it
+/// and the planet's terrain edits (and with them the water depth the ocean reads). It knows no renderer, window or UI, so a headless host can drive it
 /// (docs/pivot/review.md, Missing 1). Main-thread only, like <see cref="PhysicsWorld"/>.
 /// <para>
-/// The test system's planet carries the terrain (<see cref="Planet"/>). Physics, the sea frame and the weather plane sit
-/// in one surface bubble at the spawn on its coast (<see cref="Bubble"/>), fixed for now; rebasing is M3.
+/// The test system's planet carries the terrain (<see cref="Planet"/>). Physics and the weather plane sit in one surface
+/// bubble at the spawn on its coast (<see cref="Bubble"/>), fixed for now; rebasing is M3. The sea is planet-wide.
 /// Known gap: terrain collision is still streamed into <see cref="Physics"/> by the client's TerrainWorld around the
 /// camera, so a headless sim has no ground until collision streaming moves behind sim-owned anchors (M3).
 /// </para>
@@ -27,7 +27,12 @@ public sealed class SimWorld : IDisposable
     public const int WindInterval = TickRate;
 
     public readonly PhysicsWorld Physics;
+
+    /// <summary>The planet's sea: one definition everywhere on it (<see cref="OceanSurface.Sample"/> by planet position and tick).</summary>
     public readonly OceanSurface Ocean;
+
+    /// <summary>The planet's water depth for the ocean: generated ground plus the edits that reach the sea.</summary>
+    public readonly PlanetShore Shore;
 
     /// <summary>The planet the terrain is on: its index in <see cref="Celestial"/>, params and generator.</summary>
     public readonly int PlanetIndex;
@@ -40,7 +45,7 @@ public sealed class SimWorld : IDisposable
     /// <summary>Authoritative edits (D32: permanent); Seq stamped here.</summary>
     public readonly EditStore EditStore = new();
 
-    /// <summary>The surface bubble at the spawn: physics, the sea frame and the weather plane (y up, sea level at y 0 at its origin).</summary>
+    /// <summary>The surface bubble at the spawn: physics and the weather plane (y up, sea level at y 0 at its origin).</summary>
     public readonly PhysicsBubble Bubble;
 
     /// <summary>Seaward along the bubble's +X from the waterline at its origin.</summary>
@@ -86,11 +91,18 @@ public sealed class SimWorld : IDisposable
         Bubble = PhysicsBubble.At(coast * level, Seaward);
         Physics.SetBubble(Bubble, SceneGravity(body, Bubble.Origin));
 
-        Ocean = new OceanSurface(new OceanSwell(seed), new PlanetShoreDepth(Generator.Surface, Bubble));
+        Shore = new PlanetShore(Generator.Surface);
+        var tiles = new SeaTiles(level, body.SpinAxis);
+        Ocean = new OceanSurface(new OceanSwell(seed), tiles, _clock.TickSeconds, new PlanetShoreDepth(Shore));
         UpdateRenderPoses();
 
         if (weather is not null)
-            _wind = new SwellWind(weather);
+        {
+            // The weather plane is the bubble's; the swell's directions are from east toward south.
+            SeaTiles.EastSouth(coast, body.SpinAxis, out var east, out var south);
+            var x = Bubble.ToPlanetDirection(double3.UnitX);
+            _wind = new SwellWind(weather, (float)Math.Atan2(double3.Dot(x, south), double3.Dot(x, east)));
+        }
     }
 
     public ref readonly FixedClock Clock => ref _clock;
@@ -128,8 +140,9 @@ public sealed class SimWorld : IDisposable
     public void UpdateRenderPoses() => Celestial.Evaluate(RenderTick, _clock.Alpha);
 
     /// <summary>
-    /// The groundswell and the wind used when weather doesn't drive it. With weather driving, the sea wind at this tick
-    /// replaces the wind at once (the first wind never blends).
+    /// The groundswell and the wind used when weather doesn't drive it (directions from east toward south, the same over
+    /// the whole planet). With weather driving, the sea wind at this tick replaces the wind at once (the first wind never
+    /// blends).
     /// </summary>
     public void SetSwell(in SwellParams swell)
     {
@@ -184,7 +197,7 @@ public sealed class SimWorld : IDisposable
                 continue;
             }
 
-            EditStore.Add(command.Op with { Seq = 0 });
+            Shore.Add(EditStore.Add(command.Op with { Seq = 0 }));
             EditVersion++;
         }
 

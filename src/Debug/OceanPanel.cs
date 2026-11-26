@@ -2,13 +2,14 @@ using System.Diagnostics;
 using Brutal.ImGuiApi;
 using Brutal.Numerics;
 using BrutalGame.Engine.Time;
+using BrutalGame.Terrain.Runtime;
 using BrutalGame.Water.Ocean;
 using BrutalGame.Water.Rendering;
 
 namespace BrutalGame.Debug;
 
 /// <summary>
-/// CPU swell tuning, readouts and sampling perf. No GC allocation per frame.
+/// CPU swell tuning, readouts and sampling perf, and the shore depth maps' timings. No GC allocation per frame.
 /// </summary>
 public sealed class OceanPanel
 {
@@ -25,6 +26,8 @@ public sealed class OceanPanel
     private readonly TimingRing _height = new(TimingSamples);
     private readonly TimingRing _bench = new(TimingSamples);
     private readonly float2[] _benchPoints = new float2[BenchCount];
+    private readonly ShoreDepthGrid _depths;
+    private readonly ShoreDepthTexture _depthTexture;
     private SwellParams _edit;
     private float _fetchKm;
     private float _depth = 50f;
@@ -35,9 +38,15 @@ public sealed class OceanPanel
     public bool Open = true;
     public bool ShoreWash = true;
 
-    public OceanPanel(OceanSurface surface, OceanFft fft)
+    /// <summary>Where the readouts and the benchmark sample the sea (planet frame; the sea point under the camera) and the tick they sample it at.</summary>
+    public double3 Probe = double3.UnitX;
+    public long Tick;
+
+    public OceanPanel(OceanSurface surface, OceanFft fft, ShoreDepthGrid depths, ShoreDepthTexture depthTexture)
     {
         _surface = surface;
+        _depths = depths;
+        _depthTexture = depthTexture;
         _swell = surface.Swell;
         _fft = fft;
         _edit = _swell.Wind;
@@ -54,7 +63,7 @@ public sealed class OceanPanel
 
     public void Draw()
     {
-        _height.Record(_surface.SampleHeight(0f, 0f));
+        _height.Record(_surface.SampleHeight(Probe, Tick));
 
         if (_benchmark)
             RunBenchmark();
@@ -70,6 +79,7 @@ public sealed class OceanPanel
             DrawWind();
             DrawDetail();
             DrawReadouts();
+            DrawDepth();
             DrawPerf();
         }
 
@@ -131,13 +141,21 @@ public sealed class OceanPanel
         ImGui.Text($"choppiness {_swell.Choppiness:F3}  t {_swell.Time:F2} s");
         ImGui.Checkbox("Shore wash"u8, ref ShoreWash);
 
-        ImGui.SeparatorText("Origin"u8);
+        ImGui.SeparatorText("Under the camera"u8);
         ImGui.PlotLines("##height"u8, _height.Values, _height.Offset, default, float.MaxValue, float.MaxValue, GraphSize);
 
-        var s = _surface.Sample(0f, 0f);
+        var s = _surface.Sample(Probe, Tick);
         ImGui.Text($"h {s.Height,7:F3}  jacobian {s.Jacobian:F3}");
         ImGui.Text($"n   {s.Normal.X,7:F3} {s.Normal.Y,7:F3} {s.Normal.Z,7:F3}");
         ImGui.Text($"vel {s.Velocity.X,7:F3} {s.Velocity.Y,7:F3} {s.Velocity.Z,7:F3}");
+    }
+
+    private void DrawDepth()
+    {
+        ImGui.SeparatorText("Shore depth maps"u8);
+        ImGui.Text($"{(_depths.HasMaps ? "maps on" : "no maps")}  {(_depths.Settled ? "settled" : "baking")}  jobs {_depths.Jobs}");
+        ImGui.Text($"last job {_depths.LastJobMs,6:F2} ms / {_depths.LastJobCells} cells  far bake {_depths.LastFarBakeMs,6:F1} ms");
+        ImGui.Text($"upload {_depthTexture.LastUploadMs,6:F3} ms / {_depthTexture.LastUploadCells} cells");
     }
 
     private void DrawPerf()
@@ -155,9 +173,12 @@ public sealed class OceanPanel
 
     private void RunBenchmark()
     {
+        var up = double3.Normalize(Probe);
+        SeaTiles.EastSouth(up, double3.UnitY, out var east, out var south);
         var start = Stopwatch.GetTimestamp();
+
         foreach (var p in _benchPoints)
-            _surface.Sample(p.X, p.Y);
+            _surface.Sample(Probe + east * p.X + south * p.Y, Tick);
 
         _bench.Record((float)Stopwatch.GetElapsedTime(start).TotalMilliseconds);
     }

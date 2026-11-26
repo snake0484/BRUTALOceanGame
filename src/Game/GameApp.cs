@@ -30,10 +30,18 @@ public sealed class GameApp : IDisposable
     /// <summary>The atmosphere's density scale height (m): fog and the sky's clear colour fade with altitude by it.</summary>
     private const double ScaleHeight = 8000.0;
 
-    /// <summary>The ocean's clipmap is drawn while the camera is within this distance (m) of the sea frame's origin, its tangent plane (curved to the sphere) still within ~1 m of the sea.</summary>
-    private const double OceanReach = 40_000.0;
+    /// <summary>The sea frame moves to the camera once the camera is this far (m) from its origin: the far depth map (±12 km) still covers the waves' reach, and everything in the frame stays small.</summary>
+    private const double SeaFrameReach = 3072.0;
 
-    /// <summary>The clipmap's reach (m): past it, seabeds take the water's colour themselves.</summary>
+    /// <summary>Camera height above the sea (m) below which the sea frame has depth maps, and below which the near window (shore wash) is kept; each is dropped again a little higher.</summary>
+    private const double DepthMapsTop = 28_000.0;
+    private const double NearDepthTop = 600.0;
+    private const double DepthHysteresis = 1.15;
+
+    /// <summary>The ocean surface has faded out into the terrain's far sea by this much of the space look (about 60 km up).</summary>
+    private const float OceanGone = 0.5f;
+
+    /// <summary>Within this distance (m) of the camera seabeds are seen through the ocean surface; past it they take the water's colour themselves (under the surface, and alone once it has faded out with altitude).</summary>
     private const float OceanSurfaceReach = 6000f;
 
     /// <summary>Teleports (scripted tests) above this per-frame jump (m) reset the measured camera speed.</summary>
@@ -63,17 +71,19 @@ public sealed class GameApp : IDisposable
     private readonly FlyCamera _camera = new();
     private readonly FrameId _planetFrame;
     private readonly double _planetSoi;
-    private readonly BathymetryGrid _depthGrid = new();
+    private readonly ShoreDepthGrid _depths;
+    private readonly ShoreDepthTexture _depthTexture;
+    private readonly double3 _spinAxis;
     private readonly InstanceBuffer _instances;
     private readonly TerrainRenderer _terrainRenderer;
     private readonly TerrainWorld _terrain;
-    private readonly BathymetryTexture _bathymetry;
     private readonly TerrainPanel _terrainPanel;
     private readonly TerrainBrush _brush;
     private readonly EditTest? _editTest;
     private readonly int _oceanScope;
     private readonly GpuBenchmark? _bench;
     private readonly PlanetFlyTest? _planetFly;
+    private readonly ShoreFlyTest? _shoreFly;
     private readonly OrbitTest? _orbitTest;
     private readonly MoonTest? _moonTest;
     private readonly PlanetRenderer? _planets;
@@ -93,6 +103,17 @@ public sealed class GameApp : IDisposable
     private float _sunElevation = 1f;
     private double _cameraSpeed;
     private bool _oceanDrawn;
+
+    // The sea frame the ocean is drawn in, the one being baked to replace it, and the camera's drift between frames
+    // (it keeps the FFT tiles and the foam lace where they were when the frame moves).
+    private SeaFrame _seaFrame;
+    private SeaFrame _nextSeaFrame;
+    private bool _seaFramed;
+    private bool _seaWanted;
+    private bool _nearDepth;
+    private double _detailX;
+    private double _detailZ;
+    private int _seaFrames;
     private bool _octreeActive = true;
     private bool _octreeLoaded;
     private float _octreeCover;
@@ -103,11 +124,12 @@ public sealed class GameApp : IDisposable
     private readonly int _oceanStats;
     private readonly int _uiStats;
 
-    /// <param name="camera">Optional start pose in the spawn's sea frame (y up, sea level 0, +x out to sea): x, y, z, yaw degrees, pitch degrees.</param>
+    /// <param name="camera">Optional start pose in the spawn's bubble (y up, sea level 0, +x out to sea): x, y, z, yaw degrees, pitch degrees.</param>
     /// <param name="planetFly">--planet-fly: scripted flights over the planet at 30, 300 and 3000 m/s and a descent from 800 km, logging streaming numbers.</param>
     /// <param name="orbitTest">--orbit-test [inertial]: the test planet as a smooth sphere below the impostor switch and on the detail ladder above it, with the terrain round the spawn on it, flown from 2 m to 1e8 m with the camera in its surface or inertial frame; no ocean.</param>
     /// <param name="moonTest">--moon-test: the camera falls onto the moon from 1e9 m (a point of light) through disc, impostor and the focus switch to its octree, logging the ladder's GPU time per stage.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false)
+    /// <param name="shoreFly">--shore-fly: the camera follows the spawn's waterline, then climbs, logging the ocean's GPU time and the depth maps' work.</param>
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false, bool shoreFly = false)
     {
         var weatherField = new WeatherField(new WeatherClimate());
         _sim = new SimWorld(seed: 1, WorkerBudget.Tick, weatherField) { DriveWind = weather, WeatherTimeOffset = weatherOffset * 60.0 };
@@ -115,6 +137,7 @@ public sealed class GameApp : IDisposable
         ref readonly var planet = ref _sim.Celestial[_sim.PlanetIndex];
         _planetFrame = planet.Surface;
         _planetSoi = planet.SoiRadius;
+        _spinAxis = planet.SpinAxis;
         _camera.Frame = _planetFrame;
 
         // Without --cam, 55 m out from the spawn's beach, 28 m up, looking at it.
@@ -150,7 +173,9 @@ public sealed class GameApp : IDisposable
         _weather = new WeatherSystem(weatherField, _sim.WeatherTime, CameraXZ);
         _sim.SetSwell(wind);
         _oceanFft = new OceanFft(_renderer) { DebugView = foamDebug };
-        _oceanPanel = new OceanPanel(_sim.Ocean, _oceanFft);
+        _depths = new ShoreDepthGrid(_sim.Shore);
+        _depthTexture = new ShoreDepthTexture(_renderer);
+        _oceanPanel = new OceanPanel(_sim.Ocean, _oceanFft, _depths, _depthTexture);
         _weatherPanel = new WeatherPanel(_weather.Map) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset };
         _instances = new InstanceBuffer(_renderer);
         _terrainRenderer = new TerrainRenderer(_renderer, _instances);
@@ -169,8 +194,7 @@ public sealed class GameApp : IDisposable
         _brush = new TerrainBrush(_sim, _camera);
         _editTest = editTest ? new EditTest(_sim, _terrain, _brush, _camera) : null;
         _terrainPanel = new TerrainPanel(_terrain, _terrainRenderer, _sim.Physics);
-        _bathymetry = new BathymetryTexture(_renderer);
-        _ocean = new OceanRenderer(_renderer, _oceanFft, _bathymetry.View, _bathymetry.Sampler);
+        _ocean = new OceanRenderer(_renderer, _oceanFft, _depthTexture.NearView, _depthTexture.NearSampler, _depthTexture.FarView, _depthTexture.FarSampler);
         _planetFly = planetFly ? new PlanetFlyTest(_camera, _sim, _terrain) : null;
         _profiler = new ProfilerPanel(_stats, _renderer, _terrainRenderer, _ocean);
 
@@ -186,6 +210,7 @@ public sealed class GameApp : IDisposable
             _planetScope = _renderer.GpuTimer.Register("Planet");
 
         _moonTest = moonTest ? new MoonTest(_camera, _sim, _terrain, _celestial, _renderer.GpuTimer, _terrainScope) : null;
+        _shoreFly = shoreFly ? new ShoreFlyTest(_camera, _sim, _depths, _depthTexture, _renderer.GpuTimer, [_oceanScope, _fftScope, _oceanComputeScope]) : null;
 
         var pipelineStats = _renderer.PipelineStats;
         _terrainStats = pipelineStats.Register("Terrain", PipelinePass.Opaque);
@@ -198,7 +223,7 @@ public sealed class GameApp : IDisposable
         if (benchSeconds > 0.0)
             _bench = new GpuBenchmark(_renderer.GpuTimer, benchSeconds, ["CPU frame", "CPU record", "Terrain rec"], [_stats.Frame, _stats.Record, _terrainRenderer.DrawMs]);
 
-        if (hideUi || _bench is not null || _planetFly is not null || _moonTest is not null)
+        if (hideUi || _bench is not null || _planetFly is not null || _moonTest is not null || _shoreFly is not null)
         {
             _profiler.Open = false;
             _oceanPanel.Open = false;
@@ -245,10 +270,11 @@ public sealed class GameApp : IDisposable
             _sim.UpdateRenderPoses();
             _sections.Ticks = Lap(ref mark);
 
-            if (_orbitTest is null && _planetFly is null && _moonTest is null)
+            if (_orbitTest is null && _planetFly is null && _moonTest is null && _shoreFly is null)
                 _camera.Update(_window, frameSeconds, _imgui.WantCaptureMouse, _imgui.WantCaptureKeyboard);
 
             _planetFly?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds);
+            _shoreFly?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady, _seaFrames);
             _orbitTest?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady, OutputAspect, RenderViewport, _sim.RenderTime);
             _moonTest?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady);
             _celestial.Update(_camera);
@@ -268,6 +294,7 @@ public sealed class GameApp : IDisposable
             _terrain.Update(_orbitTest is null ? terrainCamera : _sim.Bubble.Origin, _planetFly?.Speed ?? _cameraSpeed);
             terrain &= _terrain.Focus == (_orbitTest is null ? _celestial.FocusTerrainBody : _planetTerrainBody);
             UpdateOctreeCover(terrain, frameSeconds);
+            UpdateSea(terrain, terrainCamera);
             _sections.Terrain = Lap(ref mark);
             UpdateSun(terrainCamera, terrainAxes);
             UpdateWeather();
@@ -287,17 +314,16 @@ public sealed class GameApp : IDisposable
                 var pipe = _renderer.PipelineStats;
                 var viewProj = _camera.ViewProjection(aspect);
 
-                // The ocean is drawn in the sea frame (the physics bubble at the spawn) with the camera in the planet's frame, near the frame's origin; not in the orbit test.
-                var seaCamera = _sim.Bubble.LocalDouble(terrainCamera);
-                var ocean = terrain && _orbitTest is null && _camera.Frame == _planetFrame && _celestial.Focus == _sim.PlanetIndex && _sim.Planet.HasSea
-                    && seaCamera.X * seaCamera.X + seaCamera.Z * seaCamera.Z < OceanReach * OceanReach && seaCamera.Y < OceanReach;
+                // The ocean is drawn in the sea frame under the camera, up to the height where it has faded into the terrain's far sea.
+                var seaCamera = _seaFramed ? _seaFrame.ToLocal(terrainCamera) : default;
+                var ocean = _seaWanted && _seaFramed && _ocean.Opacity > 0f;
                 _oceanDrawn = ocean;
 
                 mark = Stopwatch.GetTimestamp();
                 _instances.BeginFrame(_renderer.FrameIndex);
                 gpu.Begin(commands, _uploadScope);
                 _terrainRenderer.RecordUploads(commands, _renderer.FrameIndex);
-                _bathymetry.Record(commands, _renderer.FrameIndex, _depthGrid);
+                _depthTexture.Record(commands, _renderer.FrameIndex, _depths);
                 _celestial.RecordUploads(commands);
                 gpu.End(commands, _uploadScope);
                 _sections.Uploads = Lap(ref mark);
@@ -309,7 +335,19 @@ public sealed class GameApp : IDisposable
                 if (ocean)
                 {
                     _ocean.ShoreWash = _oceanPanel.ShoreWash;
-                    _ocean.Prepare(_renderer.FrameIndex, _swell, renderTime, SeaViewProjection(viewProj), seaCamera, NoDepthMap, _sim.Planet.SeaRadius);
+                    _ocean.Prepare(_renderer.FrameIndex, _sim.Ocean, _seaFrame, renderTime, new OceanRenderer.View
+                    {
+                        ViewProj = _seaFrame.Rotation * viewProj,
+                        Camera = seaCamera,
+                        DetailX = seaCamera.X + _detailX,
+                        DetailZ = seaCamera.Z + _detailZ,
+                        DepthNear = _depths.NearRect(seaCamera.X, seaCamera.Z),
+                        DepthFar = _depths.FarRect(seaCamera.X, seaCamera.Z),
+                        DepthValid = _depths.NearValid(seaCamera.X, seaCamera.Z),
+                        DepthCellX = _depths.Origin.X,
+                        DepthCellZ = _depths.Origin.Z,
+                        DepthVersion = _depths.FrameVersion,
+                    });
                     _sections.Prepare = Lap(ref mark);
                     gpu.Begin(commands, _oceanComputeScope);
                     _ocean.RecordCompute(commands, _renderer.FrameIndex, (float)frameSeconds, _sim.Clock.TickIndex);
@@ -382,9 +420,10 @@ public sealed class GameApp : IDisposable
             _sections.GpuWait = _stats.GpuWait.Last;
             _planetFly?.Record(_sections, _camera.ViewProjection(OutputAspect));
             _moonTest?.Record(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, _stats.Frame.Last, _sections.Work, _terrainRenderer.DrawnLastFrame, _camera.ViewProjection(OutputAspect), _renderer.Extent.Height, _focusBlend.Covers);
+            _shoreFly?.Record(_sections, _ocean.TilesDrawn);
             RecordOrbitTest();
 
-            if (_planetFly is { Done: true } || _orbitTest is { Done: true } || _moonTest is { Done: true })
+            if (_planetFly is { Done: true } || _orbitTest is { Done: true } || _moonTest is { Done: true } || _shoreFly is { Done: true })
                 _window.ShouldClose = true;
         }
     }
@@ -439,11 +478,54 @@ public sealed class GameApp : IDisposable
         var up = terrainCamera.Length() > 0.0 ? double3.Normalize(terrainCamera) : double3.UnitY;
         _sunElevation = (float)double3.Dot(sunBody, up);
 
-        if (_celestial.Focus == _sim.PlanetIndex)
+        if (_celestial.Focus == _sim.PlanetIndex && _seaFramed)
+            _ocean.SunDirection = _seaFrame.ToLocalDirection(sunBody);
+    }
+
+    /// <summary>
+    /// The sea frame follows the camera over the spawn planet's sea (<see cref="SeaFrame"/>): a new one is baked in the
+    /// background once the camera has strayed <see cref="SeaFrameReach"/> from the origin of the one in use (or its depth
+    /// maps come or go with altitude) and swapped in whole, the FFT tiles and foam lace kept where they were. The depth
+    /// maps then follow the camera inside it.
+    /// </summary>
+    private void UpdateSea(bool terrain, double3 camera)
+    {
+        var altitude = camera.Length() - _sim.Planet.SeaRadius;
+        _seaWanted = terrain && _orbitTest is null && _camera.Frame == _planetFrame && _celestial.Focus == _sim.PlanetIndex && _sim.Planet.HasSea
+            && altitude < OceanRenderer.MaxAltitude;
+        _ocean.FogFade = Atmosphere;
+        _ocean.Opacity = 1f - Smooth(0f, OceanGone, DetailLadder.SpaceLook(_celestial.FocusAltitude));
+        _oceanPanel.Probe = camera;
+        _oceanPanel.Tick = _sim.Clock.TickIndex;
+
+        if (!_seaWanted)
+            return;
+
+        var maps = altitude < DepthMapsTop * (_depths.HasMaps ? DepthHysteresis : 1.0);
+        _nearDepth = altitude < NearDepthTop * (_nearDepth ? DepthHysteresis : 1.0);
+        var local = _seaFramed ? _seaFrame.ToLocal(camera) : default;
+        var strayed = !_seaFramed || local.X * local.X + local.Z * local.Z > SeaFrameReach * SeaFrameReach || maps != _depths.HasMaps;
+
+        if (strayed && !_depths.Preparing)
         {
-            var sea = doubleQuat.Conjugate(_sim.Bubble.Axes) * sunBody;
-            _ocean.SunDirection = new System.Numerics.Vector3((float)sea.X, (float)sea.Y, (float)sea.Z);
+            _nextSeaFrame = SeaFrame.At(camera, _spinAxis, _sim.Planet.SeaRadius);
+            var next = _nextSeaFrame.ToLocal(camera);
+            _depths.Prepare(new ShoreDepthGrid.Frame(_nextSeaFrame.Origin, _nextSeaFrame.X, _nextSeaFrame.Up, _nextSeaFrame.Z, _nextSeaFrame.SeaRadius), next.X, next.Z, maps, _nearDepth);
         }
+
+        if (_depths.NextReady)
+        {
+            var next = _nextSeaFrame.ToLocal(camera);
+
+            if (_seaFramed)
+                (_detailX, _detailZ) = (_detailX + local.X - next.X, _detailZ + local.Z - next.Z);
+
+            (_seaFrame, _seaFramed, local) = (_nextSeaFrame, true, next);
+            _depths.Swap();
+            _seaFrames++;
+        }
+
+        _depths.Update(local.X, local.Z, _nearDepth);
     }
 
     /// <summary>
@@ -502,17 +584,6 @@ public sealed class GameApp : IDisposable
         _cameraSpeed += (jump / frameSeconds - _cameraSpeed) * blend;
     }
 
-    /// <summary>The ocean's view-projection: sea frame axes into the camera's, then the camera's translation-free view-projection.</summary>
-    private System.Numerics.Matrix4x4 SeaViewProjection(in System.Numerics.Matrix4x4 viewProj)
-    {
-        var q = _sim.Bubble.Axes;
-        var rotation = System.Numerics.Matrix4x4.CreateFromQuaternion(new System.Numerics.Quaternion((float)q.X, (float)q.Y, (float)q.Z, (float)q.W));
-        return rotation * viewProj;
-    }
-
-    /// <summary>No depth map until M2b's planet ShoreDepthMap: every lookup falls outside it and reads open water.</summary>
-    private static readonly System.Numerics.Vector4 NoDepthMap = new(1e7f, 1e7f, 1f, BathymetryGrid.UnknownDepth);
-
     /// <summary>
     /// --orbit-test: the smooth sphere through the marker stands in for the octree below the impostor switch (the test's
     /// octree stays at the spawn); every body on the detail ladder above it, the planet's impostor fading in across the
@@ -549,7 +620,7 @@ public sealed class GameApp : IDisposable
     /// <summary>The render target's size (render scale applied): the pixels the scene is drawn in.</summary>
     private System.Numerics.Vector2 RenderViewport => new(_renderer.Extent.Width, _renderer.Extent.Height);
 
-    private bool WorldReady => (_terrain.Settled || !_octreeActive) && _celestial.Ready;
+    private bool WorldReady => (_terrain.Settled || !_octreeActive) && _celestial.Ready && (!_seaWanted || (_seaFramed && _depths.Settled && !_depths.Preparing));
 
     /// <summary>
     /// The camera in the focus body's frame and that body's axes in the camera frame's, through the frame tree at render
@@ -637,7 +708,7 @@ public sealed class GameApp : IDisposable
         return new System.Numerics.Vector3((float)centre.X, (float)centre.Y, (float)centre.Z);
     }
 
-    /// <summary>The camera in the sea frame's plane (weather samples there); the frame's origin outside the planet's frame.</summary>
+    /// <summary>The camera in the weather plane (the spawn bubble's); the plane's origin outside the planet's frame.</summary>
     private System.Numerics.Vector2 CameraXZ
     {
         get
@@ -650,7 +721,7 @@ public sealed class GameApp : IDisposable
         }
     }
 
-    /// <summary>The camera at a point of the sea frame, looking along yaw (from +X toward +Z) and pitch.</summary>
+    /// <summary>The camera at a point of the spawn bubble (y up from sea level, +x out to sea), looking along yaw (from +X toward +Z) and pitch.</summary>
     private void PlaceCamera(System.Numerics.Vector3 position, float yaw, float pitch)
     {
         _camera.Position = _sim.Bubble.ToPlanet(position);
@@ -695,7 +766,10 @@ public sealed class GameApp : IDisposable
         var edits = _sim.Edits;
 
         for (var i = _terrain.EditCountOf(_planetTerrainBody); i < edits.Length; i++)
+        {
             _terrain.ApplyEdit(_planetTerrainBody, edits[i]);
+            _depths.MarkEdit(edits[i]);
+        }
     }
 
     private SceneLighting SceneLightingFromOcean() => new()
@@ -751,7 +825,8 @@ public sealed class GameApp : IDisposable
         _instances.Dispose();
         _sim.Dispose();
         _ocean.Dispose();
-        _bathymetry.Dispose();
+        _depths.Dispose();
+        _depthTexture.Dispose();
         _oceanFft.Dispose();
         _imgui.Dispose();
         _renderer.Dispose();

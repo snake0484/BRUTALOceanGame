@@ -1,35 +1,52 @@
 // Shared ocean surface evaluation (ocean.vert): frame block, maps, the depth-limited swell, the shore wash, and
-// oceanAt(), the displaced surface at a rest position. Must match the CPU OceanSwell / OceanSurface (see each section).
-// Camera-relative: x, z are relative to the camera and y is the height above sea level. Everything with a world phase
-// (wave and carrier phases, cascade anchors, depthRect) is rebased to the camera in double by OceanRenderer.Prepare.
+// oceanAt(), the displaced surface at a rest position. Must match the CPU OceanSurface (see each section).
+// Camera-relative, in the sea frame (SeaFrame: a tangent frame on the sea sphere near the camera, x east, z south):
+// x, z are relative to the camera and y is the height above sea level; seaDrop() bends the frame's plane to the sphere.
+// Everything with a world phase (wave and carrier phases, cascade anchors, depth rects) is rebased to the camera in
+// double by OceanRenderer.Prepare.
 
-struct Wave { vec4 a; vec4 b; }; // a = (kx, kz, phase, amplitude), b = (cx, cz, omega, unused)
+struct Wave { vec4 a; vec4 b; }; // a = (ku, kv, unused, amplitude), b = (cu, cv, omega, unused), in the wave plane's axes
+
+const int MAX_WAVES = 512;
+const int MAX_SLOTS = 4;
 
 layout(set = 0, binding = 0, std140) uniform Frame {
     mat4 viewProj;
-    vec4 cameraPos;      // (0, camera height above sea level, 0), w = time, wrapped at 3000 s (OceanRenderer.TimeWrap)
-    vec4 sunDir;         // xyz toward sun, w = intensity
-    vec4 skyZenith;
+    vec4 cameraPos;      // (0, camera height above the sea frame's plane, 0), w = time, wrapped at 3000 s (OceanRenderer.TimeWrap)
+    vec4 sunDir;         // xyz toward sun (sea frame axes), w = intensity
+    vec4 skyZenith;      // w = slope variance of the waves a pixel can't resolve (far glint width)
     vec4 skyHorizon;     // w = fog density
-    vec4 waterDeep;
+    vec4 waterDeep;      // w = the surface's opacity: from altitude it fades out into the terrain's far sea (terrain.frag)
     vec4 waterScatter;
     vec4 cascadeL;       // xyz = patch size L per cascade (m), w = cascade count
     vec4 cascadeKLo;     // xyz = band low |k| per cascade, w = persistent foam strength
-    vec4 cascadeAnchorX; // xyz = frac(camera x / L) per cascade (cascadeUv), w = camera x in the sea frame mod the lace period (foamLace)
-    vec4 cascadeAnchorZ; // xyz = frac(camera z / L) per cascade, w = camera z in the sea frame mod the lace period
-    vec4 depthRect;      // xy = depth map origin relative to the camera, z = world size, w = depth outside the map
+    vec4 cascadeAnchorX; // xyz = frac(camera x / L) per cascade (cascadeUv), w = camera x mod the lace period (foamLace)
+    vec4 cascadeAnchorZ; // xyz = frac(camera z / L) per cascade, w = camera z mod the lace period
+    vec4 depthRect;      // near depth map: xy = window corner relative to the camera, z = world size (0 = none), w = depth outside both maps
+    vec4 depthFar;       // far depth map: xy = corner relative to the camera, z = world size (0 = none)
+    vec4 depthWrap;      // xy = the near window's corner cell mod the map's size (it is stored toroidally), zw unused
+    vec4 depthValid;     // the part of the near window that holds its depth: xy = min, zw = max, relative to the camera (empty: min > max)
     vec4 carrier;        // surf carrier (OceanSwell.GpuCarrier): x = omega, y = phase, z = set group ratio (a set every 1 / this waves), w = set group phase
     vec4 shore;          // xy = carrier travel direction, z = its breaker height (0 = no shore wash), w = open swell Hs
-    vec4 planet;         // xy = camera x, z in the sea frame, z = 1 / (2 sea radius): the sea frame's tangent plane drops to the sphere by |xz|^2 z (0 = flat)
+    vec4 planet;         // xy = camera x, z in the sea frame, z unused, w = sea radius
+    vec4 bandRow;        // tile blend coordinate across the row edge = dot(xy, x0) + z (SeaSlots)
+    vec4 bandCell[2];    // ... across the cell edge of the row south of it, and of the row north of it
+    vec4 slotToTile[MAX_SLOTS];   // per slot: (u by x, u by z, v by x, v by z), sea frame plane to tile plane at the camera
+    vec4 slotFromTile[MAX_SLOTS]; // per slot: the inverse, (x by u, x by v, z by u, z by v)
+    vec4 slotSide[MAX_SLOTS];     // per slot: x = side of the row edge, y = side of its row's cell edge (-1, +1, 0 = whole), z = its row (0 south, 1 north)
     int waveCount;
+    int slotCount;
     float debugView;     // 1 = Jacobian/foam
-    Wave waves[512];
+    float pad0;
+    Wave waves[MAX_WAVES];
+    vec4 phases[MAX_WAVES]; // per wave, its phase at the camera in each slot's tile plane
 } frame;
 
 layout(set = 0, binding = 1) uniform sampler2DArray dispMap;  // (λDx, h, λDz, λDxz)
 layout(set = 0, binding = 2) uniform sampler2DArray derivMap; // (hx, hz, λDxx, λDzz)
 layout(set = 0, binding = 3) uniform sampler2DArray foamMap;  // r = persistent foam
-layout(set = 0, binding = 4) uniform sampler2D depthMap; // signed depth (BathymetryTexture), see waterDepth
+layout(set = 0, binding = 4) uniform sampler2D depthMap;    // near signed depth (ShoreDepthTexture), see waterDepth
+layout(set = 0, binding = 5) uniform sampler2D depthFarMap; // far signed depth
 
 const float BREAKING_GAMMA = 0.55; // OceanSwell.DepthCapGamma
 const float SHORE_CALM = 0.0; // m of water under the surface (oceanAt) at which the GPU band's chop is gone ...
@@ -65,19 +82,40 @@ const float SURF_SPACING_NONE = 8.0; // ... and gone by this one
 
 const int SURF_FOAM_RES = 512;
 
-layout(std430, set = 0, binding = 5) SURF_FOAM_ACCESS buffer SurfFoam
+layout(std430, set = 0, binding = 6) SURF_FOAM_ACCESS buffer SurfFoam
 {
     float values[];
 } surfFoam;
 
-// Water depth (m) from the bathymetry map: sea level - ground, negative on land, below -500 in pits cut off from the
-// sea; deep outside it.
+// How far the sea lies below the sea frame's plane at fromOrigin (x, z from the frame's origin): exact on the sphere,
+// (x² + z²) / 2R near the origin (SeaFrame.Drop).
+float seaDrop(vec2 fromOrigin)
+{
+    float R = frame.planet.w;
+    float r2 = min(dot(fromOrigin, fromOrigin), R * R);
+    return r2 / (R + sqrt(R * R - r2));
+}
+
+// Radial water depth (m): sea level - ground, negative on land (PlanetShore: the generated ground plus placed fill; an
+// inland pit dug below sea level stays land, so the sea never fills it). From the near map where its window holds its
+// depth (half a cell in from the edge, so the filter reads only such cells), the far map round it, deep outside both.
 float waterDepth(vec2 xz)
 {
-    vec2 uv = (xz - frame.depthRect.xy) / frame.depthRect.z;
-    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))))
-        return frame.depthRect.w;
-    return textureLod(depthMap, uv, 0.0).r;
+    float halfCell = 0.5 * frame.depthRect.z / float(SURF_FOAM_RES);
+    if (all(greaterThan(xz, frame.depthValid.xy + halfCell)) && all(lessThan(xz, frame.depthValid.zw - halfCell)))
+    {
+        vec2 uv = (xz - frame.depthRect.xy) / frame.depthRect.z;
+        return textureLod(depthMap, uv + frame.depthWrap.xy / float(SURF_FOAM_RES), 0.0).r;
+    }
+
+    if (frame.depthFar.z > 0.0)
+    {
+        vec2 uv = (xz - frame.depthFar.xy) / frame.depthFar.z;
+        if (all(greaterThan(uv, vec2(0.0))) && all(lessThan(uv, vec2(1.0))))
+            return textureLod(depthFarMap, uv, 0.0).r;
+    }
+
+    return frame.depthRect.w;
 }
 
 // Swash (docs/shore-wash.md): run-up events per shoreline point. Each bore that reaches the shoreline below a beach
@@ -182,18 +220,27 @@ float swashSheet(vec2 x0, float d, out float front)
     return sheet;
 }
 
-// Surf foam left behind at xz, bilinear over the cells; 0 outside the map.
+// The surf foam buffer's index of window cell c (stored toroidally, like the near depth map).
+int surfFoamIndex(ivec2 c)
+{
+    ivec2 t = (c + ivec2(frame.depthWrap.xy)) & (SURF_FOAM_RES - 1);
+    return t.x + t.y * SURF_FOAM_RES;
+}
+
+// Surf foam left behind at xz, bilinear over the cells; 0 outside the window.
 float surfFoamAt(vec2 xz)
 {
+    if (frame.depthRect.z <= 0.0)
+        return 0.0;
+
     vec2 f = (xz - frame.depthRect.xy) / frame.depthRect.z * float(SURF_FOAM_RES) - 0.5;
     ivec2 i = ivec2(floor(f));
     if (i.x < 0 || i.y < 0 || i.x >= SURF_FOAM_RES - 1 || i.y >= SURF_FOAM_RES - 1)
         return 0.0;
 
     vec2 t = f - vec2(i);
-    int k = i.x + i.y * SURF_FOAM_RES;
-    return mix(mix(surfFoam.values[k], surfFoam.values[k + 1], t.x),
-               mix(surfFoam.values[k + SURF_FOAM_RES], surfFoam.values[k + SURF_FOAM_RES + 1], t.x), t.y);
+    return mix(mix(surfFoam.values[surfFoamIndex(i)], surfFoam.values[surfFoamIndex(i + ivec2(1, 0))], t.x),
+               mix(surfFoam.values[surfFoamIndex(i + ivec2(0, 1))], surfFoam.values[surfFoamIndex(i + ivec2(1, 1))], t.x), t.y);
 }
 
 struct OceanPoint
@@ -215,46 +262,99 @@ struct Swell
     float jxx, jzz, jxz;
 };
 
-// Layer A anti-aliased over [lo, hi], every component scaled by cap (OceanSwell.Sample).
+float smooth01(float t)
+{
+    t = clamp(t, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// The weight of each sea tile slot at x0 (SeaTiles.Locate through SeaSlots): squares summing to 1.
+void slotWeights(vec2 x0, out float w[MAX_SLOTS])
+{
+    float row = smooth01(0.5 + 0.5 * (dot(frame.bandRow.xy, x0) + frame.bandRow.z));
+    float cell[2];
+    cell[0] = smooth01(0.5 + 0.5 * (dot(frame.bandCell[0].xy, x0) + frame.bandCell[0].z));
+    cell[1] = smooth01(0.5 + 0.5 * (dot(frame.bandCell[1].xy, x0) + frame.bandCell[1].z));
+
+    for (int s = 0; s < MAX_SLOTS; ++s)
+    {
+        w[s] = 0.0;
+        if (s >= frame.slotCount)
+            continue;
+
+        vec3 side = frame.slotSide[s].xyz;
+        float c = cell[int(side.z)];
+        float wr = side.x == 0.0 ? 1.0 : (side.x > 0.0 ? row : 1.0 - row);
+        float wc = side.y == 0.0 ? 1.0 : (side.y > 0.0 ? c : 1.0 - c);
+        w[s] = sqrt(wr * wc);
+    }
+}
+
+// The swell (OceanSurface.Sample) anti-aliased over [lo, hi], every component scaled by cap: each slot's tile field,
+// summed in its own plane (u, v) and turned into the sea frame's.
 Swell swellAt(vec2 x0, float lo, float hi, float cap)
 {
     Swell o = Swell(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    int count = min(frame.waveCount, 512);
+    int count = min(frame.waveCount, MAX_WAVES);
+    float weights[MAX_SLOTS];
+    slotWeights(x0, weights);
 
-    for (int i = 0; i < count; ++i)
+    for (int s = 0; s < frame.slotCount; ++s)
     {
-        vec4 a = frame.waves[i].a;
-        vec4 b = frame.waves[i].b;
-
-        float w = smoothstep(lo, hi, TWO_PI / max(length(a.xy), 1e-6));
-        if (w <= 0.0)
+        float ws = weights[s] * cap;
+        if (ws <= 0.0)
             continue;
 
-        float A = a.w * w;
-        float cx = b.x * w;
-        float cz = b.y * w;
-        float theta = a.x * x0.x + a.y * x0.y + a.z;
-        float s = sin(theta);
-        float c = cos(theta);
+        vec4 T = frame.slotToTile[s];
+        vec4 F = frame.slotFromTile[s];
+        vec2 uv = vec2(dot(T.xy, x0), dot(T.zw, x0));
+        float height = 0.0;
+        vec2 grad = vec2(0.0);
+        vec2 D = vec2(0.0);
+        vec3 j = vec3(0.0); // (uu, vv, uv)
 
-        o.height += A * c;
-        o.hx -= A * a.x * s;
-        o.hz -= A * a.y * s;
-        o.Dx -= cx * s;
-        o.Dz -= cz * s;
-        o.jxx += cx * a.x * c;
-        o.jzz += cz * a.y * c;
-        o.jxz += cx * a.y * c;
+        for (int i = 0; i < count; ++i)
+        {
+            vec4 a = frame.waves[i].a;
+            vec4 b = frame.waves[i].b;
+
+            float w = smoothstep(lo, hi, TWO_PI / max(length(a.xy), 1e-6));
+            if (w <= 0.0)
+                continue;
+
+            float A = a.w * w;
+            vec2 c = b.xy * w;
+            float theta = dot(a.xy, uv) + frame.phases[i][s];
+            float sn = sin(theta);
+            float cs = cos(theta);
+
+            height += A * cs;
+            grad -= A * a.xy * sn;
+            D -= c * sn;
+            j += vec3(c.x * a.x, c.y * a.y, c.x * a.y) * cs;
+        }
+
+        // Into the sea frame: positions by F, gradients by T transposed, the chop's Jacobian by F j T.
+        vec2 jx = vec2(F.x * j.x + F.y * j.z, F.x * j.z + F.y * j.y);
+        vec2 jz = vec2(F.z * j.x + F.w * j.z, F.z * j.z + F.w * j.y);
+        o.height += ws * height;
+        o.hx += ws * (T.x * grad.x + T.z * grad.y);
+        o.hz += ws * (T.y * grad.x + T.w * grad.y);
+        o.Dx += ws * dot(F.xy, D);
+        o.Dz += ws * dot(F.zw, D);
+        o.jxx += ws * (jx.x * T.x + jx.y * T.z);
+        o.jzz += ws * (jz.x * T.y + jz.y * T.w);
+        o.jxz += ws * 0.5 * (jx.x * T.y + jx.y * T.w + jz.x * T.x + jz.y * T.z);
     }
 
-    return Swell(o.height * cap, o.hx * cap, o.hz * cap, o.Dx * cap, o.Dz * cap, o.jxx * cap, o.jzz * cap, o.jxz * cap);
+    return o;
 }
 
 // The ocean surface at rest position x0, for a grid of effective spacing se (anti-aliasing filter width).
 OceanPoint oceanAt(vec2 x0, float se)
 {
-    // Depth-limited swell (OceanSwell.Cap): min(1, BREAKING_GAMMA h / Hs), so the open swell cannot run through the beach;
-    // 0 on land and in pits cut off from the sea.
+    // Depth-limited swell (OceanSurface): min(1, BREAKING_GAMMA h / Hs), so the open swell cannot run through the beach;
+    // 0 on land.
     float depth = waterDepth(x0);
     float cap = frame.shore.w > 1e-4 ? clamp(BREAKING_GAMMA * depth / frame.shore.w, 0.0, 1.0) : 1.0;
     Swell sw = swellAt(x0, 2.0 * se, 4.0 * se, cap);

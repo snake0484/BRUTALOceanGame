@@ -128,7 +128,7 @@ public class SimBoundaryTests
         Assert.Equal(1.0, sim.Clock.SimTime, 9);
         Assert.Equal(sim.Clock.SimTime, sim.Ocean.Swell.Time, 9); // swell, physics and frames all describe the step's end
         Assert.True(sim.Physics.GetPosition(ball).Y < 50f - 4f);
-        Assert.True(float.IsFinite(sim.Ocean.SampleHeight(0f, 0f)));
+        Assert.True(float.IsFinite(sim.Ocean.SampleHeight(sim.Bubble.ToPlanet(new Vector3(300f, 0f, 0f)), sim.Clock.TickIndex)));
     }
 
     /// <summary>The swell's wind is a function of the tick alone: two sims with the same weather agree, whatever a client's camera does.</summary>
@@ -157,7 +157,9 @@ public class SimBoundaryTests
         Assert.Equal(a.Ocean.Swell.Wind, b.Ocean.Swell.Wind);
         Assert.NotEqual(Vector2.Zero, a.SeaWind);
         Assert.True(sent.WindSpeed > 0f);
-        Assert.Equal(a.Ocean.SampleHeight(10f, -400f), b.Ocean.SampleHeight(10f, -400f));
+        var offshore = a.Bubble.ToPlanet(new Vector3(400f, 0f, -400f));
+        Assert.Equal(a.Ocean.SampleHeight(offshore, a.Clock.TickIndex), b.Ocean.SampleHeight(offshore, b.Clock.TickIndex));
+        Assert.NotEqual(0f, a.Ocean.SampleHeight(offshore, a.Clock.TickIndex));
     }
 
     /// <summary>An edit <paramref name="below"/> m under the generated ground at a point of the bubble's plane (x out to sea).</summary>
@@ -212,10 +214,43 @@ public class SimBoundaryTests
 
         Assert.InRange(surface.Height(origin.X, origin.Y, origin.Z) - surface.SeaHeight, -1.0f, 1.0f);
         Assert.InRange(sim.Bubble.Origin.Length(), sim.Planet.SeaRadius - 1e-6, sim.Planet.SeaRadius + 1e-6);
-        var depth = new PlanetShoreDepth(surface, sim.Bubble);
-        Assert.True(depth.Depth(200f, 0f) > 0f, "out to sea is water");
-        Assert.True(depth.Depth(-400f, 0f) < -3f, "inland is dry land");
+        var depth = new PlanetShoreDepth(sim.Shore);
+        Assert.True(depth.Depth(Dir(sim, 200f)) > 0f, "out to sea is water");
+        Assert.True(depth.Depth(Dir(sim, -400f)) < -3f, "inland is dry land");
         Assert.True(sim.Physics.Gravity.Y < -9.7f && MathF.Abs(sim.Physics.Gravity.X) < 0.1f && MathF.Abs(sim.Physics.Gravity.Z) < 0.1f);
+    }
+
+    /// <summary>
+    /// The sea is the planet's, not the bubble's (review C5, C7): fill placed on the seabed makes the water shallower for
+    /// the ocean's depth cap at once, on a sim with no camera, and the sea is the same function of planet position and
+    /// tick whichever way it is asked.
+    /// </summary>
+    [Fact]
+    public void PlacedFill_ShallowsTheSea()
+    {
+        using var sim = new SimWorld(seed: 1, workerThreads: 1);
+        sim.SetSwell(new SwellParams { WindSpeed = 8f, SwellHeight = 1.5f, SwellPeriod = 12f });
+        var surface = sim.Generator.Surface;
+        var d = Dir(sim, 120f);
+        var before = sim.Shore.Depth(d.X, d.Y, d.Z);
+        Assert.True(before > 0.5f, $"120 m out is water ({before} m)");
+
+        // A mound whose top stands 2 m above the sea.
+        var ground = sim.Planet.Radius + surface.Height(d.X, d.Y, d.Z);
+        var radius = before + 2f;
+        sim.QueueEdit(EditOp.At(d.X * ground, d.Y * ground, d.Z * ground, radius, BrushMode.Place, VoxelMaterial.Rock));
+
+        for (var i = 0; i < 30; i++)
+            sim.Tick();
+
+        Assert.Equal(1, sim.Edits.Length);
+        Assert.Equal(1, sim.Shore.IndexedOps);
+        Assert.Equal(-2f, sim.Shore.Depth(d.X, d.Y, d.Z), 0.01f);
+        Assert.Equal(0f, sim.Ocean.SampleHeight(d * sim.Planet.SeaRadius, sim.Clock.TickIndex));
+
+        var open = Dir(sim, 3000f);
+        Assert.NotEqual(0f, sim.Ocean.SampleHeight(open * sim.Planet.SeaRadius, sim.Clock.TickIndex));
+        Assert.Equal(sim.Ocean.SampleHeight(open * sim.Planet.SeaRadius, sim.Clock.TickIndex), sim.Ocean.SampleHeight(open * (sim.Planet.SeaRadius + 500.0), sim.Clock.TickIndex));
     }
 
     private static double3 Dir(SimWorld sim, float x) => double3.Normalize(sim.Bubble.ToPlanet(new Vector3(x, 0f, 0f)));

@@ -7,10 +7,11 @@ namespace BrutalGame.Sim;
 /// <summary>
 /// The swell's wind from the weather, camera-independent so a headless host reproduces it. The client's WeatherMap is
 /// baked around the camera, so this samples the analytic <see cref="WeatherField"/> directly, about a fixed reference
-/// point (the sea frame's origin at the spawn). A new wind is queued only when the sea wind has moved past a threshold,
+/// point (the weather plane's origin at the spawn). The swell takes directions from east toward south, so the plane's
+/// wind is turned by the plane's +X measured that way (<paramref name="turn"/>, radians). A new wind is queued only when the sea wind has moved past a threshold,
 /// and the swell blends to it over its own <see cref="OceanSwell.BlendSeconds"/>, so a sea builds as a storm arrives.
 /// </summary>
-internal sealed class SwellWind(WeatherField field)
+internal sealed class SwellWind(WeatherField field, float turn = 0f)
 {
     private const float SpeedThreshold = 1f;
     private const float DirectionThreshold = 10f * MathF.PI / 180f;
@@ -45,7 +46,7 @@ internal sealed class SwellWind(WeatherField field)
         p.WindSpeed = Wind.Length();
 
         if (p.WindSpeed > CalmSpeed)
-            p.WindDirection = MathF.Atan2(Wind.Y, Wind.X);
+            p.WindDirection = MathF.Atan2(Wind.Y, Wind.X) + turn;
 
         _sent = Wind;
         return p;

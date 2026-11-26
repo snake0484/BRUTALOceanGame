@@ -90,9 +90,9 @@ Later milestones live in their docs: A0-A4 (ship-atmosphere.md), CS0-CS7 (combat
 
 M0 landed on `space-pivot` (2f70258..1df5d87). Review items left for the milestone that replaces the island placeholder:
 
-- **M2b shore depth:** the GPU swell has no depth cap past the ~1 km bathymetry window (no far field since layer B was cut); the CPU cap costs ~0.56 us per sample with no edits and ~3.3 us with 1000 edits (`TerrainShoreDepth` rebuilds the island set and scans every edit). The planet `IShoreDepth` must bin edits and cache the generator. (M2 step 2: `PlanetShoreDepth` reads the generator, ignoring edits; the GPU has no depth map until M2b.)
+- **M2b shore depth:** the GPU swell has no depth cap past the ~1 km bathymetry window (no far field since layer B was cut); the CPU cap costs ~0.56 us per sample with no edits and ~3.3 us with 1000 edits (`TerrainShoreDepth` rebuilds the island set and scans every edit). The planet `IShoreDepth` must bin edits and cache the generator. (M2 step 2: `PlanetShoreDepth` reads the generator, ignoring edits; the GPU has no depth map until M2b.) **Done in M2 step 4:** `PlanetShore`, 0.37 us with no edits and 0.39-0.58 us with 1000; the far depth map caps the swell past the near window.
 - **M2 protected shores (D30):** `ShoreGuard` refuses whole digs within 16 m of ground below sea + 2 m. planets.md specifies `ShoreProtectHeight` 6 m, clamping removal to the generated surface, letting players remove what they placed, and a per-chunk column mask instead of ~800 generator calls per big brush.
-- **M2 pit rule:** CPU uses one voxel below sea level, the GPU uses 2^lod m at coarser LODs; base both on the generated sea mask (planets.md).
+- **M2 pit rule:** CPU uses one voxel below sea level, the GPU uses 2^lod m at coarser LODs; base both on the generated sea mask (planets.md). **Done in M2 step 4:** both read `PlanetShore`, where digging never lowers the ground below the generated surface.
 - **M4 networking:** the swell carrier phase is now integrated per tick (no snapping), which makes it history-dependent; give it a closed form or put it in the sim snapshot before late join.
 - **Debug paths:** OceanPanel and GameApp still write swell wind straight into the sim; route through sim commands. Refused digs have no feedback (show the count, then the D30 band overlay).
 - **Docs:** docs/ocean-gpu-contract.md's Frame UBO section is stale.
@@ -156,6 +156,36 @@ Left for later:
 - **Other bodies' ground:** no collision, ocean or brush off the spawn planet until bubbles (M3).
 - **Gas giants and rings:** not on the ladder yet (planets.md "Gas giants").
 - **Edits in the impostor:** it never sees them (planets.md allows baking large ones into the focus body's later).
+
+### M2 step 4: sea sphere and shore wash, M2b (2026-11-26)
+
+The sea is the planet's, not the spawn bubble's (planets.md "Ocean and shore wash on a sphere" has the design as built):
+
+- **One global sea (review C5).** `OceanSurface.Sample(double3 planetLocal, long tick)` lays the swell on the sea sphere by tile (`SeaTiles`: 49 rows of latitude, 3,058 tiles of ~64 km on the test planet, blended over 2 km either side of an edge with squared weights summing to 1). Rows and cells, not the cube sphere review C5 gave as an example: cube-sphere tile edges kink by up to 45° at cube edges, which the GPU's one linear blend coordinate per edge cannot follow; parallels and meridians can. Swell directions are now from east toward south everywhere (`--swell`'s default 0 runs east, onto the spawn's beach). The GPU's low band mirrors it through `SeaSlots` (a ported copy of `swellAt` agrees with the CPU to under 1 mm within 300 m of the camera, in a tile, on edges, at a corner, at the seam of longitude and by a polar cap).
+- **Depth (review C7, D30).** `PlanetShore`: sea level minus the generated ground raised by placed fill; edits that reach the sea are binned on the sea sphere (two hash lookups a query, lock-free for readers, one writer). Digging only takes fill back to the generated ground, so the generated sea mask is the pit rule for CPU and GPU alike. The sim files edits into it, so a headless host caps the swell the same way.
+- **GPU cache.** `ShoreDepthGrid`: a 1 km near window (512² × 2 m, toroidal) that follows the camera, and a 24.6 km far map (512² × 48 m) per sea frame for the swell's depth cap beyond it; jobs fill them, the main thread only swaps and uploads changed rectangles. The surf foam map is toroidal with the near window, so foam no longer clears when the window moves.
+- **Drawing.** The clipmap lives in a sea frame under the camera (moved every 3 km, baked in the background, swapped whole), bent onto the sphere; 7 shell levels carry the far sea to the horizon, shaded only; from altitude the fine levels are skipped and the surface fades into the terrain's far sea by ~60 km. `OceanRenderer` no longer needs the camera near the spawn.
+
+Measured (RTX 4090, 1600x900):
+
+| What | Number |
+| --- | --- |
+| `PlanetShore.Depth` (Release) | 367 ns with no edits; 389 ns with 1000 edits along 4 km of coast nearby; 582 ns with 1000 edits among the samples (island: 560 ns and 3,300 ns) |
+| `OceanSurface.Sample`, 152 components (Release) | 5.6 us inside a tile, 10.1 us in a two-tile blend, 15.3 us at a corner (12% of the sea is blended); the depth cap adds one `PlanetShore.Depth` in open water and on land, five within 4 m of depth of the capped band |
+| Depth jobs (Release) | 13 ms of one worker per 512 × 64 cell band (0.4 us a cell); far map 85-100 ms worker; a sea frame move (far map + near window) takes about 0.2 s of the one worker an 8-core machine gives it; the main thread only copies changed rectangles to staging, at most 0.19 ms |
+| GPU, `--bench` at the spawn view (Debug, alternating with the build before this step) | Ocean surface 0.052-0.061 ms against 0.040-0.053 ms: runs drifted by 25% that day, so by its ratio to the unchanged terrain scope, 0.59-0.64 against 0.55-0.59, about 8% more. Surf foam 0.004 ms, FFT unchanged |
+| GPU, `--bench` low over the beach (`--cam 30 6 0 125 -12`) | Ocean surface 0.061-0.068 ms against 0.054-0.056 ms before (which had no depth map, so no wash) |
+| `--shore-fly` (Release, vsync on, so GPU numbers read high): standing off the beach, the waterline at 15 and 150 m/s, climb to 150 km | Ocean p50 0.113 / 0.123 / 0.104 / 0.092 ms; frame work p50 0.36-0.38 ms, p95 0.46-0.79 ms; 24 and 260 depth jobs in the two flights, one sea frame move, depth jobs pending in 12 and 148 of ~4,300 frames |
+
+Shore wash on the spawn beach was checked in motion on 60-frame sheets at eye level (2.2 m) and from the `--shore-fly` waterline flight: the sheets run up and drain over several metres of the beach each wave and the edge moves smoothly frame to frame. The beach is a 1.5% slope (0.34 m deep 20 m out), so the wash is wide, thin and slow.
+
+Left for later:
+- **Surge front:** now and then a dark patch a metre or two across shows for a frame or two where a surge front crosses the see-through shallows (the mesh folding over itself and blending twice, as on the island; a flat beach makes the see-through band 40 m wide). Coarser clipmap levels are now set back a hair in depth so their one-cell overlap with the finer level can't do the same.
+- **Sea's limb from 20-60 km:** the far shell still reflects the ground-level sky, a pale rim until the atmosphere LUTs replace the sky and fog terms.
+- **Far map and edits:** the far map is generated ground only (a pier is invisible at 48 m cells); placed fill shows in the near window and in `PlanetShore`.
+- **Buoyancy:** nothing floats yet; `OceanSurface.Sample` is ready for M3 bodies. The surf carrier is taken from the camera's tile, so swash timing steps when the camera crosses a tile edge (every ~64 km).
+- **Weather on the sphere (D31):** the swell's wind is still sampled in the spawn bubble's plane and applied planet-wide.
+- **Spawn beach:** still the wide flat of step 2; a steeper coast would show the wash better.
 
 ## Open questions
 
