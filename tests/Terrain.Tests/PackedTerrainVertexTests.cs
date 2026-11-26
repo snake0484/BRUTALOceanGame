@@ -7,8 +7,7 @@ namespace BrutalGame.Terrain.Tests;
 
 public sealed class PackedTerrainVertexTests(ITestOutputHelper output)
 {
-    // Surface Nets apron cells and skirts reach 2 voxels past the chunk cube (TerrainRenderer.CullMarginVoxels).
-    private const float MarginVoxels = 2f;
+    private const float MarginVoxels = SurfaceNetsMesher.MarginVoxels;
     private const float MaxNormalErrorDegrees = 0.01f;
 
     // Half a fixed-point step, plus float rounding of the encode's add (one ulp at 64 voxels).

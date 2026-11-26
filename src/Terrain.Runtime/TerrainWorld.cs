@@ -806,7 +806,7 @@ public sealed class TerrainWorld : IDisposable
     private bool InFrustum(ChunkCoord leaf, ReadOnlySpan<Vector4> planes)
     {
         var size = leaf.SizeMetres;
-        var margin = 2.0 * leaf.VoxelSize;
+        var margin = SurfaceNetsMesher.MarginVoxels * leaf.VoxelSize;
         var lo = leaf.Origin - _camera - new double3(margin);
         var hi = lo + new double3(size + 2.0 * margin);
 

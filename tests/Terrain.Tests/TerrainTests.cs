@@ -379,8 +379,10 @@ public sealed class TerrainTests
         foreach (var v in plain.VertexSpan)
             Assert.Equal(16f, v.Position.Y);
 
-        var lo = -0.5f * s;
-        var hi = (ChunkConstants.Size - 0.5f) * s;
+        // The flange: 1 voxel down and 1 voxel out past the surface's edge, corners mitred onto both sides' lines.
+        var lo = -1.5f * s;
+        var hi = (ChunkConstants.Size + 0.5f) * s;
+        var tolerance = 1e-4f * s;
         Span<int> sides = stackalloc int[4];
         var centre = new Vector3(ChunkConstants.Size * s * 0.5f, 0f, ChunkConstants.Size * s * 0.5f);
 
@@ -389,11 +391,14 @@ public sealed class TerrainTests
             var pos = skirted.Vertices[v].Position;
             Assert.Equal(16f - s, pos.Y, 4);
             Assert.Equal(Vector3.UnitY, skirted.Vertices[v].Normal);
-            Assert.True(pos.X == lo || pos.X == hi || pos.Z == lo || pos.Z == hi);
-            sides[0] += pos.X == lo ? 1 : 0;
-            sides[1] += pos.X == hi ? 1 : 0;
-            sides[2] += pos.Z == lo ? 1 : 0;
-            sides[3] += pos.Z == hi ? 1 : 0;
+            Assert.InRange(pos.X, lo - tolerance, hi + tolerance);
+            Assert.InRange(pos.Z, lo - tolerance, hi + tolerance);
+            var before = sides[0] + sides[1] + sides[2] + sides[3];
+            sides[0] += MathF.Abs(pos.X - lo) <= tolerance ? 1 : 0;
+            sides[1] += MathF.Abs(pos.X - hi) <= tolerance ? 1 : 0;
+            sides[2] += MathF.Abs(pos.Z - lo) <= tolerance ? 1 : 0;
+            sides[3] += MathF.Abs(pos.Z - hi) <= tolerance ? 1 : 0;
+            Assert.True(sides[0] + sides[1] + sides[2] + sides[3] > before, $"skirt vertex {pos} is on no side's line");
         }
 
         foreach (var count in sides)

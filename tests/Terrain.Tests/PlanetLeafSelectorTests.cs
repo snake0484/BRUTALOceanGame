@@ -20,22 +20,6 @@ public sealed class PlanetLeafSelectorTests(ITestOutputHelper output)
         return d * (TestPlanet.Radius + TestPlanet.Generator.Surface.Height(d.X, d.Y, d.Z) + altitude);
     }
 
-    /// <summary>A point <paramref name="offset"/> m above inland ground, clear of the protected shore so digging is allowed.</summary>
-    private static double3 Inland(double offset)
-    {
-        var surface = TestPlanet.Generator.Surface;
-        var random = new Random(7);
-
-        while (true)
-        {
-            var d = double3.Normalize(new double3(random.NextDouble() - 0.5, random.NextDouble() - 0.5, random.NextDouble() - 0.5));
-            var h = surface.Height(d.X, d.Y, d.Z);
-
-            if (h > surface.SeaHeight + 300f && h < surface.SeaHeight + 1500f)
-                return d * (TestPlanet.Radius + h + offset);
-        }
-    }
-
     private static LeafSet Select(double3 camera, int minLod, double margin = 0.0)
     {
         var selector = new PlanetLeafSelector(Bounds.Value, new EditStore());
@@ -116,7 +100,7 @@ public sealed class PlanetLeafSelectorTests(ITestOutputHelper output)
     [InlineData(300.0, BrushMode.Place)]
     public void EditsFarFromTheGroundKeepTheirLeaf(double offset, BrushMode mode)
     {
-        var p = Inland(offset);
+        var p = TestPlanet.Inland(offset);
         var edits = new EditStore();
         edits.Add(EditOp.At(p.X, p.Y, p.Z, 1.5f, mode, VoxelMaterial.Rock));
         var leaf = ChunkCoord.FromPlanet(p.X, p.Y, p.Z, 0);
