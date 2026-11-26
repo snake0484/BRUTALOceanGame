@@ -50,6 +50,12 @@ public sealed class DesignerPanels
     private float _wallMetres = 0.5f;
     private float _right;
     private readonly MeshPanel _meshPanel = new();
+    private readonly LayersPanel _layersPanel;
+
+    private static readonly string[] RoleNames = ["Skin", "Room", "Component", "Panel"];
+
+    /// <summary>The cutaway plane the hull renderer clips at.</summary>
+    public Cutaway Cutaway => _layersPanel.Cutaway;
 
     private struct Draft
     {
@@ -62,6 +68,7 @@ public sealed class DesignerPanels
     public DesignerPanels(HullMaterialCatalog catalog)
     {
         _catalog = catalog;
+        _layersPanel = new LayersPanel(catalog);
     }
 
     public FileRequest Request { get; private set; }
@@ -91,7 +98,8 @@ public sealed class DesignerPanels
         DrawTools(session, stats);
         DrawBrushList(session);
         DrawProperties(session);
-        _meshPanel.Draw(session, meshEdit, _right - MeshPanel.Width - 10f);
+        _meshPanel.Draw(session, meshEdit, _right - MeshPanel.Width - 10f, 330f);
+        _layersPanel.Draw(session, _right - LayersPanel.Width - 10f, 10f);
         DrawStats(session, stats);
     }
 
@@ -289,6 +297,15 @@ public sealed class DesignerPanels
             {
                 brush.Op = (BrushOp)op;
                 HullCommands.SetBrush(session, id, brush, snap: false);
+            }
+
+            if (session.Doc.Layers is not null)
+            {
+                var role = (int)BrushRoles.Of(brush);
+                ImGui.SetNextItemWidth(120f);
+
+                if (Combo("Role"u8, ref role, RoleNames))
+                    Designer.LayerCommands.SetRole(session, id, (BrushRole)role);
             }
 
             var material = MaterialSlot(session.Doc, brush.Material);

@@ -3,7 +3,7 @@ using BrutalGame.Ships;
 
 namespace BrutalGame.Designer;
 
-public enum OpKind : byte { InsertBrush, RemoveBrush, ModifyBrush, AddMaterial, RemoveMaterial, AddMesh, RemoveMesh, SetMesh }
+public enum OpKind : byte { InsertBrush, RemoveBrush, ModifyBrush, AddMaterial, RemoveMaterial, AddMesh, RemoveMesh, SetMesh, SetLayering }
 
 /// <summary>
 /// One invertible edit, a brush-list diff (ship-hulls "undo = brush list diffs"). Insert and Remove carry the brush and
@@ -20,6 +20,11 @@ public struct PlanOp
     public HullBrush After;
     public HullMesh? MeshBefore;
     public HullMesh? MeshAfter;
+    public HullLayering? LayersBefore;
+    public HullLayering? LayersAfter;
+
+    /// <summary>Replaces the plan's layering (null: a solid brush hull). Snapshots are never mutated after this.</summary>
+    public static PlanOp SetLayering(HullLayering? before, HullLayering? after) => new() { Kind = OpKind.SetLayering, LayersBefore = before, LayersAfter = after };
 
     public static PlanOp AddMesh(int index, HullMesh mesh) => new() { Kind = OpKind.AddMesh, Index = index, MeshAfter = mesh };
 
@@ -42,6 +47,7 @@ public struct PlanOp
         OpKind.RemoveMaterial => this with { Kind = OpKind.AddMaterial },
         OpKind.AddMesh => new PlanOp { Kind = OpKind.RemoveMesh, Index = Index, MeshBefore = MeshAfter },
         OpKind.RemoveMesh => new PlanOp { Kind = OpKind.AddMesh, Index = Index, MeshAfter = MeshBefore },
+        OpKind.SetLayering => SetLayering(LayersAfter, LayersBefore),
         _ => SetMesh(Index, MeshAfter!, MeshBefore!),
     };
 
@@ -84,6 +90,10 @@ public struct PlanOp
             case OpKind.SetMesh:
                 Expect(ReferenceEquals(doc.Meshes[Index], MeshBefore));
                 doc.Meshes[Index] = MeshAfter!;
+                break;
+            case OpKind.SetLayering:
+                Expect(ReferenceEquals(doc.Layers, LayersBefore));
+                doc.Layers = LayersAfter;
                 break;
         }
     }

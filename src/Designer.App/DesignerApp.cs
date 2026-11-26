@@ -51,7 +51,8 @@ public sealed class DesignerApp : IDisposable
     private int _frames;
 
     /// <param name="view">Optional camera after framing: yaw and pitch in degrees, distance in metres.</param>
-    public DesignerApp(string dataFolder, string? load, bool demo, bool demoMesh, string? saveOnExit, int closeAfterFrames, double[]? view = null, string? script = null)
+    /// <param name="cutaway">Optional cutaway at start: axis (x, y, z) and offset in metres.</param>
+    public DesignerApp(string dataFolder, string? load, bool demo, bool demoMesh, string? saveOnExit, int closeAfterFrames, double[]? view = null, string? script = null, bool demoLayered = false, string[]? cutaway = null)
     {
         _catalog = HullMaterialCatalog.Load(dataFolder);
         _panels = new DesignerPanels(_catalog);
@@ -79,8 +80,17 @@ public sealed class DesignerApp : IDisposable
 
         if (load is not null)
             Open(load);
+        else if (demoLayered)
+            DemoLayered();
         else if (demo || demoMesh)
             Demo(demoMesh);
+
+        if (cutaway is not null)
+        {
+            _panels.Cutaway.Enabled = true;
+            _panels.Cutaway.Axis = cutaway[0] switch { "x" => 0, "y" => 1, _ => 2 };
+            _panels.Cutaway.Offset = float.Parse(cutaway[1], System.Globalization.CultureInfo.InvariantCulture);
+        }
 
         if (view is not null)
         {
@@ -164,7 +174,7 @@ public sealed class DesignerApp : IDisposable
         var copy = doc.Clone();
         PlanCanonical.Canonicalise(copy);
         _stats.Hash = PlanFormat.HashBody(copy);
-        _baker.Start(doc.Brushes.AsSpan(), doc.Meshes, _catalog.Densities(doc));
+        _baker.Start(doc.Brushes.AsSpan(), doc.Meshes, _catalog.Densities(doc), doc.Layers);
         UpdatePalette(doc);
     }
 
@@ -227,6 +237,8 @@ public sealed class DesignerApp : IDisposable
         HandleFiles();
 
         var viewProj = _camera.ViewProjection(viewport.X / Math.Max(1f, viewport.Y));
+        var cut = _panels.Cutaway;
+        _hull.SetCutaway(cut.Enabled ? cut.Axis : -1, cut.Offset, cut.Flip);
         _overlay.Begin(_camera.Position);
         _tool.Update(_session, _meshEdit, _camera, viewport, viewProj, !io.WantCaptureMouse, _overlay);
         _imgui.EndFrame();
@@ -339,6 +351,14 @@ public sealed class DesignerApp : IDisposable
         _panels.PathText = path;
         _stats.Message = $"Opened {Path.GetFileName(path)}";
         Console.WriteLine($"opened {path}: {doc.Brushes.Count} brushes, hash {PlanFormat.HashBody(doc)}");
+        FrameHull();
+    }
+
+    private void DemoLayered()
+    {
+        var all = _catalog.All;
+        SampleHulls.LayeredHull(_session, all[Math.Min(2, all.Count - 1)].Id, all[0].Id, all[Math.Min(1, all.Count - 1)].Id);
+        _session.MarkSaved("");
         FrameHull();
     }
 

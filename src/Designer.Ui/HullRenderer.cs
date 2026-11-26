@@ -22,7 +22,7 @@ public sealed unsafe class HullRenderer : IDisposable
 {
     public const int PaletteSize = 32;
     private const int UniformAlignment = 256;
-    private const int PushConstantSize = 16;
+    private const int PushConstantSize = 32;
     private const int VertexStride = PackedTerrainVertex.SizeInBytes;
 
     private readonly Renderer _renderer;
@@ -131,6 +131,20 @@ public sealed unsafe class HullRenderer : IDisposable
         }
     }
 
+    /// <summary>
+    /// Cutaway: fragments with n·p &gt; d (ship metres) are not drawn. Off when <paramref name="axis"/> is negative.
+    /// </summary>
+    public void SetCutaway(int axis, float offset, bool flip)
+    {
+        _clipAxis = axis;
+        _clipOffset = offset;
+        _clipFlip = flip;
+    }
+
+    private int _clipAxis = -1;
+    private float _clipOffset;
+    private bool _clipFlip;
+
     /// <summary>Inside the opaque pass. <paramref name="viewProj"/> has no translation; <paramref name="camera"/> is in ship metres.</summary>
     public void Record(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, double3 camera, in SceneLighting lighting)
     {
@@ -155,10 +169,23 @@ public sealed unsafe class HullRenderer : IDisposable
 
         const float scale = HullBins.CellMetres / PackedTerrainVertex.StepsPerVoxel;
 
+        // The clip plane in camera-relative space: n·(rel + camera) > d  ⇔  n·rel > d − n·camera.
+        var clip = new Vector4(0f, 0f, 0f, float.MaxValue);
+
+        if (_clipAxis >= 0)
+        {
+            var sign = _clipFlip ? -1f : 1f;
+            var cam = _clipAxis == 0 ? camera.X : _clipAxis == 1 ? camera.Y : camera.Z;
+            clip = new Vector4(_clipAxis == 0 ? sign : 0f, _clipAxis == 1 ? sign : 0f, _clipAxis == 2 ? sign : 0f, (float)(sign * (_clipOffset - cam)));
+        }
+
+        var push = stackalloc Vector4[2];
+        push[1] = clip;
+
         foreach (var draw in _draws)
         {
-            var push = new Vector4((float)(draw.Origin.X - camera.X), (float)(draw.Origin.Y - camera.Y), (float)(draw.Origin.Z - camera.Z), scale);
-            commands.PushConstants(_layout, VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit, 0, new ReadOnlySpan<byte>(&push, PushConstantSize));
+            push[0] = new Vector4((float)(draw.Origin.X - camera.X), (float)(draw.Origin.Y - camera.Y), (float)(draw.Origin.Z - camera.Z), scale);
+            commands.PushConstants(_layout, VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit, 0, new ReadOnlySpan<byte>(push, PushConstantSize));
             commands.DrawIndexed(draw.IndexCount, 1, draw.FirstIndex, draw.VertexOffset, 0);
         }
     }
@@ -271,7 +298,7 @@ public sealed unsafe class HullRenderer : IDisposable
                 var raster = new VkPipelineRasterizationStateCreateInfo
                 {
                     PolygonMode = VkPolygonMode.Fill,
-                    CullMode = VkCullModeFlags.BackBit,
+                    CullMode = VkCullModeFlags.None,
                     FrontFace = VkFrontFace.CounterClockwise,
                     LineWidth = 1f,
                 };

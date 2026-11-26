@@ -57,6 +57,10 @@ public sealed class ViewportTool
     private static readonly uint HoverColour = OverlayRenderer.Rgba(255, 230, 120, 255);
     private static readonly uint[] AxisColours = [OverlayRenderer.Rgba(235, 70, 70), OverlayRenderer.Rgba(90, 220, 90), OverlayRenderer.Rgba(80, 140, 255)];
     private static readonly uint FrontColour = OverlayRenderer.Rgba(255, 196, 40);
+    private static readonly uint RoomColour = OverlayRenderer.Rgba(90, 220, 220, 220);
+    private static readonly uint ComponentColour = OverlayRenderer.Rgba(200, 120, 255, 220);
+    private static readonly uint PanelColour = OverlayRenderer.Rgba(255, 150, 60, 220);
+    private static readonly uint CutColour = OverlayRenderer.Rgba(255, 120, 200);
     private static readonly ImColor8 FrontLabel = new(255, 196, 40, 255);
     private const double GuideMargin = 2.0;
     private const double MinGuideHalf = 6.0;
@@ -96,7 +100,12 @@ public sealed class ViewportTool
                 continue;
 
             var selected = session.Selection.Contains(b.Id);
-            var colour = selected ? SelectedColour : b.Op switch
+            var colour = selected ? SelectedColour : session.Doc.Layers is not null && BrushRoles.Of(b) != BrushRole.Skin ? BrushRoles.Of(b) switch
+            {
+                BrushRole.Room => RoomColour,
+                BrushRole.Component => ComponentColour,
+                _ => PanelColour,
+            } : b.Op switch
             {
                 BrushOp.Subtract => SubtractColour,
                 BrushOp.Paint => PaintColour,
@@ -586,13 +595,28 @@ public sealed class ViewportTool
         }
 
         var symmetry = session.Symmetry;
-
-        if (!symmetry.Any)
-            return;
-
         var hx = Math.Max(Math.Max(-min.X, max.X), MinGuideHalf) + GuideMargin;
         var hy = Math.Max(Math.Max(-min.Y, max.Y), MinGuideHalf) + GuideMargin;
         var hz = Math.Max(Math.Max(-min.Z, max.Z), MinGuideHalf) + GuideMargin;
+
+        // Section cuts: outlines in pink across the hull's bounds.
+        if (session.Doc.Layers is { } layers)
+        {
+            foreach (var cut in layers.Cuts)
+            {
+                var c = cut.Position * HullBrush.MetresPerPositionUnit;
+                var (a, b, cc, d) = cut.Axis switch
+                {
+                    0 => (new Vector3d(c, -hy, -hz), new Vector3d(c, hy, -hz), new Vector3d(c, hy, hz), new Vector3d(c, -hy, hz)),
+                    1 => (new Vector3d(-hx, c, -hz), new Vector3d(-hx, c, hz), new Vector3d(hx, c, hz), new Vector3d(hx, c, -hz)),
+                    _ => (new Vector3d(-hx, -hy, c), new Vector3d(hx, -hy, c), new Vector3d(hx, hy, c), new Vector3d(-hx, hy, c)),
+                };
+                Plane(overlay, a, b, cc, d, CutColour);
+            }
+        }
+
+        if (!symmetry.Any)
+            return;
 
         if (symmetry.X)
             Plane(overlay, new Vector3d(0, -hy, -hz), new Vector3d(0, hy, -hz), new Vector3d(0, hy, hz), new Vector3d(0, -hy, hz), AxisColours[0]);

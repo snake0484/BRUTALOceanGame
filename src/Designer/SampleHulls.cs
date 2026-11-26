@@ -59,6 +59,41 @@ public static class SampleHulls
         HullCommands.AddBrush(session, BrushShape.Cylinder, BrushOp.Add, 0, 6 * m, -4 * m, (ushort)(0.75 * h), (ushort)(0.5 * h), (ushort)(0.75 * h), BrushRotation.Identity, trim);
     }
 
+    /// <summary>
+    /// A layered hull: a skin of a box body, a wedge nose and a cylinder engine pod, sectioned at the nose (Z = 6 m) with
+    /// a heavier stack there; a cockpit and a corridor as rooms, a reactor as a component, an armour panel on the roof.
+    /// </summary>
+    public static void LayeredHull(DesignSession session, DefId armour, DefId alloy, DefId titanium)
+    {
+        const int m = HullBrush.PositionUnitsPerMetre;
+        const int h = HullBrush.HalfUnitsPerMetre;
+        LayerCommands.Enable(session, titanium, alloy);
+        HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, 3 * m, 0, 4 * h, 3 * h, 6 * h, BrushRotation.Identity, alloy);
+        HullCommands.AddBrush(session, BrushShape.Wedge, BrushOp.Add, 0, 3 * m, 8 * m, 4 * h, 3 * h, 2 * h, BrushRotation.Identity, alloy);
+        HullCommands.AddBrush(session, BrushShape.Cylinder, BrushOp.Add, 0, 3 * m, -7 * m, (ushort)(2.5 * h), 2 * h, (ushort)(2.5 * h), BrushRotation.FromSteps(0, 6, 0), alloy);
+
+        var cockpit = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, 3 * m, 4 * m, (ushort)(2.5 * h), (ushort)(1.5 * h), 1 * h, BrushRotation.Identity, alloy);
+        LayerCommands.SetRole(session, cockpit, Ships.BrushRole.Room);
+        var corridor = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, 3 * m, 0, 1 * h, (ushort)(1.25 * h), 3 * h, BrushRotation.Identity, alloy);
+        LayerCommands.SetRole(session, corridor, Ships.BrushRole.Room);
+        var reactor = HullCommands.AddBrush(session, BrushShape.Cylinder, BrushOp.Add, 0, 3 * m, -4 * m, (ushort)(1.25 * h), (ushort)(1.25 * h), (ushort)(1.25 * h), BrushRotation.Identity, alloy);
+        LayerCommands.SetRole(session, reactor, Ships.BrushRole.Component);
+        var plate = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, (int)(6.25 * m), 0, 3 * h, (ushort)(0.25 * h), 4 * h, BrushRotation.Identity, armour);
+        LayerCommands.SetRole(session, plate, Ships.BrushRole.Panel);
+
+        LayerCommands.AddStack(session, armour);
+        LayerCommands.Change(session, (s, l) =>
+        {
+            l.Stacks[2].Layers.Clear();
+            l.Stacks[2].Layers.Add(new HullLayer(s.EnsureMaterial(armour), 500));
+            l.Stacks[2].Layers.Add(new HullLayer(s.EnsureMaterial(alloy), 750));
+            return true;
+        });
+        LayerCommands.AddCut(session, 2, 6 * m);
+        var nose = LayerCommands.Sections(session.Doc.Layers!).First(x => x.Section.Z == 1).Section;
+        LayerCommands.AssignSection(session, nose, 2);
+    }
+
     private static int FaceAlong(HullMesh mesh, int axis, int sign)
     {
         var b = new MeshBuilder(mesh);

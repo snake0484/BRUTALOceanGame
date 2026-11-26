@@ -29,7 +29,7 @@ public sealed class MeshPanel
     private MeshIssue _issue;
     private int _issueAt;
 
-    public void Draw(DesignSession session, MeshEditState edit, float x)
+    public void Draw(DesignSession session, MeshEditState edit, float x, float y)
     {
         var id = session.Selection.Primary;
         var mesh = MeshCommands.MeshOf(session, id);
@@ -37,7 +37,7 @@ public sealed class MeshPanel
         if (mesh is null)
             return;
 
-        ImGui.SetNextWindowPos(new float2(x, 10f), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowPos(new float2(x, y), ImGuiCond.FirstUseEver);
         ImGui.SetNextWindowSize(new float2(Width, 0f), ImGuiCond.FirstUseEver);
 
         if (ImGui.Begin("Mesh"u8, ImGuiWindowFlags.AlwaysAutoResize))

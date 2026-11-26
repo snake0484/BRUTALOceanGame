@@ -145,6 +145,37 @@ public class LayerTests
     }
 
     [Fact]
+    public void LayerCommands_UndoAndRedoExactly()
+    {
+        var session = new DesignSession();
+        var start = PlanFormat.EncodeBody(session.Doc);
+        Assert.True(LayerCommands.Enable(session, UndoTests.Titanium, UndoTests.Alloy));
+        var room = HullCommands.AddBrush(session, BrushShape.Box, BrushOp.Add, 0, 0, 0, 512, 512, 512, 0, UndoTests.Alloy);
+        Assert.True(LayerCommands.SetRole(session, room, BrushRole.Room));
+        Assert.True(LayerCommands.AddCut(session, 2, 4096));
+        var section = LayerCommands.Sections(session.Doc.Layers!).First(s => s.Section.Z == 1).Section;
+        Assert.True(LayerCommands.AddStack(session, UndoTests.Titanium));
+        Assert.True(LayerCommands.AssignSection(session, section, 2));
+        Assert.True(LayerCommands.SetLayer(session, 0, 1, UndoTests.Titanium, 750));
+        Assert.Equal(2, LayerCommands.Sections(session.Doc.Layers!).First(s => s.Section.Z == 1).Stack);
+        Assert.False(LayerCommands.Disable(session));
+        var end = PlanFormat.EncodeBody(session.Doc);
+
+        while (session.UndoLast())
+        {
+        }
+
+        Assert.Equal(start, PlanFormat.EncodeBody(session.Doc));
+        Assert.Null(session.Doc.Layers);
+
+        while (session.RedoNext())
+        {
+        }
+
+        Assert.Equal(end, PlanFormat.EncodeBody(session.Doc));
+    }
+
+    [Fact]
     public void LayeredPlan_RoundTripsAndValidates()
     {
         var doc = new PlanDocument();

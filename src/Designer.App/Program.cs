@@ -18,6 +18,8 @@ var benchBrushes = 0;
 var benchMeshes = false;
 var benchSurfaceNets = false;
 var demoMesh = false;
+var demoLayered = false;
+string[]? cutaway = null;
 double[]? view = null;
 string? script = null;
 
@@ -33,6 +35,10 @@ for (var i = 0; i < args.Length; i++)
         demo = true;
     else if (args[i] == "--demo-mesh")
         demoMesh = true;
+    else if (args[i] == "--demo-layered")
+        demoLayered = true;
+    else if (args[i] == "--cutaway" && i + 2 < args.Length)
+        cutaway = [args[++i], args[++i]];
     else if (args[i] == "--input-script" && i + 1 < args.Length)
         script = args[++i];
     else if (args[i] == "--view" && i + 3 < args.Length)
@@ -53,7 +59,7 @@ if (benchBrushes > 0)
     return;
 }
 
-using var app = new DesignerApp(data, load, demo, demoMesh, saveOnExit, frames, view, script);
+using var app = new DesignerApp(data, load, demo, demoMesh, saveOnExit, frames, view, script, demoLayered, cutaway);
 app.Run();
 
 // --bake-bench [n] [--bench-meshes] [--bench-surface-nets]: headless. Cold bakes of the n-brush sample hull (a fresh

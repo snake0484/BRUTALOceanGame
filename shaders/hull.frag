@@ -14,6 +14,7 @@ layout(set = 0, binding = 0, std140) uniform Frame {
 
 layout(push_constant) uniform Brick {
     vec4 originScale;
+    vec4 clipPlane;   // camera-relative: fragments with dot(xyz, pos) > w are cut away (cutaway view)
 } brick;
 
 layout(location = 0) in vec3 vRelPos;
@@ -32,6 +33,20 @@ vec3 acesFit(vec3 x)
 
 void main()
 {
+    if (dot(brick.clipPlane.xyz, vRelPos) > brick.clipPlane.w)
+        discard;
+
+    // Back faces show only through a cutaway: there they cap the cut solid, flat and darkened in the material's colour.
+    if (!gl_FrontFacing)
+    {
+        if (brick.clipPlane.w > 1e30)
+            discard;
+
+        vec3 cap = frame.palette[min(vMaterial, 31u)].rgb * 0.45;
+        outColor = vec4(pow(acesFit(cap), vec3(1.0 / 2.2)), 1.0);
+        return;
+    }
+
     vec3 L = frame.sunDir.xyz;
     vec3 V = normalize(-vRelPos);
     vec3 face = normalize(cross(dFdx(vRelPos), dFdy(vRelPos)));
