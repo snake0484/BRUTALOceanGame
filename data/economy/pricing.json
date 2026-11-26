@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "wage": 4.0,
+  "catalogScale": 0.85,
+  "vendorMargin": 0.2,
+  "retail": {
+    "stock": 1.1,
+    "part": 1.4,
+    "component": 1.08
+  },
+  "yardMargin": 0.05,
+  "jobLabour": 1.6,
+  "jobMargin": 0.35,
+  "rawMarkup": 1.15,
+  "machineRate": 5.0,
+  "designStamp": 0.06,
+  "nre": {
+    "part": 40,
+    "component": 250,
+    "ship": 150,
+    "perDistinct": 0.25,
+    "perJoint": 0.01
+  },
+  "toolingPerMaterial": 0.5,
+  "partLicence": 0.05,
+  "componentLicence": 0.05,
+  "planLicencePerBuild": 0.05,
+  "buyback": {
+    "itemOfWholesale": 0.8,
+    "shipOfPremade": 0.6,
+    "shipCertified": 0.7
+  },
+  "revisionNreOnDiff": true
+}

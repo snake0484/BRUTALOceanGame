@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "ice",
+  "name": "Ice",
+  "family": "volatile",
+  "densityKgM3": 920,
+  "refCostPerKg": 0.005
+}

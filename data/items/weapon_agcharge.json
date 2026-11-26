@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "id": "weapon.agcharge",
+  "name": "Anti-graviton charge",
+  "family": "weapon",
+  "densityKgM3": 2000,
+  "unitMassKg": 25
+}

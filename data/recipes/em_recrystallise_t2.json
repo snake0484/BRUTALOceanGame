@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "id": "em.recrystallise.t2",
+  "kind": "Enrich",
+  "station": "fc.recrystalliser.t2",
+  "licence": "refinery",
+  "input": {
+    "family": "em",
+    "minPurity": 0.3
+  },
+  "alpha": 4,
+  "yield": 0.8,
+  "loss": 0.03,
+  "purityCap": 0.85,
+  "throughputKgPerHour": 20,
+  "powerW": 5000000.0,
+  "spreadOut": 0.0,
+  "consumes": [
+    {
+      "item": "solvent.cryo",
+      "perKgInput": 0.5
+    }
+  ]
+}

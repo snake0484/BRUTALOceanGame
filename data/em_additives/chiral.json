@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "id": "add.chiral",
+  "item": {
+    "family": "additive",
+    "densityKgM3": 2400,
+    "refCostPerKg": 8.0,
+    "metastable": null
+  },
+  "effect": {
+    "flowBiasAdd": 0.5
+  },
+  "tradeOff": {
+    "emMul": 1.3
+  },
+  "recipe": {
+    "station": "fc.additive_lab",
+    "crude": false,
+    "kind": "Fixed",
+    "timeSPerKg": 2400,
+    "powerW": 5000000.0,
+    "inputs": [
+      {
+        "item": "rock.disc_inclusion",
+        "kg": 0.6
+      }
+    ]
+  }
+}

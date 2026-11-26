@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "id": "RemnantCore",
+  "name": "Remnant core",
+  "densityKgM3": 3000,
+  "hardness": 0.9,
+  "placeable": false,
+  "yields": {
+    "item": "em",
+    "purityFrom": "deposit",
+    "purityRange": [
+      0.6,
+      0.91
+    ]
+  }
+}
