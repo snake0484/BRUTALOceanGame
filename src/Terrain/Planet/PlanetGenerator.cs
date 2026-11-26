@@ -21,7 +21,11 @@ public sealed class PlanetGenerator
     /// <summary>Density is vertical distance × max(1/√(1+slope²), InvMin): steeper than ~76° saturates a little early.</summary>
     public const float InvMin = 0.25f;
 
-    /// <summary>Slope past 0.7 is bare rock.</summary>
+    /// <summary>
+    /// Slope past 0.7 is bare rock under the surface layer; the layer itself keeps its material and the terrain shader
+    /// shows it as rock by the pixel's slope (one material per triangle would saw-tooth every rim). The v1 kind turns the
+    /// layer to rock too, as v1 did.
+    /// </summary>
     public const float SteepInv = 0.819f;
 
     /// <summary>Normalised distance (voxels) past which density is saturated (127/32 rounded up) and rock past the 4 m subsurface layer.</summary>
@@ -49,6 +53,7 @@ public sealed class PlanetGenerator
 
     private readonly double _radius;
     private readonly float _peak;
+    private readonly bool _steepSurfaceIsRock;
 
     public PlanetGenerator(in PlanetParams p)
     {
@@ -56,6 +61,7 @@ public sealed class PlanetGenerator
         Surface = new PlanetSurface(p);
         _radius = p.Radius;
         _peak = p.MaxHeight * PeakFraction;
+        _steepSurfaceIsRock = PlanetKinds.Get(p.KindId ?? PlanetKinds.Legacy).IsCompatV1;
         LatticeN0 = LatticeMultiple * (int)Math.Ceiling(2.0 * p.Radius * CubeLattice.MaxArcPerT / LatticeMultiple);
     }
 
@@ -604,7 +610,7 @@ public sealed class PlanetGenerator
         if (shore)
             return m.Shore;
 
-        if (steep || height > _peak)
+        if (height > _peak || (steep && (_steepSurfaceIsRock || depth >= SurfaceLayer)))
             return m.Rock;
 
         return depth < SurfaceLayer ? m.Surface : m.Subsurface;

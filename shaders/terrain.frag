@@ -40,6 +40,15 @@ const float SEA_RAMP = 200.0;
 const float SPACE_AMBIENT = 0.004;
 const float GLINT = 0.5;
 
+// Sand and grass do not hold on steep ground: they show as bare rock by the pixel's own slope, from 0.55 to 0.85 rise
+// over run (the cosines of those against the radial up), as the impostor's bake blends it. The voxels keep the soil:
+// a material is one per triangle, and a rock switch in them saw-toothed every rim.
+const float ROCK_WHOLE = 0.762;
+const float ROCK_NONE = 0.876;
+const uint ROCK = 1u;
+const uint SAND = 2u;
+const uint GRASS = 3u;
+
 // PackedTerrainVertex.SeaColumn / MaterialMask: the vertex is in the generated sea mask; the rest is the palette index.
 const uint SEA_COLUMN = 0x8000u;
 const uint MATERIAL_MASK = 0x7FFFu;
@@ -63,7 +72,8 @@ void main()
     vec3 N = normalize(vNormal);
     vec3 L = frame.sunDir.xyz;
     float intensity = frame.sunDir.w;
-    vec3 albedo = PALETTE[min(vMaterial & MATERIAL_MASK, 4u)];
+    uint material = min(vMaterial & MATERIAL_MASK, 4u);
+    vec3 albedo = PALETTE[material];
 
     // Hemispheric ambient about the radial up: zenith above, horizon at the side, dim bounce below.
     vec3 fromCentre = vWorldPos - frame.planet.xyz;
@@ -72,6 +82,9 @@ void main()
     float up = dot(N, upDir);
     vec3 skyAmbient = mix(frame.skyHorizon.rgb, frame.skyZenith.rgb, clamp(up, 0.0, 1.0));
     vec3 ambient = mix(skyAmbient, GROUND_BOUNCE, clamp(-up, 0.0, 1.0));
+
+    if (material == SAND || material == GRASS)
+        albedo = mix(PALETTE[ROCK], albedo, smoothstep(ROCK_WHOLE, ROCK_NONE, up));
 
     float space = frame.space.x;
     float star = frame.skyZenith.w;
