@@ -85,13 +85,21 @@ public sealed class PlanetFlyTest
     private long _maxMeshBytes;
     private long _forced;
 
-    public PlanetFlyTest(FlyCamera camera, SimWorld sim, TerrainWorld world)
+    /// <param name="steep">Fly over the planet's steepest ground (<see cref="SteepGround"/>) instead of inland from the spawn.</param>
+    public PlanetFlyTest(FlyCamera camera, SimWorld sim, TerrainWorld world, bool steep = false)
     {
         _camera = camera;
         _world = world;
         _surface = sim.Generator.Surface;
         _start = double3.Normalize(sim.Bubble.Origin);
         _heading = -sim.Seaward;
+
+        if (steep)
+        {
+            SteepGround.Find(_surface, out _start, out _heading);
+            Log.Info($"Steep start at ({_start.X:F4}, {_start.Y:F4}, {_start.Z:F4}), ground {_surface.Height(_start.X, _start.Y, _start.Z):F0} m, kind {sim.Planet.KindId}");
+        }
+
         _ground = _surface.HasSea ? _surface.SeaHeight : float.MinValue;
     }
 

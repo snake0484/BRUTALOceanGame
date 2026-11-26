@@ -166,14 +166,28 @@ public static class PlanetImpostor
     {
         var surface = generator.Surface;
         var lod = SampleLod(generator.Params, n);
+        var points = ArrayPool<double>.Shared.Rent(3 * n);
+        var rows = ArrayPool<float>.Shared.Rent(surface.Program.Rows * n);
 
-        for (var j = 0; j < n; j++)
+        try
         {
-            for (var i = 0; i < n; i++)
+            Span<double> px = points.AsSpan(0, n), py = points.AsSpan(n, n), pz = points.AsSpan(2 * n, n);
+
+            for (var j = 0; j < n; j++)
             {
-                Direction(face, (i + 0.5) / n, (j + 0.5) / n, out var x, out var y, out var z);
-                height[j * n + i] = surface.Height(x, y, z, lod);
+                for (var i = 0; i < n; i++)
+                {
+                    Direction(face, (i + 0.5) / n, (j + 0.5) / n, out var x, out var y, out var z);
+                    (px[i], py[i], pz[i]) = (x * surface.Radius, y * surface.Radius, z * surface.Radius);
+                }
+
+                surface.Heights(px, py, pz, lod, height.AsSpan(j * n, n), rows);
             }
+        }
+        finally
+        {
+            ArrayPool<double>.Shared.Return(points);
+            ArrayPool<float>.Shared.Return(rows);
         }
     }
 

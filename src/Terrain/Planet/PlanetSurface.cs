@@ -76,6 +76,33 @@ public sealed class PlanetSurface
         return rows[PlanetKindProgram.Height];
     }
 
+    /// <summary>
+    /// H at many datum points (unit direction × <see cref="Radius"/>) in one pass over rows: the same values as
+    /// <see cref="Height"/> point by point. <paramref name="rows"/> is scratch of <see cref="PlanetKindProgram.Rows"/> × the count.
+    /// </summary>
+    public void Heights(ReadOnlySpan<double> x, ReadOnlySpan<double> y, ReadOnlySpan<double> z, int lod, Span<float> heights, Span<float> rows)
+    {
+        var count = heights.Length;
+
+        var set = new RowSet
+        {
+            X = x[..count],
+            Y = y[..count],
+            Z = z[..count],
+            Ch = rows[..(Program.Rows * count)],
+            Count = count,
+            Stride = count,
+            Channels = Program.ChannelCount,
+            W = count,
+            H = 1,
+            Direct = true,
+        };
+
+        set.Row(PlanetKindProgram.Height).Clear();
+        LayerOps.Evaluate(Program, lod, ref set);
+        set.Row(PlanetKindProgram.Height).CopyTo(heights);
+    }
+
     /// <summary>Rigorous bounds of H over the cap within <paramref name="angle"/> (rad) of unit direction d, at every LOD.</summary>
     public void Bounds(double dx, double dy, double dz, double angle, out float lo, out float hi) =>
         Bounds(dx, dy, dz, angle, 0, PlanetGenerator.MaxLod, out lo, out hi);

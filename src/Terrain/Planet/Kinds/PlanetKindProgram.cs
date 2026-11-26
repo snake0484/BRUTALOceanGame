@@ -116,7 +116,7 @@ public sealed class PlanetKindProgram
     /// <summary>Table entries per octave: a warp samples three fields.</summary>
     public int Fields(int layer) => Op[layer] == LayerOp.Warp ? 3 : 1;
 
-    /// <summary>Coarse-grid values per layer at a LOD: a sum per linear layer, the raw octave values per shaped one.</summary>
+    /// <summary>Coarse-grid values per layer at a LOD: a sum per linear layer, the raw octave values per creased one, the sum and running gradient of an eroded one.</summary>
     public int SlotsOf(int layer, int coarseOctaves)
     {
         if (coarseOctaves == 0)
@@ -126,7 +126,7 @@ public sealed class PlanetKindProgram
         {
             LayerOp.Warp => 3,
             LayerOp.Fbm => (Mode[layer] & LayerMode.Gradient) != 0 ? 4 : 1,
-            LayerOp.Eroded => 4 * coarseOctaves,
+            LayerOp.Eroded => 4,
             LayerOp.Ridged when (Mode[layer] & LayerMode.ShapedV1) != 0 => 1,
             _ => coarseOctaves,
         };

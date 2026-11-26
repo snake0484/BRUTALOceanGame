@@ -175,6 +175,166 @@ public sealed class PlanetKindTests(ITestOutputHelper output)
         Assert.InRange(s.Slope90, slope90 * 0.5, slope90 * 2.0);
     }
 
+    /// <summary>
+    /// Cost of a kind against the brief's budgets (§1): lattice ns per point and ms per surface leaf at LOD 0, 2, 4, 6, 8
+    /// and 12 over its steepest ground (belts, crater fields, canyon country), vector rows and scalar; the point query,
+    /// bounds, classification and the impostor's per-sample cost. Release numbers only.
+    /// </summary>
+    [Theory]
+    [Trait("Category", "Perf")]
+    [InlineData("legacy-rolling", 1.0e6)]
+    [InlineData("temperate-continental", 1.0e6)]
+    [InlineData("barren-cratered", 4.0e5)]
+    [InlineData("desert-canyon", 1.0e6)]
+    public void KindCost(string kind, double radius)
+    {
+        var generator = new PlanetGenerator(PlanetParams.Generate(PlanetParams.BodySeed(SystemSeed, kind == "barren-cratered" ? 2 : 1), radius, kind: kind));
+        var surface = generator.Surface;
+        var scratch = new PlanetChunkScratch();
+        var random = new Random(61);
+        var spots = new List<(double Slope, double X, double Y, double Z)>();
+        var sea = surface.HasSea ? surface.SeaHeight + 50f : float.NegativeInfinity;
+
+        while (spots.Count < 600)
+        {
+            RandomDirection(random, out var x, out var y, out var z);
+            var h = surface.Height(x, y, z);
+
+            if (h < sea)
+                continue;
+
+            var step = 100.0 / radius;
+            var l = Math.Sqrt((x + step) * (x + step) + y * y + z * z);
+            spots.Add((Math.Abs(surface.Height((x + step) / l, y / l, z / l) - h), x, y, z));
+        }
+
+        spots.Sort((a, b) => b.Slope.CompareTo(a.Slope));
+        var target = new VoxelChunk();
+        var sw = new System.Diagnostics.Stopwatch();
+
+        foreach (var lod in new[] { 0, 2, 4, 6, 8, 12 })
+        {
+            var coords = new List<ChunkCoord>();
+
+            for (var i = 0; i < spots.Count && coords.Count < 48; i++)
+            {
+                var r = radius + surface.Height(spots[i].X, spots[i].Y, spots[i].Z, lod);
+                target.Coord = ChunkCoord.FromPlanet(spots[i].X * r, spots[i].Y * r, spots[i].Z * r, lod);
+                generator.Generate(target, scratch);
+
+                if (target.HasSurface)
+                    coords.Add(target.Coord);
+            }
+
+            double Lattice(bool simd)
+            {
+                LayerOps.SimdEnabled = simd;
+                long points = 0;
+                sw.Restart();
+
+                while (sw.Elapsed.TotalMilliseconds < 250)
+                {
+                    foreach (var c in coords)
+                        points += generator.EvaluateLattice(c, scratch);
+                }
+
+                LayerOps.SimdEnabled = true;
+                return sw.Elapsed.TotalMilliseconds * 1e6 / points;
+            }
+
+            double Leaf(bool simd)
+            {
+                LayerOps.SimdEnabled = simd;
+                var leaves = 0;
+                sw.Restart();
+
+                while (sw.Elapsed.TotalMilliseconds < 250)
+                {
+                    foreach (var c in coords)
+                    {
+                        target.Coord = c;
+                        generator.Generate(target, scratch);
+                    }
+
+                    leaves += coords.Count;
+                }
+
+                LayerOps.SimdEnabled = true;
+                return sw.Elapsed.TotalMilliseconds / leaves;
+            }
+
+            Lattice(true);
+            Lattice(false);
+            var points = 0;
+
+            foreach (var c in coords)
+                points += generator.EvaluateLattice(c, scratch);
+
+            double vector = Lattice(true), scalar = Lattice(false), perLeaf = points / (double)coords.Count * 1e-6;
+            output.WriteLine($"{kind} LOD {lod}: lattice {vector:F0} ns/point = {vector * perLeaf:F3} ms/leaf, whole leaf {Leaf(true):F3} ms; scalar {scalar:F0} ns/point = {scalar * perLeaf:F3} ms/leaf, whole leaf {Leaf(false):F3} ms ({coords.Count} surface leaves)");
+        }
+
+        var samples = 0;
+        var sum = 0f;
+        sw.Restart();
+
+        while (sw.Elapsed.TotalMilliseconds < 200)
+        {
+            var s = spots[samples++ % spots.Count];
+            sum += surface.Height(s.X, s.Y, s.Z);
+        }
+
+        var height = sw.Elapsed.TotalMilliseconds * 1000.0 / samples;
+        samples = 0;
+        sw.Restart();
+
+        while (sw.Elapsed.TotalMilliseconds < 200)
+        {
+            var s = spots[samples++ % spots.Count];
+            surface.Bounds(s.X, s.Y, s.Z, 1e-4, 0, PlanetGenerator.MaxLod, out var lo, out _);
+            sum += lo;
+        }
+
+        var boundsCost = sw.Elapsed.TotalMilliseconds * 1000.0 / samples;
+        sw.Restart();
+        var bounds = new PlanetHeightBounds(generator);
+        bounds.Build();
+        var build = sw.Elapsed.TotalMilliseconds;
+        samples = 0;
+        sw.Restart();
+
+        while (sw.Elapsed.TotalMilliseconds < 200)
+        {
+            var s = spots[samples++ % spots.Count];
+            var r = radius + surface.Height(s.X, s.Y, s.Z) + 96.0;
+            sum += (int)bounds.Classify(ChunkCoord.FromPlanet(s.X * r, s.Y * r, s.Z * r, 0), 0);
+        }
+
+        var classify = sw.Elapsed.TotalMilliseconds * 1000.0 / samples - height;
+        var heights = new ushort[PlanetImpostor.Texels(PlanetImpostor.BaseSize)];
+        var albedo = new uint[heights.Length];
+        sw.Restart();
+        PlanetImpostor.BakeFace(generator, PlanetImpostor.BaseSize, 0, heights, albedo);
+        var impostor = sw.Elapsed.TotalMilliseconds * 1000.0 / (PlanetImpostor.BaseSize * PlanetImpostor.BaseSize);
+        output.WriteLine($"{kind}: Height {height:F3} us, Bounds {boundsCost:F3} us, Classify {classify:F3} us, bounds pyramid {build:F0} ms, impostor {impostor:F3} us/sample ({sum:F0})");
+    }
+
+    /// <summary>
+    /// Each shipped kind's program hash, heights and chunk bytes for the test system's bodies: a change to a kind's data
+    /// or to a layer's maths shows here (a changed kind takes a new id once worlds are saved).
+    /// </summary>
+    [Theory]
+    [InlineData("temperate-continental", 1.0e6, 1, 0x83078AD9DDF7A3E1UL, 0xB6576351132222D9UL, 0x0AC4B923A3608CEFUL)]
+    [InlineData("barren-cratered", 4.0e5, 2, 0x7619E33BB7D536D9UL, 0x084FA7C4A315A545UL, 0x4BE79B7985CE5216UL)]
+    [InlineData("desert-canyon", 1.0e6, 1, 0x6644F7C4DE205754UL, 0xAEDA65CE93515175UL, 0x612245D630A02DCEUL)]
+    public void KindGoldenHashes(string kind, double radius, int body, ulong program, ulong heights, ulong chunks)
+    {
+        var generator = new PlanetGenerator(PlanetParams.Generate(PlanetParams.BodySeed(SystemSeed, body), radius, kind: kind));
+        var hashes = GoldenHashes(generator);
+        output.WriteLine($"[InlineData(\"{kind}\", {radius:0.0e0}, {body}, 0x{generator.Params.ProgramHash:X16}UL, 0x{hashes.Heights:X16}UL, 0x{hashes.Chunks:X16}UL)]");
+        Assert.Equal((program, heights, chunks), (generator.Params.ProgramHash, hashes.Heights, hashes.Chunks));
+    }
+
     /// <summary>The v1 generator's heights and chunk bytes, recorded before the kinds landed: legacy-rolling reproduces them bit for bit.</summary>
     [Fact]
     public void LegacyKindMatchesV1()

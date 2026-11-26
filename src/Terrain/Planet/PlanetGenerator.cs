@@ -109,6 +109,26 @@ public sealed class PlanetGenerator
             chunk.Density.AsSpan().CopyTo(scratch.Generated);
     }
 
+    /// <summary>The lattice heights of a chunk's windows alone (what a generate evaluates before it fills voxels); returns the lattice points. For cost measurements.</summary>
+    internal int EvaluateLattice(ChunkCoord coord, PlanetChunkScratch scratch)
+    {
+        var s = coord.VoxelSize;
+        var size = ChunkConstants.Size * s;
+        var ox = coord.X * size;
+        var oy = coord.Y * size;
+        var oz = coord.Z * size;
+        Span<double> box = [ox - s, oy - s, oz - s, ox + size, oy + size, oz + size];
+        var n = LatticeN(coord.Lod);
+        BuildWindows(scratch, box, n, ox, oy, oz, s);
+        EvaluateWindows(scratch, coord.Lod, n, out _, out _, out _);
+        var points = 0;
+
+        for (var w = 0; w < scratch.WindowCount; w++)
+            points += scratch.Windows[w].HW * scratch.Windows[w].HH;
+
+        return points;
+    }
+
     /// <summary>
     /// True if a server can drop the op unlogged (D30): every voxel it reaches at LOD 0 is protected and generated as
     /// saturated rock, so neither removal (clamped) nor placing (already solid) changes anything. Conservative.
@@ -386,6 +406,16 @@ public sealed class PlanetGenerator
                 }
             }
 
+            for (var k = 0; k < w.HW + w.HH; k++)
+            {
+                var column = k < w.HW;
+                var lattice = column ? w.HI0 + k : w.HJ0 + k - w.HW;
+                var cell = lattice / CoarseStep - (column ? w.CI0 : w.CJ0);
+                scratch.CoarseA[k] = cell;
+                scratch.CoarseB[k] = Math.Min(cell + 1, (column ? w.CW : w.CH) - 1);
+                scratch.CoarseF[k] = (lattice % CoarseStep) * (1f / CoarseStep);
+            }
+
             var rows = new RowSet
             {
                 X = scratch.PointX.AsSpan(0, points),
@@ -405,6 +435,12 @@ public sealed class PlanetGenerator
                 CI0 = w.CI0,
                 CJ0 = w.CJ0,
                 SlotStride = coarsePoints,
+                ColA = scratch.CoarseA.AsSpan(0, w.HW),
+                ColB = scratch.CoarseB.AsSpan(0, w.HW),
+                ColF = scratch.CoarseF.AsSpan(0, w.HW),
+                RowA = scratch.CoarseA.AsSpan(w.HW, w.HH),
+                RowB = scratch.CoarseB.AsSpan(w.HW, w.HH),
+                RowF = scratch.CoarseF.AsSpan(w.HW, w.HH),
                 Scratch = scratch,
                 Face = w.Face,
                 N = n,

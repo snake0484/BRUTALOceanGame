@@ -45,13 +45,22 @@ public sealed class SeamTest
     private double _readySince = -1.0;
     private bool _capturing;
 
-    public SeamTest(FlyCamera camera, SimWorld sim, TerrainWorld world, Renderer renderer)
+    private readonly bool _steep;
+    private readonly double3 _start;
+    private readonly double3 _heading;
+
+    /// <param name="steep">Look at the planet's steepest ground (<see cref="SteepGround"/>) instead of inland from the spawn.</param>
+    public SeamTest(FlyCamera camera, SimWorld sim, TerrainWorld world, Renderer renderer, bool steep = false)
     {
         _camera = camera;
         _sim = sim;
         _world = world;
         _renderer = renderer;
         _ball = sim.Planet.Radius + sim.Planet.MinHeight;
+        _steep = steep;
+
+        if (steep)
+            SteepGround.Find(sim.Generator.Surface, out _start, out _heading);
     }
 
     public bool Done => _view == Altitudes.Length;
@@ -65,8 +74,17 @@ public sealed class SeamTest
         if (Done)
             return;
 
-        _camera.Position = _sim.Bubble.ToPlanet(new Vector3(0f, (float)Altitudes[_view], 0f));
-        _camera.LookAlong(_sim.Bubble.ToPlanetDirection(FlyCamera.Direction(Yaw, Pitch)));
+        if (_steep)
+        {
+            var ground = _sim.Generator.Surface.Height(_start.X, _start.Y, _start.Z);
+            _camera.Position = _start * (_sim.Planet.Radius + ground + Altitudes[_view]);
+            _camera.LookAlong(_heading * Math.Cos(Pitch) + _start * Math.Sin(Pitch));
+        }
+        else
+        {
+            _camera.Position = _sim.Bubble.ToPlanet(new Vector3(0f, (float)Altitudes[_view], 0f));
+            _camera.LookAlong(_sim.Bubble.ToPlanetDirection(FlyCamera.Direction(Yaw, Pitch)));
+        }
 
         if (_capturing)
             return;

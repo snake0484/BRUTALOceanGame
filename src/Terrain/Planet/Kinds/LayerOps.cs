@@ -18,6 +18,10 @@ internal ref struct RowSet
     public int CW, CH, CI0, CJ0, SlotStride;
     public bool Direct;
 
+    /// <summary>Per column and per row of the window: the two coarse indices either side and the fraction between them.</summary>
+    public ReadOnlySpan<int> ColA, ColB, RowA, RowB;
+    public ReadOnlySpan<float> ColF, RowF;
+
     /// <summary>A lattice window's face, cells per side and job scratch (stamp list); null scratch for point queries.</summary>
     public PlanetChunkScratch? Scratch;
     public int Face, N;
@@ -185,10 +189,42 @@ internal static partial class LayerOps
             }
             case LayerOp.Eroded:
             {
-                for (var o = 0; o < coarse; o++)
-                    NoiseRowD(p, first + o, ref r, warp, default, r.Slot(slot + 4 * o), r.Slot(slot + 4 * o + 1), r.Slot(slot + 4 * o + 2), r.Slot(slot + 4 * o + 3));
-
+                Span<float> sum = r.Slot(slot), sx = r.Slot(slot + 1), sy = r.Slot(slot + 2), sz = r.Slot(slot + 3);
+                sum.Clear();
+                sx.Clear();
+                sy.Clear();
+                sz.Clear();
+                ErodedOctaves(p, layer, ref r, 0, coarse, default, sum, sx, sy, sz);
                 break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Eroded octaves [from, to): each is damped by 1 / (1 + κ·|G|²), G the running tangential slope of the octaves so
+    /// far (its own included). The sum and G carry on from what the rows already hold.
+    /// </summary>
+    private static void ErodedOctaves(PlanetKindProgram p, int layer, ref RowSet r, int from, int to, ReadOnlySpan<float> gate, Span<float> dst, Span<float> sx, Span<float> sy, Span<float> sz)
+    {
+        Span<float> n = r.Tmp(0), gx = r.Tmp(1), gy = r.Tmp(2), gz = r.Tmp(3);
+        var first = p.FirstOctave[layer];
+        var kappa = p.Params[p.ParamBase[layer]];
+        var invRadius = 1.0 / p.Radius;
+
+        for (var o = from; o < to; o++)
+        {
+            NoiseRowD(p, first + o, ref r, p.Warp[layer], gate, n, gx, gy, gz);
+            var a = p.Amplitude[first + o];
+            var af = (float)(a * p.Frequency[first + o]);
+
+            for (var i = 0; i < dst.Length; i++)
+            {
+                sx[i] += af * gx[i];
+                sy[i] += af * gy[i];
+                sz[i] += af * gz[i];
+                var radial = (float)((sx[i] * r.X[i] + sy[i] * r.Y[i] + sz[i] * r.Z[i]) * invRadius);
+                var slope2 = MathF.Max(sx[i] * sx[i] + sy[i] * sy[i] + sz[i] * sz[i] - radial * radial, 0f);
+                dst[i] += a * n[i] / (1f + kappa * slope2);
             }
         }
     }
@@ -319,43 +355,12 @@ internal static partial class LayerOps
             }
             case LayerOp.Eroded:
             {
-                Span<float> gx = r.Tmp(1), gy = r.Tmp(2), gz = r.Tmp(3);
                 Span<float> sx = r.Tmp(4), sy = r.Tmp(5), sz = r.Tmp(6);
-                var kappa = p.Params[p.ParamBase[layer]];
-                var invRadius = 1.0 / p.Radius;
-                sx.Clear();
-                sy.Clear();
-                sz.Clear();
-                dst.Clear();
-
-                for (var o = 0; o < end; o++)
-                {
-                    if (o < coarse)
-                    {
-                        Interpolate(ref r, slot + 4 * o, n);
-                        Interpolate(ref r, slot + 4 * o + 1, gx);
-                        Interpolate(ref r, slot + 4 * o + 2, gy);
-                        Interpolate(ref r, slot + 4 * o + 3, gz);
-                    }
-                    else
-                    {
-                        NoiseRowD(p, first + o, ref r, warp, gate, n, gx, gy, gz);
-                    }
-
-                    var a = p.Amplitude[first + o];
-                    var af = (float)(a * p.Frequency[first + o]);
-
-                    for (var i = 0; i < dst.Length; i++)
-                    {
-                        sx[i] += af * gx[i];
-                        sy[i] += af * gy[i];
-                        sz[i] += af * gz[i];
-                        var radial = (float)((sx[i] * r.X[i] + sy[i] * r.Y[i] + sz[i] * r.Z[i]) * invRadius);
-                        var slope2 = MathF.Max(sx[i] * sx[i] + sy[i] * sy[i] + sz[i] * sz[i] - radial * radial, 0f);
-                        dst[i] += a * n[i] / (1f + kappa * slope2);
-                    }
-                }
-
+                Start(ref r, dst, coarse > 0, slot);
+                Start(ref r, sx, coarse > 0, slot + 1);
+                Start(ref r, sy, coarse > 0, slot + 2);
+                Start(ref r, sz, coarse > 0, slot + 3);
+                ErodedOctaves(p, layer, ref r, coarse, end, gate, dst, sx, sy, sz);
                 break;
             }
         }
@@ -463,25 +468,18 @@ internal static partial class LayerOps
     private static void Interpolate(ref RowSet r, int slot, Span<float> dst)
     {
         ReadOnlySpan<float> s = r.Slot(slot);
-        var cw = r.CW;
+        ReadOnlySpan<int> colA = r.ColA, colB = r.ColB;
+        ReadOnlySpan<float> colF = r.ColF;
         var k = 0;
 
         for (var j = 0; j < r.H; j++)
         {
-            var lj = r.J0 + j;
-            var cj = lj / CoarseStep - r.CJ0;
-            var row0 = cj * cw;
-            var row1 = Math.Min(cj + 1, r.CH - 1) * cw;
-            var fj = (lj % CoarseStep) * (1f / CoarseStep);
+            var top = s.Slice(r.RowA[j] * r.CW, r.CW);
+            var bottom = s.Slice(r.RowB[j] * r.CW, r.CW);
+            var fj = r.RowF[j];
 
-            for (var i = 0; i < r.W; i++, k++)
-            {
-                var li = r.I0 + i;
-                var ci = li / CoarseStep - r.CI0;
-                var ci1 = Math.Min(ci + 1, cw - 1);
-                var fi = (li % CoarseStep) * (1f / CoarseStep);
-                dst[k] = Bilinear(s[row0 + ci], s[row0 + ci1], s[row1 + ci], s[row1 + ci1], fi, fj);
-            }
+            for (var i = 0; i < colA.Length; i++, k++)
+                dst[k] = Bilinear(top[colA[i]], top[colB[i]], bottom[colA[i]], bottom[colB[i]], colF[i], fj);
         }
     }
 

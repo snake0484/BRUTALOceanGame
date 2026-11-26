@@ -11,20 +11,30 @@ namespace BrutalGame.Sim.Tests;
 
 public class SimBoundaryTests
 {
-    /// <summary>How far out from the spawn's waterline, along the sea frame's +x, the sea is first this deep (the coast is the planet kind's).</summary>
-    private static float Offshore(SimWorld sim, float depth)
+    /// <summary>The nearest point to the spawn, out along 16 bearings of the sea frame, where the sea is this deep over open seabed (the coast is the planet kind's).</summary>
+    private static double3 Offshore(SimWorld sim, float depth)
     {
         var surface = sim.Generator.Surface;
 
-        for (var x = 1000f; x <= 200_000f; x += 500f)
+        for (var range = 1000f; range <= 400_000f; range += 1000f)
         {
-            var d = Dir(sim, x);
+            for (var k = 0; k < 16; k++)
+            {
+                var bearing = k * (MathF.PI / 8f);
+                var d = double3.Normalize(sim.Bubble.ToPlanet(new Vector3(range * MathF.Cos(bearing), 0f, range * MathF.Sin(bearing))));
 
-            if (surface.Height(d.X, d.Y, d.Z) < surface.SeaHeight - depth)
-                return x;
+                if (surface.Height(d.X, d.Y, d.Z) > surface.SeaHeight - depth)
+                    continue;
+
+                // Open seabed, not a pit of the coastal ramp: the ground all round is under water too.
+                surface.Bounds(d.X, d.Y, d.Z, 5e-5, 0, 0, out _, out var highest);
+
+                if (highest < surface.SeaHeight - 0.5f * depth)
+                    return d;
+            }
         }
 
-        throw new InvalidOperationException($"No sea {depth} m deep within 200 km of the spawn");
+        throw new InvalidOperationException($"No sea {depth} m deep within 400 km of the spawn");
     }
 
     private static readonly string[] Forbidden = ["Brutal.Vulkan", "Brutal.Glfw", "Brutal.ImGui", "Brutal.ShaderC", "Engine", "Debug"];
@@ -176,9 +186,10 @@ public class SimBoundaryTests
     }
 
     /// <summary>An edit <paramref name="below"/> m under the generated ground at a point of the bubble's plane (x out to sea).</summary>
-    private static EditOp Under(SimWorld sim, float x, float below, BrushMode mode)
+    private static EditOp Under(SimWorld sim, float x, float below, BrushMode mode) => Under(sim, double3.Normalize(sim.Bubble.ToPlanet(new Vector3(x, 0f, 0f))), below, mode);
+
+    private static EditOp Under(SimWorld sim, double3 d, float below, BrushMode mode)
     {
-        var d = double3.Normalize(sim.Bubble.ToPlanet(new Vector3(x, 0f, 0f)));
         var r = sim.Planet.Radius + sim.Generator.Surface.Height(d.X, d.Y, d.Z) - below;
         return EditOp.At(d.X * r, d.Y * r, d.Z * r, 3f, mode, mode == BrushMode.Dig ? VoxelMaterial.Air : VoxelMaterial.Rock);
     }
@@ -259,7 +270,7 @@ public class SimBoundaryTests
         Assert.Equal(-2f, sim.Shore.Depth(d.X, d.Y, d.Z), 0.01f);
         Assert.Equal(0f, sim.Ocean.SampleHeight(d * sim.Planet.SeaRadius, sim.Clock.TickIndex));
 
-        var open = Dir(sim, Offshore(sim, 30f));
+        var open = Offshore(sim, 30f);
         Assert.NotEqual(0f, sim.Ocean.SampleHeight(open * sim.Planet.SeaRadius, sim.Clock.TickIndex));
         Assert.Equal(sim.Ocean.SampleHeight(open * sim.Planet.SeaRadius, sim.Clock.TickIndex), sim.Ocean.SampleHeight(open * (sim.Planet.SeaRadius + 500.0), sim.Clock.TickIndex));
     }

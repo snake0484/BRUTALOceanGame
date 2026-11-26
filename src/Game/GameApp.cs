@@ -130,12 +130,14 @@ public sealed partial class GameApp : IDisposable
     /// <param name="orbitTest">--orbit-test [inertial]: the test planet as a smooth sphere below the impostor switch and on the detail ladder above it, with the terrain round the spawn on it, flown from 2 m to 1e8 m with the camera in its surface or inertial frame; no ocean.</param>
     /// <param name="moonTest">--moon-test: the camera falls onto the moon from 1e9 m (a point of light) through disc, impostor and the focus switch to its octree, logging the ladder's GPU time per stage.</param>
     /// <param name="shoreFly">--shore-fly: the camera follows the spawn's waterline, then climbs, logging the ocean's GPU time and the depth maps' work.</param>
+    /// <param name="planetKind">--planet-kind &lt;id&gt; [--kind-seed N]: the terrain planet and the moons take this planet kind (data/planets/kinds), its ranges drawn from the seed.</param>
+    /// <param name="steep">--steep: --planet-fly and --seam-test run over the planet's steepest ground, not the spawn.</param>
     /// <param name="seamTest">--seam-test: static views of the octree alone over a key clear colour; one captured frame per view counts the pixels showing through it.</param>
     /// <param name="menu">Menu mode (no test or bench flag): app states, menus and settings (GameApp.Menu.cs); null runs as before.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false, bool shoreFly = false, bool seamTest = false, Menu.MenuLaunch? menu = null)
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false, bool shoreFly = false, bool seamTest = false, Menu.MenuLaunch? menu = null, string? planetKind = null, ulong? kindSeed = null, bool steep = false)
     {
         var weatherField = new WeatherField(new WeatherClimate());
-        _sim = new SimWorld(seed: menu?.Seed ?? 1, WorkerBudget.Tick, weatherField) { DriveWind = weather, WeatherTimeOffset = weatherOffset * 60.0 };
+        _sim = new SimWorld(seed: menu?.Seed ?? 1, WorkerBudget.Tick, weatherField, kind: planetKind, kindSeed: kindSeed) { DriveWind = weather, WeatherTimeOffset = weatherOffset * 60.0 };
 
         ref readonly var planet = ref _sim.Celestial[_sim.PlanetIndex];
         _planetFrame = planet.Surface;
@@ -198,7 +200,7 @@ public sealed partial class GameApp : IDisposable
         _editTest = editTest ? new EditTest(_sim, _terrain, _brush, _camera) : null;
         _terrainPanel = new TerrainPanel(_terrain, _terrainRenderer, _sim.Physics);
         _ocean = new OceanRenderer(_renderer, _oceanFft, _depthTexture.NearView, _depthTexture.NearSampler, _depthTexture.FarView, _depthTexture.FarSampler);
-        _planetFly = planetFly ? new PlanetFlyTest(_camera, _sim, _terrain) : null;
+        _planetFly = planetFly ? new PlanetFlyTest(_camera, _sim, _terrain, steep) : null;
         _profiler = new ProfilerPanel(_stats, _renderer, _terrainRenderer, _ocean);
 
         _uploadScope = _renderer.GpuTimer.Register("Uploads");
@@ -213,7 +215,7 @@ public sealed partial class GameApp : IDisposable
             _planetScope = _renderer.GpuTimer.Register("Planet");
 
         _moonTest = moonTest ? new MoonTest(_camera, _sim, _terrain, _celestial, _renderer.GpuTimer, _terrainScope) : null;
-        _seamTest = seamTest ? new SeamTest(_camera, _sim, _terrain, _renderer) : null;
+        _seamTest = seamTest ? new SeamTest(_camera, _sim, _terrain, _renderer, steep) : null;
         _shoreFly = shoreFly ? new ShoreFlyTest(_camera, _sim, _depths, _depthTexture, _renderer.GpuTimer, [_oceanScope, _fftScope, _oceanComputeScope]) : null;
 
         var pipelineStats = _renderer.PipelineStats;

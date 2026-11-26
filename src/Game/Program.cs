@@ -27,6 +27,12 @@ var weatherOffset = 0f;
 // Scene resolution per axis relative to the window (0.5..1); the UI stays native.
 var renderScale = 1f;
 float[]? camera = null;
+
+// Planet kind of the terrain planet and the moons (data/planets/kinds), and the seed its ranges draw from.
+string? planetKind = null;
+ulong? kindSeed = null;
+var steep = false;
+
 for (var i = 0; i < args.Length; i++)
 {
     if (args[i] == "--wind" && i + 1 < args.Length)
@@ -71,6 +77,12 @@ for (var i = 0; i < args.Length; i++)
         shoreFly = true;
     else if (args[i] == "--seam-test")
         seamTest = true;
+    else if (args[i] == "--planet-kind" && i + 1 < args.Length)
+        planetKind = args[++i];
+    else if (args[i] == "--kind-seed" && i + 1 < args.Length)
+        kindSeed = ulong.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture);
+    else if (args[i] == "--steep")
+        steep = true;
     else if (args[i] == "--orbit-test")
     {
         orbitTest = OrbitTestFrame.Surface;
@@ -94,7 +106,7 @@ if (BrutalGame.Menu.MenuLaunch.FromArgs(args) is { } menu)
 {
     do
     {
-        using var menuApp = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest, shoreFly, seamTest, menu);
+        using var menuApp = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest, shoreFly, seamTest, menu, planetKind, kindSeed, steep);
         menuApp.Run();
     }
     while (menu.TakeRelaunch());
@@ -102,5 +114,5 @@ if (BrutalGame.Menu.MenuLaunch.FromArgs(args) is { } menu)
     return;
 }
 
-using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest, shoreFly, seamTest);
+using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest, shoreFly, seamTest, planetKind: planetKind, kindSeed: kindSeed, steep: steep);
 app.Run();

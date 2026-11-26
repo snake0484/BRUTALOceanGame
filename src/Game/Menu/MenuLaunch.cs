@@ -25,6 +25,7 @@ public sealed class MenuLaunch(SettingsStore settings)
         "--moon-test",
         "--shore-fly",
         "--seam-test",
+        "--planet-kind",
         "--cam",
         "--hide-ui",
         "--no-menu",

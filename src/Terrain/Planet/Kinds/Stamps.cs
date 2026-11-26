@@ -167,7 +167,7 @@ internal static class Stamps
 
             float deepest = cls.DepthMax, highest = cls.RimMax;
             var cell = MinArcPerT * 2.0 / cls.CellsPerSide * p.Radius;
-            var n = rho <= 2.0 * cell ? Collect(p, k, cx, cy, cz, rho, buffer) : -1;
+            var n = rho <= 0.5 * cell ? Collect(p, k, cx, cy, cz, rho, buffer) : -1;
 
             if (n >= 0)
             {
@@ -253,6 +253,32 @@ internal static class Stamps
         var reach = rho / p.Radius;
         var n = cls.CellsPerSide;
         var count = 0;
+
+        // A cap whose reach in lattice t stays inside the centre's face touches only that face's cells around it.
+        var own = CubeLattice.Face(c[0], c[1], c[2], out var cu, out var cv);
+        var span = reach / MinArcPerT * 1.05 + 1e-9;
+        double tu0 = CubeLattice.ToT(cu), tv0 = CubeLattice.ToT(cv);
+
+        if (tu0 - span > -1.0 && tu0 + span < 1.0 && tv0 - span > -1.0 && tv0 + span < 1.0)
+        {
+            int a0 = Cell(tu0 - span, n), a1 = Cell(tu0 + span, n), b0 = Cell(tv0 - span, n), b1 = Cell(tv0 + span, n);
+
+            for (var j = b0; j <= b1; j++)
+            {
+                for (var i = a0; i <= a1; i++)
+                {
+                    if (!Candidate(p, k, own, i, j, out var stamp))
+                        continue;
+
+                    if (count == list.Length)
+                        return -1;
+
+                    list[count++] = stamp;
+                }
+            }
+
+            return count;
+        }
 
         for (var face = 0; face < CubeLattice.Faces; face++)
         {

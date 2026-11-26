@@ -35,6 +35,10 @@ public sealed class PlanetChunkScratch
     internal double[] PointX = [], PointY = [], PointZ = [], CoarseX = [], CoarseY = [], CoarseZ = [];
     internal float[] Rows = [], CoarseRows = [], Slots = [];
 
+    /// <summary>Per column then per row of the window: the coarse indices either side and the fraction between (columns at 0, rows from the window's width).</summary>
+    internal int[] CoarseA = [], CoarseB = [];
+    internal float[] CoarseF = [];
+
     /// <summary>Stamps that can reach the window being evaluated, in class order.</summary>
     internal Stamp[] Stamps = new Stamp[64];
     internal int StampCount;
@@ -73,6 +77,9 @@ public sealed class PlanetChunkScratch
         Ensure(ref Rows, program.Rows * points);
         Ensure(ref CoarseRows, program.Rows * coarsePoints);
         Ensure(ref Slots, Math.Max(program.MaxCoarseSlots, 1) * coarsePoints);
+        Ensure(ref CoarseA, points);
+        Ensure(ref CoarseB, points);
+        Ensure(ref CoarseF, points);
     }
 
     internal static void Ensure<T>(ref T[] array, int length)
