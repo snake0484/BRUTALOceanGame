@@ -18,7 +18,7 @@ using BrutalGame.Weather;
 
 namespace BrutalGame;
 
-public sealed class GameApp : IDisposable
+public sealed partial class GameApp : IDisposable
 {
     private const int TimingSamples = 256;
     private const string Title = "BRUTALGame";
@@ -131,10 +131,11 @@ public sealed class GameApp : IDisposable
     /// <param name="moonTest">--moon-test: the camera falls onto the moon from 1e9 m (a point of light) through disc, impostor and the focus switch to its octree, logging the ladder's GPU time per stage.</param>
     /// <param name="shoreFly">--shore-fly: the camera follows the spawn's waterline, then climbs, logging the ocean's GPU time and the depth maps' work.</param>
     /// <param name="seamTest">--seam-test: static views of the octree alone over a key clear colour; one captured frame per view counts the pixels showing through it.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false, bool shoreFly = false, bool seamTest = false)
+    /// <param name="menu">Menu mode (no test or bench flag): app states, menus and settings (GameApp.Menu.cs); null runs as before.</param>
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false, bool shoreFly = false, bool seamTest = false, Menu.MenuLaunch? menu = null)
     {
         var weatherField = new WeatherField(new WeatherClimate());
-        _sim = new SimWorld(seed: 1, WorkerBudget.Tick, weatherField) { DriveWind = weather, WeatherTimeOffset = weatherOffset * 60.0 };
+        _sim = new SimWorld(seed: menu?.Seed ?? 1, WorkerBudget.Tick, weatherField) { DriveWind = weather, WeatherTimeOffset = weatherOffset * 60.0 };
 
         ref readonly var planet = ref _sim.Celestial[_sim.PlanetIndex];
         _planetFrame = planet.Surface;
@@ -233,6 +234,8 @@ public sealed class GameApp : IDisposable
             _terrainPanel.Open = false;
             _weatherPanel.Open = false;
         }
+
+        InitMenu(menu); // menu
     }
 
     /// <summary>--bench: alternates the shore wash on/off once the world has settled, then closes.</summary>
@@ -269,9 +272,10 @@ public sealed class GameApp : IDisposable
             last = now;
 
             var mark = Stopwatch.GetTimestamp();
-            RunTicks(frameSeconds);
+            RunTicks(MenuSimSeconds(frameSeconds)); // menu: no ticks under the menus
             _sim.UpdateRenderPoses();
             _sections.Ticks = Lap(ref mark);
+            MenuCameraBefore(); // menu
 
             if (_orbitTest is null && _planetFly is null && _moonTest is null && _shoreFly is null && _seamTest is null)
                 _camera.Update(_window, frameSeconds, _imgui.WantCaptureMouse, _imgui.WantCaptureKeyboard);
@@ -281,6 +285,7 @@ public sealed class GameApp : IDisposable
             _orbitTest?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady, OutputAspect, RenderViewport, _sim.RenderTime);
             _moonTest?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady);
             _seamTest?.Fly(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady && _octreeCover >= 1f);
+            MenuCameraAfter(frameSeconds); // menu
             _celestial.Update(_camera);
             UpdateCameraSpeed(frameSeconds);
 
@@ -799,13 +804,14 @@ public sealed class GameApp : IDisposable
         _oceanPanel.Draw();
         _terrainPanel.Draw();
         _weatherPanel.Draw(CameraXZ);
+        DrawMenu(); // menu
         _imgui.EndFrame();
         _stats.Ui.Record((float)Stopwatch.GetElapsedTime(uiStart).TotalMilliseconds);
     }
 
     private void OnKey(GlfwWindow window, GlfwKey key, int scancode, GlfwKeyAction action, GlfwModifier mods)
     {
-        if (action != GlfwKeyAction.Press)
+        if (action != GlfwKeyAction.Press || MenuKey(key)) // menu: Escape pauses, resumes and goes back
             return;
 
         if (key == GlfwKey.F3)

@@ -89,5 +89,18 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
+// menu: without a test or bench flag the menu runs the game; a new world with another seed relaunches it (Menu/MenuLaunch.cs).
+if (BrutalGame.Menu.MenuLaunch.FromArgs(args) is { } menu)
+{
+    do
+    {
+        using var menuApp = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest, shoreFly, seamTest, menu);
+        menuApp.Run();
+    }
+    while (menu.TakeRelaunch());
+
+    return;
+}
+
 using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest, shoreFly, seamTest);
 app.Run();

@@ -26,6 +26,7 @@
     <Project Path="tests/Designer.Tests/Designer.Tests.csproj" />
     <Project Path="tests/Frames.Tests/Frames.Tests.csproj" />
     <Project Path="tests/Net.Tests/Net.Tests.csproj" />
+    <Project Path="tests/Game.Tests/Game.Tests.csproj" />
     <Project Path="tests/Physics.Tests/Physics.Tests.csproj" />
     <Project Path="tests/Plans.Tests/Plans.Tests.csproj" />
     <Project Path="tests/Sim.Tests/Sim.Tests.csproj" />

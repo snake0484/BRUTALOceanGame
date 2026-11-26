@@ -26,6 +26,7 @@ public sealed class FlyCamera
     public float Near = 0.1f;
     public double MoveSpeed = 15.0;
     public double LookSensitivity = 0.0025;
+    public bool InvertY;
 
     private bool _looking;
     private double2 _lastCursor;
@@ -107,7 +108,7 @@ public sealed class FlyCamera
         heading = length > 1e-9 ? heading / length : double3.Cross(up, Right);
         heading = doubleQuat.CreateFromAxisAngle(up, -dx * LookSensitivity) * heading;
 
-        var pitch = Math.Clamp(Math.Asin(sinPitch) - dy * LookSensitivity, -MaxPitch, MaxPitch);
+        var pitch = Math.Clamp(Math.Asin(sinPitch) - (InvertY ? -dy : dy) * LookSensitivity, -MaxPitch, MaxPitch);
         LookAlong(heading * Math.Cos(pitch) + up * Math.Sin(pitch));
     }
 
