@@ -103,7 +103,7 @@ public sealed partial class DesignerApp
             if (_programPanel.CallRequest >= 0)
                 ProgramRunner.Call(program, _componentRun, _programPanel.CallRequest);
 
-            _componentRun.Blocked = _programPanel.Blocked;
+            _componentRun.Obstructed = _programPanel.Blocked;
         }
 
         (_programPanel.ResetRequest, _programPanel.CallRequest) = (false, -1);

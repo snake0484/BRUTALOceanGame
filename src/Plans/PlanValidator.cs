@@ -401,12 +401,17 @@ public static class PlanValidator
             var named = n.Kind switch
             {
                 Ships.Logic.NodeKind.OnCall => n.A < face.Calls.Count,
-                Ships.Logic.NodeKind.SetState or Ships.Logic.NodeKind.IfState => n.A < face.States.Count,
+                Ships.Logic.NodeKind.SetState or Ships.Logic.NodeKind.IfState or Ships.Logic.NodeKind.StateIs => n.A < face.States.Count,
+                Ships.Logic.NodeKind.JointAt => doc.Joints?.IndexOf(n.Joint) >= 0,
                 _ => true,
             };
 
-            if (n.Id == 0 || !ids.Add(n.Id) || !Enum.IsDefined(n.Kind) || !named || n.B < 0
-                || (n.Out0 != 0 && program.IndexOf(n.Out0) < 0) || (n.Out1 != 0 && program.IndexOf(n.Out1) < 0))
+            // Flow leads to flow nodes; a condition link leads to a condition.
+            bool Flow(ushort to) => to == 0 || (program.IndexOf(to) is var i and >= 0 && !program.Nodes[i].IsCondition);
+            var condition = n.In == 0 || (program.IndexOf(n.In) is var c and >= 0 && program.Nodes[c].IsCondition && n.TakesCondition);
+
+            if (n.Id == 0 || !ids.Add(n.Id) || !Enum.IsDefined(n.Kind) || !named || (n.Kind != Ships.Logic.NodeKind.JointAt && n.B < 0)
+                || !Flow(n.Out0) || !Flow(n.Out1) || !condition)
                 log.Add(Severity.Error, IssueCode.ProgramShape, default, n.Id);
         }
 

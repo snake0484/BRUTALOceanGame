@@ -3,8 +3,8 @@ namespace BrutalGame.Ships.Logic;
 /// <summary>
 /// One placed component's programme state. The part a renderer needs is the <b>state record</b>: <see cref="State"/>, the
 /// tick it was <see cref="Entered"/>, where each joint <see cref="Start"/>ed from then, and whether it is
-/// <see cref="Held"/> (stopped where it was, after something got in the way). From it every joint's position at any tick
-/// is closed form (<see cref="ProgramRunner.Position"/>), so a client, a far ship or a save draws the component without
+/// <see cref="Held"/> (stopped where it was by something in its way). From it every joint's position at any tick is
+/// closed form (<see cref="ProgramRunner.Position"/>), so a client, a far ship or a save draws the component without
 /// running its graph; only a new state record goes on the wire. The rest is the running sequence, server-side only.
 /// </summary>
 public sealed class ProgramInstance
@@ -16,19 +16,23 @@ public sealed class ProgramInstance
     public bool Held;
     public readonly short[] Start = new short[MaxJoints];
 
-    /// <summary>The node the running sequence is at (0: idle) and, in a Wait, the tick it ends.</summary>
+    /// <summary>The node the running sequence is at (0: idle) and, in a Wait or Wait until, the tick it ends.</summary>
     public ushort Node;
     public long WaitUntil;
 
-    /// <summary>Something is in the way of the moving parts (the game's sweep; the designer's preview toggle).</summary>
-    public bool Blocked;
+    /// <summary>
+    /// Something physically stops the moving parts (the game's sweep; the designer's preview toggle): while set, parts on
+    /// their way stop where they are (the record becomes held). The programme learns of it only by what it can see: a
+    /// part that never reaches its position, so a Wait until times out.
+    /// </summary>
+    public bool Obstructed;
 }
 
 /// <summary>
 /// Runs component programmes, deterministically, on the integer tick (60 a second): a call starts its sequence at the
 /// call's node (replacing any running one); each tick the sequence runs through instant nodes until it waits, at most
 /// <see cref="MaxStepsPerTick"/> nodes, so a loop cannot hang a tick. Joints move at their own speed toward the current
-/// state's pose. No allocation.
+/// state's pose, unless something stops them. No allocation.
 /// </summary>
 public static class ProgramRunner
 {
@@ -76,12 +80,9 @@ public static class ProgramRunner
         return target >= start ? Math.Min(target, start + travel) : Math.Max(target, start - travel);
     }
 
-    /// <summary>Whether every joint the state names has reached its pose (a held state never moves on).</summary>
+    /// <summary>Whether every joint the state names has reached its pose (a held state never gets there).</summary>
     public static bool Arrived(HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, long tick)
     {
-        if (instance.Held)
-            return false;
-
         for (var j = 0; j < joints.Count && j < ProgramInstance.MaxJoints; j++)
         {
             if (program.PoseOf(instance.State, joints[j].Id, out var target) && Math.Abs(Position(program, joints, instance, j, tick) - target) > 1e-9)
@@ -102,10 +103,47 @@ public static class ProgramRunner
         instance.Held = false;
     }
 
-    /// <summary>One tick of the running sequence; true when the state record changed (what a server would send).</summary>
+    /// <summary>Whether condition node <paramref name="id"/> holds at <paramref name="tick"/> (a missing one never does).</summary>
+    public static bool Holds(HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, ushort id, long tick)
+    {
+        var index = program.IndexOf(id);
+
+        if (index < 0)
+            return false;
+
+        var c = program.Nodes[index];
+
+        switch (c.Kind)
+        {
+            case NodeKind.StateIs:
+                return instance.State == c.A;
+            case NodeKind.InPose:
+                return Arrived(program, joints, instance, tick);
+            case NodeKind.JointAt:
+                for (var j = 0; j < joints.Count && j < ProgramInstance.MaxJoints; j++)
+                {
+                    if (joints[j].Id == c.Joint)
+                        return Math.Abs(Position(program, joints, instance, j, tick) - c.B) <= c.A;
+                }
+
+                return false;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>One tick: an obstruction stops parts on their way, then the running sequence. True when the state record changed (what a server would send).</summary>
     public static bool Step(HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, long tick)
     {
         var changed = false;
+
+        // Stopped where they are by whatever is in the way.
+        if (instance.Obstructed && !instance.Held && !Arrived(program, joints, instance, tick))
+        {
+            Enter(program, joints, instance, instance.State, tick);
+            instance.Held = true;
+            changed = true;
+        }
 
         for (var steps = 0; instance.Node != 0 && steps < MaxStepsPerTick; steps++)
         {
@@ -128,23 +166,25 @@ public static class ProgramRunner
                     Enter(program, joints, instance, node.A, tick);
                     instance.Node = node.Out0;
                     changed = true;
+
+                    if (instance.Obstructed && !Arrived(program, joints, instance, tick))
+                        instance.Held = true;
+
                     break;
-                case NodeKind.WaitArrived:
-                    if (Arrived(program, joints, instance, tick))
+                case NodeKind.WaitUntil:
+                    if (instance.WaitUntil == 0)
+                        instance.WaitUntil = node.B > 0 ? tick + node.B : long.MaxValue;
+
+                    if (Holds(program, joints, instance, node.In, tick))
                     {
-                        instance.Node = node.Out0;
+                        (instance.WaitUntil, instance.Node) = (0, node.Out0);
                         break;
                     }
 
-                    // Nothing in the way, or no path for it (moving back out of the way, say): keep going.
-                    if (!instance.Blocked || node.Out1 == 0)
+                    if (tick < instance.WaitUntil)
                         return changed;
 
-                    // In the way: stop where it is, and go on the blocked path.
-                    Enter(program, joints, instance, instance.State, tick);
-                    instance.Held = true;
-                    instance.Node = node.Out1;
-                    changed = true;
+                    (instance.WaitUntil, instance.Node) = (0, node.Out1);
                     break;
                 case NodeKind.Wait:
                     if (instance.WaitUntil == 0)
@@ -156,11 +196,23 @@ public static class ProgramRunner
                     instance.WaitUntil = 0;
                     instance.Node = node.Out0;
                     break;
+                case NodeKind.If:
+                    instance.Node = Holds(program, joints, instance, node.In, tick) ? node.Out0 : node.Out1;
+                    break;
                 case NodeKind.IfState:
                     instance.Node = instance.State == node.A ? node.Out0 : node.Out1;
                     break;
+                case NodeKind.WaitArrived:
+                    if (Arrived(program, joints, instance, tick))
+                        instance.Node = node.Out0;
+                    else if (instance.Held && node.Out1 != 0)
+                        instance.Node = node.Out1;
+                    else
+                        return changed;
+
+                    break;
                 case NodeKind.IfBlocked:
-                    instance.Node = instance.Blocked ? node.Out0 : node.Out1;
+                    instance.Node = instance.Obstructed ? node.Out0 : node.Out1;
                     break;
                 default:
                     instance.Node = 0;
@@ -172,5 +224,5 @@ public static class ProgramRunner
     }
 
     /// <summary>A joint's speed in stored units per second (a rotor's 0.1 rpm as 0.1 degree a second).</summary>
-    private static double Speed(HullJoint joint) => Math.Abs(joint.Kind == JointKind.Rotor ? joint.Speed * 6.0 : joint.Speed);
+    public static double Speed(HullJoint joint) => Math.Abs(joint.Kind == JointKind.Rotor ? joint.Speed * 6.0 : joint.Speed);
 }

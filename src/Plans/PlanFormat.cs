@@ -74,7 +74,8 @@ public enum PlanFormatError
 /// <see cref="HullJointSet"/> block (rotors, hinges, the solids that move with them) after the paint. Format 14 (openings)
 /// adds door profiles, sliders and flag 128 with the <see cref="HullOpeningSet"/> block (doorways, docking port faces)
 /// after the joints. Format 15 (programmes) writes a second flags byte after the first (1: programme) and the
-/// <see cref="Ships.Logic.HullProgram"/> block after the openings.
+/// <see cref="Ships.Logic.HullProgram"/> block after the openings. Format 16 (conditions) gives each programme node a condition link and a joint (20 B nodes);
+/// format 15's 14 B nodes are read as before, and every programme is written in format 16.
 /// </summary>
 public static class PlanFormat
 {
@@ -93,12 +94,13 @@ public static class PlanFormat
     public const ushort JointFormat = 13;
     public const ushort OpeningFormat = 14;
     public const ushort ProgramFormat = 15;
+    public const ushort ConditionFormat = 16;
 
     /// <summary>The newest format this build writes; bodies up to it can be read.</summary>
-    public const ushort Newest = ProgramFormat;
+    public const ushort Newest = ConditionFormat;
 
     public static ushort FormatOf(PlanDocument doc) =>
-        doc.Program is not null || doc.Prefabs.Values.Any(p => FormatOf(p) >= ProgramFormat) ? ProgramFormat
+        doc.Program is not null || doc.Prefabs.Values.Any(p => FormatOf(p) >= ProgramFormat) ? ConditionFormat
         : doc.Openings is { IsEmpty: false } || doc.Interior is { } i && i.Profiles.Exists(p => p.Kind == ProfileKind.Door)
             || doc.Joints is { } j && j.Joints.Exists(x => x.Kind == JointKind.Slider) || doc.Prefabs.Values.Any(p => FormatOf(p) >= OpeningFormat) ? OpeningFormat
         : doc.Joints is { IsEmpty: false } || doc.Prefabs.Values.Any(p => FormatOf(p) >= JointFormat) ? JointFormat
@@ -308,7 +310,7 @@ public static class PlanFormat
         if (header.Magic != PlanHeader.MagicValue)
             return PlanFormatError.BadMagic;
 
-        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat or InteriorFormat or WindowFormat or RouteFormat or WallFormat or BrushProfileFormat or PaintFormat or RepeatFormat or JointFormat or OpeningFormat or ProgramFormat))
+        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat or InteriorFormat or WindowFormat or RouteFormat or WallFormat or BrushProfileFormat or PaintFormat or RepeatFormat or JointFormat or OpeningFormat or ProgramFormat or ConditionFormat))
             return PlanFormatError.UnsupportedFormat;
 
         if (header.Level is not (PlanLevel.Ship or PlanLevel.HullChunk or PlanLevel.Component))
@@ -596,7 +598,7 @@ public static class PlanFormat
 
         if (hasProgram)
         {
-            doc.Program = r.Program();
+            doc.Program = r.Program(narrow: format == ProgramFormat);
 
             if (doc.Program is null)
                 return false;
@@ -840,9 +842,9 @@ public static class PlanFormat
             return joints;
         }
 
-        public Ships.Logic.HullProgram? Program()
+        public Ships.Logic.HullProgram? Program(bool narrow)
         {
-            var program = Ships.Logic.HullProgram.Read(_bytes[_offset..], out var consumed);
+            var program = Ships.Logic.HullProgram.Read(_bytes[_offset..], out var consumed, narrow);
             _offset += consumed;
             return program;
         }

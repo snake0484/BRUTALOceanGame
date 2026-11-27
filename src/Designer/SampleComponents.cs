@@ -91,7 +91,7 @@ public static class SampleComponents
     private static void DoorProgramme(DesignSession session)
     {
         ProgramCommands.Implement(session, InterfaceLibrary.Door);
-        ProgramCommands.Set(session, p => ProgramCommands.StandardDoor(p));
+        ProgramCommands.Set(session, p => ProgramCommands.StandardDoor(p, session.Doc.Joints?.Joints ?? []));
     }
 
     /// <summary>

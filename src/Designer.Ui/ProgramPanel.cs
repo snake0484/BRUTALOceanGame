@@ -112,7 +112,7 @@ public sealed class ProgramPanel
         if (ImGui.Button("Start from the standard door sequence"u8))
         {
             var ok = true;
-            ProgramCommands.Set(session, p => ok = ProgramCommands.StandardDoor(p));
+            ProgramCommands.Set(session, p => ok = ProgramCommands.StandardDoor(p, session.Doc.Joints?.Joints ?? []));
             _message = ok ? "" : "The standard door sequence needs a door's calls (Open, Close, Lock, Unlock) and states (Closed, Opening, Open, Closing, Locked, Blocked).";
         }
 

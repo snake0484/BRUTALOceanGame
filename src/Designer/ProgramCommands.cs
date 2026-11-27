@@ -132,15 +132,18 @@ public static class ProgramCommands
         });
 
     /// <summary>
-    /// Replaces the graph with the standard door sequence, if the interface has a door's calls and states:
+    /// Replaces the graph with the standard door sequence, if the interface has a door's calls and states. The door's
+    /// leaf is the first hinge or slider that stands differently in Open and Closed; "got there" is that joint reaching
+    /// its end, within <see cref="TimeoutSlack"/> times the time it needs (a part stopped on the way never gets there, so
+    /// the wait times out: something is in the way).
     /// <list type="bullet">
-    /// <item>Open: not when locked; Opening, then Open on arrival (Blocked if stopped).</item>
-    /// <item>Close: not when something is in the way; Closing, then Closed and at once Locked on arrival; if something gets in the way, it stops and opens again.</item>
+    /// <item>Open: not when locked; Opening, wait until the leaf is open: Open; timed out: Blocked.</item>
+    /// <item>Close: Closing, wait until the leaf is shut: Closed, then at once Locked; timed out: open again (Opening, wait, Open; timed out again: Blocked).</item>
     /// <item>Lock: from Closed. Unlock: from Locked, back to Closed.</item>
     /// </list>
     /// False when a name is missing.
     /// </summary>
-    public static bool StandardDoor(HullProgram program)
+    public static bool StandardDoor(HullProgram program, IReadOnlyList<HullJoint> joints)
     {
         var face = program.Interface;
         int Call(string n) => face.Calls.FindIndex(c => c.Equals(n, StringComparison.OrdinalIgnoreCase));
@@ -151,72 +154,110 @@ public static class ProgramCommands
         if (Math.Min(Math.Min(Math.Min(open, close), Math.Min(lockCall, unlock)), Math.Min(Math.Min(closed, opening), Math.Min(Math.Min(opened, closing), Math.Min(locked, blocked)))) < 0)
             return false;
 
+        // The leaf, its two ends, and how long it may take to get from one to the other.
+        HullJoint? leaf = null;
+        short openAt = 0, shutAt = 0;
+
+        foreach (var j in joints)
+        {
+            if (j.Limited && program.PoseOf(opened, j.Id, out openAt) && program.PoseOf(closed, j.Id, out shutAt) && openAt != shutAt)
+            {
+                leaf = j;
+                break;
+            }
+        }
+
+        var timeout = leaf is null ? (short)(5 * ProgramRunner.TicksPerSecond)
+            : (short)Math.Min(short.MaxValue, Math.Ceiling(Math.Abs(openAt - shutAt) / Math.Max(1.0, ProgramRunner.Speed(leaf)) * ProgramRunner.TicksPerSecond * TimeoutSlack) + ProgramRunner.TicksPerSecond / 2);
+
         program.Nodes.Clear();
         ushort id = 0;
-        ushort Add(NodeKind kind, int col, int row, int a = 0, short b = 0)
+
+        ushort Add(NodeKind kind, int col, double row, int a = 0, short b = 0)
         {
-            program.Nodes.Add(new ProgramNode { Id = ++id, Kind = kind, X = (short)(20 + col * 200), Y = (short)(20 + row * 120), A = (byte)a, B = b });
+            program.Nodes.Add(new ProgramNode { Id = ++id, Kind = kind, X = (short)(20 + col * ColumnPixels), Y = (short)(20 + row * RowPixels), A = (byte)a, B = b });
             return id;
         }
 
-        void Link(ushort from, int output, ushort to)
+        void Set(ushort node, Func<ProgramNode, ProgramNode> change)
         {
-            var i = program.IndexOf(from);
-            var n = program.Nodes[i];
-
-            if (output == 0)
-                n.Out0 = to;
-            else
-                n.Out1 = to;
-
-            program.Nodes[i] = n;
+            var i = program.IndexOf(node);
+            program.Nodes[i] = change(program.Nodes[i]);
         }
+
+        // "The leaf is at its end" (or, with no leaf, "in pose"), placed under the wait that tests it.
+        ushort At(bool shut, int col, double row)
+        {
+            if (leaf is null)
+                return Add(NodeKind.InPose, col, row);
+
+            var c = Add(NodeKind.JointAt, col, row, PositionTolerance, shut ? shutAt : openAt);
+            var joint = leaf.Id;
+            Set(c, n => n with { Joint = joint });
+            return c;
+        }
+
+        void Link(ushort from, int output, ushort to) => Set(from, n => output == 0 ? n with { Out0 = to } : n with { Out1 = to });
+
+        void Test(ushort wait, ushort condition) => Set(wait, n => n with { In = condition });
 
         // Open.
         var onOpen = Add(NodeKind.OnCall, 0, 0, open);
         var isLocked = Add(NodeKind.IfState, 1, 0, locked);
         var setOpening = Add(NodeKind.SetState, 2, 0, opening);
-        var waitOpen = Add(NodeKind.WaitArrived, 3, 0);
+        var waitOpen = Add(NodeKind.WaitUntil, 3, 0, 0, timeout);
         var setOpen = Add(NodeKind.SetState, 4, 0, opened);
         var setBlocked = Add(NodeKind.SetState, 4, 1, blocked);
+        Test(waitOpen, At(false, 2, 1));
         Link(onOpen, 0, isLocked);
         Link(isLocked, 1, setOpening);
         Link(setOpening, 0, waitOpen);
         Link(waitOpen, 0, setOpen);
         Link(waitOpen, 1, setBlocked);
 
-        // Close: refuse while in the way; on arrival Closed, then Locked; stopped on the way: open again.
-        var onClose = Add(NodeKind.OnCall, 0, 2, close);
-        var inWay = Add(NodeKind.IfBlocked, 1, 2);
-        var setClosing = Add(NodeKind.SetState, 2, 2, closing);
-        var waitClose = Add(NodeKind.WaitArrived, 3, 2);
-        var setClosed = Add(NodeKind.SetState, 4, 2, closed);
-        var setLocked = Add(NodeKind.SetState, 5, 2, locked);
-        var reopen = Add(NodeKind.SetState, 4, 3, opening);
-        var waitReopen = Add(NodeKind.WaitArrived, 5, 3);
-        var setReopened = Add(NodeKind.SetState, 6, 3, opened);
-        Link(onClose, 0, inWay);
-        Link(inWay, 1, setClosing);
+        // Close: on arrival Closed, then Locked; timed out (something in the way): open again.
+        var onClose = Add(NodeKind.OnCall, 0, 2.3, close);
+        var setClosing = Add(NodeKind.SetState, 1, 2.3, closing);
+        var waitClose = Add(NodeKind.WaitUntil, 2, 2.3, 0, timeout);
+        var setClosed = Add(NodeKind.SetState, 3, 2.3, closed);
+        var setLocked = Add(NodeKind.SetState, 4, 2.3, locked);
+        Test(waitClose, At(true, 1, 3.3));
+        var reopen = Add(NodeKind.SetState, 3, 3.3, opening);
+        var waitReopen = Add(NodeKind.WaitUntil, 4, 3.3, 0, timeout);
+        var setReopened = Add(NodeKind.SetState, 5, 3.3, opened);
+        var setStuck = Add(NodeKind.SetState, 5, 4.3, blocked);
+        Test(waitReopen, At(false, 3, 4.3));
+        Link(onClose, 0, setClosing);
         Link(setClosing, 0, waitClose);
         Link(waitClose, 0, setClosed);
         Link(setClosed, 0, setLocked);
         Link(waitClose, 1, reopen);
         Link(reopen, 0, waitReopen);
         Link(waitReopen, 0, setReopened);
+        Link(waitReopen, 1, setStuck);
 
         // Lock and unlock.
-        var onLock = Add(NodeKind.OnCall, 0, 4, lockCall);
-        var isClosed = Add(NodeKind.IfState, 1, 4, closed);
-        var lockIt = Add(NodeKind.SetState, 2, 4, locked);
+        var onLock = Add(NodeKind.OnCall, 0, 5.6, lockCall);
+        var isClosed = Add(NodeKind.IfState, 1, 5.6, closed);
+        var lockIt = Add(NodeKind.SetState, 2, 5.6, locked);
         Link(onLock, 0, isClosed);
         Link(isClosed, 0, lockIt);
-        var onUnlock = Add(NodeKind.OnCall, 0, 5, unlock);
-        var isLocked2 = Add(NodeKind.IfState, 1, 5, locked);
-        var unlockIt = Add(NodeKind.SetState, 2, 5, closed);
+        var onUnlock = Add(NodeKind.OnCall, 0, 6.8, unlock);
+        var isLocked2 = Add(NodeKind.IfState, 1, 6.8, locked);
+        var unlockIt = Add(NodeKind.SetState, 2, 6.8, closed);
         Link(onUnlock, 0, isLocked2);
         Link(isLocked2, 0, unlockIt);
         return true;
     }
+
+    /// <summary>How much longer than a part needs to reach its end a wait allows before it counts as stopped.</summary>
+    public const double TimeoutSlack = 1.5;
+
+    /// <summary>How near its end a joint counts as there (stored units: 0.1 degree, or mm).</summary>
+    public const byte PositionTolerance = 5;
+
+    /// <summary>The standard sequence's layout: room between nodes (a node is 190 pixels wide).</summary>
+    private const int ColumnPixels = 260, RowPixels = 110;
 
     private static void Change(DesignSession session, Action<HullProgram> mutate) =>
         session.Edit(s =>
