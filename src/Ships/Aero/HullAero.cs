@@ -95,6 +95,9 @@ public static class HullAero
     public const double BaseSuction = 0.35;
     public const double SkinFriction = 0.005;
     public const int TargetSamples = 4096;
+
+    /// <summary>Closest sample spacing, m: a small part (a door leaf) needs no finer.</summary>
+    public const double MinSpacing = 0.15;
     private const int MaxGrid = 256;
     private const double ExposureFacing = 0.05;
 
@@ -259,7 +262,7 @@ public static class HullAero
         }
 
         // Halving to edges no longer than the spacing leaves pieces of about a third of its square.
-        spacing = Math.Max(0.05, Math.Sqrt(3 * area / TargetSamples));
+        spacing = Math.Max(MinSpacing, Math.Sqrt(3 * area / TargetSamples));
         var samples = new SampleList();
 
         // Each triangle halved across its longest edge until no edge is longer than the spacing, so no gap between

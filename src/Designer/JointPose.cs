@@ -3,26 +3,34 @@ using BrutalGame.Ships;
 namespace BrutalGame.Designer;
 
 /// <summary>
-/// Where each moving part is at a moment of the preview: a rotor turns at its speed; a hinge swings from its lower limit
-/// to its upper one and back at its speed. Each group's transform (p' = R p + t, ship space) turns it about its joint's
+/// Where each moving part is at a moment of the preview: a rotor turns at its speed; a hinge swings (a slider slides)
+/// from its lower limit to its upper one and back at its speed. Each group's transform (p' = R p + t, ship space) turns it about its joint's
 /// axis through the pivot, after its parent's transform.
 /// </summary>
 public static class JointPose
 {
-    /// <summary>A joint's angle (radians) <paramref name="seconds"/> into the preview.</summary>
+    /// <summary>
+    /// A joint's angle (radians; a slider's travel, metres) <paramref name="seconds"/> into the preview: at rest (0 s) a
+    /// hinge or slider is at its target, then runs to its upper limit, back to its lower one, and so on.
+    /// </summary>
     public static double Angle(HullJoint joint, double seconds)
     {
         if (joint.Kind == JointKind.Rotor)
             return joint.Speed / 10.0 * 6.0 * seconds * Math.PI / 180.0;
 
-        double min = joint.Min / 10.0, max = joint.Max / 10.0, range = max - min;
+        double min = Value(joint, joint.Min), max = Value(joint, joint.Max), range = max - min;
+        var target = Math.Clamp(Value(joint, joint.Target), min, max);
 
-        if (range <= 1e-6 || joint.Speed == 0)
-            return joint.Target / 10.0 * Math.PI / 180.0;
+        if (range <= 1e-9 || joint.Speed == 0)
+            return target;
 
-        var travel = Math.Abs(joint.Speed / 10.0) * seconds % (2 * range);
-        return (min + (travel < range ? travel : 2 * range - travel)) * Math.PI / 180.0;
+        var travel = (Math.Abs(Value(joint, joint.Speed)) * seconds + (target - min)) % (2 * range);
+        return min + (travel < range ? travel : 2 * range - travel);
     }
+
+    /// <summary>A stored limit, target or speed in radians (a slider's in metres).</summary>
+    public static double Value(HullJoint joint, short stored) =>
+        joint.Kind == JointKind.Slider ? stored / 1000.0 : stored / 10.0 * Math.PI / 180.0;
 
     /// <summary>Each group's rotation (row-major, 9 per group) and translation; group 0 stays put.</summary>
     public static void Transforms(JointGroups groups, double seconds, double[] rotations, Vector3d[] translations)
@@ -57,11 +65,22 @@ public static class JointPose
         var parent = depth > HullJointSet.MaxJoints ? 0 : groups.GroupOfJoint(joint.Parent);
         Resolve(groups, parent, angles, rotations, translations, done, depth + 1);
 
-        // Own turn about the pivot: R (p - c) + c.
+        // Own turn about the pivot: R (p - c) + c; a slider's: p + axis d.
         Span<double> r = stackalloc double[9];
-        AxisAngle(joint.Axis, angles[g], r);
-        var c = joint.Pivot;
-        var own = Sub(c, Apply(r, c));
+        Vector3d own;
+
+        if (joint.Kind == JointKind.Slider)
+        {
+            AxisAngle(joint.Axis, 0, r);
+            var axis = joint.Axis;
+            own = new Vector3d(axis.X * angles[g], axis.Y * angles[g], axis.Z * angles[g]);
+        }
+        else
+        {
+            AxisAngle(joint.Axis, angles[g], r);
+            var c = joint.Pivot;
+            own = Sub(c, Apply(r, c));
+        }
 
         // After the parent's: P.R (R p + own) + P.t.
         var pr = rotations.AsSpan(parent * 9, 9);

@@ -81,19 +81,34 @@ public sealed class PrefabLibrary
 }
 
 /// <summary>
-/// What a prefab looks like and weighs, in its own frame, computed once per prefab: the housing's exact surface, every
-/// part's and pipe's surface, the bounds (its hull cutter) and the metal mass of its parts and pipes.
+/// What a prefab looks like and weighs, in its own frame, computed once per prefab: the housing's exact surface (cut by
+/// its own openings), every part's and pipe's surface, the bounds (its hull cutter) and the metal mass of its parts and
+/// pipes. A prefab with joints (a door's leaf) has a surface per moving part (<see cref="Parts"/>; part 0 is fixed).
 /// </summary>
 public sealed class PrefabShape
 {
     public readonly List<SurfacePolygon> Surface = new();
+    public readonly List<List<SurfacePolygon>> Parts = new();
     public Vector3d Min, Max;
     public double PartsMassKg;
 
     public static PrefabShape Build(PlanDocument prefab, Func<DefId, int> density)
     {
         var shape = new PrefabShape();
-        shape.Surface.AddRange(HullCsg.Shaded(prefab.Solids.AsSpan(), prefab.Meshes));
+        var groups = JointGroups.Build(prefab);
+        var solids = new List<HullSolid>(prefab.Solids.AsSpan().ToArray());
+        var meshes = new List<HullMesh>(prefab.Meshes);
+        Span<double> identity = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+        OpeningGeometry.Cuts(prefab.Openings, prefab.Interior?.Profiles, identity, default, 0, false, 0, solids, meshes);
+
+        for (var g = 0; g < groups.Count; g++)
+        {
+            var own = solids.Where(s => groups.GroupOf(s) == g).ToArray();
+            var part = own.Length > 0 ? HullCsg.Shaded(own, meshes) : new List<SurfacePolygon>();
+            shape.Parts.Add(part);
+            shape.Surface.AddRange(part);
+        }
+
         var data = prefab.Components;
 
         if (data is not null)
@@ -105,12 +120,16 @@ public sealed class PrefabShape
                 part.Clear();
                 PartGeometry.Surface(p, part);
                 shape.Surface.AddRange(part);
+                shape.Parts[0].AddRange(part);
                 shape.PartsMassKg += PartGeometry.Volume(part) * Density(prefab, p.Material, density);
             }
 
             foreach (var pipe in data.Pipes)
             {
-                PipeGeometry.Surface(pipe, shape.Surface);
+                part.Clear();
+                PipeGeometry.Surface(pipe, part);
+                shape.Surface.AddRange(part);
+                shape.Parts[0].AddRange(part);
                 shape.PartsMassKg += PipeGeometry.Volume(pipe) * Density(prefab, pipe.Material, density);
             }
         }
@@ -136,13 +155,18 @@ public sealed class PrefabShape
     private static double Density(PlanDocument doc, byte material, Func<DefId, int> density) => material < doc.Materials.Count ? density(doc.Materials[material]) : 0;
 
     /// <summary>The surface placed: rotated and moved into the ship, materials mapped to the ship's palette.</summary>
-    public void Place(in ComponentPlacement placement, Func<byte, byte> material, List<SurfacePolygon> output)
+    public void Place(in ComponentPlacement placement, Func<byte, byte> material, List<SurfacePolygon> output) => Place(Surface, placement, material, output);
+
+    /// <summary>Moving part <paramref name="part"/>'s surface placed (at rest).</summary>
+    public void PlacePart(int part, in ComponentPlacement placement, Func<byte, byte> material, List<SurfacePolygon> output) => Place(Parts[part], placement, material, output);
+
+    private static void Place(List<SurfacePolygon> surface, in ComponentPlacement placement, Func<byte, byte> material, List<SurfacePolygon> output)
     {
         Span<double> m = stackalloc double[9];
         SolidRotation.Matrix(placement.Rotation, m);
         var p = placement.Position;
 
-        foreach (var poly in Surface)
+        foreach (var poly in surface)
         {
             var placed = new SurfacePolygon { Points = new Vector3d[poly.Points.Length], Normals = new Vector3d[poly.Points.Length], Material = material(poly.Material) };
 

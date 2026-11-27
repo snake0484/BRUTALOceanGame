@@ -4,7 +4,7 @@ using System.Text;
 namespace BrutalGame.Ships.Interior;
 
 /// <summary>A hallway's closed cross-section, one wall's section for rooms (half a hallway's), or a brush's closed outline swept along strokes.</summary>
-public enum ProfileKind : byte { Hallway, Wall, Brush }
+public enum ProfileKind : byte { Hallway, Wall, Brush, Door }
 
 /// <summary>
 /// A cross-section in 1/1024 m. A hallway profile is a closed outline, X across, Y up from the floor (Y = 0), 3-32 points.
@@ -288,7 +288,7 @@ public sealed class HullInterior
 
             if (walls)
             {
-                if (s[o] > (byte)ProfileKind.Brush)
+                if (s[o] > (byte)ProfileKind.Door)
                     return null;
 
                 p.Kind = (ProfileKind)s[o++];

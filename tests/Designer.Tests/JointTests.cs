@@ -75,10 +75,12 @@ public class JointTests
         var rotor = new HullJoint { Id = 1, Kind = JointKind.Rotor, Speed = 600 };   // 60 rpm: a turn a second
         Assert.Equal(Math.PI, JointPose.Angle(rotor, 0.5), 9);
 
-        var hinge = new HullJoint { Id = 2, Kind = JointKind.Hinge, Min = -100, Max = 200, Speed = 100 };   // 10 deg/s over 30 deg
-        Assert.Equal(-10 * Math.PI / 180, JointPose.Angle(hinge, 0), 9);
-        Assert.Equal(20 * Math.PI / 180, JointPose.Angle(hinge, 3), 9);
-        Assert.Equal(10 * Math.PI / 180, JointPose.Angle(hinge, 4), 9);
+        // 10 deg/s over 30 deg, at rest on its target (0), then up to 20, down to -10.
+        var hinge = new HullJoint { Id = 2, Kind = JointKind.Hinge, Min = -100, Max = 200, Speed = 100 };
+        Assert.Equal(0, JointPose.Angle(hinge, 0), 9);
+        Assert.Equal(20 * Math.PI / 180, JointPose.Angle(hinge, 2), 9);
+        Assert.Equal(10 * Math.PI / 180, JointPose.Angle(hinge, 3), 9);
+        Assert.Equal(-10 * Math.PI / 180, JointPose.Angle(hinge, 5), 9);
 
         // A rotor about +Y at (1, 0, 0) and a second, mounted on it, about +Y at (2, 0, 0): a half turn of each.
         var doc = new PlanDocument();

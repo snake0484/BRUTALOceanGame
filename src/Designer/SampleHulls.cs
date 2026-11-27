@@ -200,6 +200,21 @@ public static class SampleHulls
         JointCommands.SetMember(session, flap, hinge);
     }
 
+    /// <summary>
+    /// A 10 x 4 x 12 m hull with a room inside behind 0.3 m walls: a swing door in its +X wall, a sliding door in its -X
+    /// wall (both sills on the room's floor) and a docking port on its +Z face.
+    /// </summary>
+    public static void DoorsDemo(DesignSession session, DefId alloy)
+    {
+        const int m = HullSolid.PositionUnitsPerMetre;
+        const int h = HullSolid.HalfUnitsPerMetre;
+        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 2 * m, 0, 5 * h, 2 * h, 6 * h, SolidRotation.Identity, alloy);
+        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Subtract, 0, 2 * m, 0, (ushort)(4.7 * h), (ushort)(1.6 * h), (ushort)(5.7 * h), SolidRotation.Identity, alloy);
+        ComponentCommands.PlacePrefab(session, SampleComponents.SwingDoor(alloy), new Vector3d(5, 0.4, 2), OpeningCommands.Facing(new Vector3d(1, 0, 0)));
+        ComponentCommands.PlacePrefab(session, SampleComponents.SlidingDoor(alloy), new Vector3d(-5, 0.4, -2), OpeningCommands.Facing(new Vector3d(-1, 0, 0)));
+        ComponentCommands.PlacePrefab(session, SampleComponents.DockingPort(alloy), new Vector3d(0, 2, 6), OpeningCommands.Facing(new Vector3d(0, 0, 1)));
+    }
+
     /// <summary>A solid block with a 7 x 3 x 6 m room and a 4 m round room cut out of it, walls coved at the ceiling and chamfered at the floor.</summary>
     public static void WallRoom(DesignSession session, DefId alloy)
     {

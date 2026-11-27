@@ -95,6 +95,11 @@ public sealed class ProfilesPanel : IDisposable
                 var brushes = session.Doc.Brushes?.Brushes.Count(b => b.Kind == BrushKind.Sweep && b.Outline == i) ?? 0;
                 note = $"brush, {brushes} brush{(brushes == 1 ? "" : "es")}";
             }
+            else if (p.Kind == ProfileKind.Door)
+            {
+                var openings = session.Doc.Openings?.Openings.Count(o => o.Profile == i) ?? 0;
+                note = $"door, {openings} opening{(openings == 1 ? "" : "s")}";
+            }
             else
             {
                 var users = interior.Hallways.Count(h => h.Profile == i);
@@ -118,6 +123,11 @@ public sealed class ProfilesPanel : IDisposable
 
         if (ImGui.Button("New brush"u8))
             Added(InteriorCommands.AddProfile(session, $"Brush {count + 1}", BrushCommands.Profile(ProfilePreset.Rib, _brushWidth, _brushDepth), kind: ProfileKind.Brush));
+
+        ImGui.SameLine();
+
+        if (ImGui.Button("New door"u8))
+            Added(InteriorCommands.AddProfile(session, $"Door {count + 1}", HallwayGeometry.Preset(HallwayPreset.Rectangle, 1.0, 2.1), kind: ProfileKind.Door));
 
         ImGui.SameLine();
         ImGui.BeginDisabled(Selected < 0 || Selected >= count);

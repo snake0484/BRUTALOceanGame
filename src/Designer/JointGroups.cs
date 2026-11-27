@@ -1,6 +1,7 @@
 using BrutalGame.Designer.Tools;
 using BrutalGame.Plans;
 using BrutalGame.Ships;
+using BrutalGame.Ships.Components;
 using BrutalGame.Ships.Interior;
 using static BrutalGame.Ships.HullSurface;
 
@@ -9,7 +10,9 @@ namespace BrutalGame.Designer;
 /// <summary>
 /// The ship split into its moving parts for baking and drawing: group 0 is the ship's own, group k the moving part of the
 /// k-th joint. A plan solid goes with its joint; what sits on the hull (brush strokes, windows, decals, placed components)
-/// goes with the solid it is on (<see cref="SolidUnder"/>); hallways stay with the ship. Built when the plan changes.
+/// goes with the solid it is on (<see cref="SolidUnder"/>); hallways stay with the ship. A placed component's own joints
+/// (a door's leaf) become groups of the ship too, after the plan's: their pivots and axes placed with it, mounted on
+/// whatever the component sits on. Openings' cuts go with what their component sits on. Built when the plan changes.
 /// </summary>
 public sealed class JointGroups
 {
@@ -18,6 +21,13 @@ public sealed class JointGroups
     private readonly List<int> _windowGroup = new();
     private readonly List<int> _decalGroup = new();
     private readonly List<int> _placementGroup = new();
+    private readonly Dictionary<(int Placement, int Group), int> _placementParts = new();
+    private static readonly Dictionary<(uint Placement, uint Joint), uint> AxisCache = new();
+
+    /// <summary>The first id of joints that come from placed components (<see cref="PlacedJointId"/>).</summary>
+    public const uint PlacedJointBase = 0xA0000000;
+
+    public static uint PlacedJointId(int placement, int group) => PlacedJointBase | ((uint)placement << 5) | (uint)group;
 
     /// <summary>The joints in group order (group k is <c>Joints[k - 1]</c>).</summary>
     public readonly List<HullJoint> Joints = new();
@@ -40,13 +50,17 @@ public sealed class JointGroups
     {
         var groups = new JointGroups();
 
-        if (doc.Joints is not { } set)
+        // Nothing moves: no joints of its own, none in what it places.
+        if (doc.Joints is null && doc.Components?.Placements.Exists(p => doc.Prefabs.TryGetValue(p.Prefab, out var prefab) && prefab.Joints is { Joints.Count: > 0 }) != true)
             return groups;
 
-        groups.Joints.AddRange(set.Joints);
+        if (doc.Joints is { } set)
+        {
+            groups.Joints.AddRange(set.Joints);
 
-        foreach (var (solid, joint) in set.Members)
-            groups._solidGroup[solid] = groups.GroupOfJoint(joint);
+            foreach (var (solid, joint) in set.Members)
+                groups._solidGroup[solid] = groups.GroupOfJoint(joint);
+        }
 
         if (doc.Brushes is { } brushes)
         {
@@ -70,10 +84,51 @@ public sealed class JointGroups
         {
             foreach (var p in components.Placements)
                 groups._placementGroup.Add(groups.SolidGroup(SolidUnder(doc, p.Position, new Vector3d(0, 1, 0))));
+
+            for (var i = 0; i < components.Placements.Count; i++)
+                groups.AddPlaced(doc, components.Placements[i], i);
         }
 
         return groups;
     }
+
+    /// <summary>A placed component's own joints, as the ship's: placed with it, mounted on what it sits on.</summary>
+    private void AddPlaced(PlanDocument doc, ComponentPlacement placement, int index)
+    {
+        if (!doc.Prefabs.TryGetValue(placement.Prefab, out var prefab) || prefab.Joints is not { Joints.Count: > 0 })
+            return;
+
+        var inner = Build(prefab);
+        Span<double> m = stackalloc double[9];
+        SolidRotation.Matrix(placement.Rotation, m);
+        var mount = _placementGroup[index];
+        var mountJoint = mount == 0 ? 0u : Joints[mount - 1].Id;
+
+        for (var k = 1; k < inner.Count && index < (1 << 22); k++)
+        {
+            var source = inner.Joints[k - 1];
+            var joint = source.Clone();
+            joint.Id = PlacedJointId(index, k);
+            var pivot = source.Pivot;
+            var at = Add(placement.Position, new Vector3d(m[0] * pivot.X + m[1] * pivot.Y + m[2] * pivot.Z, m[3] * pivot.X + m[4] * pivot.Y + m[5] * pivot.Z, m[6] * pivot.X + m[7] * pivot.Y + m[8] * pivot.Z));
+            (joint.X, joint.Y, joint.Z) = ComponentCommands.Quantise(at);
+
+            if (!AxisCache.TryGetValue((placement.Rotation, source.Rotation), out var rotation))
+            {
+                var axis = source.Axis;
+                AxisCache[(placement.Rotation, source.Rotation)] = rotation = JointCommands.Snap(new Vector3d(m[0] * axis.X + m[1] * axis.Y + m[2] * axis.Z, m[3] * axis.X + m[4] * axis.Y + m[5] * axis.Z, m[6] * axis.X + m[7] * axis.Y + m[8] * axis.Z));
+            }
+
+            joint.Rotation = rotation;
+            joint.Parent = source.Parent == 0 ? mountJoint : PlacedJointId(index, inner.GroupOfJoint(source.Parent));
+            Joints.Add(joint);
+            _placementParts[(index, k)] = Joints.Count;
+        }
+    }
+
+    /// <summary>The ship's group drawing part <paramref name="group"/> of placement <paramref name="placement"/> (its group 0: what it sits on).</summary>
+    public int PlacementPartGroup(int placement, int group) =>
+        group == 0 ? PlacementGroup(placement) : _placementParts.TryGetValue((placement, group), out var g) ? g : PlacementGroup(placement);
 
     public int SolidGroup(uint solid) => _solidGroup.TryGetValue(solid, out var g) ? g : 0;
 
@@ -99,6 +154,9 @@ public sealed class JointGroups
 
         if ((id & 0xF0000000) == 0xD0000000)
             return 0;
+
+        if (OpeningGeometry.Owner(id) is var owner and >= 0)
+            return owner == 0 ? 0 : PlacementGroup(owner - 1);
 
         return SolidGroup(id);
     }

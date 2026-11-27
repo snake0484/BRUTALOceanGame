@@ -19,13 +19,14 @@ public sealed partial class DesignerApp
     [
         (AddKind.Box, "Box"), (AddKind.Wedge, "Wedge"), (AddKind.Cylinder, "Cylinder"), (AddKind.Hallway, "Hallway"),
         (AddKind.Window, "Window"), (AddKind.Decal, "Decal or paint shape"), (AddKind.Stroke, "Brush stroke"), (AddKind.Component, "Component"),
-        (AddKind.Rotor, "Rotor"), (AddKind.Hinge, "Hinge"),
+        (AddKind.Door, "Door"), (AddKind.DockingPort, "Docking port"), (AddKind.Rotor, "Rotor"), (AddKind.Hinge, "Hinge"), (AddKind.Slider, "Slider"),
     ];
 
     private static readonly (AddKind Kind, string Label)[] ComponentAdds =
     [
         (AddKind.Box, "Box"), (AddKind.Wedge, "Wedge"), (AddKind.Cylinder, "Cylinder"), (AddKind.Chamber, "Burn chamber"),
         (AddKind.Nozzle, "Nozzle"), (AddKind.Injector, "Injector"), (AddKind.Igniter, "Igniter"), (AddKind.Pipe, "Pipe"),
+        (AddKind.Opening, "Doorway"), (AddKind.PortFace, "Docking port face"), (AddKind.Rotor, "Rotor"), (AddKind.Hinge, "Hinge"), (AddKind.Slider, "Slider"),
     ];
 
     private readonly ObjectTree _tree = new();
@@ -44,7 +45,8 @@ public sealed partial class DesignerApp
 
     /// <summary>The one selected thing (or the primary solid).</summary>
     private ObjectRef CurrentSelection =>
-        _jointsPanel.Selected != 0 ? new ObjectRef(ObjectKind.Joint, _jointsPanel.Selected)
+        _openingsPanel.Selected != 0 ? new ObjectRef(ObjectKind.Opening, _openingsPanel.Selected)
+        : _jointsPanel.Selected != 0 ? new ObjectRef(ObjectKind.Joint, _jointsPanel.Selected)
         : _interiorPanel.Selected != 0 ? new ObjectRef(ObjectKind.Hallway, _interiorPanel.Selected)
         : _windowsPanel.Selected != 0 ? new ObjectRef(ObjectKind.Window, _windowsPanel.Selected)
         : _decalsPanel.Selected != 0 ? new ObjectRef(ObjectKind.Decal, _decalsPanel.Selected)
@@ -77,6 +79,9 @@ public sealed partial class DesignerApp
         if (item.Kind != ObjectKind.Joint)
             _jointsPanel.Selected = 0;
 
+        if (item.Kind != ObjectKind.Opening)
+            _openingsPanel.Selected = 0;
+
         switch (item.Kind)
         {
             case ObjectKind.Solid when toggle:
@@ -102,6 +107,9 @@ public sealed partial class DesignerApp
                 break;
             case ObjectKind.Joint:
                 _jointsPanel.Selected = item.Id;
+                break;
+            case ObjectKind.Opening:
+                _openingsPanel.Selected = item.Id;
                 break;
         }
 
@@ -155,7 +163,20 @@ public sealed partial class DesignerApp
     private void RouteProperties()
     {
         var selected = CurrentSelection;
-        _panels.OtherProperties = _active.Component is not null ? null : selected.Kind switch
+
+        // The component editor's own panels show its parts; joints and openings show here.
+        if (_active.Component is not null)
+        {
+            _panels.OtherProperties = selected.Kind switch
+            {
+                ObjectKind.Joint => s => _jointsPanel.DrawProperties(s),
+                ObjectKind.Opening => s => _openingsPanel.DrawProperties(s),
+                _ => null,
+            };
+            return;
+        }
+
+        _panels.OtherProperties = selected.Kind switch
         {
             ObjectKind.Hallway => s => _interiorPanel.DrawProperties(s),
             ObjectKind.Window => s => _windowsPanel.DrawProperties(s),
@@ -184,6 +205,7 @@ public sealed partial class DesignerApp
         ObjectKind.Stroke => BrushesPanel.Label(_session, item.Id),
         ObjectKind.Placement => PrefabPanel.Label(_session, item.Id),
         ObjectKind.Joint => JointsPanel.Label(_session, item.Id),
+        ObjectKind.Opening => OpeningsPanel.Label(_session, item.Id),
         _ => $"#{item.Id}",
     };
 
@@ -309,9 +331,9 @@ public sealed partial class DesignerApp
 
                 return made;
             }
-            case AddKind.Rotor or AddKind.Hinge:
+            case AddKind.Rotor or AddKind.Hinge or AddKind.Slider:
             {
-                var kind = _adding == AddKind.Rotor ? JointKind.Rotor : JointKind.Hinge;
+                var kind = _adding switch { AddKind.Rotor => JointKind.Rotor, AddKind.Hinge => JointKind.Hinge, _ => JointKind.Slider };
                 _jointsPanel.DrawAddOptions(kind);
 
                 if (!ImGui.Button("Add"u8))
@@ -319,6 +341,35 @@ public sealed partial class DesignerApp
 
                 _jointsPanel.PlaceAt(_session, kind, _addAt, _addNormal, _addOnSolid);
                 Select(new ObjectRef(ObjectKind.Joint, _jointsPanel.Selected));
+                return true;
+            }
+            case AddKind.Door or AddKind.DockingPort:
+            {
+                var kind = _adding == AddKind.Door ? OpeningKind.Door : OpeningKind.DockingPort;
+                _prefabPanel.DrawAddOptions(kind);
+                ImGui.BeginDisabled(!_prefabPanel.HasAddPick);
+
+                if (ImGui.Button("Add"u8))
+                {
+                    _prefabPanel.PlaceFacing(_session, _addAt, _addNormal, _session.Snap.StepMetres);
+                    Select(new ObjectRef(ObjectKind.Placement, _prefabPanel.Selected));
+                    ImGui.EndDisabled();
+                    return true;
+                }
+
+                ImGui.EndDisabled();
+                return false;
+            }
+            case AddKind.Opening or AddKind.PortFace:
+            {
+                var kind = _adding == AddKind.Opening ? OpeningKind.Door : OpeningKind.DockingPort;
+                _openingsPanel.DrawAddOptions(kind);
+
+                if (!ImGui.Button("Add"u8))
+                    return false;
+
+                _openingsPanel.PlaceAt(_session, kind, _addAt, _addNormal);
+                Select(new ObjectRef(ObjectKind.Opening, _openingsPanel.Selected));
                 return true;
             }
             case AddKind.Component:

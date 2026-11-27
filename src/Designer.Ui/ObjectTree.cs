@@ -7,7 +7,7 @@ using static BrutalGame.Ships.HullSurface;
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>What the designer can select: one thing at a time (solids may be several).</summary>
-public enum ObjectKind : byte { None, Solid, Hallway, Window, Decal, Stroke, Placement, Joint }
+public enum ObjectKind : byte { None, Solid, Hallway, Window, Decal, Stroke, Placement, Joint, Opening }
 
 public readonly record struct ObjectRef(ObjectKind Kind, uint Id)
 {
@@ -72,6 +72,12 @@ public sealed class ObjectTree
                         if (j.Parent == 0)
                             Joint(session, j, selected, label, shipItems, 0);
                     }
+                }
+
+                if (session.Doc.Openings is { } openings)
+                {
+                    foreach (var o in openings.Openings)
+                        Leaf(new ObjectRef(ObjectKind.Opening, o.Id), selected, label);
                 }
 
                 if (shipItems)

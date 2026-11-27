@@ -30,7 +30,7 @@ public sealed unsafe class HullRenderer : IDisposable
     private const int PushConstantSize = 112;
 
     /// <summary>Moving parts (joints' groups) the renderer can turn; group 0 is the ship's own.</summary>
-    public const int MaxGroups = 17;
+    public const int MaxGroups = 64;
 
     /// <summary>Projector cells: about this size, and at most this many along each axis of a brick.</summary>
     private const double CellMetres = 2.0;

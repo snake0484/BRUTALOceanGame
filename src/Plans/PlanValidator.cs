@@ -69,6 +69,8 @@ public enum IssueCode : ushort
     JointCount,
     JointShape,
     JointMember,
+    OpeningCount,
+    OpeningShape,
 }
 
 public readonly record struct ValidationIssue(Severity Severity, IssueCode Code, ElementRef Element, int Value);
@@ -358,7 +360,8 @@ public static class PlanValidator
 
             if (!Enum.IsDefined(j.Kind) || !SolidRotation.IsValid(j.Rotation) || j.Pivot.Length() > PlanLimits.MaxReachMetres
                 || depth is 0 or > HullJointSet.MaxDepth || j.TorqueNm > HullJoint.MaxTorqueNm
-                || (j.Kind == JointKind.Hinge && (j.Min < -1800 || j.Max > 1800 || j.Min > j.Max || j.Target < j.Min || j.Target > j.Max)))
+                || (j.Kind == JointKind.Hinge && (j.Min < -1800 || j.Max > 1800))
+                || (j.Limited && (j.Min > j.Max || j.Target < j.Min || j.Target > j.Max)))
                 log.Add(Severity.Error, IssueCode.JointShape, element, depth);
         }
 
@@ -368,6 +371,25 @@ public static class PlanValidator
         {
             if (!seen.Add(solid) || doc.Solids.IndexOf(solid) < 0 || set.IndexOf(joint) < 0)
                 log.Add(Severity.Error, IssueCode.JointMember, new ElementRef(ElementKind.Solid, solid), (int)joint);
+        }
+    }
+
+    /// <summary>Openings: count; each a known kind on a door profile of the plan, a valid rotation, within reach, a depth of 1 mm to 8 m.</summary>
+    private static void ValidateOpenings(PlanDocument doc, ValidationLog log)
+    {
+        if (doc.Openings is not { } set)
+            return;
+
+        if (set.Openings.Count > HullOpeningSet.MaxOpenings)
+            log.Add(Severity.Error, IssueCode.OpeningCount, default, set.Openings.Count);
+
+        var profiles = doc.Interior?.Profiles;
+
+        foreach (var o in set.Openings)
+        {
+            if (!Enum.IsDefined(o.Kind) || profiles is null || o.Profile >= profiles.Count || profiles[o.Profile].Kind != ProfileKind.Door
+                || !SolidRotation.IsValid(o.Rotation) || o.Origin.Length() > PlanLimits.MaxReachMetres || o.DepthMm is 0 or > HullOpening.MaxDepthMm)
+                log.Add(Severity.Error, IssueCode.OpeningShape, new ElementRef(ElementKind.Placement, o.Id), o.Profile);
         }
     }
 
@@ -541,6 +563,7 @@ public static class PlanValidator
         ValidateDecals(doc, log);
         ValidatePaint(doc, log);
         ValidateJoints(doc, log);
+        ValidateOpenings(doc, log);
         ValidateComponents(doc, log);
         ValidateInterior(doc, log);
         ValidateWindows(doc, log);

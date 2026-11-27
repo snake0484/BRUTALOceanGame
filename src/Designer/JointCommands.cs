@@ -6,7 +6,7 @@ using static BrutalGame.Ships.HullSurface;
 namespace BrutalGame.Designer;
 
 /// <summary>
-/// Rotor and hinge edits, each one undo group that swaps the plan's joints for an edited copy. A joint is mounted where it
+/// Rotor, hinge and slider edits, each one undo group that swaps the plan's joints for an edited copy. A joint is mounted where it
 /// is placed: on the ship, or on the moving part of the joint whose solid it sits on (at most three deep). Solids join a
 /// joint's moving part with <see cref="SetMember"/>.
 /// </summary>
@@ -35,6 +35,9 @@ public static class JointCommands
 
             if (kind == JointKind.Hinge)
                 joint.Speed = 300;
+
+            if (kind == JointKind.Slider)
+                (joint.Speed, joint.Min, joint.Max, joint.Target) = (500, 0, 1000, 0);
 
             data.Joints.Add(joint);
         });

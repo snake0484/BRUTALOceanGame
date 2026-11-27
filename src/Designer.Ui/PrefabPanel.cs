@@ -45,10 +45,28 @@ public sealed class PrefabPanel
 
     private PrefabNode? _addPick;
 
+    private OpeningKind? _filter;
+
     /// <summary>The options new placements get (in the Add dialog): which component, from the library.</summary>
     public void DrawAddOptions()
     {
         ImGui.TextWrapped("A component: a prefab from the library, cut into the hull as a bay. Its insides change only in the component editor."u8);
+        DrawLibrary(null);
+    }
+
+    /// <summary>The Add dialog for a door or docking port: the library's components with an opening of that kind.</summary>
+    public void DrawAddOptions(OpeningKind kind)
+    {
+        ImGui.TextWrapped(kind == OpeningKind.Door
+            ? "A door: a component with a doorway, set in the wall facing out of it, its sill where you click. Its doorway cuts through the wall. Make your own (buttons, windows, paint) as a copy in the component editor."u8
+            : "A docking port: a component with a port face, set on the hull facing out. Ports of the same profile mate face to face. Make your own as a copy in the component editor."u8);
+        DrawLibrary(kind);
+    }
+
+    private void DrawLibrary(OpeningKind? filter)
+    {
+        if (_filter != filter)
+            (_filter, _addPick) = (filter, null);
 
         if (ImGui.Button("Refresh library"u8))
             RefreshRequest = true;
@@ -58,6 +76,20 @@ public sealed class PrefabPanel
 
         if (_addPick is null)
             ImGui.TextDisabled("Pick a component."u8);
+    }
+
+    private bool Shown(PrefabNode node) =>
+        _filter is not { } kind || (node.IsFolder ? node.Children.Exists(Shown) : node.Prefab!.Openings?.Openings.Exists(o => o.Kind == kind) == true);
+
+    /// <summary>The picked component at <paramref name="at"/> (snapped), its +Z out along <paramref name="normal"/> and upright; selected.</summary>
+    public void PlaceFacing(DesignSession session, Vector3d at, Vector3d normal, double step)
+    {
+        if (_addPick?.Prefab is not { } prefab)
+            return;
+
+        var snapped = step > 0 ? new Vector3d(Math.Round(at.X / step) * step, Math.Round(at.Y / step) * step, Math.Round(at.Z / step) * step) : at;
+        Selected = ComponentCommands.PlacePrefab(session, prefab, snapped, OpeningCommands.Facing(normal));
+        _message = Selected == 0 ? ComponentCommands.LastError : $"Placed {_addPick.Name}.";
     }
 
     /// <summary>The component picked in the Add dialog, or null.</summary>
@@ -99,6 +131,9 @@ public sealed class PrefabPanel
 
     private void Tree(PrefabNode node)
     {
+        if (!Shown(node))
+            return;
+
         if (node.IsFolder)
         {
             if (ImGui.TreeNodeEx($"{node.Name}##{node.GetHashCode()}", ImGuiTreeNodeFlags.DefaultOpen | ImGuiTreeNodeFlags.SpanAvailWidth))
@@ -166,6 +201,44 @@ public sealed class PrefabPanel
         {
             var shape = _shape(held);
             ImGui.Text($"Parts and pipes {shape.PartsMassKg:F1} kg; cuts a {(shape.Max.X - shape.Min.X):F2} x {(shape.Max.Y - shape.Min.Y):F2} x {(shape.Max.Z - shape.Min.Z):F2} m bay");
+
+            // Its doorways cut through the wall; a docking port's face must be clear of the hull to mate.
+            if (held.Openings is { } openings)
+            {
+                Span<double> m = stackalloc double[9];
+                Span<double> f = stackalloc double[9];
+                SolidRotation.Matrix(placement.Rotation, m);
+                var surface = new HullSurface(session.Doc.Solids.AsSpan(), session.Doc.Meshes);
+
+                foreach (var o in openings.Openings)
+                {
+                    var profiles = held.Interior?.Profiles;
+                    var profile = profiles is not null && o.Profile < profiles.Count ? profiles[o.Profile] : null;
+
+                    if (o.Kind == OpeningKind.Door)
+                    {
+                        ImGui.Text($"Doorway {profile?.Name ?? "?"}: cuts {o.DepthMm / 1000.0:F2} m each way through the wall");
+                        continue;
+                    }
+
+                    if (profile is null)
+                        continue;
+
+                    var ring = OpeningGeometry.Outline(o, profiles);
+
+                    for (var i = 0; i < ring.Length; i++)
+                        ring[i] = HullSurface.Add(placement.Position, new Vector3d(m[0] * ring[i].X + m[1] * ring[i].Y + m[2] * ring[i].Z, m[3] * ring[i].X + m[4] * ring[i].Y + m[5] * ring[i].Z, m[6] * ring[i].X + m[7] * ring[i].Y + m[8] * ring[i].Z));
+
+                    SolidRotation.Matrix(o.Rotation, f);
+                    var normal = new Vector3d(m[0] * f[2] + m[1] * f[5] + m[2] * f[8], m[3] * f[2] + m[4] * f[5] + m[5] * f[8], m[6] * f[2] + m[7] * f[5] + m[8] * f[8]);
+                    OpeningsPanel.PortNotes(profile);
+
+                    if (OpeningsPanel.PortBlocked(surface, ring, normal))
+                        ImGui.TextColored(new Brutal.Numerics.float4(1f, 0.45f, 0.35f, 1f), "The hull stands in front of the port's face: nothing can dock here"u8);
+                    else
+                        ImGui.Text("Port face clear"u8);
+                }
+            }
 
         }
     }

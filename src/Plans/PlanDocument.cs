@@ -116,6 +116,9 @@ public sealed class PlanDocument
     /// <summary>Rotors and hinges and the solids that move with them; null when there are none.</summary>
     public HullJointSet? Joints;
 
+    /// <summary>Doorways and docking port faces (a component's); null when there are none.</summary>
+    public HullOpeningSet? Openings;
+
     /// <summary>
     /// The component prefabs this plan places, by plan hash, carried inside it so a file or a network send is complete.
     /// Each is a component-level plan, never edited from here (a new design is a new hash).
@@ -180,6 +183,12 @@ public sealed class PlanDocument
             foreach (var j in Joints.Joints)
                 Meta.NextId = Math.Max(Meta.NextId, j.Id + 1);
         }
+
+        if (Openings is not null)
+        {
+            foreach (var o in Openings.Openings)
+                Meta.NextId = Math.Max(Meta.NextId, o.Id + 1);
+        }
     }
 
     public PlanDocument Clone()
@@ -204,6 +213,7 @@ public sealed class PlanDocument
         copy.Decals = Decals?.Clone();
         copy.Paint = Paint?.Clone();
         copy.Joints = Joints?.Clone();
+        copy.Openings = Openings?.Clone();
 
         // Prefabs are never edited in place: sharing them is safe.
         foreach (var (hash, prefab) in Prefabs)

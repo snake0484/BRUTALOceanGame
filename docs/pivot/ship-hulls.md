@@ -289,6 +289,16 @@ public sealed class HullDeformation
 - **Preview.** "Play joints" (P) turns each part about its axis: a rotor at its speed, a hinge from its lower limit to its upper one and back. The renderer turns a part's bricks with a per-draw rotation; paint, decals and finishes are worked out at rest, so they move with it.
 - **Next.** Physics: each part a Jolt body with a hinge constraint and motor, on the wire as joint angles.
 - **Air (D85).** Each part also has its own air table (lift from shape), so hinge and rotor parts are the control surfaces.
+- **Sliders.** A third kind: the part slides along the axis between limits (travel in mm, speed in mm/s, force in N). Plan format 14.
+
+### Doors and docking ports (designer, 2026-11-27, D86)
+
+- **Components.** A door or docking port is a component plan: its frame or collar (solids), its leaf or hatch on a hinge or slider joint (solids under the joint), and an **opening** (`HullOpeningSet`, plan format 14, up to 16): a door profile (`ProfileKind.Door`, closed outline, X across, Y up from the sill), an origin on the sill, a snap rotation (Z through) and a cut depth each way. Kinds: `Door` and `DockingPort` (the port's face is the opening's plane, facing +Z).
+- **Cuts.** The opening's prism cuts the component's fixed part (never a moving leaf). Placed in a ship, the same prism cuts the wall (a Room-role solid on a layered hull), besides the component's bounding-box bay. Generated ids `0xB0000000 | owner << 4 | opening` (owner 0: the plan's own; placement index + 1).
+- **Leaves move in the ship.** A placed component's joints become ship groups after the plan's own (ids `0xA0000000 | placement << 5 | group`), placed with it and mounted on what it sits on; their parts are drawn from the prefab's per-part surface, binned on the spot (no grid bake, no worker). They get air tables like any part.
+- **Docking.** Genderless: two ports mate face to face when their profiles are the same shape (the designer shows a four-digit port type); a lopsided outline is flagged, since two of it would not line up mirrored. In a ship, port faces are outlined, red when the hull stands within 2 m in front of one.
+- **Catalog:** swing door and sliding door (1 x 2.1 m), docking port (1.4 m octagon). Add > Door or Docking port in a ship places one facing out of the wall clicked, upright; in the component editor Add > Doorway or Docking port face, and the joints.
+- **Not yet:** door state on the wire and in the room graph (portals), powered and wired opening, docking itself (alignment, latching, the combined bake of D85).
 
 ### Collision (Jolt)
 

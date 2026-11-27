@@ -63,6 +63,9 @@ public static class PlanCanonical
         if (doc.Decals is { IsEmpty: true })
             doc.Decals = null;
 
+        if (doc.Openings is { IsEmpty: true })
+            doc.Openings = null;
+
         // Members of solids or joints that are gone are dropped; the rest go in solid id order.
         if (doc.Joints is { } joints)
         {

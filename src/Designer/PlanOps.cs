@@ -6,7 +6,7 @@ using BrutalGame.Ships.Interior;
 
 namespace BrutalGame.Designer;
 
-public enum OpKind : byte { InsertSolid, RemoveSolid, ModifySolid, AddMaterial, RemoveMaterial, AddMesh, RemoveMesh, SetMesh, SetLayering, SetBrushes, SetComponents, AddPrefab, RemovePrefab, SetInterior, SetWindows, SetDecals, SetPaint, SetJoints }
+public enum OpKind : byte { InsertSolid, RemoveSolid, ModifySolid, AddMaterial, RemoveMaterial, AddMesh, RemoveMesh, SetMesh, SetLayering, SetBrushes, SetComponents, AddPrefab, RemovePrefab, SetInterior, SetWindows, SetDecals, SetPaint, SetJoints, SetOpenings }
 
 /// <summary>
 /// One invertible edit, a solid-list diff (ship-hulls "undo = solid list diffs"). Insert and Remove carry the solid and
@@ -39,6 +39,8 @@ public struct PlanOp : IUndoOp<PlanOp, PlanDocument>
     public HullPaintSet? PaintAfter;
     public HullJointSet? JointsBefore;
     public HullJointSet? JointsAfter;
+    public HullOpeningSet? OpeningsBefore;
+    public HullOpeningSet? OpeningsAfter;
     public PlanDocument? Prefab;
     public ulong PrefabHash;
 
@@ -60,6 +62,8 @@ public struct PlanOp : IUndoOp<PlanOp, PlanDocument>
     public static PlanOp SetPaint(HullPaintSet? before, HullPaintSet? after) => new() { Kind = OpKind.SetPaint, PaintBefore = before, PaintAfter = after };
 
     public static PlanOp SetJoints(HullJointSet? before, HullJointSet? after) => new() { Kind = OpKind.SetJoints, JointsBefore = before, JointsAfter = after };
+
+    public static PlanOp SetOpenings(HullOpeningSet? before, HullOpeningSet? after) => new() { Kind = OpKind.SetOpenings, OpeningsBefore = before, OpeningsAfter = after };
 
     public static PlanOp AddPrefab(ulong hash, PlanDocument prefab) => new() { Kind = OpKind.AddPrefab, PrefabHash = hash, Prefab = prefab };
 
@@ -92,6 +96,7 @@ public struct PlanOp : IUndoOp<PlanOp, PlanDocument>
         OpKind.SetDecals => SetDecals(DecalsAfter, DecalsBefore),
         OpKind.SetPaint => SetPaint(PaintAfter, PaintBefore),
         OpKind.SetJoints => SetJoints(JointsAfter, JointsBefore),
+        OpKind.SetOpenings => SetOpenings(OpeningsAfter, OpeningsBefore),
         OpKind.AddPrefab => new PlanOp { Kind = OpKind.RemovePrefab, PrefabHash = PrefabHash, Prefab = Prefab },
         OpKind.RemovePrefab => AddPrefab(PrefabHash, Prefab!),
         _ => SetMesh(Index, MeshAfter!, MeshBefore!),
@@ -152,6 +157,17 @@ public struct PlanOp : IUndoOp<PlanOp, PlanDocument>
             case OpKind.SetPaint:
                 Expect(ReferenceEquals(doc.Paint, PaintBefore));
                 doc.Paint = PaintAfter;
+                break;
+            case OpKind.SetOpenings:
+                Expect(ReferenceEquals(doc.Openings, OpeningsBefore));
+                doc.Openings = OpeningsAfter;
+
+                if (OpeningsAfter is not null)
+                {
+                    foreach (var o in OpeningsAfter.Openings)
+                        doc.Meta.NextId = Math.Max(doc.Meta.NextId, o.Id + 1);
+                }
+
                 break;
             case OpKind.SetJoints:
                 Expect(ReferenceEquals(doc.Joints, JointsBefore));
