@@ -201,6 +201,20 @@ public class MeshTests
     }
 
     [Fact]
+    public void Mirror_OfAMeshWithNoSeam_SplitsTheFacesAcrossTheMiddle()
+    {
+        // A plain box has no vertices at X = 0: its top, bottom, front and back faces cross the plane.
+        var box = Box();
+        var mirrored = Run(box, MeshOps.MirrorX);
+
+        AssertValid(mirrored);
+        Assert.Equal(Volume(box), Volume(mirrored), 6);
+        Assert.Contains(mirrored.Vertices, v => v.X == 0);
+        var xs = mirrored.Vertices.Select(v => v.X).Order().ToArray();
+        Assert.Equal(xs, xs.Select(x => -x).Order().ToArray());
+    }
+
+    [Fact]
     public void MirroredDrag_KeepsTheSeamJoined()
     {
         var mirrored = Run(Run(Box(), x => MeshOps.Knife(x, 0, 0)), MeshOps.MirrorX);

@@ -100,6 +100,9 @@ public sealed class ViewportTool
     private HullSolid _preview;
     private HullMesh? _previewMesh;
     private HashSet<int>? _dragVertices;
+
+    /// <summary>Where a mirrored drag left the dragged vertices (mirroring renumbers vertices, so the selection follows by position).</summary>
+    private readonly HashSet<MeshVertex> _movedTo = new();
     private int _hoverAxis = -1;
     private int _hoverSide;
     private int _ringHover = -1;
@@ -460,6 +463,7 @@ public sealed class ViewportTool
             {
                 // Seam vertices stay on the mirror plane, so the halves stay joined.
                 MeshOps.TranslateMirrored(builder, _dragVertices!, lx, ly, lz);
+                MovedPositions(mesh, builder);
                 MeshOps.MirrorX(builder);
             }
             else
@@ -475,10 +479,53 @@ public sealed class ViewportTool
 
         _drag = DragKind.None;
 
-        if (_previewMesh is not null && !ReferenceEquals(_previewMesh, mesh))
-            MeshCommands.Replace(session, _dragSolid.Id, _previewMesh);
+        if (_previewMesh is not null && !ReferenceEquals(_previewMesh, mesh) && MeshCommands.Replace(session, _dragSolid.Id, _previewMesh) && edit.Mirror)
+            Reselect(edit, _previewMesh);
 
         _previewMesh = null;
+    }
+
+    /// <summary>The dragged vertices' new positions: a -X pick is where its moved +X twin's mirror lands.</summary>
+    private void MovedPositions(HullMesh before, MeshBuilder after)
+    {
+        _movedTo.Clear();
+        var at = new Dictionary<MeshVertex, int>(before.Vertices.Length);
+
+        for (var i = 0; i < before.Vertices.Length; i++)
+            at.TryAdd(before.Vertices[i], i);
+
+        foreach (var v in _dragVertices!)
+        {
+            var p = before.Vertices[v];
+
+            if (p.X < 0 && at.TryGetValue(new MeshVertex(-p.X, p.Y, p.Z), out var twin))
+            {
+                var q = after.Vertices[twin];
+                _movedTo.Add(new MeshVertex(-q.X, q.Y, q.Z));
+            }
+            else
+            {
+                _movedTo.Add(after.Vertices[v]);
+            }
+        }
+    }
+
+    /// <summary>After a mirrored drag: the same vertices stay selected (found by position); an edge or face pick is dropped rather than left on the wrong ones.</summary>
+    private void Reselect(MeshEditState edit, HullMesh mesh)
+    {
+        var selection = edit.Selection;
+        selection.Clear();
+
+        if (selection.Mode != MeshSelectMode.Vertex)
+            return;
+
+        for (var i = 0; i < mesh.Vertices.Length; i++)
+        {
+            if (_movedTo.Contains(mesh.Vertices[i]))
+                selection.Vertices.Add(i);
+        }
+
+        edit.MeshHash = mesh.MeshHash;
     }
 
     private static int Snap(double units) => (int)Math.Round(units / MeshSnapUnits) * MeshSnapUnits;

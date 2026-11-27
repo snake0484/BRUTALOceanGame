@@ -578,11 +578,15 @@ public static class MeshOps
     }
 
     /// <summary>
-    /// Symmetrise across local X = 0: faces on the +X side (every corner at x ≥ 0, some above) are kept and mirrored with
-    /// reversed winding; vertices on the plane are shared. Live mirror runs this after every op.
+    /// Symmetrise across local X = 0: faces that cross the plane are first split on it (a knife at X = 0), then faces on
+    /// the +X side (every corner at x ≥ 0, some above) are kept and mirrored with reversed winding; vertices on the plane
+    /// are shared, so the halves meet along the seam. Live mirror runs this after every op.
     /// </summary>
     public static bool MirrorX(MeshBuilder b)
     {
+        if (CrossesX(b))
+            Knife(b, 0, 0);
+
         var keep = new List<(int[] Face, ushort Panel)>();
 
         for (var f = 0; f < b.Faces.Count; f++)
@@ -644,6 +648,26 @@ public static class MeshOps
         }
 
         return true;
+    }
+
+    /// <summary>Any face with corners on both sides of X = 0.</summary>
+    private static bool CrossesX(MeshBuilder b)
+    {
+        foreach (var face in b.Faces)
+        {
+            bool positive = false, negative = false;
+
+            foreach (var v in face)
+            {
+                positive |= b.Vertices[v].X > 0;
+                negative |= b.Vertices[v].X < 0;
+            }
+
+            if (positive && negative)
+                return true;
+        }
+
+        return false;
     }
 
     public static void SetCrease(MeshBuilder b, IEnumerable<(int A, int B)> edges, bool sharp)
