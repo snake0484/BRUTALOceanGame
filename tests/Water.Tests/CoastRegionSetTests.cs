@@ -137,7 +137,9 @@ public sealed class CoastRegionSetTests(ITestOutputHelper output)
         var peak = 0f;
         var least = 1f;
         var tick = 0L;
+        var stats = default(BreakerStability);
         set.Sample(point, 0.0, out var before);
+        var first = before;
 
         void Step(CoastCarrier carrier)
         {
@@ -145,7 +147,12 @@ public sealed class CoastRegionSetTests(ITestOutputHelper output)
             set.Sample(point, ++tick * (double)Frame, out var face);
             worst = MathF.Max(worst, MathF.Abs(face.Height - before.Height));
             peak = MathF.Max(peak, MathF.Abs(face.Height));
-            before = face;
+            stats.Step(before, face);
+
+            if (tick > 1)
+                stats.Kick(first, before, face);
+
+            (first, before) = (before, face);
 
             if (set.Busy)
                 Thread.Sleep(1);
@@ -188,8 +195,273 @@ public sealed class CoastRegionSetTests(ITestOutputHelper output)
 
         Assert.Equal(CoastRegionSet.MaxDesired, Live(set));
         Assert.True(peak > 0.3f, "the point never saw a wave");
+        output.WriteLine(stats.ToString());
         Assert.True(worst <= BreakerStability.HeightJump, $"the face jumped {worst:F3} m in a tick");
+        Assert.Equal(0, stats.Jumps);
+        Assert.Equal(0, stats.Kicks);
         Assert.True(least > 0.999f, $"a window's maps summed to {least:F3} in a cross-fade");
+    }
+
+    /// <summary>In the cells two windows share the two maps are drawn as one wave: the blended face there moves as smoothly as one map's.</summary>
+    [Fact]
+    public void Overlap_MovesAsOneWave()
+    {
+        using var set = Beach();
+        Settle(set, Camera(790.0, 960.0), Swell);
+        var stats = default(BreakerStability);
+        var maps = 0;
+
+        foreach (var region in set.Regions)
+        {
+            region.Window.ToLocal(Home.Direction(770.0, 960.0), out var x, out var z);
+            maps += region.Drawn && CoastWindow.Weight((float)x / CoastWindow.CellSize, (float)z / CoastWindow.CellSize) > 0.3f ? 1 : 0;
+        }
+
+        Assert.Equal(2, maps);
+
+        for (var u = 690.0; u <= 800.0; u += 2.3)
+        {
+            for (var v = 930.0; v <= 990.0; v += 30.0)
+            {
+                var point = Home.Direction(u, v);
+                set.Sample(point, 0.0, out var first);
+                set.Sample(point, Frame, out var before);
+                stats.Step(first, before);
+
+                for (var tick = 2; tick <= 600; tick++)
+                {
+                    set.Sample(point, tick * (double)Frame, out var face);
+                    stats.Step(before, face);
+                    stats.Kick(first, before, face);
+                    (first, before) = (before, face);
+                }
+            }
+        }
+
+        output.WriteLine(stats.ToString());
+        Assert.Equal(0, stats.Jumps);
+        Assert.Equal(0, stats.Kicks);
+        Assert.True(stats.MaxHeight > 0.5f && stats.MaxFoam > 0.5f, "the wave never broke in the shared cells");
+    }
+
+    /// <summary>Inside the tolerance a new carrier keeps the maps and only the drawn height follows; past it they are baked again.</summary>
+    [Fact]
+    public void CarrierInsideTheTolerance_KeepsTheMaps()
+    {
+        using var set = Beach();
+        var camera = Camera(790.0, 512.0);
+        Settle(set, camera, Swell);
+        var bakes = set.Bakes;
+        var near = CoastCarrier.From(Swell.Direction + 0.008f, Swell.Omega * 1.005f, Swell.Height * 1.03f);
+        Assert.True(CoastRegionSet.Keeps(Swell, near));
+        var point = Home.Direction(778.0, 512.0);
+        set.Sample(point, 0.0, out var before);
+        var worst = 0f;
+
+        for (var i = 1; i <= 600; i++)
+        {
+            set.Update(camera, near, Hs, Frame);
+            set.Sample(point, i * (double)Frame, out var face);
+            worst = MathF.Max(worst, MathF.Abs(face.Height - before.Height));
+            before = face;
+        }
+
+        Assert.Equal(bakes, set.Bakes);
+        Assert.Equal(Swell, set.Carrier);
+        Assert.True(worst <= 0.03f, $"the face moved {worst:F3} m in a tick as the height followed");
+
+        for (var slot = 0; slot < CoastRegionSet.Capacity; slot++)
+        {
+            if (set.Regions[slot].Drawn)
+                Assert.Equal(near.Height, set.Atlas(slot).Height, 0.002f);
+        }
+
+        var far = CoastCarrier.From(Swell.Direction + 0.05f, Swell.Omega, Swell.Height);
+        Assert.False(CoastRegionSet.Keeps(Swell, far));
+        Assert.False(CoastRegionSet.Keeps(Swell, CoastCarrier.From(Swell.Direction, Swell.Omega * 1.02f, Swell.Height)));
+        Assert.False(CoastRegionSet.Keeps(Swell, CoastCarrier.From(Swell.Direction, Swell.Omega, Swell.Height * 1.08f)));
+        Assert.False(CoastRegionSet.Keeps(Swell, default));
+        Settle(set, camera, far);
+        Assert.Equal(far, set.Carrier);
+        Assert.Equal(bakes + CoastRegionSet.MaxDesired, set.Bakes);
+    }
+
+    /// <summary>A window dropped and wanted again before its map has faded out fades back in: no bake, and its weight never steps.</summary>
+    [Fact]
+    public void RetiringWindow_WantedAgain_FadesBackIn()
+    {
+        using var set = Beach();
+        var camera = Camera(790.0, 512.0);
+        Settle(set, camera, Swell);
+        var bakes = set.Bakes;
+        var away = Camera(790.0, 512.0, 7000.0);
+        var before = Weights(set);
+        var worst = 0f;
+
+        void Step(double3 at)
+        {
+            set.Update(at, Swell, Hs, Frame);
+            var now = Weights(set);
+            worst = MathF.Max(worst, MathF.Abs(now - before));
+            before = now;
+        }
+
+        for (var i = 0; i < 40; i++)
+            Step(away);
+
+        Assert.InRange(before, 0.1f * CoastRegionSet.MaxDesired, 0.9f * CoastRegionSet.MaxDesired);
+
+        for (var i = 0; i < 240; i++)
+            Step(camera);
+
+        Assert.Equal(bakes, set.Bakes);
+        Assert.Equal(CoastRegionSet.MaxDesired, Live(set));
+        Assert.Equal((float)CoastRegionSet.MaxDesired, before, 0.001f);
+        Assert.True(worst < 0.15f, $"the weights stepped {worst:F3} in a frame");
+    }
+
+    private static unsafe float Share(int tile, in double3 direction)
+    {
+        Tiles.Hand(direction, out var hand);
+
+        for (var k = 0; k < hand.Count; k++)
+        {
+            if (hand.Tile[k] == tile)
+                return hand.Weight[k];
+        }
+
+        return 0f;
+    }
+
+    /// <summary>
+    /// Where a coast crosses a sea tile's edge the carrier is handed from one tile to the next over a narrow band: both
+    /// tiles' regions load on their own sides, their weights sum to 1 across it, their carriers agree in phase at the
+    /// sea point under the camera, and the face does not jump as the camera crosses at a run. At 40° of latitude, where
+    /// the tiles' frames are turned 3° from each other.
+    /// </summary>
+    [Fact]
+    public unsafe void TileEdge_HandsTheCarrierOver()
+    {
+        const double shore = 800.0;
+        const double pace = 0.2;
+        var axis = double3.Normalize(new double3(0.2, 1.0, -0.1));
+        var (sin, cos) = Math.SinCos(40.0 * Math.PI / 180.0);
+        Tiles.Locate(double3.Normalize(double3.Normalize(double3.Cross(axis, double3.UnitX)) * cos + axis * sin), out var blend);
+        var tile = blend.Tile[0];
+        var plane = new CoastWindow(Tiles, tile, 0, 0);
+        var (lo, hi) = (0.0, 40_000.0);
+        Assert.Equal(1f, Share(tile, plane.Direction(lo, shore)));
+        Assert.Equal(0f, Share(tile, plane.Direction(hi, shore)));
+
+        for (var i = 0; i < 40; i++)
+        {
+            var mid = 0.5 * (lo + hi);
+            (lo, hi) = Share(tile, plane.Direction(mid, shore)) > 0.5f ? (mid, hi) : (lo, mid);
+        }
+
+        var edge = lo;
+        var carrier = CoastCarrier.From(1.3f, 0.6f, 1.2f);
+        using var set = new CoastRegionSet(Tiles, new PlaneSeabed(Tiles, tile, (_, v) => (float)(0.04 * (shore - v))), 1);
+        double3 Camera(double u) => plane.Direction(u, shore - 40.0) * (Tiles.SeaRadius + 2.0);
+        Settle(set, Camera(edge), carrier);
+        var home = 0;
+        var other = 0;
+
+        foreach (var region in set.Regions)
+        {
+            if (region.State != CoastRegionState.Live)
+                continue;
+
+            home += region.Key.Tile == tile ? 1 : 0;
+            other += region.Key.Tile == tile ? 0 : 1;
+        }
+
+        output.WriteLine($"edge at u {edge:F0} m: {home} regions of the tile, {other} of its neighbour");
+        Assert.True(home > 0 && other > 0, "both tiles' regions load at their edge");
+        var band = 0;
+
+        for (var u = edge - 600.0; u <= edge + 600.0; u += 10.0)
+        {
+            var share = Share(tile, plane.Direction(u, shore - 60.0));
+            band += share is > 0f and < 1f ? 1 : 0;
+            Assert.Equal(1f, set.Coverage(plane.Direction(u, shore - 60.0)), 0.002f);
+        }
+
+        Assert.InRange(band * 10.0, 300.0, 900.0);
+
+        // At the sea point under the camera the two tiles' carriers are the same wave, to the lag between two solves
+        // whose directions differ as the tiles' frames do; unmatched they would be anywhere up to π apart.
+        for (var along = -150.0; along <= 150.0; along += 75.0)
+        {
+            set.Update(Camera(edge + along), carrier, Hs, Frame);
+            var under = plane.Direction(edge + along, shore - 40.0);
+            var phaseHome = float.NaN;
+            var phaseOther = float.NaN;
+
+            for (var slot = 0; slot < CoastRegionSet.Capacity; slot++)
+            {
+                var region = set.Regions[slot];
+                region.Window.ToLocal(under, out var x, out var z);
+
+                if (!region.Drawn || CoastWindow.Weight((float)x / CoastWindow.CellSize, (float)z / CoastWindow.CellSize) < 0.5f)
+                    continue;
+
+                var phase = SurfCarrier.At(set.Atlas(slot), (float)x, (float)z, set.PhaseAt(slot, 7.0)).Phase;
+
+                if (region.Key.Tile == tile)
+                    phaseHome = phase;
+                else
+                    phaseOther = phase;
+            }
+
+            var apart = MathF.Abs(SurfCarrier.Wrap(phaseHome - phaseOther));
+            output.WriteLine($"carriers under the camera {along:F0} m along the edge: {apart:F3} rad apart");
+            Assert.True(apart < 0.5f, $"the tiles' carriers are {apart:F2} rad apart under the camera");
+        }
+
+        // Crossing the hand-over at 12 m/s: the face at fixed points in it moves as a wave does.
+        var stats = default(BreakerStability);
+        var watch = new double3[3];
+        var last = new FacePoint[3];
+        var tick = 0L;
+        set.Update(Camera(edge - 300.0), carrier, Hs, Frame);
+
+        for (var i = 0; i < watch.Length; i++)
+        {
+            watch[i] = plane.Direction(edge - 120.0 + 120.0 * i, shore - 45.0);
+            set.Sample(watch[i], 0.0, out last[i]);
+        }
+
+        for (var u = edge - 300.0; u <= edge + 300.0; u += pace)
+        {
+            set.Update(Camera(u), carrier, Hs, Frame);
+            tick++;
+
+            for (var i = 0; i < watch.Length; i++)
+            {
+                set.Sample(watch[i], tick * (double)Frame, out var face);
+                stats.Step(last[i], face);
+                last[i] = face;
+            }
+
+            if (set.Busy)
+                Thread.Sleep(1);
+        }
+
+        output.WriteLine($"crossing the hand-over: {stats}");
+        Assert.True(stats.MaxHeight > 0.3f, "the points never saw a wave");
+        Assert.True(stats.MaxHeightStep < 0.04f, $"the face moved {stats.MaxHeightStep:F3} m in a frame");
+        Assert.Equal(0, stats.HeightJumps + stats.FoamJumps + stats.SlopeJumps);
+    }
+
+    private static float Weights(CoastRegionSet set)
+    {
+        var sum = 0f;
+
+        foreach (var region in set.Regions)
+            sum += region.Drawn ? region.Weight : 0f;
+
+        return sum;
     }
 
     /// <summary>The GPU's map from the camera-relative sea frame to a region's cells lands where the window says, to the linearisation's error.</summary>

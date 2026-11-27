@@ -4,8 +4,9 @@ namespace BrutalGame.Water.Ocean;
 
 /// <summary>
 /// The breaker face judged in motion (breaking-waves-brief.md §8): at fixed rest points, tick after tick, how far its
-/// height, normal and whitewater move, and how often by more than a wave's own travel explains. Accumulates over any
-/// number of <see cref="Run"/>s.
+/// height, normal and whitewater move, and how sharply that motion changes. A wave moves a point fast but smoothly; a
+/// pop is one tick out of step with the ticks either side, so it shows in the second difference (the kick) far above a
+/// wave's own, whatever the step. Accumulates over any number of <see cref="Run"/>s.
 /// </summary>
 public struct BreakerStability
 {
@@ -14,28 +15,43 @@ public struct BreakerStability
     public const float NormalJump = 0.35f;
     public const float FoamJump = 0.2f;
 
+    /// <summary>A second difference past these counts as a kick: twice a breaking face's own at 60 Hz (up to 0.0075 m, 0.011 rad, 0.019).</summary>
+    public const float HeightKick = 0.015f;
+    public const float NormalKick = 0.03f;
+    public const float FoamKick = 0.04f;
+
     public int Samples;
     public int HeightJumps;
     public int SlopeJumps;
     public int FoamJumps;
+    public int Kicks;
     public float MaxHeightStep;
     public float MaxShiftStep;
     public float MaxNormalStep;
     public float MaxFoamStep;
+    public float MaxHeightKick;
+    public float MaxNormalKick;
+    public float MaxFoamKick;
     public float MaxHeight;
     public float MaxFoam;
 
-    public void Run(CoastAtlas atlas, float x, float z, long firstTick, int ticks, double tickSeconds)
+    public readonly int Jumps => HeightJumps + SlopeJumps + FoamJumps;
+
+    public void Run(CoastAtlas atlas, float x, float z, long firstTick, int ticks, double tickSeconds, float spacing = 0f)
     {
         var weight = CoastWindow.Weight(x / CoastWindow.CellSize, z / CoastWindow.CellSize);
-        BreakerFace.Apply(atlas, x, z, atlas.PhaseAt(firstTick * tickSeconds), out var before);
-        Scale(ref before, weight);
+        var first = Face(atlas, x, z, firstTick * tickSeconds, weight, spacing);
+        var before = first;
 
         for (var i = 1; i <= ticks; i++)
         {
-            BreakerFace.Apply(atlas, x, z, atlas.PhaseAt((firstTick + i) * tickSeconds), out var face);
-            Scale(ref face, weight);
+            var face = Face(atlas, x, z, (firstTick + i) * tickSeconds, weight, spacing);
             Step(before, face);
+
+            if (i > 1)
+                Kick(first, before, face);
+
+            first = before;
             before = face;
         }
     }
@@ -62,8 +78,26 @@ public struct BreakerStability
         MaxFoam = MathF.Max(MaxFoam, face.Foam);
     }
 
-    private static void Scale(ref FacePoint p, float weight)
+    /// <summary>The second difference of three ticks running at a rest point: how far the middle one is out of step.</summary>
+    public void Kick(in FacePoint first, in FacePoint second, in FacePoint third)
     {
+        Normal(first, out var ax, out var ay, out var az);
+        Normal(second, out var bx, out var by, out var bz);
+        Normal(third, out var cx, out var cy, out var cz);
+        var (x, y, z) = (ax - 2f * bx + cx, ay - 2f * by + cy, az - 2f * bz + cz);
+        var height = MathF.Abs(first.Height - 2f * second.Height + third.Height);
+        var normal = MathF.Sqrt(x * x + y * y + z * z);
+        var foam = MathF.Abs(first.Foam - 2f * second.Foam + third.Foam);
+
+        Kicks += height > HeightKick || normal > NormalKick || foam > FoamKick ? 1 : 0;
+        MaxHeightKick = MathF.Max(MaxHeightKick, height);
+        MaxNormalKick = MathF.Max(MaxNormalKick, normal);
+        MaxFoamKick = MathF.Max(MaxFoamKick, foam);
+    }
+
+    private static FacePoint Face(CoastAtlas atlas, float x, float z, double time, float weight, float spacing)
+    {
+        BreakerFace.Apply(atlas, x, z, atlas.PhaseAt(time), out var p, spacing);
         p.Height *= weight;
         p.SlopeX *= weight;
         p.SlopeZ *= weight;
@@ -73,10 +107,11 @@ public struct BreakerStability
         p.DzZ *= weight;
         p.DxZ *= weight;
         p.Foam *= weight;
+        return p;
     }
 
     public override readonly string ToString() =>
-        $"{Samples} samples: height step max {MaxHeightStep:F3} m ({HeightJumps} over {HeightJump}), shift step max {MaxShiftStep:F3} m, normal turn max {MaxNormalStep:F3} rad ({SlopeJumps} over {NormalJump}), foam step max {MaxFoamStep:F3} ({FoamJumps} over {FoamJump}); peak height {MaxHeight:F2} m, foam {MaxFoam:F2}";
+        $"{Samples} samples: height step max {MaxHeightStep:F3} m ({HeightJumps} over {HeightJump}), shift step max {MaxShiftStep:F3} m, normal turn max {MaxNormalStep:F3} rad ({SlopeJumps} over {NormalJump}), foam step max {MaxFoamStep:F3} ({FoamJumps} over {FoamJump}); second differences max height {MaxHeightKick:F4} m, normal {MaxNormalKick:F4} rad, foam {MaxFoamKick:F4} ({Kicks} kicks); peak height {MaxHeight:F2} m, foam {MaxFoam:F2}";
 
     /// <summary>The displaced surface's normal from the face alone (ocean.frag's contract form).</summary>
     private static void Normal(in FacePoint p, out float x, out float y, out float z)

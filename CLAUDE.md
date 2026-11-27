@@ -69,11 +69,13 @@ Core pillars, in priority order:
 
 ## Water
 
-Cut to the ocean only (`docs/pivot/inventory.md`). Kept: analytic swell, GPU FFT cascades, ocean shading, and **shore wash** (GPU swash sheets, edge foam, surf foam), on a sea sphere per planet.
+Cut to the ocean only (`docs/pivot/inventory.md`). Kept: analytic swell, GPU FFT cascades, ocean shading, **shore wash** (GPU swash sheets, edge foam, surf foam) and **breaking waves** (slice 1: the breaking face, `docs/pivot/briefs/breaking-waves-brief.md`), on a sea sphere per planet.
 
 - `OceanSurface.Sample(double3 planetLocal, long tick)` has one global definition (fixed tangent tiles), so server and clients agree on buoyancy.
 - Shore wash reads a depth window built from the planet generator plus edits (`IShoreDepth`), not from voxel water.
-- Gone: coastal maps (layer B), breakers, bores, spray, voxel water and its flow sim, river, lakes, wind sea, water fog, SSR, rain.
+- Breaking waves: coast regions (`src/Water/Coast`) are 1 km windows of 4 m cells on a fixed lattice in each `SeaTiles` tile's plane, overlapping their neighbours by 128 m. Each is baked once per swell carrier on a job (eikonal phase, shoaling, break clock) from the generated ground (shores are fixed, D30): at most 8 resident, loaded within 3 km, cross-faded when the swell turns. The face (`BreakerFace`, `ocean_breaker.glsl`: the surf carrier, crest lift, pitch, whitewater) is a pure function of the atlas and the tick: no per-tick state, nothing on the wire.
+- The face is drawn only: it is not in `OceanSurface.Sample`, and the server bakes nothing.
+- Gone: breaker lips, bores, spray, the swell's own coastal maps (layer B refraction of every component), voxel water and its flow sim, river, lakes, wind sea, water fog, SSR, rain.
 - The GPU never feeds back into gameplay. No GPU readbacks in the frame loop.
 
 ## Ships (`docs/pivot/ship-hulls.md`)

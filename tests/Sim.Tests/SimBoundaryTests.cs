@@ -299,7 +299,7 @@ public class SimBoundaryTests(Xunit.Abstractions.ITestOutputHelper output)
         Assert.InRange(wet, 1, n * n - 1);
     }
 
-    /// <summary>The spawn coast's region baked from the planet's own ground: worker time against the brief's 30 ms.</summary>
+    /// <summary>The spawn coast's region baked from the planet's own ground, its probe known as the region set knows it: worker time against the brief's 30 ms.</summary>
     [Fact]
     [Trait("Category", "Perf")]
     public void CoastBake_CostOnThePlanet()
@@ -322,9 +322,9 @@ public class SimBoundaryTests(Xunit.Abstractions.ITestOutputHelper output)
         var best = float.MaxValue;
         var depth = 0f;
 
-        for (var i = 0; i < 6; i++)
+        for (var i = 0; i < 40; i++)
         {
-            bake.Prepare(sim.CoastDepth, new CoastWindow(tiles, key), key, atlas, CoastBake.BreakDepth(1.5f));
+            bake.Prepare(sim.CoastDepth, new CoastWindow(tiles, key), key, atlas, CoastBake.BreakDepth(1.5f), i == 0 ? float.NaN : bake.ProbeMin, i == 0 ? float.NaN : bake.ProbeMax);
             bake.Run();
             Assert.True(bake.Baked);
 
@@ -332,7 +332,7 @@ public class SimBoundaryTests(Xunit.Abstractions.ITestOutputHelper output)
                 (best, depth) = (bake.Ms, bake.DepthMs);
         }
 
-        output.WriteLine($"bake {best:F1} ms, depth sampling {depth:F1} ms of it; probe depths {bake.ProbeMin:F1} .. {bake.ProbeMax:F1} m");
+        output.WriteLine($"bake {best:F1} ms, depth sampling {depth:F1} ms of it ({bake.DepthSamples} samples); probe depths {bake.ProbeMin:F1} .. {bake.ProbeMax:F1} m");
     }
 
     /// <summary>

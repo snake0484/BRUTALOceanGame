@@ -614,7 +614,8 @@ public sealed unsafe class OceanRenderer : IDisposable
 
         // Vertical cull range: the tallest swell crests and troughs.
         _cullReach = 2f * swell.SignificantWaveHeight + 4f;
-        _firstLevel = FirstLevel((float)(camera.Y + frame.Drop(camera.X, camera.Z)));
+        var altitude = (float)(camera.Y + frame.Drop(camera.X, camera.Z));
+        _firstLevel = FirstLevel(altitude);
 
         header->Planet = new Vector4((float)camera.X, (float)camera.Z, 0f, (float)frame.SeaRadius);
         header->CameraPos = new Vector4(0f, height, 0f, (float)(renderTime % TimeWrap));
@@ -629,7 +630,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         header->DepthRect = view.DepthNear;
         header->DepthFar = view.DepthFar;
         header->DepthValid = view.DepthValid;
-        header->DepthWrap = new Vector4(view.DepthCellX & (SurfFoamResolution - 1), view.DepthCellZ & (SurfFoamResolution - 1), 0f, 0f);
+        header->DepthWrap = new Vector4(view.DepthCellX & (SurfFoamResolution - 1), view.DepthCellZ & (SurfFoamResolution - 1), FaceSpacing(altitude), 0f);
         _foamOn = view.DepthNear.Z > 0f;
         (_depthCellX, _depthCellZ, _depthVersion) = (view.DepthCellX, view.DepthCellZ, view.DepthVersion);
 
@@ -673,7 +674,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         }
     }
 
-    /// <summary>A shoaled, held breaker stands at most about this × the carrier's deep-water height over the sea.</summary>
+    /// <summary>A shoaled, held breaker stands at most about this Ã— the carrier's deep-water height over the sea.</summary>
     private const float FaceCullHeight = 3f;
 
     /// <summary>
@@ -696,14 +697,34 @@ public sealed unsafe class OceanRenderer : IDisposable
             var to = (Vector4*)(block + CoastFloats * count++);
             to[0] = placement.CellX with { W = placement.Slot };
             to[1] = placement.CellZ with { W = slot };
-            to[2] = new Vector4(coast.Atlas(slot).PhaseAt(renderTime), carrier.Omega, carrier.Height, region.Weight);
+            var atlas = coast.Atlas(slot);
+            to[2] = new Vector4(coast.PhaseAt(slot, renderTime), carrier.Omega, atlas.Height, region.Weight);
         }
 
         return count;
     }
 
+    /// <summary>The finest level's spacing (m) without <see cref="FirstLevel"/>'s steps: the breaking faces are filtered at it.</summary>
+    public static float FaceSpacing(float altitude) => MathF.Max(altitude, 0f) * FinestCell;
+
+    /// <summary>The effective spacing (m) of the grid drawn a horizontal distance from a camera at an altitude: its level's, morphing to the next's (ocean.vert).</summary>
+    public static float GridSpacing(float altitude, float distance)
+    {
+        var level = FirstLevel(altitude);
+        var spacing = BaseSpacing * (1 << level);
+
+        while (distance > HalfCells * spacing && level < WaveLevels - 1)
+        {
+            spacing *= 2f;
+            level++;
+        }
+
+        var morph = Math.Clamp((distance / (HalfCells * spacing) - MorphStart) / (MorphEnd - MorphStart), 0f, 1f);
+        return spacing * (1f + morph);
+    }
+
     /// <summary>The finest level drawn from <paramref name="altitude"/> (m above the sea): cells of about <see cref="FinestCell"/> of it.</summary>
-    private static int FirstLevel(float altitude) =>
+    public static int FirstLevel(float altitude) =>
         Math.Clamp((int)MathF.Floor(MathF.Log2(MathF.Max(altitude * FinestCell / BaseSpacing, 1f))), 0, Levels - 2);
 
     /// <summary>

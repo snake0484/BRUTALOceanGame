@@ -260,8 +260,152 @@ public sealed class CoastBakeTests(ITestOutputHelper output)
             output.WriteLine($"z {z} depth {sa.Depth:F1}: phase apart {phase:F3} rad, amp {sa.Amplitude:F3} / {sb.Amplitude:F3}, clock {sa.BreakDistance:F1} / {sb.BreakDistance:F1} m");
         }
 
-        Assert.True(worstPhase < 0.5f, $"phases {worstPhase:F2} rad apart");
-        Assert.True(worstAmp < 0.15f, $"amplitudes {worstAmp:F2} apart");
+        Assert.True(worstPhase < 0.2f, $"phases {worstPhase:F2} rad apart");
+        Assert.True(worstAmp < 0.06f, $"amplitudes {worstAmp:F2} apart");
+        Assert.True(worstBreak < 2f, $"break clocks {worstBreak:F1} m apart");
+    }
+
+    /// <summary>The same over a seabed that is not a plane (a bar off a curved shore), across both kinds of shared edge.</summary>
+    [Theory]
+    [InlineData(1, 0)]
+    [InlineData(0, 1)]
+    public void NeighbourWindows_AgreeOverABarredBay(int stepX, int stepZ)
+    {
+        static float Seabed(double u, double v) => BreakerFaceTests.BarredBay(0.8 * u + 0.6 * v - 230.0, 0.8 * v - 0.6 * u);
+        var carrier = CoastCarrier.From(0.95f, 0.5f, 1.2f);
+        var a = Bake(Seabed, carrier, 0, 0);
+        var b = Bake(Seabed, carrier, stepX, stepZ);
+        var phaseA = a.PhaseAt(0.0);
+        var phaseB = b.PhaseAt(0.0);
+        const float shift = (float)CoastWindow.PitchMetres;
+        const float middle = shift + 0.5f * CoastWindow.Blend * Cell;
+        var worstPhase = 0f;
+        var worstAmp = 0f;
+        var worstBreak = 0f;
+        var surf = 0;
+
+        for (var along = 40f; along < 1000f; along += 6f)
+        {
+            var (x, z) = stepX == 1 ? (middle, along) : (along, middle);
+            a.Sample(x, z, out var sa);
+            b.Sample(x - shift * stepX, z - shift * stepZ, out var sb);
+            Assert.Equal(sa.Depth, sb.Depth, 0.02f);
+
+            if (sa.Depth < 0.5f || sa.Depth > 8f)
+                continue;
+
+            surf += sa.BreakDistance > 1f ? 1 : 0;
+            worstPhase = MathF.Max(worstPhase, MathF.Abs(SurfCarrier.Wrap(sa.Phase + phaseA - sb.Phase - phaseB)));
+            worstAmp = MathF.Max(worstAmp, MathF.Abs(sa.Amplitude - sb.Amplitude));
+            worstBreak = MathF.Max(worstBreak, MathF.Abs(sa.BreakDistance - sb.BreakDistance));
+        }
+
+        output.WriteLine($"shared edge ({stepX}, {stepZ}): phases {worstPhase:F3} rad apart, amplitudes {worstAmp:F3}, break clocks {worstBreak:F1} m; {surf} samples in the surf");
+        Assert.True(surf > 0, "the shared cells miss the surf zone");
+        Assert.True(worstPhase < 0.35f, $"phases {worstPhase:F2} rad apart");
+        Assert.True(worstAmp < 0.2f, $"amplitudes {worstAmp:F2} apart");
+        Assert.True(worstBreak < 4f, $"break clocks {worstBreak:F1} m apart");
+    }
+
+    /// <summary>Water with no way to the open sea carries no wave: a pond behind the beach has none, and a window whose only shallows are a pond is not baked.</summary>
+    [Fact]
+    public void LandlockedWater_CarriesNoWave()
+    {
+        static float Pond(double u, double v) => Math.Sqrt((u - 920.0) * (u - 920.0) + (v - 512.0) * (v - 512.0)) < 50.0 ? 2f : BeachDepth(u);
+        var carrier = CoastCarrier.From(0f, 0.6f, 1.2f);
+        var atlas = Bake(Pond, carrier);
+        atlas.Sample(920f, 512f, out var pond);
+        atlas.Sample(760f, 512f, out var surf);
+        var phase0 = atlas.PhaseAt(3.0);
+
+        Assert.Equal(2f, pond.Depth, 0.05f);
+        Assert.Equal(0f, pond.Amplitude);
+        Assert.Equal(0f, pond.BreakDistance);
+        Assert.Equal(0f, SurfCarrier.At(atlas, 920f, 512f, phase0).Unbroken);
+        Assert.True(surf.Amplitude > 1.2f && surf.BreakDistance > 1f, "the beach in front still breaks");
+
+        for (var x = 880f; x <= 960f; x += 4f)
+        {
+            BreakerFace.Apply(atlas, x, 512f, phase0, out var face);
+            Assert.Equal(0f, face.Height);
+            Assert.Equal(0f, face.Foam);
+        }
+
+        var key = new CoastRegionKey(Tile, 0, 0, carrier);
+        var bake = new CoastBake();
+        bake.Prepare(new PlaneSeabed(Tiles, Tile, (u, v) => Math.Sqrt((u - 500.0) * (u - 500.0) + (v - 512.0) * (v - 512.0)) < 120.0 ? 2f : -6f), new CoastWindow(Tiles, key), key, new CoastAtlas(), CoastBake.BreakDepth(1.5f));
+        bake.Run();
+        Assert.True(bake.Solved);
+        Assert.False(bake.Baked, "a basin inland is no coast");
+        Assert.Equal(float.PositiveInfinity, bake.SeaMin);
+    }
+
+    /// <summary>No wave comes through land: a harbour open only to leeward is joined to the sea and nearly still.</summary>
+    [Fact]
+    public void WaterBehindLand_IsSheltered()
+    {
+        static float Harbour(double u, double v)
+        {
+            var wall = u is >= 380.0 and <= 420.0 && v is >= 300.0 and <= 720.0;
+            var arms = u is >= 380.0 and <= 640.0 && (v is >= 300.0 and <= 340.0 || v is >= 680.0 and <= 720.0);
+            return wall || arms ? -5f : 12f;
+        }
+
+        var atlas = Bake(Harbour, CoastCarrier.From(0f, 0.6f, 1.2f));
+        atlas.Sample(200f, 512f, out var open);
+        atlas.Sample(460f, 512f, out var inside);
+        atlas.Sample(560f, 512f, out var mouth);
+        atlas.Sample(520f, 150f, out var beside);
+        output.WriteLine($"amplitude: open {open.Amplitude:F2}, beside the harbour {beside.Amplitude:F2}, inside at its back {inside.Amplitude:F2}, near its mouth {mouth.Amplitude:F2}");
+
+        Assert.InRange(open.Amplitude, 0.9f, 1.2f);
+        Assert.InRange(beside.Amplitude, 0.8f, 1.3f);
+        Assert.True(inside.Amplitude < 0.25f * open.Amplitude, $"the harbour's back has {inside.Amplitude:F2} of the open sea's {open.Amplitude:F2}");
+        Assert.True(mouth.Amplitude < 0.5f * open.Amplitude, $"the harbour's mouth has {mouth.Amplitude:F2} of the open sea's {open.Amplitude:F2}");
+    }
+
+    /// <summary>Depths are sampled every 16 m and again at 8 m and 4 m only where the seabed bends: a plane beach takes the base samples alone, and a cliff's foot and top are found to the cell.</summary>
+    [Fact]
+    public void Depths_AreSampledFinerWhereTheSeabedBends()
+    {
+        static float Cliff(double u) => (float)Math.Clamp(2.0 * (703.0 - u), -6.0, 6.0);
+        var carrier = CoastCarrier.From(0f, 0.6f, 1.2f);
+        var plane = new CoastBake();
+        Bake((u, _) => BeachDepth(u), carrier, bake: plane);
+        const int nodes = (CoastWindow.Cells + 2 * CoastBake.Halo) / CoastBake.NodeStep + 1;
+        const int coarse = CoastBake.CoarseCells / CoastBake.CoarseDepthStep;
+        Assert.Equal(nodes * nodes + coarse * coarse, plane.DepthSamples);
+
+        var steep = new CoastBake();
+        var atlas = Bake((u, _) => Cliff(u), carrier, bake: steep);
+        output.WriteLine($"depth samples: plane beach {plane.DepthSamples}, cliff {steep.DepthSamples}");
+        Assert.True(steep.DepthSamples > plane.DepthSamples);
+        Assert.True(steep.DepthSamples < 2 * plane.DepthSamples, "only the cliff is sampled finer");
+
+        for (var x = 682f; x <= 722f; x += 4f)
+        {
+            atlas.Sample(x, 510f, out var s);
+            var expected = 0.25f * (Cliff(x - 2.0) * 2f + Cliff(x + 2.0) * 2f);
+            Assert.Equal(expected, s.Depth, 0.26f);
+        }
+    }
+
+    /// <summary>The carrier is drawn only near where it breaks, so a window with no water that shallow has none to start at its edge.</summary>
+    [Fact]
+    public void Carrier_FormsOnlyNearItsBreak()
+    {
+        const float height = 1.2f;
+        Assert.Equal(0f, SurfCarrier.Unbroken(height, 0.6f, SurfCarrier.FadeDepth * height, 1f));
+        Assert.Equal(0f, SurfCarrier.Unbroken(height, 0.6f, 40f, 1f));
+        Assert.Equal(height, SurfCarrier.Unbroken(height, 0.6f, 0.5f * SurfCarrier.FormDepth * height, 1f), 0.01f);
+        var before = 0f;
+
+        for (var depth = SurfCarrier.FadeDepth * height; depth >= SurfCarrier.FormDepth * height; depth -= 0.05f)
+        {
+            var unbroken = SurfCarrier.Unbroken(height, 0.6f, depth, 1f);
+            Assert.True(unbroken >= before - 1e-4f && unbroken - before < 0.08f, $"the carrier steps at {depth:F2} m");
+            before = unbroken;
+        }
     }
 
     [Fact]

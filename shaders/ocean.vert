@@ -19,6 +19,7 @@ layout(location = 4) out float vShoreDamp;   // share of the FFT slopes drawn: 0
 layout(location = 5) out float vSurfFoam;
 layout(location = 6) out float vSwashEdge;   // 1 at the edge of a swash sheet, 0 half a metre behind it (ocean.frag's edge line)
 layout(location = 7) out float vBreakFoam;   // whitewater of the breaking face
+layout(location = 8) out vec2 vCoast;        // x = the share of the breaking faces the grid draws here, y > 0 near a coast region
 
 const float LIMB = 0.999; // shell vertices past the sea sphere's limb (as the frame's plane sees it) are pulled in to it
 
@@ -60,6 +61,7 @@ void main()
         p.surfFoam = 0.0;
         p.swashEdge = 0.0;
         p.breakFoam = 0.0;
+        p.coast = vec2(0.0);
     }
     else
     {
@@ -75,6 +77,7 @@ void main()
     vSurfFoam = p.surfFoam;
     vSwashEdge = p.swashEdge;
     vBreakFoam = p.breakFoam;
+    vCoast = p.coast;
 
     // The sea frame is a tangent plane at its origin: drawn on the sea sphere.
     float drop = seaDrop(frame.planet.xy + vWorldPos.xz);

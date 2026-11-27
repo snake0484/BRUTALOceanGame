@@ -44,6 +44,12 @@ public sealed unsafe class SeaTiles
 {
     public const double TileSize = 64_000.0;
     public const double BlendHalfWidth = 2_000.0;
+
+    /// <summary>
+    /// One coherent wave cannot be blended as the random sea is: it is handed from tile to tile where their squared
+    /// weights are within this of equal (<see cref="Hand"/>), about 270 m either side of the edge.
+    /// </summary>
+    public const double HandWidth = 0.1;
     public const int MaxBlend = 4;
 
     public readonly double SeaRadius;
@@ -142,7 +148,21 @@ public sealed unsafe class SeaTiles
     }
 
     /// <summary>The tiles whose fields make the sea at unit direction <paramref name="dir"/>, and their weights.</summary>
-    public void Locate(in double3 dir, out SeaBlend blend)
+    public void Locate(in double3 dir, out SeaBlend blend) => Blend(dir, hand: false, out blend);
+
+    /// <summary>
+    /// The same tiles with each one's share of a coherent wave there as its weight: the shares sum to 1, and all but a
+    /// narrow band at an edge (<see cref="HandWidth"/>) belongs to one tile.
+    /// </summary>
+    public void Hand(in double3 dir, out SeaBlend blend) => Blend(dir, hand: true, out blend);
+
+    public static double HandShare(double squaredWeight)
+    {
+        var t = Math.Clamp((squaredWeight - (0.5 - HandWidth)) / (2.0 * HandWidth), 0.0, 1.0);
+        return t * t * (3.0 - 2.0 * t);
+    }
+
+    private void Blend(in double3 dir, bool hand, out SeaBlend blend)
     {
         Angles(dir, out var latitude, out var longitude);
         var t = (latitude + 0.5 * Math.PI) / _rowAngle;
@@ -162,12 +182,15 @@ public sealed unsafe class SeaTiles
             share = Smooth(0.5 + 0.5 * (1.0 - f) / _rowMargin);
         }
 
+        if (hand)
+            share = HandShare(share);
+
         blend = default;
         var cosLat = Math.Cos(latitude);
-        AddRow(ref blend, row, longitude, cosLat, share);
+        AddRow(ref blend, row, longitude, cosLat, share, hand);
 
         if (other >= 0)
-            AddRow(ref blend, other, longitude, cosLat, 1.0 - share);
+            AddRow(ref blend, other, longitude, cosLat, 1.0 - share, hand);
     }
 
     /// <summary>The four tiles round the tile corner nearest <paramref name="dir"/>.</summary>
@@ -249,7 +272,7 @@ public sealed unsafe class SeaTiles
     }
 
     /// <summary>Adds a row's cell at this longitude, and its neighbour across the nearer cell edge inside the blend, sharing <paramref name="share"/>.</summary>
-    private void AddRow(ref SeaBlend blend, int row, double longitude, double cosLat, double share)
+    private void AddRow(ref SeaBlend blend, int row, double longitude, double cosLat, double share, bool hand)
     {
         var cells = _cells[row];
         var t = longitude / Math.Tau * cells;
@@ -270,16 +293,19 @@ public sealed unsafe class SeaTiles
             own = Smooth(0.5 + 0.5 * (1.0 - f) / margin);
         }
 
+        if (hand)
+            own = HandShare(own);
+
         var i = blend.Count++;
         blend.Tile[i] = _start[row] + cell;
-        blend.Weight[i] = (float)Math.Sqrt(share * own);
+        blend.Weight[i] = (float)(hand ? share * own : Math.Sqrt(share * own));
 
         if (neighbour < 0)
             return;
 
         i = blend.Count++;
         blend.Tile[i] = _start[row] + neighbour;
-        blend.Weight[i] = (float)Math.Sqrt(share * (1.0 - own));
+        blend.Weight[i] = (float)(hand ? share * (1.0 - own) : Math.Sqrt(share * (1.0 - own)));
     }
 
     private static int Mod(int value, int modulus) => (value % modulus + modulus) % modulus;

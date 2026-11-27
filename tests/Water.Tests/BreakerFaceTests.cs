@@ -201,11 +201,87 @@ public sealed class BreakerFaceTests(ITestOutputHelper output)
 
         output.WriteLine(stats.ToString());
         Assert.True(stats.MaxHeightStep <= 0.08f, $"height moved {stats.MaxHeightStep:F3} m in a tick");
-        Assert.Equal(0, stats.HeightJumps);
-        Assert.Equal(0, stats.FoamJumps);
-        Assert.Equal(0, stats.SlopeJumps);
+        Assert.Equal(0, stats.Jumps);
+        Assert.Equal(0, stats.Kicks);
         Assert.True(stats.MaxHeight > 0.5f, $"the face never stood up ({stats.MaxHeight:F2} m)");
         Assert.True(stats.MaxFoam > 0.5f, $"no whitewater ({stats.MaxFoam:F2})");
+    }
+
+    /// <summary>A beach that bends along the shore with a bar off it: the wave breaks on the bar, and beyond.</summary>
+    internal static float BarredBay(double u, double v)
+    {
+        var shore = 800.0 + 40.0 * Math.Sin(v / 150.0);
+        var bar = (u - (shore - 55.0)) / 12.0;
+        return (float)(0.04 * (shore - u) - 0.8 * Math.Exp(-bar * bar));
+    }
+
+    /// <summary>The same in motion over a seabed that is not a plane: a bar and a curved shore, with the swell oblique.</summary>
+    [Fact]
+    public void Face_ChangesSmoothlyOverABarredBay()
+    {
+        var atlas = CoastBakeTests.Bake(BarredBay, CoastCarrier.From(0.45f, Omega, DeepHeight));
+        var stats = default(BreakerStability);
+
+        for (var x = 660f; x <= 840f; x += 1.7f)
+        {
+            for (var z = 250f; z <= 750f; z += 125f)
+                stats.Run(atlas, x, z, 0, 600, TickSeconds);
+        }
+
+        output.WriteLine(stats.ToString());
+        Assert.Equal(0, stats.Jumps);
+        Assert.Equal(0, stats.Kicks);
+        Assert.True(stats.MaxHeight > 0.5f && stats.MaxFoam > 0.5f, "the wave never broke");
+    }
+
+    /// <summary>
+    /// The face as a grid draws it (the GPU's filter, mirrored): it changes smoothly with the grid's spacing, so nothing
+    /// steps where the clipmap's levels change or the camera climbs; it is the face itself on a fine grid and gone by
+    /// <see cref="BreakerFace.MaxSpacing"/>, whatever the wavelength.
+    /// </summary>
+    [Fact]
+    public void Face_IsContinuousInTheGridSpacing()
+    {
+        var worstHeight = 0f;
+        var worstFoam = 0f;
+        var worstShift = 0f;
+        var seen = 0f;
+
+        foreach (var atlas in new[] { HeadOn, Oblique })
+        {
+            for (var x = 560f; x <= 800f; x += 14f)
+            {
+                for (var t = 0; t < 4; t++)
+                {
+                    var phase0 = atlas.PhaseAt(20.0 + 1.9 * t);
+                    BreakerFace.Apply(atlas, x, 512f, phase0, out var exact);
+                    BreakerFace.Apply(atlas, x, 512f, phase0, out var before, 0.05f);
+                    Assert.Equal(exact.Height, before.Height, 0.01f);
+                    Assert.Equal(exact.Foam, before.Foam, 0.02f);
+                    seen = MathF.Max(seen, MathF.Abs(exact.Height));
+
+                    for (var spacing = 0.05f * 1.001f; spacing < 1.2f * BreakerFace.MaxSpacing; spacing *= 1.001f)
+                    {
+                        BreakerFace.Apply(atlas, x, 512f, phase0, out var face, spacing);
+                        worstHeight = MathF.Max(worstHeight, MathF.Abs(face.Height - before.Height));
+                        worstFoam = MathF.Max(worstFoam, MathF.Abs(face.Foam - before.Foam));
+                        worstShift = MathF.Max(worstShift, MathF.Abs(face.Dx - before.Dx) + MathF.Abs(face.Dz - before.Dz));
+
+                        if (spacing >= BreakerFace.MaxSpacing)
+                            Assert.True(face is { Height: 0f, Foam: 0f, Dx: 0f, Dz: 0f }, "the face is drawn on a grid too coarse for it");
+
+                        before = face;
+                    }
+                }
+            }
+        }
+
+        // A face fades over a doubling of the spacing, so a 0.1 % step moves it by a few thousandths of its height.
+        output.WriteLine($"largest change over a 0.1 % step of the spacing: height {worstHeight:F4} m, foam {worstFoam:F4}, shift {worstShift:F4} m; tallest face {seen:F2} m");
+        Assert.True(seen > 0.5f);
+        Assert.True(worstHeight < 0.006f, $"the height steps {worstHeight:F4} m with the spacing");
+        Assert.True(worstFoam < 0.006f, $"the whitewater steps {worstFoam:F4} with the spacing");
+        Assert.True(worstShift < 0.015f, $"the shift steps {worstShift:F4} m with the spacing");
     }
 
     [Fact]

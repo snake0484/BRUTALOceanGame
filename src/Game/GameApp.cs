@@ -35,9 +35,9 @@ public sealed partial class GameApp : IDisposable
     private const double SeaFrameReach = 3072.0;
 
     /// <summary>--surf-beach: in the spawn's bubble (y up, sea level 0, +x out to sea), yaw and pitch in radians.</summary>
-    private static readonly System.Numerics.Vector3 SurfBeachPosition = new(60f, 3f, -40f);
-    private const float SurfBeachYaw = 1.9f;
-    private const float SurfBeachPitch = -0.08f;
+    private static readonly System.Numerics.Vector3 SurfBeachPosition = new(20f, 3f, -60f);
+    private const float SurfBeachYaw = 0.96f;
+    private const float SurfBeachPitch = -0.105f;
     private const double SurfBeachSunElevation = 0.6;
 
     /// <summary>Camera height above the sea (m) below which the sea frame has depth maps, and below which the near window (shore wash) is kept; each is dropped again a little higher.</summary>
@@ -96,6 +96,8 @@ public sealed partial class GameApp : IDisposable
     private readonly TimingRing _coastMs = new(256);
     private readonly bool _benchFaces;
     private readonly bool _surfBeach;
+    private readonly SurfBeachTest? _surfTest;
+    private long _coastAllocated;
     private readonly OrbitTest? _orbitTest;
     private readonly MoonTest? _moonTest;
     private readonly SeamTest? _seamTest;
@@ -147,9 +149,10 @@ public sealed partial class GameApp : IDisposable
     /// <param name="seamTest">--seam-test: static views of the octree alone over a key clear colour; one captured frame per view counts the pixels showing through it.</param>
     /// <param name="faces">false with --no-faces: the breaking faces over the coast regions are not drawn (A/B).</param>
     /// <param name="benchFaces">--bench-faces: --bench alternates the breaking faces, not the shore wash.</param>
+    /// <param name="surfClimb">--surf-climb: --surf-beach, then the camera climbs to 4 km over the surf and back (SurfBeachTest).</param>
     /// <param name="surfBeach">--surf-beach: the camera stands in the shallows off the spawn's beach, looking along the break (unless --cam places it), under a sun held over the beach.</param>
     /// <param name="menu">Menu mode (no test or bench flag): app states, menus and settings (GameApp.Menu.cs); null runs as before.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false, bool shoreFly = false, bool seamTest = false, Menu.MenuLaunch? menu = null, string? planetKind = null, ulong? kindSeed = null, bool steep = false, bool faces = true, bool benchFaces = false, bool surfBeach = false)
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false, bool shoreFly = false, bool seamTest = false, Menu.MenuLaunch? menu = null, string? planetKind = null, ulong? kindSeed = null, bool steep = false, bool faces = true, bool benchFaces = false, bool surfBeach = false, bool surfClimb = false)
     {
         _benchFaces = benchFaces;
         _surfBeach = surfBeach;
@@ -212,6 +215,7 @@ public sealed partial class GameApp : IDisposable
         _coast = new CoastRegionSet(_sim.Ocean.Tiles, _sim.CoastDepth, WorkerBudget.Side);
         _coastGpu = new CoastAtlasGpu(_renderer);
         _oceanPanel = new OceanPanel(_sim.Ocean, _oceanFft, _depths, _depthTexture, _coast, _coastGpu) { BreakerFaces = faces };
+        _surfTest = surfBeach ? new SurfBeachTest(_sim, _coast, surfClimb) : null;
         _weatherPanel = new WeatherPanel(_weather.Map) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset };
         _instances = new InstanceBuffer(_renderer);
         _terrainRenderer = new TerrainRenderer(_renderer, _instances);
@@ -341,6 +345,12 @@ public sealed partial class GameApp : IDisposable
             terrain &= _terrain.Focus == (_orbitTest is null ? _celestial.FocusTerrainBody : _planetTerrainBody);
             UpdateOctreeCover(terrain, frameSeconds);
             UpdateSea(terrain, terrainCamera, frameSeconds);
+            _surfTest?.Update(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, _sim.RenderTime, WorldReady, _coastAllocated);
+
+            if (_surfTest is { Climbing: true })
+                PlaceCamera(_surfTest.CameraPosition, SurfBeachYaw, _surfTest.CameraPitch);
+
+            _coastAllocated = 0;
             _sections.Terrain = Lap(ref mark);
             UpdateSun(terrainCamera, terrainAxes);
             UpdateWeather();
@@ -370,7 +380,9 @@ public sealed partial class GameApp : IDisposable
                 gpu.Begin(commands, _uploadScope);
                 _terrainRenderer.RecordUploads(commands, _renderer.FrameIndex);
                 _depthTexture.Record(commands, _renderer.FrameIndex, _depths);
+                var coastBytes = GC.GetAllocatedBytesForCurrentThread();
                 _coastGpu.Record(commands, _renderer.FrameIndex, _coast);
+                _coastAllocated += GC.GetAllocatedBytesForCurrentThread() - coastBytes;
                 _celestial.RecordUploads(commands);
                 gpu.End(commands, _uploadScope);
                 _sections.Uploads = Lap(ref mark);
@@ -597,8 +609,10 @@ public sealed partial class GameApp : IDisposable
     private void UpdateCoast(double3 camera, double frameSeconds)
     {
         var start = Stopwatch.GetTimestamp();
+        var bytes = GC.GetAllocatedBytesForCurrentThread();
         var carrier = _seaWanted ? CoastCarrier.From(_swell.TargetCarrierDirection, _swell.TargetCarrierOmega, _swell.TargetCarrierHeight) : default;
         _coast.Update(camera, carrier, _swell.TargetSignificantHeight, (float)frameSeconds);
+        _coastAllocated += GC.GetAllocatedBytesForCurrentThread() - bytes;
         _coastMs.Record((float)Stopwatch.GetElapsedTime(start).TotalMilliseconds);
     }
 

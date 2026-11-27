@@ -10,10 +10,13 @@ layout(set = 0, binding = 9) uniform sampler2DArray coastDir;    // rg = directi
 const float COAST_CELLS = 256.0;          // CoastWindow.Cells
 const float COAST_CELL = 4.0;             // CoastWindow.CellSize
 const float COAST_BLEND = 32.0;           // CoastWindow.Blend
-const float COAST_MAX_SPACING = 32.0;     // grid spacing (m) past which no carrier can be drawn
+const float COAST_MAX_SPACING = 32.0;     // BreakerFace.MaxSpacing: grid spacing (m) past which no carrier can be drawn ...
+const float COAST_FADE_SPACING = 16.0;    // BreakerFace.FadeSpacing: ... and from which the face fades out toward it, whatever its wavelength
 const float SURF_GAMMA = 0.78;            // SurfCarrier.BreakingGamma
 const float COHERENT_KH = 0.4;
 const float INCOHERENT_KH = 1.2;
+const float FORM_DEPTH = 4.0;             // SurfCarrier.FormDepth
+const float FADE_DEPTH = 8.0;             // SurfCarrier.FadeDepth
 const float SPENT_DEPTH_K = 0.3;
 const float MAX_SHARPNESS = 0.55;
 const float SHARP_FROM = 0.1;
@@ -58,6 +61,7 @@ const float STAND_FROM = 0.45;
 const float STAND_AMOUNT = 0.55;
 const float BREAK_STEEP = 0.85;
 const float THROW_FOAM_HEIGHT = 0.6;
+const float THROW_BLEND = 0.5;
 const float SPILL_TIP = 0.5;
 const float CREST_AMPLITUDE = 0.2;
 const float BORE_LIFT = 0.35;
@@ -66,7 +70,8 @@ const float RUNUP_DEPTH = 0.6;
 const float BORE_FADE_DEPTH = 0.4;
 const float FACE_SPENT_DEPTH = 0.3;
 const float FACE_MIN_HEIGHT = 1e-3;
-const float FACE_MIN_CELLS = 1.5;         // the crest's lift and whitewater are at least this many grid cells wide (GPU only)
+const float FACE_MIN_CELLS = 1.5;         // BreakerFace.MinCells: the crest's lift and whitewater are at least this many grid cells wide
+const float FAR_FOAM = 0.5;               // lace coverage of the surf zone where the grid cannot resolve the face (coastBand, GPU only)
 
 // What the face adds at a rest position: height and its gradient, the horizontal shift and its partials
 // (xx, zz, xz), and the whitewater weight. In a region's plane from breakerFace, in the sea frame's from coastFace.
@@ -82,6 +87,7 @@ struct Face
 struct SurfPoint
 {
     float phase;   // wrapped to [-pi, pi): 0 on a crest
+    float turns;   // what the wrap took off (whole turns, rad)
     vec2 dir;
     float k;
     float unbroken;
@@ -116,7 +122,8 @@ float surfUnbroken(float deepHeight, float omega, float depth, float shoaling)
 {
     float h = max(depth, 0.0);
     float coherence = 1.0 - smooth01((surfWaveNumber(omega, h) * h - COHERENT_KH) / (INCOHERENT_KH - COHERENT_KH));
-    return deepHeight * sqrt(coherence) * shoaling;
+    float shallows = 1.0 - smooth01((h - FORM_DEPTH * deepHeight) / ((FADE_DEPTH - FORM_DEPTH) * max(deepHeight, 1e-4)));
+    return deepHeight * sqrt(coherence * shallows) * shoaling;
 }
 
 float surfSharpness(float height, float depth)
@@ -124,23 +131,31 @@ float surfSharpness(float height, float depth)
     return MAX_SHARPNESS * smooth01((height / max(depth, 0.1) - SHARP_FROM) / (SHARP_FULL - SHARP_FROM));
 }
 
-// The carrier at cell coordinates c of region r (SurfCarrier.At): the phase bilinear by hand (the filter's 8-bit weights
-// would step it), the rest through the samplers; all clamped to the window.
-SurfPoint surfCarrierAt(int r, vec2 c)
+// A region's spatial phase at texel coordinates f of its layer, bilinear by hand: the filter's 8-bit weights would step it.
+float coastSpatialPhase(float layer, vec2 f)
+{
+    vec2 i = floor(f);
+    vec2 t = f - i;
+    vec4 g = textureGather(coastPhase, vec3((i + 1.0) / COAST_CELLS, layer), 0);
+    return mix(mix(g.w, g.z, t.x), mix(g.x, g.y, t.x), t.y);
+}
+
+// The carrier at cell coordinates c of region r (SurfCarrier.At): the rest through the samplers; all clamped to the window.
+// turns < 0 wraps the phase to the nearest crest; a point's own turns give the phase against that point's crest.
+SurfPoint surfCarrierAt(int r, vec2 c, float turns)
 {
     vec4 wave = frame.coast[r].wave;
     float layer = frame.coast[r].cellZ.w;
     vec2 f = clamp(c - 0.5, vec2(0.0), vec2(COAST_CELLS - 1.001));
-    vec2 i = floor(f);
-    vec2 t = f - i;
-    vec4 g = textureGather(coastPhase, vec3((i + 1.0) / COAST_CELLS, layer), 0);
     vec3 uv = vec3((f + 0.5) / COAST_CELLS, layer);
     vec4 fields = textureLod(coastFields, uv, 0.0);
     vec2 dir = textureLod(coastDir, uv, 0.0).rg;
     float depth = max(fields.r, 0.0);
 
     SurfPoint p;
-    p.phase = wrapPhase(mix(mix(g.w, g.z, t.x), mix(g.x, g.y, t.x), t.y) + wave.x);
+    float total = coastSpatialPhase(layer, f) + wave.x;
+    p.turns = turns < 0.0 ? total - wrapPhase(total) : turns;
+    p.phase = total - p.turns;
     p.dir = dir / max(length(dir), 1e-6);
     p.k = surfWaveNumber(wave.y, max(depth, SPENT_DEPTH_K));
     p.unbroken = surfUnbroken(wave.z, wave.y, depth, fields.g);
@@ -227,15 +242,15 @@ float softRamp(float x, float k0, float k1, out float slope)
 // BreakerFace.Apply at cell coordinates c of region r, for a grid of effective spacing se: the carrier fades out where
 // the grid cannot resolve its wavelength (as the swell's components do), and what rides its crest (lift, whitewater) is
 // no narrower than the grid can show, so a far break line is a line and not beads on the vertices. Lengths are metres;
-// the result is in the region's plane.
-Face breakerFace(int r, vec2 c, float se)
+// the result is in the region's plane. resolved: the share of the face this grid draws.
+Face breakerFace(int r, vec2 c, float se, out float resolved)
 {
     float lo = 2.0 * se;
     float hi = 4.0 * se;
     float narrowest = FACE_MIN_CELLS * se;
     Face o = Face(0.0, vec2(0.0), vec2(0.0), vec3(0.0), 0.0);
-    SurfPoint here = surfCarrierAt(r, c);
-    float resolved = smoothstep(lo, hi, TWO_PI / here.k);
+    SurfPoint here = surfCarrierAt(r, c, -1.0);
+    resolved = smoothstep(lo, hi, TWO_PI / here.k) * (1.0 - smoothstep(COAST_FADE_SPACING, COAST_MAX_SPACING, se));
     if (here.unbroken < FACE_MIN_HEIGHT || resolved <= 0.0)
         return o;
 
@@ -253,12 +268,12 @@ Face breakerFace(int r, vec2 c, float se)
     float eta = norm * (cs1 + sharp * (cs2 + sharp * cs3));
     vec2 slope = -norm * here.k * (sn1 + sharp * (2.0 * sn2 + sharp * 3.0 * sn3)) * here.dir;
 
-    // Two Newton steps to the crest.
+    // Two Newton steps to the crest, the phase taken against this point's crest all the way.
     vec2 x = c * COAST_CELL;
     vec2 guess = x - here.dir * (here.phase / here.k);
-    SurfPoint crest = surfCarrierAt(r, guess / COAST_CELL);
+    SurfPoint crest = surfCarrierAt(r, guess / COAST_CELL, here.turns);
     guess -= crest.dir * (crest.phase / crest.k);
-    crest = surfCarrierAt(r, guess / COAST_CELL);
+    crest = surfCarrierAt(r, guess / COAST_CELL, here.turns);
 
     float sn = dot(x - guess, crest.dir) + crest.phase / crest.k;
     float wavelength = TWO_PI / crest.k;
@@ -318,7 +333,8 @@ Face breakerFace(int r, vec2 c, float se)
         float whiteFront = clamp(WHITE_FRONT * state.height, WHITE_FRONT_MIN, WHITE_FRONT_MAX);
         float whiteWidth = max(sn < 0.0 ? WHITE_BACK * whiteFront : whiteFront, narrowest);
         float ew = exp(-(sn * sn) / (whiteWidth * whiteWidth));
-        float throwing = smoothstep(0.6, 1.0, state.curl) * (sn > 0.0 ? 0.6 * ew : 0.15 * ew * ew * ew) * smoothstep(0.0, THROW_FOAM_HEIGHT, state.height);
+        float thrown = mix(0.15 * ew * ew * ew, 0.6 * ew, smoothstep(-THROW_BLEND * whiteWidth, 0.0, sn));
+        float throwing = smoothstep(0.6, 1.0, state.curl) * thrown * smoothstep(0.0, THROW_FOAM_HEIGHT, state.height);
         float spilling = state.spill * (sn > 0.0 ? ew : ew * ew);
         float roller = state.broken * (sn > 0.0 ? ew : max(ew, ROLLER_TRAIL * exp(sn / max(ROLLER_TAIL * state.height, ROLLER_TAIL_MIN))));
         o.foam = max(max(throwing, spilling), roller) * window * smoothstep(0.0, WHITE_DRY_DEPTH, here.depth);
@@ -337,42 +353,67 @@ float coastRamp(float c)
     return smooth01(min(c, COAST_CELLS - c) / COAST_BLEND);
 }
 
-// The faces of every region over x0, in the sea frame: each by its window's weight (neighbours cross-fade over the cells
-// they share), its fade (load, unload, rebake) and its tile's share of the sea there.
-Face coastFace(vec2 x0, float se)
+// Region r's weight at its cell coordinates c over x0: its window's (neighbours cross-fade over the cells they share),
+// its fade (load, unload, rebake) and its tile's share of a coherent wave there (slotShares: the carrier is one tile's
+// but for a narrow hand-over at an edge, where CoastRegionSet matches the tiles' phases). 0 outside the window.
+float coastWeight(int r, vec2 c, vec2 x0, inout bool weighed, inout float tiles[MAX_SLOTS])
+{
+    if (c.x <= 0.0 || c.y <= 0.0 || c.x >= COAST_CELLS || c.y >= COAST_CELLS)
+        return 0.0;
+
+    if (!weighed)
+    {
+        slotShares(x0, tiles);
+        weighed = true;
+    }
+
+    int s = int(frame.coast[r].cellX.w);
+    return coastRamp(c.x) * coastRamp(c.y) * frame.coast[r].wave.w * tiles[s];
+}
+
+vec2 coastCell(int r, vec2 x0)
+{
+    vec4 cx = frame.coast[r].cellX;
+    vec4 cz = frame.coast[r].cellZ;
+    return vec2(dot(cx.xy, x0) + cx.z, dot(cz.xy, x0) + cz.z);
+}
+
+// The faces of every region over x0, in the sea frame, each by its weight. The spacing is at least frame.depthWrap.z,
+// which does not step where the finest level drawn does. share: how much of the faces this grid draws (the rest is
+// coastBand's); near: 1 within two cells of a region, so the fragments know to look.
+Face coastFace(vec2 x0, float se, out float share, out float near)
 {
     Face o = Face(0.0, vec2(0.0), vec2(0.0), vec3(0.0), 0.0);
-    if (frame.coastCount == 0 || se >= COAST_MAX_SPACING)
-        return o;
-
+    share = 0.0;
+    near = 0.0;
+    se = max(se, frame.depthWrap.z);
+    float margin = 2.0 * se / COAST_CELL;
     bool weighed = false;
     float tiles[MAX_SLOTS];
 
     for (int r = 0; r < frame.coastCount; ++r)
     {
-        vec4 cx = frame.coast[r].cellX;
-        vec4 cz = frame.coast[r].cellZ;
-        vec2 c = vec2(dot(cx.xy, x0) + cx.z, dot(cz.xy, x0) + cz.z);
-        if (c.x <= 0.0 || c.y <= 0.0 || c.x >= COAST_CELLS || c.y >= COAST_CELLS)
+        vec2 c = coastCell(r, x0);
+        if (c.x <= -margin || c.y <= -margin || c.x >= COAST_CELLS + margin || c.y >= COAST_CELLS + margin)
             continue;
 
-        if (!weighed)
-        {
-            slotWeights(x0, tiles);
-            weighed = true;
-        }
+        near = 1.0;
+        if (se >= COAST_MAX_SPACING)
+            continue;
 
-        int s = int(cx.w);
-        float w = coastRamp(c.x) * coastRamp(c.y) * frame.coast[r].wave.w * tiles[s] * tiles[s];
+        float w = coastWeight(r, c, x0, weighed, tiles);
         if (w <= 0.0)
             continue;
 
-        Face f = breakerFace(r, c, se);
+        float resolved;
+        Face f = breakerFace(r, c, se, resolved);
+        int s = int(frame.coast[r].cellX.w);
         vec4 T = frame.slotToTile[s];
         vec4 F = frame.slotFromTile[s];
         vec3 j = f.jacobian;
         vec2 jx = vec2(F.x * j.x + F.y * j.z, F.x * j.z + F.y * j.y);
         vec2 jz = vec2(F.z * j.x + F.w * j.z, F.z * j.z + F.w * j.y);
+        share += w * resolved;
         o.height += w * f.height;
         o.slope += w * vec2(T.x * f.slope.x + T.z * f.slope.y, T.y * f.slope.x + T.w * f.slope.y);
         o.shift += w * vec2(dot(F.xy, f.shift), dot(F.zw, f.shift));
@@ -381,4 +422,64 @@ Face coastFace(vec2 x0, float se)
     }
 
     return o;
+}
+
+// The surf zone's whitewater averaged over a wave, 0..1, for fragments where the grid cannot resolve the face: where a
+// region's break clock has run, in water. No time in it, so nothing of it moves or flickers.
+float coastBand(vec2 x0)
+{
+    float band = 0.0;
+    bool weighed = false;
+    float tiles[MAX_SLOTS];
+
+    for (int r = 0; r < frame.coastCount; ++r)
+    {
+        vec2 c = coastCell(r, x0);
+        float w = coastWeight(r, c, x0, weighed, tiles);
+        if (w <= 0.0)
+            continue;
+
+        vec2 f = clamp(c - 0.5, vec2(0.0), vec2(COAST_CELLS - 1.001));
+        vec4 fields = textureLod(coastFields, vec3((f + 0.5) / COAST_CELLS, frame.coast[r].cellZ.w), 0.0);
+        if (fields.b <= 0.0 || fields.r <= 0.0)
+            continue;
+
+        float wavelength = TWO_PI / surfWaveNumber(frame.coast[r].wave.y, max(fields.r, SPENT_DEPTH_K));
+        band += w * breakOnset(fields.b, wavelength) * smoothstep(0.0, WHITE_DRY_DEPTH, fields.r);
+    }
+
+    return band;
+}
+
+// swashSheet's bores on the regions' carriers (ocean_common.glsl): each region over the shoreline point runs the swash
+// on its own phase there, by its weight; weight is their sum, the open carrier's share being the rest.
+float coastSwash(SwashBeach b, vec2 shore, out float front, out float edge, out float weight)
+{
+    float sheet = 0.0;
+    front = 0.0;
+    edge = 0.0;
+    weight = 0.0;
+    bool weighed = false;
+    float tiles[MAX_SLOTS];
+
+    for (int r = 0; r < frame.coastCount; ++r)
+    {
+        vec2 c = coastCell(r, shore);
+        float w = coastWeight(r, c, shore, weighed, tiles);
+        if (w <= 0.0)
+            continue;
+
+        vec4 wave = frame.coast[r].wave;
+        vec2 f = clamp(c - 0.5, vec2(0.0), vec2(COAST_CELLS - 1.001));
+        float runFront;
+        float runEdge;
+        float run = swashRun(b, coastSpatialPhase(frame.coast[r].cellZ.w, f) + wave.x, max(wave.y, 1e-3), runFront, runEdge);
+        w = min(w, 1.0 - weight);
+        sheet += w * run;
+        front += w * runFront;
+        edge += w * runEdge;
+        weight += w;
+    }
+
+    return sheet;
 }

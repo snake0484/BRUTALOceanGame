@@ -1,5 +1,3 @@
-using System.Globalization;
-
 namespace BrutalGame.Menu;
 
 /// <summary>
@@ -8,12 +6,10 @@ namespace BrutalGame.Menu;
 /// </summary>
 public sealed class MenuLaunch(SettingsStore settings)
 {
+    /// <summary>The shipped world's seed (D83): fixed by us, never entered by the player.</summary>
     public const ulong DefaultSeed = 1;
     public const string TestFlag = "--menu-test";
     public const string SettingsFolderFlag = "--settings-dir";
-
-    private const ulong FnvOffset = 14695981039346656037;
-    private const ulong FnvPrime = 1099511628211;
 
     private static readonly string[] BypassFlags =
     [
@@ -25,6 +21,7 @@ public sealed class MenuLaunch(SettingsStore settings)
         "--moon-test",
         "--shore-fly",
         "--surf-beach",
+        "--surf-climb",
         "--no-faces",
         "--bench-faces",
         "--seam-test",
@@ -66,25 +63,6 @@ public sealed class MenuLaunch(SettingsStore settings)
             folder = args[flag + 1];
 
         return new MenuLaunch(new SettingsStore(folder)) { Scripted = Array.IndexOf(args, TestFlag) >= 0 };
-    }
-
-    /// <summary>Digits are the seed itself; any other text hashes to one (FNV-1a); blank picks at random.</summary>
-    public static ulong ParseSeed(ReadOnlySpan<char> text)
-    {
-        text = text.Trim();
-
-        if (text.IsEmpty)
-            return (ulong)Random.Shared.NextInt64(1, long.MaxValue);
-
-        if (ulong.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var seed))
-            return seed;
-
-        var hash = FnvOffset;
-
-        foreach (var c in text)
-            hash = (hash ^ c) * FnvPrime;
-
-        return hash;
     }
 
     /// <summary>A fresh world needs a fresh <see cref="GameApp"/>: Program disposes this one and builds the next from <see cref="Seed"/>.</summary>
