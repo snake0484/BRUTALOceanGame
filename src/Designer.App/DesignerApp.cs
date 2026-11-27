@@ -490,6 +490,9 @@ public sealed class DesignerApp : DesignApp
         _prefabPanel.BeginFrame();
         var viewport = ViewportSize;
 
+        // The selection's menu opens on a right-click in the view (a right-drag still orbits).
+        ContextBar.Track(!io.WantCaptureMouse);
+
         if (workspace is not null)
         {
             workspace.Mode = _bar.Mode;
