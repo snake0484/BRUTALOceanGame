@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Brutal.GlfwApi;
+using Brutal.ImGuiApi;
 using Brutal.Numerics;
 using BrutalGame.Debug;
 using BrutalGame.Engine.Jobs;
@@ -67,6 +68,7 @@ public sealed partial class GameApp : IDisposable
     private readonly Renderer _renderer;
     private readonly ImGuiLayer _imgui;
     private readonly ProfilerPanel _profiler;
+    private readonly DebugShell _debug;
     private readonly SimWorld _sim;
     private readonly OceanPanel _oceanPanel;
     private readonly WeatherSystem _weather;
@@ -273,6 +275,11 @@ public sealed partial class GameApp : IDisposable
             _weatherPanel.Open = false;
         }
 
+        _profiler.Add("Terrain update", _terrainPanel.UpdateMs);
+        _profiler.Add("Coast update", _coastMs);
+        _profiler.Add("Weather cache tick", _weatherPanel.TickMs);
+        _profiler.Add("Sea tick", _weatherPanel.SeaMs);
+        _debug = new DebugShell(_stats, _window.Size.X, _window.Size.Y, [_profiler, _oceanPanel, _terrainPanel, _weatherPanel]);
         InitMenu(menu); // menu
     }
 
@@ -873,12 +880,19 @@ public sealed partial class GameApp : IDisposable
     {
         var uiStart = Stopwatch.GetTimestamp();
         _imgui.NewFrame();
-        _profiler.Draw();
-        _renderer.PipelineStats.Enabled = _profiler.Open && _profiler.PipelineStatsOn;
-        _terrainRenderer.StatsEnabled = _profiler.Open || _terrainPanel.Open || _orbitTest is not null || _moonTest is not null;
-        _oceanPanel.Draw();
-        _terrainPanel.Draw();
-        _weatherPanel.Draw(PlanetCamera, _sim.WeatherTick);
+        var debug = _debug.Begin(ImGui.GetIO().DisplaySize.Y, _window.ContentScale.X);
+
+        if (debug)
+        {
+            _profiler.Draw();
+            _oceanPanel.Draw();
+            _terrainPanel.Draw();
+            _weatherPanel.Draw(PlanetCamera, _sim.WeatherTick);
+            _debug.End();
+        }
+
+        _renderer.PipelineStats.Enabled = debug && _profiler.Open && _profiler.PipelineStatsOn;
+        _terrainRenderer.StatsEnabled = (debug && (_profiler.Open || _terrainPanel.Open)) || _orbitTest is not null || _moonTest is not null;
         DrawMenu(); // menu
         _imgui.EndFrame();
         _stats.Ui.Record((float)Stopwatch.GetElapsedTime(uiStart).TotalMilliseconds);
@@ -889,15 +903,10 @@ public sealed partial class GameApp : IDisposable
         if (action != GlfwKeyAction.Press || MenuKey(key)) // menu: Escape pauses, resumes and goes back
             return;
 
-        if (key == GlfwKey.F3)
-            _profiler.Open = !_profiler.Open;
-        else if (key == GlfwKey.F4)
-            _oceanPanel.Open = !_oceanPanel.Open;
-        else if (key == GlfwKey.F5)
-            _terrainPanel.Open = !_terrainPanel.Open;
-        else if (key == GlfwKey.F6)
-            _weatherPanel.Open = !_weatherPanel.Open;
-        else if (key == GlfwKey.Escape && !_imgui.WantCaptureKeyboard)
+        if (_debug.OnKey(key))
+            return;
+
+        if (key == GlfwKey.Escape && !_imgui.WantCaptureKeyboard)
             window.ShouldClose = true;
     }
 

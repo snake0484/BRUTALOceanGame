@@ -7,6 +7,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Engine\Engine.csproj" />
+    <ProjectReference Include="..\DesignKit.Ui\DesignKit.Ui.csproj" />
     <ProjectReference Include="..\Water.Rendering\Water.Rendering.csproj" />
     <ProjectReference Include="..\Terrain.Runtime\Terrain.Runtime.csproj" />
     <ProjectReference Include="..\Weather\Weather.csproj" />
