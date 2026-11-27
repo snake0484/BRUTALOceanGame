@@ -4,11 +4,12 @@ using Brutal.Numerics;
 namespace BrutalGame.Water.Ocean;
 
 /// <summary>
-/// The queryable ocean surface, one definition for the whole planet (review C5): the swell laid on the sea sphere by
-/// <see cref="SeaTiles"/>, depth-limited by min(1, 0.55 h / Hs) from the world's analytic depth (review C7). Server and
-/// clients evaluate the same function, so buoyancy can be predicted; the GPU's low band mirrors it
-/// (<see cref="SeaSlots"/>), its FFT detail and shore wash are not queryable. Read-only between ticks (the swell's
-/// SetTime runs on the main thread in the tick), so safe to call from jobs then; allocation-free.
+/// The queryable ocean surface, one definition for the whole planet (review C5): each tile's swell (<see cref="SeaSwells"/>)
+/// laid on the sea sphere by <see cref="SeaTiles"/>, depth-limited by min(1, 0.55 h / Hs) from the world's analytic depth
+/// (review C7), Hs being the blend's (√Σ w² Hs²). Server and clients evaluate the same function, so buoyancy can be
+/// predicted; the GPU's low band mirrors it (<see cref="SeaSlots"/>), its FFT detail and shore wash are not queryable.
+/// Read-only between ticks (the swells' Tick runs on the main thread in the sim's), so safe to call from jobs then;
+/// allocation-free. A tile with no live swell counts as calm (<see cref="SeaSwells.Misses"/>).
 /// </summary>
 public sealed unsafe class OceanSurface
 {
@@ -19,20 +20,26 @@ public sealed unsafe class OceanSurface
     /// </summary>
     public const float CapMargin = 4f;
 
-    private readonly OceanSwell _swell;
+    private readonly SeaSwells _swells;
     private readonly SeaTiles _tiles;
     private readonly IShoreDepth? _shore;
     private readonly double _tickSeconds;
 
-    public OceanSurface(OceanSwell swell, SeaTiles tiles, double tickSeconds, IShoreDepth? shore = null)
+    public OceanSurface(SeaSwells swells, double tickSeconds, IShoreDepth? shore = null)
     {
-        _swell = swell;
-        _tiles = tiles;
+        _swells = swells;
+        _tiles = swells.Tiles;
         _tickSeconds = tickSeconds;
         _shore = shore;
     }
 
-    public OceanSwell Swell => _swell;
+    /// <summary>One swell on every tile, moved by the caller (tests, tools).</summary>
+    public OceanSurface(OceanSwell swell, SeaTiles tiles, double tickSeconds, IShoreDepth? shore = null)
+        : this(new SeaSwells(swell, tiles, tickSeconds), tickSeconds, shore)
+    {
+    }
+
+    public SeaSwells Swells => _swells;
 
     public SeaTiles Tiles => _tiles;
 
@@ -40,6 +47,7 @@ public sealed unsafe class OceanSurface
     private struct Site
     {
         public int Count;
+        public fixed int Tile[SeaTiles.MaxBlend];
         public fixed float U[SeaTiles.MaxBlend];
         public fixed float V[SeaTiles.MaxBlend];
         public fixed float Weight[SeaTiles.MaxBlend];
@@ -48,6 +56,10 @@ public sealed unsafe class OceanSurface
         public double3 E1;
         public double3 E2;
         public float Lead;
+
+        /// <summary>The blend's significant height, and whether any of its swells is choppy.</summary>
+        public float Hs;
+        public bool Chop;
     }
 
     /// <summary>
@@ -93,8 +105,11 @@ public sealed unsafe class OceanSurface
 
         for (var k = 0; k < site.Count; k++)
         {
+            if (_swells.For(site.Tile[k]) is not { } swell)
+                continue;
+
             Rest(site, k, du, dv, out var u, out var v);
-            height += site.Weight[k] * _swell.SumHeight(u, v, site.Lead);
+            height += site.Weight[k] * swell.SumHeight(u, v, site.Lead);
         }
 
         return cap * height;
@@ -107,7 +122,7 @@ public sealed unsafe class OceanSurface
     public double3 SurfacePoint(in double3 rest, long tick, out float cap)
     {
         Locate(rest, tick, out var site);
-        cap = Cap(site.Dir);
+        cap = Cap(site.Dir, site.Hs);
         Sum(site, 0f, 0f, out var sums);
         var radius = _tiles.SeaRadius;
         var moved = double3.Normalize(site.Dir * radius + (site.E1 * sums.Dx + site.E2 * sums.Dz) * cap);
@@ -123,32 +138,57 @@ public sealed unsafe class OceanSurface
         _tiles.Lift(first, dir, out site.E1, out site.E2);
         _tiles.Plane(first, dir, out var u, out var v);
         site.Dir = dir;
-        site.Lead = (float)(tick * _tickSeconds - _swell.Time);
+        site.Lead = (float)(tick * _tickSeconds - _swells.Time);
         site.Count = blend.Count;
+        site.Tile[0] = first;
         site.U[0] = (float)u;
         site.V[0] = (float)v;
         site.Weight[0] = blend.Weight[0];
         site.Turn[0] = 1f;
         site.Turn[3] = 1f;
 
-        if (blend.Count == 1)
-            return;
-
-        _tiles.Axes(first, out var east, out _, out var south);
-
-        for (var k = 1; k < blend.Count; k++)
+        if (blend.Count > 1)
         {
-            var tile = blend.Tile[k];
-            _tiles.Plane(tile, dir, out u, out v);
-            _tiles.Lift(tile, dir, out var e1, out var e2);
-            site.U[k] = (float)u;
-            site.V[k] = (float)v;
-            site.Weight[k] = blend.Weight[k];
-            site.Turn[4 * k] = (float)double3.Dot(e1, east);
-            site.Turn[4 * k + 1] = (float)double3.Dot(e2, east);
-            site.Turn[4 * k + 2] = (float)double3.Dot(e1, south);
-            site.Turn[4 * k + 3] = (float)double3.Dot(e2, south);
+            _tiles.Axes(first, out var east, out _, out var south);
+
+            for (var k = 1; k < blend.Count; k++)
+            {
+                var tile = blend.Tile[k];
+                _tiles.Plane(tile, dir, out u, out v);
+                _tiles.Lift(tile, dir, out var e1, out var e2);
+                site.Tile[k] = tile;
+                site.U[k] = (float)u;
+                site.V[k] = (float)v;
+                site.Weight[k] = blend.Weight[k];
+                site.Turn[4 * k] = (float)double3.Dot(e1, east);
+                site.Turn[4 * k + 1] = (float)double3.Dot(e2, east);
+                site.Turn[4 * k + 2] = (float)double3.Dot(e1, south);
+                site.Turn[4 * k + 3] = (float)double3.Dot(e2, south);
+            }
         }
+
+        Heights(ref site);
+    }
+
+    /// <summary>The blend's Hs and chop from the tiles' swells.</summary>
+    private void Heights(ref Site site)
+    {
+        var energy = 0f;
+
+        for (var k = 0; k < site.Count; k++)
+        {
+            if (_swells.For(site.Tile[k]) is not { } swell)
+            {
+                _swells.Miss();
+                continue;
+            }
+
+            var w = site.Weight[k] * swell.SignificantWaveHeight;
+            energy += w * w;
+            site.Chop |= swell.Choppiness > 0f;
+        }
+
+        site.Hs = MathF.Sqrt(energy);
     }
 
     /// <summary>
@@ -162,19 +202,19 @@ public sealed unsafe class OceanSurface
         var cap = 1f;
         var settled = true;
 
-        if (_shore is not null && _swell.SignificantWaveHeight > 1e-4f)
+        if (_shore is not null && site.Hs > 1e-4f)
         {
             var depth = _shore.Depth(site.Dir);
 
             if (depth <= -CapMargin)
                 return 0f;
 
-            var scale = OceanSwell.DepthCapGamma / _swell.SignificantWaveHeight;
+            var scale = OceanSwell.DepthCapGamma / site.Hs;
             settled = scale * (depth - CapMargin) >= 1f;
             cap = Math.Clamp(scale * depth, 0f, 1f);
         }
 
-        if (_swell.Choppiness <= 0f)
+        if (!site.Chop)
             return cap;
 
         for (var i = 0; i < OceanSwell.InversionIterations; i++)
@@ -184,18 +224,18 @@ public sealed unsafe class OceanSurface
             dv = -cap * dz;
 
             if (!settled)
-                cap = Cap(double3.Normalize(site.Dir * _tiles.SeaRadius + site.E1 * du + site.E2 * dv));
+                cap = Cap(double3.Normalize(site.Dir * _tiles.SeaRadius + site.E1 * du + site.E2 * dv), site.Hs);
         }
 
         return cap;
     }
 
-    private float Cap(in double3 dir)
+    private float Cap(in double3 dir, float hs)
     {
-        if (_shore is null || _swell.SignificantWaveHeight <= 1e-4f)
+        if (_shore is null || hs <= 1e-4f)
             return 1f;
 
-        return Math.Clamp(OceanSwell.DepthCapGamma * _shore.Depth(dir) / _swell.SignificantWaveHeight, 0f, 1f);
+        return Math.Clamp(OceanSwell.DepthCapGamma * _shore.Depth(dir) / hs, 0f, 1f);
     }
 
     /// <summary>The rest position (offset du, dv in the first tile's plane) in tile k's plane.</summary>
@@ -209,18 +249,23 @@ public sealed unsafe class OceanSurface
     /// <summary>The blended chop displacement at a rest position, in the first tile's plane.</summary>
     private void Displacement(in Site site, float du, float dv, out float dx, out float dz)
     {
-        _swell.SumDisplacement(site.U[0] + du, site.V[0] + dv, site.Lead, out dx, out dz);
+        dx = 0f;
+        dz = 0f;
 
-        if (site.Count == 1)
-            return;
-
-        dx *= site.Weight[0];
-        dz *= site.Weight[0];
-
-        for (var k = 1; k < site.Count; k++)
+        for (var k = 0; k < site.Count; k++)
         {
+            if (_swells.For(site.Tile[k]) is not { } swell)
+                continue;
+
             Rest(site, k, du, dv, out var u, out var v);
-            _swell.SumDisplacement(u, v, site.Lead, out var x, out var z);
+            swell.SumDisplacement(u, v, site.Lead, out var x, out var z);
+
+            if (site.Count == 1)
+            {
+                (dx, dz) = (x, z);
+                return;
+            }
+
             var w = site.Weight[k];
             dx += w * (site.Turn[4 * k] * x + site.Turn[4 * k + 1] * z);
             dz += w * (site.Turn[4 * k + 2] * x + site.Turn[4 * k + 3] * z);
@@ -230,19 +275,22 @@ public sealed unsafe class OceanSurface
     /// <summary>Every tile's sums at a rest position, blended into the first tile's plane.</summary>
     private void Sum(in Site site, float du, float dv, out SwellSums sums)
     {
-        _swell.Sum(site.U[0] + du, site.V[0] + dv, site.Lead, out sums);
-
-        if (site.Count == 1)
-            return;
-
-        var first = sums;
         sums = default;
-        sums.Add(first, site.Weight[0], 1f, 0f, 0f, 1f);
 
-        for (var k = 1; k < site.Count; k++)
+        for (var k = 0; k < site.Count; k++)
         {
+            if (_swells.For(site.Tile[k]) is not { } swell)
+                continue;
+
             Rest(site, k, du, dv, out var u, out var v);
-            _swell.Sum(u, v, site.Lead, out var s);
+            swell.Sum(u, v, site.Lead, out var s);
+
+            if (site.Count == 1)
+            {
+                sums = s;
+                return;
+            }
+
             sums.Add(s, site.Weight[k], site.Turn[4 * k], site.Turn[4 * k + 1], site.Turn[4 * k + 2], site.Turn[4 * k + 3]);
         }
     }

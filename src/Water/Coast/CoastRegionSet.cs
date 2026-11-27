@@ -37,11 +37,11 @@ public struct CoastRegion
 
 /// <summary>
 /// The coast regions round the camera (breaking-waves-brief.md §3): the nearest <see cref="MaxDesired"/> lattice windows
-/// that hold a coast are baked for the swell's carrier, one at a time on a job, into a fixed pool of
-/// <see cref="Capacity"/> atlases. Windows load within <see cref="LoadDistance"/> of the camera and unload past
-/// <see cref="UnloadDistance"/>, fading in and out over <see cref="FadeSeconds"/>; when the carrier leaves the baked one's
-/// tolerance each window is baked again into the spare slot and cross-faded, and inside it only the drawn height
-/// follows. Whether a window holds a coast comes from a probe of its depths, remembered in a fixed table. The main thread only coordinates; nothing is allocated after construction.
+/// that hold a coast are baked for the carrier of the sea tile they lie in (<see cref="ICoastCarriers"/>), one at a time
+/// on a job, into a fixed pool of <see cref="Capacity"/> atlases. Windows load within <see cref="LoadDistance"/> of the
+/// camera and unload past <see cref="UnloadDistance"/>, fading in and out over <see cref="FadeSeconds"/>; when a tile's
+/// carrier leaves its baked one's tolerance each of its windows is baked again into the spare slot and cross-faded, and
+/// inside it only the drawn height follows. Whether a window holds a coast comes from a probe of its depths, remembered in a fixed table. The main thread only coordinates; nothing is allocated after construction.
 /// </summary>
 public sealed class CoastRegionSet : IDisposable
 {
@@ -72,6 +72,9 @@ public sealed class CoastRegionSet : IDisposable
     private const int ProbeReach = 8;
     private const int MaxTiles = SeaTiles.MaxBlend;
 
+    /// <summary>Tiles with a carrier: the four round the camera's nearest tile corner and those of the slots in use.</summary>
+    private const int MaxTileCarriers = MaxTiles + Capacity;
+
     private enum Work
     {
         None,
@@ -96,6 +99,29 @@ public sealed class CoastRegionSet : IDisposable
         public short X;
         public short Z;
         public double Rank;
+    }
+
+    /// <summary>A tile's carriers: the one its maps are baked for, its swell's own (<see cref="Keeps"/>), and its break depth.</summary>
+    private struct TileCarrier
+    {
+        public int Tile;
+        public CoastCarrier Baked;
+        public CoastCarrier Wanted;
+        public float BreakDepth;
+        public bool Seen;
+    }
+
+    /// <summary>
+    /// The hand-over turns of the maps of one carrier's phase (direction and frequency: maps of two heights of it are one
+    /// wave), per tile under the camera (<see cref="Match"/>).
+    /// </summary>
+    private unsafe struct HandTurns
+    {
+        public CoastCarrier Carrier;
+        public int Count;
+        public bool Seen;
+        public fixed int Tile[MaxTiles];
+        public fixed int Turns[MaxTiles];
     }
 
     private sealed class ProbeJob(ICoastDepth depth) : IJob
@@ -126,12 +152,11 @@ public sealed class CoastRegionSet : IDisposable
     private Work _running;
     private int _bakeSlot;
     private readonly double[] _handPhase = new double[Capacity];
-    private readonly int[] _handTiles = new int[MaxTiles];
-    private readonly int[] _handTurns = new int[MaxTiles];
+    private readonly HandTurns[] _hands = new HandTurns[Capacity];
     private int _handCount;
-    private CoastCarrier _carrier;
-    private CoastCarrier _baked;
-    private float _breakDepth;
+    private readonly TileCarrier[] _tileCarriers = new TileCarrier[MaxTileCarriers];
+    private int _tileCount;
+    private readonly UniformCarriers _uniform = new();
     private double3 _selectedAt;
     private bool _dirty = true;
     private long _stamp;
@@ -151,10 +176,52 @@ public sealed class CoastRegionSet : IDisposable
 
     public ReadOnlySpan<CoastRegion> Regions => _regions;
 
-    /// <summary>The carrier the maps are baked for, and the swell's own, which it follows in steps (<see cref="Keeps"/>).</summary>
-    public CoastCarrier Carrier => _baked;
+    /// <summary>The carrier a tile's maps are baked for, and its swell's own, which it follows in steps (<see cref="Keeps"/>); calm for a tile not round the camera.</summary>
+    public CoastCarrier BakedFor(int tile)
+    {
+        var at = TileIndex(tile);
+        return at < 0 ? default : _tileCarriers[at].Baked;
+    }
 
-    public CoastCarrier Wanted => _carrier;
+    public CoastCarrier WantedFor(int tile)
+    {
+        var at = TileIndex(tile);
+        return at < 0 ? default : _tileCarriers[at].Wanted;
+    }
+
+    /// <summary>The tallest deep-water height a drawn map is drawn with (m).</summary>
+    public float DrawnHeight
+    {
+        get
+        {
+            var height = 0f;
+
+            for (var i = 0; i < Capacity; i++)
+            {
+                if (_regions[i].Drawn)
+                    height = MathF.Max(height, _atlases[i].Height);
+            }
+
+            return height;
+        }
+    }
+
+    /// <summary>Every drawn map is of its tile's carrier.</summary>
+    public bool Current
+    {
+        get
+        {
+            for (var i = 0; i < Capacity; i++)
+            {
+                ref readonly var region = ref _regions[i];
+
+                if (region.Drawn && region.Key.Carrier != BakedFor(region.Key.Tile))
+                    return false;
+            }
+
+            return true;
+        }
+    }
 
     /// <summary>Worker time of the last bake (ms) and of its depth sampling; bakes and probes run so far; slots drawn.</summary>
     public float LastBakeMs { get; private set; }
@@ -182,26 +249,10 @@ public sealed class CoastRegionSet : IDisposable
     /// Per frame, main thread: takes a finished job, moves the fades by <paramref name="seconds"/>, and when the camera
     /// (planet frame) has moved or something changed, chooses the windows wanted again and starts the next job.
     /// </summary>
-    /// <param name="significantHeight">Hs of the swell the carrier is of: windows with no water shallower than <see cref="CoastBake.BreakDepth"/>, or than the carrier is drawn in, are left out.</param>
-    public void Update(in double3 camera, CoastCarrier carrier, float significantHeight, float seconds)
+    /// <param name="carriers">Each tile's carrier and its swell's Hs: windows with no water shallower than <see cref="CoastBake.BreakDepth"/>, or than the carrier is drawn in, are left out. Null is a calm sea.</param>
+    public void Update(in double3 camera, ICoastCarriers? carriers, float seconds)
     {
-        var drawn = SurfCarrier.FadeDepth * (1f + HeightTolerance) * MathF.Max(carrier.Height, _baked.Height);
-        var breakDepth = MathF.Max(CoastBake.BreakDepth(significantHeight), drawn);
-
-        if (!Keeps(_baked, carrier))
-        {
-            _baked = carrier;
-            _handCount = 0;
-            _dirty = true;
-        }
-
-        if (breakDepth != _breakDepth)
-        {
-            _breakDepth = breakDepth;
-            _dirty = true;
-        }
-
-        _carrier = carrier;
+        Carriers(camera, carriers);
         Collect();
         Fade(seconds);
         Heights(seconds);
@@ -221,6 +272,93 @@ public sealed class CoastRegionSet : IDisposable
         Settled = _running == Work.None && !Fading();
     }
 
+    /// <summary>The same carrier on every tile, of a swell of Hs <paramref name="significantHeight"/>.</summary>
+    public void Update(in double3 camera, CoastCarrier carrier, float significantHeight, float seconds)
+    {
+        _uniform.Carrier = carrier;
+        _uniform.SignificantHeight = significantHeight;
+        Update(camera, _uniform, seconds);
+    }
+
+    /// <summary>
+    /// Reads the carrier of each tile round the camera and of each slot in use; a tile whose carrier has left the one its
+    /// maps are baked for takes it up, and its windows are chosen again. Tiles no longer in reach are forgotten.
+    /// </summary>
+    private unsafe void Carriers(in double3 camera, ICoastCarriers? carriers)
+    {
+        for (var i = 0; i < _tileCount; i++)
+            _tileCarriers[i].Seen = false;
+
+        _tiles.Window(double3.Normalize(camera), out var window);
+
+        for (var s = 0; s < MaxTiles; s++)
+            See(window.Tile[s], carriers);
+
+        for (var i = 0; i < Capacity; i++)
+        {
+            if (_regions[i].State != CoastRegionState.Free)
+                See(_regions[i].Key.Tile, carriers);
+        }
+
+        for (var i = 0; i < _tileCount; i++)
+        {
+            if (!_tileCarriers[i].Seen)
+                _tileCarriers[i--] = _tileCarriers[--_tileCount];
+        }
+    }
+
+    private void See(int tile, ICoastCarriers? carriers)
+    {
+        var at = TileIndex(tile);
+
+        if (at >= 0 && _tileCarriers[at].Seen)
+            return;
+
+        if (at < 0)
+        {
+            at = _tileCount++;
+            _tileCarriers[at] = new TileCarrier { Tile = tile };
+        }
+
+        ref var entry = ref _tileCarriers[at];
+        var significantHeight = 0f;
+        var carrier = carriers?.At(tile, out significantHeight) ?? default;
+        var drawn = SurfCarrier.FadeDepth * (1f + HeightTolerance) * MathF.Max(carrier.Height, entry.Baked.Height);
+        var breakDepth = MathF.Max(CoastBake.BreakDepth(significantHeight), drawn);
+
+        if (!Keeps(entry.Baked, carrier))
+        {
+            entry.Baked = carrier;
+            _dirty = true;
+        }
+
+        if (breakDepth != entry.BreakDepth)
+        {
+            entry.BreakDepth = breakDepth;
+            _dirty = true;
+        }
+
+        entry.Wanted = carrier;
+        entry.Seen = true;
+    }
+
+    private int TileIndex(int tile)
+    {
+        for (var i = 0; i < _tileCount; i++)
+        {
+            if (_tileCarriers[i].Tile == tile)
+                return i;
+        }
+
+        return -1;
+    }
+
+    private float BreakDepthOf(int tile)
+    {
+        var at = TileIndex(tile);
+        return at < 0 ? 0f : _tileCarriers[at].BreakDepth;
+    }
+
     /// <summary>A map baked for <paramref name="baked"/> still serves <paramref name="wanted"/>.</summary>
     public static bool Keeps(CoastCarrier baked, CoastCarrier wanted)
     {
@@ -235,8 +373,12 @@ public sealed class CoastRegionSet : IDisposable
             && MathF.Abs(wanted.Height - baked.Height) <= HeightTolerance * baked.Height;
     }
 
-    /// <summary>The height a slot's map is drawn with: the swell's carrier's while the map serves it, else its own.</summary>
-    private float DrawHeight(in CoastRegion region) => Keeps(region.Key.Carrier, _carrier) ? _carrier.Height : region.Key.Carrier.Height;
+    /// <summary>The height a slot's map is drawn with: its tile's swell's carrier's while the map serves it, else its own.</summary>
+    private float DrawHeight(in CoastRegion region)
+    {
+        var wanted = WantedFor(region.Key.Tile);
+        return Keeps(region.Key.Carrier, wanted) ? wanted.Height : region.Key.Carrier.Height;
+    }
 
     private void Heights(float seconds)
     {
@@ -390,11 +532,14 @@ public sealed class CoastRegionSet : IDisposable
     }
 
     /// <summary>
-    /// Tiles' carriers are plane waves in their own planes, unrelated in phase. Where a wave is handed from one tile to
-    /// the next (<see cref="SeaTiles.Hand"/>) every map's phase is shifted so the tiles agree at the sea point under the
-    /// camera: by the camera's tiles' plane phases there, each a whole number of turns off so they lie together, less
-    /// the map's own tile's. A tile keeps its turns while it has a share, so nothing steps as the camera crosses; the
-    /// tile the camera is wholly in is left as it is.
+    /// A carrier is a plane wave in its tile's plane, unrelated in phase to the same wave in another tile's. Where a wave
+    /// is handed from one tile to the next (<see cref="SeaTiles.Hand"/>) every map's phase is shifted so the tiles agree
+    /// at the sea point under the camera: by its carrier's plane phases there in the camera's tiles, each a whole number
+    /// of turns off so they lie together, less its own tile's. Maps of one direction and frequency share their turns, so
+    /// two tiles' maps of one wave (of any heights) are drawn as one wave there. Tiles' carriers of other directions or
+    /// frequencies cannot agree for long: their maps are cross-faded across the band, each continuous in time. A tile
+    /// keeps its turns while it has a share, so nothing steps as the camera crosses; the tile the camera is wholly in is
+    /// left as it is. Each shift depends only on its own map's carrier, so no map moves when another tile's rebakes.
     /// </summary>
     private unsafe void Match(in double3 camera)
     {
@@ -402,43 +547,12 @@ public sealed class CoastRegionSet : IDisposable
         _tiles.Hand(dir, out var hand);
         Span<double> u = stackalloc double[MaxTiles];
         Span<double> v = stackalloc double[MaxTiles];
-        Span<int> turns = stackalloc int[MaxTiles];
-        var reference = double.NaN;
 
         for (var k = 0; k < hand.Count; k++)
-        {
             _tiles.Plane(hand.Tile[k], dir, out u[k], out v[k]);
-            turns[k] = int.MinValue;
 
-            for (var before = 0; before < _handCount && hand.Weight[k] > 0f; before++)
-            {
-                if (_handTiles[before] != hand.Tile[k])
-                    continue;
-
-                turns[k] = _handTurns[before];
-                reference = PlanePhase(_baked, u[k], v[k]) - Math.Tau * turns[k];
-            }
-        }
-
-        _handCount = 0;
-
-        for (var k = 0; k < hand.Count; k++)
-        {
-            if (hand.Weight[k] <= 0f)
-                continue;
-
-            if (turns[k] == int.MinValue)
-            {
-                var phase = PlanePhase(_baked, u[k], v[k]);
-                turns[k] = double.IsNaN(reference) ? 0 : (int)Math.Round((phase - reference) / Math.Tau);
-
-                if (double.IsNaN(reference))
-                    reference = phase;
-            }
-
-            _handTiles[_handCount] = hand.Tile[k];
-            _handTurns[_handCount++] = turns[k];
-        }
+        for (var h = 0; h < _handCount; h++)
+            _hands[h].Seen = false;
 
         for (var i = 0; i < Capacity; i++)
         {
@@ -448,17 +562,102 @@ public sealed class CoastRegionSet : IDisposable
                 continue;
 
             var carrier = region.Key.Carrier;
+            var at = Hands(carrier);
+            ref var turnsOf = ref _hands[at];
+
+            if (!turnsOf.Seen)
+            {
+                Turns(ref turnsOf, hand, u, v);
+                turnsOf.Seen = true;
+            }
+
             var shared = 0.0;
 
             for (var k = 0; k < hand.Count; k++)
             {
                 if (hand.Weight[k] > 0f)
-                    shared += hand.Weight[k] * (PlanePhase(carrier, u[k], v[k]) - Math.Tau * turns[k]);
+                    shared += hand.Weight[k] * (PlanePhase(carrier, u[k], v[k]) - Math.Tau * TurnsOf(ref turnsOf, hand.Tile[k]));
             }
 
             _tiles.Plane(region.Key.Tile, dir, out var ownU, out var ownV);
             _handPhase[i] = shared - PlanePhase(carrier, ownU, ownV);
         }
+
+        for (var h = 0; h < _handCount; h++)
+        {
+            if (!_hands[h].Seen)
+                _hands[h--] = _hands[--_handCount];
+        }
+    }
+
+    /// <summary>The turns of maps of the carrier's direction and frequency; a new carrier's has none yet.</summary>
+    private int Hands(CoastCarrier carrier)
+    {
+        for (var h = 0; h < _handCount; h++)
+        {
+            var other = _hands[h].Carrier;
+
+            if (other.DirectionStep == carrier.DirectionStep && other.OmegaStep == carrier.OmegaStep)
+                return h;
+        }
+
+        _hands[_handCount] = new HandTurns { Carrier = carrier };
+        return _handCount++;
+    }
+
+    /// <summary>
+    /// The turns of each tile with a share under the camera: kept from before while it had one, else the whole turns
+    /// that bring its plane phase nearest a kept tile's (or 0 for the first).
+    /// </summary>
+    private static unsafe void Turns(ref HandTurns turnsOf, in SeaBlend hand, ReadOnlySpan<double> u, ReadOnlySpan<double> v)
+    {
+        Span<int> turns = stackalloc int[MaxTiles];
+        var reference = double.NaN;
+
+        for (var k = 0; k < hand.Count; k++)
+        {
+            turns[k] = int.MinValue;
+
+            for (var before = 0; before < turnsOf.Count && hand.Weight[k] > 0f; before++)
+            {
+                if (turnsOf.Tile[before] != hand.Tile[k])
+                    continue;
+
+                turns[k] = turnsOf.Turns[before];
+                reference = PlanePhase(turnsOf.Carrier, u[k], v[k]) - Math.Tau * turns[k];
+            }
+        }
+
+        turnsOf.Count = 0;
+
+        for (var k = 0; k < hand.Count; k++)
+        {
+            if (hand.Weight[k] <= 0f)
+                continue;
+
+            if (turns[k] == int.MinValue)
+            {
+                var phase = PlanePhase(turnsOf.Carrier, u[k], v[k]);
+                turns[k] = double.IsNaN(reference) ? 0 : (int)Math.Round((phase - reference) / Math.Tau);
+
+                if (double.IsNaN(reference))
+                    reference = phase;
+            }
+
+            turnsOf.Tile[turnsOf.Count] = hand.Tile[k];
+            turnsOf.Turns[turnsOf.Count++] = turns[k];
+        }
+    }
+
+    private static unsafe int TurnsOf(ref HandTurns turnsOf, int tile)
+    {
+        for (var k = 0; k < turnsOf.Count; k++)
+        {
+            if (turnsOf.Tile[k] == tile)
+                return turnsOf.Turns[k];
+        }
+
+        return 0;
     }
 
     /// <summary>The carrier's open phase k₀ d̂·(u, v) at a point of a tile's plane (rad, not wrapped).</summary>
@@ -494,7 +693,7 @@ public sealed class CoastRegionSet : IDisposable
             if (_bake.Solved)
                 Remember(region.Key.Tile, region.Key.X, region.Key.Z, _bake.SeaMin, _bake.ProbeMax);
 
-            if (_bake.Baked && region.Key.Carrier == _baked)
+            if (_bake.Baked && region.Key.Carrier == BakedFor(region.Key.Tile))
                 GoLive(ref region, _atlases[_bakeSlot]);
             else
                 region.State = CoastRegionState.Free;
@@ -565,14 +764,11 @@ public sealed class CoastRegionSet : IDisposable
         if (_running != Work.Probe)
             _probe.Count = 0;
 
-        if (_baked.Calm)
-            return;
-
         for (var i = 0; i < Capacity; i++)
         {
             ref readonly var region = ref _regions[i];
 
-            if (region.State is CoastRegionState.Live or CoastRegionState.Baking && !Desired(region.Key))
+            if (region.State is CoastRegionState.Live or CoastRegionState.Baking && !Desired(region.Key) && !BakedFor(region.Key.Tile).Calm)
                 Consider(camera, region.Window, region.Key.Tile, region.Key.X, region.Key.Z, UnloadDistance, Stickiness, loaded: true);
         }
 
@@ -588,7 +784,7 @@ public sealed class CoastRegionSet : IDisposable
             for (var b = 0; b < s; b++)
                 seen |= window.Tile[b] == tile;
 
-            if (seen)
+            if (seen || BakedFor(tile).Calm)
                 continue;
 
             _tiles.Plane(tile, dir, out var u, out var v);
@@ -682,7 +878,7 @@ public sealed class CoastRegionSet : IDisposable
         }
 
         _probes[probe].Stamp = ++_stamp;
-        return CoastBake.Coastal(_probes[probe].Min, _probes[probe].Max, _breakDepth);
+        return CoastBake.Coastal(_probes[probe].Min, _probes[probe].Max, BreakDepthOf(candidate.Tile));
     }
 
     private bool Loaded(int tile, short x, short z)
@@ -719,7 +915,7 @@ public sealed class CoastRegionSet : IDisposable
 
             if (region.State == CoastRegionState.Live && !desired)
                 region.State = CoastRegionState.Retiring;
-            else if (region.State == CoastRegionState.Retiring && desired && region.Key.Carrier == _baked && !Has(region.Key))
+            else if (region.State == CoastRegionState.Retiring && desired && region.Key.Carrier == BakedFor(region.Key.Tile) && !Has(region.Key))
                 region.State = CoastRegionState.Live;
         }
     }
@@ -737,7 +933,7 @@ public sealed class CoastRegionSet : IDisposable
 
         for (var d = 0; d < _desiredCount; d++)
         {
-            var key = new CoastRegionKey(_desired[d].Tile, _desired[d].X, _desired[d].Z, _baked);
+            var key = new CoastRegionKey(_desired[d].Tile, _desired[d].X, _desired[d].Z, BakedFor(_desired[d].Tile));
 
             if (Has(key))
                 continue;
@@ -753,7 +949,7 @@ public sealed class CoastRegionSet : IDisposable
             region.State = CoastRegionState.Baking;
             region.Fade = 0f;
             var probe = Find(key.Tile, key.X, key.Z);
-            _bake.Prepare(_depth, region.Window, key, _atlases[slot], _breakDepth, probe < 0 ? float.NaN : _probes[probe].Min, probe < 0 ? float.NaN : _probes[probe].Max);
+            _bake.Prepare(_depth, region.Window, key, _atlases[slot], BreakDepthOf(key.Tile),probe < 0 ? float.NaN : _probes[probe].Min, probe < 0 ? float.NaN : _probes[probe].Max);
             _scheduler.Queue(_bake, 1);
             _scheduler.ExecuteJobs();
             _running = Work.Bake;

@@ -21,8 +21,8 @@ public sealed class OceanPanel
 
     private static readonly float2 GraphSize = new(0f, 48f);
 
-    private readonly OceanSwell _swell;
     private readonly OceanSurface _surface;
+    private readonly Action<SwellParams> _apply;
     private readonly OceanFft _fft;
     private readonly TimingRing _height = new(TimingSamples);
     private readonly TimingRing _bench = new(TimingSamples);
@@ -46,16 +46,17 @@ public sealed class OceanPanel
     public double3 Probe = double3.UnitX;
     public long Tick;
 
-    public OceanPanel(OceanSurface surface, OceanFft fft, ShoreDepthGrid depths, ShoreDepthTexture depthTexture, CoastRegionSet coast, CoastAtlasGpu coastGpu)
+    /// <param name="apply">Sets the sea's base swell (the sim's SetSwell): with weather driving, its wind stays the weather's.</param>
+    public OceanPanel(OceanSurface surface, Action<SwellParams> apply, OceanFft fft, ShoreDepthGrid depths, ShoreDepthTexture depthTexture, CoastRegionSet coast, CoastAtlasGpu coastGpu)
     {
+        _apply = apply;
         _coast = coast;
         _coastGpu = coastGpu;
         _surface = surface;
         _depths = depths;
         _depthTexture = depthTexture;
-        _swell = surface.Swell;
         _fft = fft;
-        _edit = _swell.Wind;
+        _edit = surface.Swells.Base;
         _fetchKm = _edit.Fetch / 1000f;
         _deep = float.IsPositiveInfinity(_edit.Depth);
 
@@ -66,6 +67,9 @@ public sealed class OceanPanel
         for (var i = 0; i < BenchCount; i++)
             _benchPoints[i] = new float2(i % BenchSide * BenchSpacing - half, i / BenchSide * BenchSpacing - half);
     }
+
+    /// <summary>The swell of the probe's tile.</summary>
+    private OceanSwell Swell => _surface.Swells.Near(Probe);
 
     public void Draw()
     {
@@ -117,24 +121,24 @@ public sealed class OceanPanel
         ImGui.SliderAngle("Swell direction"u8, ref _edit.SwellDirection, 0f, 360f);
         ImGui.SliderFloat("Bandwidth"u8, ref _edit.SwellBandwidth, 0.01f, 0.15f, "%.3f"u8);
         ImGui.SliderFloat("Swell spread"u8, ref _edit.SwellSpread, 5f, 80f, "%.0f"u8);
-        ImGui.Text($"sets every {1f / _swell.GroupRatio:F0} waves");
+        ImGui.Text($"sets every {1f / Swell.GroupRatio:F0} waves");
 
         if (ImGui.Button("Apply wind"u8))
         {
             _edit.Fetch = _fetchKm * 1000f;
             _edit.Depth = _deep ? float.PositiveInfinity : _depth;
-            _swell.SetWind(_edit);
+            _apply(_edit);
         }
 
         ImGui.SameLine();
-        ImGui.ProgressBar(_swell.BlendProgress, new float2(-1f, 0f), "blend"u8);
+        ImGui.ProgressBar(Swell.BlendProgress, new float2(-1f, 0f), "blend"u8);
     }
 
     private void DrawDetail()
     {
         ImGui.SeparatorText("GPU detail + foam"u8);
         ImGui.SliderFloat("FFT choppiness"u8, ref _fft.Choppiness, 0f, 2f, "%.2f"u8);
-        ImGui.Text($"Whitecap coverage {100f * OceanFft.WhitecapCoverage(_swell.Wind.WindSpeed):F1} % (Monahan & O'Muircheartaigh 1980)");
+        ImGui.Text($"Whitecap coverage {100f * OceanFft.WhitecapCoverage(Swell.Wind.WindSpeed):F1} % (Monahan & O'Muircheartaigh 1980)");
         ImGui.SliderFloat("Whitecap linger"u8, ref _fft.WhitecapLinger, 1f, 10f, "%.1f"u8);
         ImGui.SliderFloat("Foam decay /s"u8, ref _fft.FoamDecay, 0f, 3f, "%.2f"u8);
         ImGui.SliderFloat("Foam strength"u8, ref _fft.FoamStrength, 0f, 2f, "%.2f"u8);
@@ -144,8 +148,8 @@ public sealed class OceanPanel
     private void DrawReadouts()
     {
         ImGui.SeparatorText("Swell"u8);
-        ImGui.Text($"Hs {_swell.SignificantWaveHeight:F2} m  Tp {_swell.PeakPeriod:F2} s  components {_swell.ComponentCount}");
-        ImGui.Text($"choppiness {_swell.Choppiness:F3}  t {_swell.Time:F2} s");
+        ImGui.Text($"Hs {Swell.SignificantWaveHeight:F2} m  Tp {Swell.PeakPeriod:F2} s  components {Swell.ComponentCount}");
+        ImGui.Text($"choppiness {Swell.Choppiness:F3}  t {Swell.Time:F2} s");
         ImGui.Checkbox("Shore wash"u8, ref ShoreWash);
 
         ImGui.SeparatorText("Under the camera"u8);
@@ -169,8 +173,9 @@ public sealed class OceanPanel
     {
         ImGui.SeparatorText("Breaking waves"u8);
         ImGui.Checkbox("Breaker faces"u8, ref BreakerFaces);
-        var carrier = _coast.Carrier;
-        ImGui.Text($"carrier T {(carrier.Calm ? 0f : MathF.Tau / carrier.Omega),5:F1} s  H0 {carrier.Height,5:F2} m  dir {carrier.Direction * 180f / MathF.PI,5:F0} deg");
+        var tile = _surface.Swells.TileAt(Probe);
+        var carrier = _coast.BakedFor(tile);
+        ImGui.Text($"tile {tile} carrier T {(carrier.Calm ? 0f : MathF.Tau / carrier.Omega),5:F1} s  H0 {carrier.Height,5:F2} m  dir {carrier.Direction * 180f / MathF.PI,5:F0} deg");
         ImGui.Text($"regions {_coast.Drawn} / {CoastRegionSet.Capacity}  {(_coast.Settled ? "settled" : "working")}  {CoastRegionSet.ResidentBytes / 1048576f:F1} + {CoastAtlasGpu.Bytes / 1048576f:F1} MB");
         ImGui.Text($"bakes {_coast.Bakes}  last {_coast.LastBakeMs,5:F1} ms (depth {_coast.LastBakeDepthMs,5:F1})  probes {_coast.Probes}");
         ImGui.Text($"uploads {_coastGpu.Uploads}  last {_coastGpu.LastUploadMs,6:F3} ms");

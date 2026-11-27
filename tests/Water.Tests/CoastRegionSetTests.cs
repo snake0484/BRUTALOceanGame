@@ -267,7 +267,7 @@ public sealed class CoastRegionSetTests(ITestOutputHelper output)
         }
 
         Assert.Equal(bakes, set.Bakes);
-        Assert.Equal(Swell, set.Carrier);
+        Assert.Equal(Swell, set.BakedFor(CoastBakeTests.Tile));
         Assert.True(worst <= 0.03f, $"the face moved {worst:F3} m in a tick as the height followed");
 
         for (var slot = 0; slot < CoastRegionSet.Capacity; slot++)
@@ -282,7 +282,7 @@ public sealed class CoastRegionSetTests(ITestOutputHelper output)
         Assert.False(CoastRegionSet.Keeps(Swell, CoastCarrier.From(Swell.Direction, Swell.Omega, Swell.Height * 1.08f)));
         Assert.False(CoastRegionSet.Keeps(Swell, default));
         Settle(set, camera, far);
-        Assert.Equal(far, set.Carrier);
+        Assert.Equal(far, set.BakedFor(CoastBakeTests.Tile));
         Assert.Equal(bakes + CoastRegionSet.MaxDesired, set.Bakes);
     }
 
@@ -339,29 +339,39 @@ public sealed class CoastRegionSetTests(ITestOutputHelper output)
     /// sea point under the camera, and the face does not jump as the camera crosses at a run. At 40° of latitude, where
     /// the tiles' frames are turned 3° from each other.
     /// </summary>
-    [Fact]
-    public unsafe void TileEdge_HandsTheCarrierOver()
+    private const double EdgeShore = 800.0;
+
+    /// <summary>A tile at 40° of latitude, a window of its lattice, and where along the window's u the tile's share of the carrier is one half (m); the shore runs along v = <see cref="EdgeShore"/>.</summary>
+    private static unsafe (int Tile, CoastWindow Plane, double Edge) TileEdge()
     {
-        const double shore = 800.0;
-        const double pace = 0.2;
         var axis = double3.Normalize(new double3(0.2, 1.0, -0.1));
         var (sin, cos) = Math.SinCos(40.0 * Math.PI / 180.0);
         Tiles.Locate(double3.Normalize(double3.Normalize(double3.Cross(axis, double3.UnitX)) * cos + axis * sin), out var blend);
         var tile = blend.Tile[0];
         var plane = new CoastWindow(Tiles, tile, 0, 0);
         var (lo, hi) = (0.0, 40_000.0);
-        Assert.Equal(1f, Share(tile, plane.Direction(lo, shore)));
-        Assert.Equal(0f, Share(tile, plane.Direction(hi, shore)));
+        Assert.Equal(1f, Share(tile, plane.Direction(lo, EdgeShore)));
+        Assert.Equal(0f, Share(tile, plane.Direction(hi, EdgeShore)));
 
         for (var i = 0; i < 40; i++)
         {
             var mid = 0.5 * (lo + hi);
-            (lo, hi) = Share(tile, plane.Direction(mid, shore)) > 0.5f ? (mid, hi) : (lo, mid);
+            (lo, hi) = Share(tile, plane.Direction(mid, EdgeShore)) > 0.5f ? (mid, hi) : (lo, mid);
         }
 
-        var edge = lo;
+        return (tile, plane, lo);
+    }
+
+    private static CoastRegionSet EdgeBeach(int tile) => new(Tiles, new PlaneSeabed(Tiles, tile, (_, v) => (float)(0.04 * (EdgeShore - v))), 1);
+
+    [Fact]
+    public unsafe void TileEdge_HandsTheCarrierOver()
+    {
+        const double shore = EdgeShore;
+        const double pace = 0.2;
+        var (tile, plane, edge) = TileEdge();
         var carrier = CoastCarrier.From(1.3f, 0.6f, 1.2f);
-        using var set = new CoastRegionSet(Tiles, new PlaneSeabed(Tiles, tile, (_, v) => (float)(0.04 * (shore - v))), 1);
+        using var set = EdgeBeach(tile);
         double3 Camera(double u) => plane.Direction(u, shore - 40.0) * (Tiles.SeaRadius + 2.0);
         Settle(set, Camera(edge), carrier);
         var home = 0;
@@ -452,6 +462,145 @@ public sealed class CoastRegionSetTests(ITestOutputHelper output)
         Assert.True(stats.MaxHeight > 0.3f, "the points never saw a wave");
         Assert.True(stats.MaxHeightStep < 0.04f, $"the face moved {stats.MaxHeightStep:F3} m in a frame");
         Assert.Equal(0, stats.HeightJumps + stats.FoamJumps + stats.SlopeJumps);
+    }
+
+    /// <summary>Its own carrier on one tile, another on every other: a tile edge between two swells.</summary>
+    private sealed class TwoCarriers(int home, float hs) : ICoastCarriers
+    {
+        public CoastCarrier Home;
+        public CoastCarrier Other;
+
+        public CoastCarrier At(int tile, out float significantHeight)
+        {
+            significantHeight = hs;
+            return tile == home ? Home : Other;
+        }
+    }
+
+    /// <summary>
+    /// Two tiles with swells of different periods and directions meet on a coast: each tile's windows are baked for its
+    /// own carrier, they cross-fade across the hand-over band, and the face there moves as a wave does with the camera
+    /// parked in the band, crossing it at a run, and through the neighbour's rebake to a third carrier (which leaves the
+    /// home tile's maps and their phases alone).
+    /// </summary>
+    [Fact]
+    public void TileEdge_TwoSwells_EachTileBakesItsOwn()
+    {
+        var (tile, plane, edge) = TileEdge();
+        var carriers = new TwoCarriers(tile, Hs) { Home = CoastCarrier.From(1.3f, 0.6f, 1.2f), Other = CoastCarrier.From(1.0f, 0.85f, 0.9f) };
+        using var set = EdgeBeach(tile);
+        double3 Camera(double u) => plane.Direction(u, EdgeShore - 40.0) * (Tiles.SeaRadius + 2.0);
+        var tick = 0L;
+
+        void Step(double3 camera)
+        {
+            set.Update(camera, carriers, Frame);
+            tick++;
+
+            if (set.Busy)
+                Thread.Sleep(1);
+        }
+
+        for (var i = 0; i < 4000 && !(set.Settled && !set.Busy && set.Drawn > 0); i++)
+            Step(Camera(edge));
+
+        var home = 0;
+        var other = 0;
+
+        foreach (var region in set.Regions)
+        {
+            if (region.State != CoastRegionState.Live)
+                continue;
+
+            Assert.Equal(region.Key.Tile == tile ? carriers.Home : carriers.Other, region.Key.Carrier);
+            home += region.Key.Tile == tile ? 1 : 0;
+            other += region.Key.Tile == tile ? 0 : 1;
+        }
+
+        output.WriteLine($"{home} regions of the tile, {other} of its neighbour");
+        Assert.True(home > 0 && other > 0, "both tiles' regions load at their edge");
+        Assert.Equal(carriers.Home, set.BakedFor(tile));
+
+        for (var u = edge - 600.0; u <= edge + 600.0; u += 10.0)
+            Assert.Equal(1f, set.Coverage(plane.Direction(u, EdgeShore - 60.0)), 0.002f);
+
+        var watch = new double3[7];
+        var last = new FacePoint[watch.Length];
+        var earlier = new FacePoint[watch.Length];
+
+        for (var i = 0; i < watch.Length; i++)
+            watch[i] = plane.Direction(edge - 300.0 + 100.0 * i, EdgeShore - 45.0);
+
+        BreakerStability Follow(Func<int, double3> camera, int ticks)
+        {
+            var stats = default(BreakerStability);
+            Step(camera(0));
+
+            for (var i = 0; i < watch.Length; i++)
+            {
+                set.Sample(watch[i], (tick - 1) * (double)Frame, out earlier[i]);
+                set.Sample(watch[i], tick * (double)Frame, out last[i]);
+            }
+
+            for (var n = 1; n <= ticks; n++)
+            {
+                Step(camera(n));
+
+                for (var i = 0; i < watch.Length; i++)
+                {
+                    set.Sample(watch[i], tick * (double)Frame, out var face);
+                    stats.Step(last[i], face);
+                    stats.Kick(earlier[i], last[i], face);
+                    (earlier[i], last[i]) = (last[i], face);
+                }
+            }
+
+            return stats;
+        }
+
+        var parked = Follow(_ => Camera(edge), 1200);
+        output.WriteLine($"parked in the band: {parked}");
+        var crossing = Follow(n => Camera(edge - 300.0 + 0.2 * n), 3000);
+        output.WriteLine($"crossing the band at 12 m/s: {crossing}");
+
+        Step(Camera(edge + 60.0));
+        var versions = new int[CoastRegionSet.Capacity];
+        var phases = new float[CoastRegionSet.Capacity];
+
+        for (var slot = 0; slot < CoastRegionSet.Capacity; slot++)
+        {
+            var region = set.Regions[slot];
+            versions[slot] = region.Key.Tile == tile && region.State == CoastRegionState.Live ? region.Version : -1;
+            phases[slot] = versions[slot] >= 0 ? set.PhaseAt(slot, 0.0) : 0f;
+        }
+
+        carriers.Other = CoastCarrier.From(0.7f, 1.0f, 1.1f);
+        var bakes = set.Bakes;
+        var rebake = Follow(_ => Camera(edge + 60.0), 1500);
+        output.WriteLine($"through the neighbour's rebake ({set.Bakes - bakes} bakes): {rebake}");
+        Assert.True(set.Settled && set.Bakes > bakes, "the neighbour's windows never rebaked");
+
+        for (var slot = 0; slot < CoastRegionSet.Capacity; slot++)
+        {
+            if (versions[slot] < 0)
+                continue;
+
+            Assert.Equal(versions[slot], set.Regions[slot].Version);
+            Assert.Equal(phases[slot], set.PhaseAt(slot, 0.0), 1e-4f);
+        }
+
+        foreach (var region in set.Regions)
+        {
+            if (region.Drawn)
+                Assert.Equal(region.Key.Tile == tile ? carriers.Home : carriers.Other, region.Key.Carrier);
+        }
+
+        foreach (var stats in new[] { parked, crossing, rebake })
+        {
+            Assert.True(stats.MaxHeight > 0.3f, "the points never saw a wave");
+            Assert.Equal(0, stats.Jumps);
+            Assert.Equal(0, stats.Kicks);
+        }
     }
 
     private static float Weights(CoastRegionSet set)

@@ -520,7 +520,7 @@ public sealed class SphereWeatherTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>Best of three passes after warm-up, with the island's flat field as a baseline on the same machine.</summary>
+    /// <summary>Best of three passes after warm-up.</summary>
     [Fact]
     [Trait("Category", "Perf")]
     public void SampleCost()
@@ -528,7 +528,6 @@ public sealed class SphereWeatherTests(ITestOutputHelper output)
         const int points = 4_096;
         const int ticks = 9_000;
         var field = Rocky(3);
-        var flat = new WeatherField(new WeatherClimate { Seed = 3 });
         var cache = new SphereWeatherCache(field);
         var anchor = field.Direction(40.0 * Degree, 1.0);
         field.Basis(anchor, out var east, out _);
@@ -538,7 +537,6 @@ public sealed class SphereWeatherTests(ITestOutputHelper output)
         Span<double3> anchors = [anchor * Radius];
         var sink = 0f;
         var fieldNs = double.MaxValue;
-        var flatNs = double.MaxValue;
         var cacheNs = double.MaxValue;
 
         for (var i = 0; i < points; i++)
@@ -574,12 +572,6 @@ public sealed class SphereWeatherTests(ITestOutputHelper output)
             start = Stopwatch.GetTimestamp();
 
             for (var i = 0; i < points; i++)
-                sink += flat.Sample((float)(directions[i].X * 1e5), (float)(directions[i].Z * 1e5), pass * 16.3 + i * 0.52).Cloud;
-
-            flatNs = Math.Min(flatNs, Stopwatch.GetElapsedTime(start).TotalNanoseconds / points);
-            start = Stopwatch.GetTimestamp();
-
-            for (var i = 0; i < points; i++)
                 sink += cache.Sample(near[i], last).Cloud;
 
             cacheNs = Math.Min(cacheNs, Stopwatch.GetElapsedTime(start).TotalNanoseconds / points);
@@ -587,7 +579,7 @@ public sealed class SphereWeatherTests(ITestOutputHelper output)
 
         var steady = tickMs.AsSpan(1);
         steady.Sort();
-        output.WriteLine($"sample: field {fieldNs:F0} ns, island field {flatNs:F0} ns, cache {cacheNs:F0} ns");
+        output.WriteLine($"sample: field {fieldNs:F0} ns, cache {cacheNs:F0} ns");
         output.WriteLine($"cache tick (anchor 30 m/s): median {steady[steady.Length / 2] * 1000.0:F2} µs, p99 {steady[steady.Length * 99 / 100] * 1000.0:F1} µs, max {steady[^1] * 1000.0:F1} µs; first tick {tickMs[0]:F3} ms ({syncBakes} sync bakes, {firstSync:F3} ms) ({sink:F0})");
         Assert.True(fieldNs < 10_000.0);
         Assert.True(cacheNs < 2_000.0);

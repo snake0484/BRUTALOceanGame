@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Numerics;
+using Brutal.Numerics;
 using BrutalGame.Engine.Rendering;
 using BrutalGame.Water.Rendering;
 using BrutalGame.Weather;
@@ -6,8 +8,10 @@ using BrutalGame.Weather;
 namespace BrutalGame;
 
 /// <summary>
-/// Feeds the sky from the weather where the camera is. The map bakes on ticks; this runs once per frame. The swell's
-/// wind is the sim's (SimWorld), sampled from the same field away from the camera.
+/// The client's weather: the sim's <see cref="SphereWeatherField"/> baked into a <see cref="SphereWeatherCache"/> round the
+/// camera on ticks, sampled once per frame for the sky. The cache's values do not depend on where it is anchored, so
+/// what the client shows agrees with the sim's sea wind (SimWorld.SeaWinds reads the same field) and with every peer.
+/// Rain, audio and the cloud map (D80) read the same cache.
 /// </summary>
 public sealed class WeatherSystem
 {
@@ -16,26 +20,33 @@ public sealed class WeatherSystem
     private static readonly Vector3 StormZenith = new(0.15f, 0.17f, 0.20f);
     private static readonly Vector3 StormHorizon = new(0.30f, 0.32f, 0.35f);
 
-    public readonly WeatherMap Map;
+    public readonly SphereWeatherCache Cache;
 
-    /// <param name="time">Weather time (s) at launch.</param>
-    public WeatherSystem(WeatherField field, double time, Vector2 camera)
-    {
-        Map = new WeatherMap(field);
-        Map.Tick(time, camera);
-        Local = Map.Sample(camera.X, camera.Y);
-    }
+    private readonly double3[] _anchor = new double3[1];
+
+    public WeatherSystem(SphereWeatherField field) => Cache = new SphereWeatherCache(field);
+
+    public SphereWeatherField Field => Cache.Field;
 
     /// <summary>Weather at the camera as of the last <see cref="Update"/>.</summary>
     public WeatherSample Local { get; private set; }
 
-    /// <summary>Fixed tick: <paramref name="time"/> is weather time (sim time plus any debug offset).</summary>
-    public void Tick(double time, Vector2 camera) => Map.Tick(time, camera);
+    /// <summary>Milliseconds of the last <see cref="Tick"/>.</summary>
+    public float LastTickMs { get; private set; }
+
+    /// <summary>Fixed tick: <paramref name="weatherTick"/> is the sim's weather tick (sim tick plus any debug offset).</summary>
+    public void Tick(long weatherTick, in double3 camera)
+    {
+        var start = Stopwatch.GetTimestamp();
+        _anchor[0] = camera;
+        Cache.Tick(weatherTick, _anchor);
+        LastTickMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+    }
 
     /// <summary>Main thread, once per frame. <paramref name="clear"/> is the sky with no weather.</summary>
-    public void Update(Vector2 camera, OceanRenderer ocean, in SceneLighting clear, bool driveSky)
+    public void Update(in double3 camera, long weatherTick, OceanRenderer ocean, in SceneLighting clear, bool driveSky)
     {
-        Local = Map.Sample(camera.X, camera.Y);
+        Local = Cache.Sample(camera, weatherTick);
         ApplySky(ocean, driveSky ? Sky(clear, Local) : clear);
     }
 

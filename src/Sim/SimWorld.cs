@@ -25,9 +25,6 @@ public sealed class SimWorld : IDisposable
 {
     public const int TickRate = 60;
 
-    /// <summary>Ticks between swell wind samples (1 s).</summary>
-    public const int WindInterval = TickRate;
-
     public readonly PhysicsWorld Physics;
 
     /// <summary>The planet's sea: one definition everywhere on it (<see cref="OceanSurface.Sample"/> by planet position and tick).</summary>
@@ -64,16 +61,27 @@ public sealed class SimWorld : IDisposable
     /// <summary>Every entity; probes step from their <see cref="EntityTable.Input"/> each tick, before physics.</summary>
     public readonly EntityTable Entities;
 
-    /// <summary>Weather the swell wind follows when <see cref="DriveWind"/> is set; null pins the swell to <see cref="SetSwell"/>.</summary>
-    public readonly WeatherField? Weather;
+    /// <summary>The sea planet's weather (D31): deterministic from the world seed and the tick, read-only, job-safe.</summary>
+    public readonly SphereWeatherField Weather;
 
-    /// <summary>Follow the weather's sea wind (debug toggle; off pins the swell's wind).</summary>
-    public bool DriveWind = true;
+    /// <summary>Each sea tile's wind per epoch, from <see cref="Weather"/>.</summary>
+    public readonly SeaWindSchedule SeaWinds;
 
-    /// <summary>Debug offset (s) of weather time from sim time.</summary>
-    public double WeatherTimeOffset;
+    /// <summary>The sea tile at the spawn.</summary>
+    public readonly int SpawnTile;
 
-    private readonly SwellWind? _wind;
+    /// <summary>
+    /// Where the host is looking from (planet frame), kept live on the sea with the bubble and the entities near sea level:
+    /// the client's camera. Null for none.
+    /// </summary>
+    public double3? ViewAnchor;
+
+    /// <summary>Entities this far (m) above or below the sea sphere keep its tiles live.</summary>
+    public const double AnchorAltitude = 10_000.0;
+
+    private SwellParams _swell = new();
+    private bool _driveWind;
+    private double3[] _anchors;
     private readonly List<EditCommand> _pending = new(64);
     private FixedClock _clock = new(TickRate);
 
@@ -86,10 +94,13 @@ public sealed class SimWorld : IDisposable
     public static string KindOf(CelestialKind kind) => kind == CelestialKind.Moon ? MoonKind : PlanetKind;
 
     /// <param name="kind">Debug override of the terrain planet's and the moons' kind (--planet-kind), with its own seed for the kind's parameter ranges.</param>
-    public SimWorld(ulong seed, int workerThreads, WeatherField? weather = null, int entityCapacity = EntityTable.DefaultCapacity, string? kind = null, ulong? kindSeed = null)
+    /// <param name="weather">The weather drives the sea's wind (<see cref="DriveWind"/>).</param>
+    /// <param name="edgeSpawn">--surf-edge: the spawn's beach lies on a sea tile's row edge (<see cref="EdgeLatitudes"/>), where two tiles' swells meet.</param>
+    public SimWorld(ulong seed, int workerThreads, bool weather = false, int entityCapacity = EntityTable.DefaultCapacity, string? kind = null, ulong? kindSeed = null, bool edgeSpawn = false)
     {
         Seed = seed;
-        Weather = weather;
+        _driveWind = weather;
+        _anchors = new double3[entityCapacity + 2];
         Physics = new PhysicsWorld(workerThreads: workerThreads);
         Frames = new FrameTree();
         Celestial = CelestialSystem.CreateTest(Frames, seed, _clock.TickSeconds);
@@ -103,7 +114,11 @@ public sealed class SimWorld : IDisposable
         for (var i = 0; i < Celestial.Count; i++)
             BodyParams[i] = i == PlanetIndex ? Planet : RockyParams(Celestial, seed, i, kind, kindSeed);
 
-        PlanetSpawn.FindCoast(Generator.Surface, body.SpinAxis, out var coast, out Seaward);
+        var coast = default(double3);
+
+        if (!edgeSpawn || !PlanetSpawn.FindCoast(Generator.Surface, body.SpinAxis, EdgeLatitudes(new SeaTiles(Planet.SeaRadius, body.SpinAxis)), out coast, out Seaward))
+            PlanetSpawn.FindCoast(Generator.Surface, body.SpinAxis, out coast, out Seaward);
+
         var level = Planet.HasSea ? Planet.SeaRadius : Planet.Radius + Generator.Surface.Height(coast.X, coast.Y, coast.Z);
         Bubble = PhysicsBubble.At(coast * level, Seaward);
         Physics.SetBubble(Bubble, SceneGravity(body, Bubble.Origin));
@@ -112,19 +127,32 @@ public sealed class SimWorld : IDisposable
         var tiles = new SeaTiles(level, body.SpinAxis);
         var depth = new PlanetShoreDepth(Shore);
         CoastDepth = depth;
-        Ocean = new OceanSurface(new OceanSwell(seed), tiles, _clock.TickSeconds, depth);
+        SpawnTile = TileAt(tiles, coast);
+        Weather = new SphereWeatherField(Climate(body, PlanetParams.BodySeed(seed, PlanetIndex), _clock.TickSeconds), _clock.TickSeconds);
+        SeaWinds = new SeaWindSchedule(Weather, tiles);
+        Ocean = new OceanSurface(new SeaSwells(seed, tiles, _clock.TickSeconds, SeaWinds), _clock.TickSeconds, depth);
+        SetSwell(_swell);
         UpdateRenderPoses();
-
-        if (weather is not null)
-        {
-            // The weather plane is the bubble's; the swell's directions are from east toward south.
-            SeaTiles.EastSouth(coast, body.SpinAxis, out var east, out var south);
-            var x = Bubble.ToPlanetDirection(double3.UnitX);
-            _wind = new SwellWind(weather, (float)Math.Atan2(double3.Dot(x, south), double3.Dot(x, east)));
-        }
     }
 
     public ulong Seed { get; }
+
+    /// <summary>The sea tiles' row edges (degrees of latitude) within 25° of 30° north or south, nearest 30° first.</summary>
+    public static double[] EdgeLatitudes(SeaTiles tiles)
+    {
+        var edges = new List<double>();
+
+        for (var row = 1; row < tiles.Rows; row++)
+        {
+            var latitude = tiles.RowEdge(row) * 180.0 / Math.PI;
+
+            if (Math.Abs(Math.Abs(latitude) - 30.0) <= 25.0)
+                edges.Add(latitude);
+        }
+
+        edges.Sort((a, b) => (Math.Abs(Math.Abs(a) - 30.0), a < 0).CompareTo((Math.Abs(Math.Abs(b) - 30.0), b < 0)));
+        return edges.ToArray();
+    }
 
     public ref readonly FixedClock Clock => ref _clock;
 
@@ -140,11 +168,35 @@ public sealed class SimWorld : IDisposable
     /// <summary>Edits dropped unlogged because every voxel they reach is protected shore, seabed or dig floor (D30).</summary>
     public int RefusedEdits { get; private set; }
 
-    /// <summary>Sea wind (m/s, blowing toward) as of the last wind sample; zero without weather.</summary>
-    public System.Numerics.Vector2 SeaWind => _wind?.Wind ?? default;
+    /// <summary>The spawn tile's sea wind this epoch (reads the weather: debug and tests).</summary>
+    public SeaWindKey SpawnWind => SeaWinds.At(SpawnTile, SeaWind.Epoch(_clock.TickIndex));
+
+    /// <summary>Each sea tile follows its weather (off pins the swell to <see cref="SetSwell"/>'s wind everywhere).</summary>
+    public bool DriveWind
+    {
+        get => _driveWind;
+        set
+        {
+            if (value == _driveWind)
+                return;
+
+            _driveWind = value;
+            SetSwell(_swell);
+        }
+    }
+
+    /// <summary>Debug offset (s) of weather time from sim time, whole ticks.</summary>
+    public double WeatherTimeOffset
+    {
+        get => SeaWinds.TickOffset * _clock.TickSeconds;
+        set => SeaWinds.TickOffset = (long)Math.Round(value / _clock.TickSeconds);
+    }
+
+    /// <summary>Weather tick of the current tick.</summary>
+    public long WeatherTick => _clock.TickIndex + SeaWinds.TickOffset;
 
     /// <summary>Weather time (s) of the current tick.</summary>
-    public double WeatherTime => _clock.SimTime + WeatherTimeOffset;
+    public double WeatherTime => WeatherTick * _clock.TickSeconds;
 
     /// <summary>Adds real frame time and returns how many ticks to run.</summary>
     public int Advance(double frameSeconds) => _clock.Advance(frameSeconds);
@@ -162,19 +214,13 @@ public sealed class SimWorld : IDisposable
 
     /// <summary>
     /// The groundswell and the wind used when weather doesn't drive it (directions from east toward south, the same over
-    /// the whole planet). With weather driving, the sea wind at this tick replaces the wind at once (the first wind never
-    /// blends).
+    /// the whole planet). With weather driving, this epoch's sea wind replaces the wind.
     /// </summary>
     public void SetSwell(in SwellParams swell)
     {
-        if (_wind is null || !DriveWind)
-        {
-            Ocean.Swell.SetWind(swell);
-            return;
-        }
-
-        _wind.Sample(WeatherTime);
-        Ocean.Swell.SetWind(_wind.With(swell));
+        _swell = swell;
+        Ocean.Swells.SetBase(swell, _driveWind);
+        TickSea(_clock.TickIndex);
     }
 
     /// <summary>Queues a brush edit, stamped with the next tick to run; it is checked and applied at that tick's start.</summary>
@@ -188,18 +234,38 @@ public sealed class SimWorld : IDisposable
     public void Tick()
     {
         ApplyEdits();
-        UpdateWind();
         Celestial.Update(_clock.TickIndex + 1);
 
         var dt = _clock.TickSeconds;
         StepEntities(dt);
         Physics.Step((float)dt);
-
-        var start = Stopwatch.GetTimestamp();
-        Ocean.Swell.SetTime((_clock.TickIndex + 1) * dt);
-        LastSwellMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+        TickSea(_clock.TickIndex + 1);
 
         _clock.TickIndex++;
+    }
+
+    /// <summary>The sea's swells to <paramref name="tick"/>, live round the bubble, the view and the entities near sea level.</summary>
+    private void TickSea(long tick)
+    {
+        var count = 0;
+        _anchors[count++] = Bubble.Origin;
+
+        if (ViewAnchor is { } view)
+            _anchors[count++] = view;
+
+        var surface = Celestial[PlanetIndex].Surface;
+        var radius = Ocean.Tiles.SeaRadius;
+
+        foreach (var index in Entities.Alive)
+        {
+            ref readonly var placement = ref Entities.Placement[index];
+
+            if (placement.Frame == surface && Math.Abs(placement.Position.Length() - radius) < AnchorAltitude)
+                _anchors[count++] = placement.Position;
+        }
+
+        Ocean.Swells.Tick(tick, _anchors.AsSpan(0, count));
+        LastSwellMs = Ocean.Swells.LastTickMs;
     }
 
     private void ApplyEdits()
@@ -240,21 +306,26 @@ public sealed class SimWorld : IDisposable
         }
     }
 
-    /// <summary>Tick-quantised: the sea wind is sampled every <see cref="WindInterval"/> ticks at the tick's weather time.</summary>
-    private void UpdateWind()
+    private static unsafe int TileAt(SeaTiles tiles, double3 dir)
     {
-        if (_wind is null)
-            return;
-
-        if (!DriveWind)
-        {
-            _wind.Reset();
-            return;
-        }
-
-        if (_clock.TickIndex % WindInterval == 0)
-            _wind.Update(Ocean.Swell, WeatherTime);
+        tiles.Locate(dir, out var blend);
+        return blend.Tile[0];
     }
+
+    /// <summary>
+    /// Weather systems' size on the rocky planets against the island's: 45–65 km storms, so one covers a good part of a
+    /// 64 km sea tile and its sea builds (a tile takes the mean wind over its area; island-sized storms never showed).
+    /// </summary>
+    public const float WeatherSizeScale = 4f;
+
+    /// <summary>The planet's climate: its own seed from the body's, its radius, day and axis.</summary>
+    private static PlanetClimate Climate(in CelestialBody body, ulong bodySeed, double tickSeconds)
+    {
+        var day = body.DayTicks > 0 ? body.DayTicks * tickSeconds : 1e9;
+        return PlanetClimate.Rocky(bodySeed ^ WeatherSalt, body.Radius, day, body.SpinAxis) with { SizeScale = WeatherSizeScale };
+    }
+
+    private const ulong WeatherSalt = 0x2545F4914F6CDD1DUL;
 
     private static int FirstPlanet(CelestialSystem celestial)
     {
