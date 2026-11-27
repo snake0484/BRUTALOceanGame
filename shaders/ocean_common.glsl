@@ -164,9 +164,71 @@ float surfWidth(float breakerHeight, float slope)
     return breakerHeight / WAVE_BREAKING_GAMMA / slope;
 }
 
+// A beach point for the swash: its depth, the beach's slope, its distance up the beach from the shoreline below it
+// (negative in the water), the open carrier's spatial phase at that shoreline point, the bore's energy height there
+// and the edge's decelerations and top speed.
+struct SwashBeach
+{
+    float d;
+    float slope;
+    float s0;
+    float spatial;
+    float unbroken;
+    float up;
+    float back;
+    float u0Max;
+};
+
+// The sheets of the last SWASH_EVENTS bores for a carrier whose phase at the shoreline point is `phase` (0 as a crest
+// reaches it) and angular frequency omega: the surface above the beach point, how fresh the up-rushing foam is there
+// (front) and how near the edge of the highest sheet it is (edge).
+float swashRun(SwashBeach b, float phase, float omega, out float front, out float edge)
+{
+    float p = fract(-phase / TWO_PI); // periods since the last crest reached the shoreline
+    float period = TWO_PI / omega;
+    float sheet = -1e3;
+    front = 0.0;
+    edge = 0.0;
+
+    for (int n = 0; n < SWASH_EVENTS; ++n)
+    {
+        float since = p + float(n);
+        float age = since * period;
+        // The set envelope travels with the crests, so the crest that reached the shore `since` periods ago carried the
+        // envelope `since` wavelengths back along the travel.
+        float u0 = min(SWASH_U0 * sqrt(9.81 * b.unbroken * groupEnvelope(b.spatial + TWO_PI * since)), b.u0Max);
+        float tUp = u0 / b.up;
+        float dt = age - tUp;
+        float xs = age < tUp ? age * (u0 - 0.5 * b.up * age) : 0.5 * u0 * tUp - 0.5 * b.back * dt * dt;
+        xs *= 1.0 - smoothstep(float(SWASH_EVENTS - 1), float(SWASH_EVENTS), since);
+        float behind = xs - b.s0;
+        float t = max(age, SWASH_LENS_TIME);
+        // Past the edge the sheet dives under the sand at twice the beach's slope, so the edge falls smoothly between
+        // vertices rather than on them.
+        float lens = behind > 0.0 ? min(max(behind * behind / (9.0 * 9.81 * t * t), SWASH_SHEET * b.slope * behind), SWASH_LENS_MAX) : 2.0 * b.slope * behind;
+        float surface = -b.d + SWASH_MIN_SHEET + lens;
+        if (surface > sheet)
+        {
+            sheet = surface;
+            edge = behind > 0.0 ? 1.0 - min(behind / SWASH_EDGE_WIDTH, 1.0) : 0.0;
+        }
+
+        if (b.d < 0.0 && age < tUp && behind >= 0.0 && behind < SWASH_FOAM_FRONT)
+            front = max(front, (1.0 - behind / SWASH_FOAM_FRONT) * smoothstep(0.0, SWASH_FOAM_U0, u0));
+    }
+
+    return sheet;
+}
+
+// The swash of the coast regions over a shoreline point, each by its weight there (ocean_breaker.glsl): their carriers
+// reach the shore when the breaking faces drawn from them do.
+float coastSwash(SwashBeach b, vec2 shore, out float front, out float edge, out float weight);
+
 // The swash sheet's surface above x0 (depth d: negative on land), or -1e3 where there is none. front: how fresh the
 // up-rushing foam is here, 1 at the edge of a strong bore's up-rush falling to 0 SWASH_FOAM_FRONT behind it; only on the
 // beach, never over the water. gSwashEdge: 1 at the edge of the sheet that is highest here, 0 SWASH_EDGE_WIDTH behind it.
+// The bores arrive on the coast regions' carrier where one covers the shoreline point, and on the open carrier's phase
+// there elsewhere (along a straight shore Snell's law keeps k0 sin of the angle).
 float gSwashEdge = 0.0;
 
 float swashSheet(vec2 x0, float d, out float front)
@@ -183,48 +245,32 @@ float swashSheet(vec2 x0, float d, out float front)
     if (g2 < 1e-6)
         return -1e3;
 
-    float slope = sqrt(g2);
+    SwashBeach b;
+    b.d = d;
+    b.slope = sqrt(g2);
     vec2 shore = x0 - d * grad / g2;
     float omega = max(frame.carrier.x, 1e-3);
-    float spatial = omega * omega / 9.81 * dot(frame.shore.xy, shore);
-    float p = fract(-(spatial + frame.carrier.y) / TWO_PI); // periods since the last crest reached the shoreline
-    float period = TWO_PI / omega;
+    b.spatial = omega * omega / 9.81 * dot(frame.shore.xy, shore);
 
     // The bore's energy height at the shore, before its set envelope: the breaker height on a shore facing the carrier,
     // less the break's dissipation over the surf zone it has crossed.
-    float exposure = sqrt(max(dot(frame.shore.xy, -grad / slope), 0.0));
-    float unbroken = frame.shore.z * exposure * exp(-surfWidth(frame.shore.z, slope) / SWASH_DISSIPATE);
-    float up = max(9.81 * slope * (1.0 + SWASH_FRICTION), SWASH_DECEL_MIN);
-    float back = SWASH_BACK * up;
-    float u0Max = sqrt(2.0 * up * SWASH_MAX / slope);
-    float s0 = -d / slope; // metres up the beach from the shoreline (negative in the water)
-    float sheet = -1e3;
+    float exposure = sqrt(max(dot(frame.shore.xy, -grad / b.slope), 0.0));
+    b.unbroken = frame.shore.z * exposure * exp(-surfWidth(frame.shore.z, b.slope) / SWASH_DISSIPATE);
+    b.up = max(9.81 * b.slope * (1.0 + SWASH_FRICTION), SWASH_DECEL_MIN);
+    b.back = SWASH_BACK * b.up;
+    b.u0Max = sqrt(2.0 * b.up * SWASH_MAX / b.slope);
+    b.s0 = -d / b.slope;
 
-    for (int n = 0; n < SWASH_EVENTS; ++n)
+    float weight;
+    float sheet = coastSwash(b, shore, front, gSwashEdge, weight);
+    if (weight < 0.999)
     {
-        float since = p + float(n);
-        float age = since * period;
-        // The set envelope travels with the crests, so the crest that reached the shore `since` periods ago carried the
-        // envelope `since` wavelengths back along the travel.
-        float u0 = min(SWASH_U0 * sqrt(9.81 * unbroken * groupEnvelope(spatial + TWO_PI * since)), u0Max);
-        float tUp = u0 / up;
-        float dt = age - tUp;
-        float xs = age < tUp ? age * (u0 - 0.5 * up * age) : 0.5 * u0 * tUp - 0.5 * back * dt * dt;
-        xs *= 1.0 - smoothstep(float(SWASH_EVENTS - 1), float(SWASH_EVENTS), since);
-        float behind = xs - s0;
-        float t = max(age, SWASH_LENS_TIME);
-        // Past the edge the sheet dives under the sand at twice the beach's slope, so the edge falls smoothly between
-        // vertices rather than on them.
-        float lens = behind > 0.0 ? min(max(behind * behind / (9.0 * 9.81 * t * t), SWASH_SHEET * slope * behind), SWASH_LENS_MAX) : 2.0 * slope * behind;
-        float surface = -d + SWASH_MIN_SHEET + lens;
-        if (surface > sheet)
-        {
-            sheet = surface;
-            gSwashEdge = behind > 0.0 ? 1.0 - min(behind / SWASH_EDGE_WIDTH, 1.0) : 0.0;
-        }
-
-        if (d < 0.0 && age < tUp && behind >= 0.0 && behind < SWASH_FOAM_FRONT)
-            front = max(front, (1.0 - behind / SWASH_FOAM_FRONT) * smoothstep(0.0, SWASH_FOAM_U0, u0));
+        float openFront;
+        float openEdge;
+        float open = swashRun(b, b.spatial + frame.carrier.y, omega, openFront, openEdge);
+        sheet += (1.0 - weight) * open;
+        front += (1.0 - weight) * openFront;
+        gSwashEdge += (1.0 - weight) * openEdge;
     }
 
     return sheet;
@@ -261,6 +307,7 @@ struct OceanPoint
     float shore;       // share of the FFT slopes drawn: 0 on the beach .. 1 on open water
     float surfFoam;    // whitewater left behind by the surf (ocean_surf_foam.comp)
     float breakFoam;   // whitewater of the breaking face (ocean_breaker.glsl)
+    vec2 coast;        // x = the share of the breaking faces this grid draws, y = 1 near a coast region (ocean.frag's far band)
     float swashEdge;   // 1 at the edge of the swash sheet drawn here, 0 half a metre behind it or where the sea is the surface (ocean.frag's edge line)
 };
 
@@ -374,7 +421,8 @@ OceanPoint oceanAt(vec2 x0, float se)
 
     // The breaking face over the coast regions: the surf carrier and its breakers, on top of the swell. Drawn only: the
     // CPU's OceanSurface does not have it.
-    Face face = coastFace(x0, se);
+    vec2 coast;
+    Face face = coastFace(x0, se, coast.x, coast.y);
     float height = sw.height + face.height;
 
     // Swash is metres wide: a grid this coarse can't show it, so it fades out with the spacing (smoothly, so no seam
@@ -429,6 +477,7 @@ OceanPoint oceanAt(vec2 x0, float se)
     p.shore = shore;
     p.surfFoam = surfFoamAt(x0);
     p.breakFoam = face.foam;
+    p.coast = coast;
     p.swashEdge = swashEdge;
     return p;
 }
