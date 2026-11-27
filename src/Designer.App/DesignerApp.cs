@@ -532,84 +532,69 @@ public sealed partial class DesignerApp : DesignApp
         if (InteriorView)
             _meshEdit.Enabled = false;
 
+        // One selection, shown in Properties whatever kind it is.
+        KeepOneSelected();
+        RouteProperties();
+        _interiorPanel.BeginFrame();
         _panels.Locked = InteriorView;
         _panels.Draw(_session, _stats, _meshEdit);
+        DrawTree();
         _viewOverlay.Draw(_session, _meshEdit, _camera, _panels.Cutaway, editable: !InteriorView);
         var workspace = _active.Component;
         _prefabPanel.BeginFrame();
         var viewport = ViewportSize;
 
-        // The selection's menu opens on a right-click in the view (a right-drag still orbits).
+        // The right-click menu: on the hull, the selection's actions and "Add here"; on empty space, Add.
         ContextBar.Track(!io.WantCaptureMouse);
+        PlaceMenu();
 
         if (workspace is not null)
         {
             workspace.DrawPanels(_session);
-            workspace.DrawContext(_session, _camera, viewport);
         }
         else
         {
-            _prefabPanel.Draw(_session);
-            _interiorPanel.Draw(_session);
-
             if (_interiorPanel.EditProfileRequest >= 0)
                 (_profilesPanel.Selected, _profilesPanel.Focus) = (_interiorPanel.EditProfileRequest, true);
             else if (_panels.EditProfileRequest >= 0)
                 (_profilesPanel.Selected, _profilesPanel.Focus) = (_panels.EditProfileRequest, true);
 
             _profilesPanel.Draw(_session);
-            _windowsPanel.Draw(_session);
-            _decalsPanel.Draw(_session);
             _paintPanel.Draw(_session);
-            _interiorPanel.DrawContext(_session, _camera, viewport);
-            _windowsPanel.DrawContext(_session, _camera, viewport);
-            _decalsPanel.DrawContext(_session, _camera, viewport);
-            _prefabPanel.DrawContext(_session, _camera, viewport);
         }
 
-        // One bar at a time: a picked node, window, placement or part outranks the selected solid.
-        if (!OtherSelected)
-            _panels.DrawContext(_session, _meshEdit, _camera, viewport);
+        if (ContextBar.BeginShared())
+        {
+            if (_addOnSurface)
+            {
+                if (workspace is not null)
+                {
+                    workspace.DrawContext(_session, _camera, viewport);
+                }
+                else
+                {
+                    _interiorPanel.DrawContext(_session, _camera, viewport);
+                    _windowsPanel.DrawContext(_session, _camera, viewport);
+                    _decalsPanel.DrawContext(_session, _camera, viewport);
+                    _prefabPanel.DrawContext(_session, _camera, viewport);
+                }
+
+                // A picked node, window, placement or part outranks the selected solid.
+                if (!OtherSelected)
+                    _panels.DrawContext(_session, _meshEdit, _camera, viewport);
+            }
+
+            AddMenuItems();
+            ContextBar.EndShared();
+        }
+
+        DrawAddDialog();
     }
 
     /// <summary>A picked node, window, placement or part: it has the gizmo and the menu, not the selected solid.</summary>
     private bool OtherSelected => _active.Component is { } workspace
         ? workspace.SelectedPart != 0 || workspace.SelectedNode >= 0
         : _interiorPanel.SelectedNode >= 0 || _windowsPanel.Selected != 0 || _decalsPanel.Selected != 0 || _prefabPanel.Selected != 0;
-
-    /// <summary>The Add menu: new things go at the camera target (windows wait for a click on the hull).</summary>
-    private void HandleAdd()
-    {
-        var at = new Vector3d(_camera.Target.X, _camera.Target.Y, _camera.Target.Z);
-
-        switch (_bar.Add)
-        {
-            case AddKind.Box:
-                _panels.AddSolid(_session, SolidShape.Box);
-                break;
-            case AddKind.Wedge:
-                _panels.AddSolid(_session, SolidShape.Wedge);
-                break;
-            case AddKind.Cylinder:
-                _panels.AddSolid(_session, SolidShape.Cylinder);
-                break;
-            case AddKind.Hallway:
-                _interiorPanel.AddHallway(_session, at);
-                break;
-            case AddKind.Window:
-                _windowsPanel.StartPlacing();
-                break;
-            case AddKind.Decal:
-                _decalsPanel.StartPlacing();
-                break;
-            case AddKind.Chamber or AddKind.Nozzle or AddKind.Injector or AddKind.Igniter when _active.Component is { } component:
-                component.AddPart(_session, _bar.Add switch { AddKind.Chamber => PartKind.Chamber, AddKind.Nozzle => PartKind.Nozzle, AddKind.Injector => PartKind.Injector, _ => PartKind.Igniter });
-                break;
-            case AddKind.Pipe when _active.Component is { } component:
-                component.AddPipe(_session, at);
-                break;
-        }
-    }
 
     protected override void AfterPanels(ImGuiIOPtr io)
     {

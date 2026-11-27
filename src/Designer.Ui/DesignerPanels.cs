@@ -101,6 +101,15 @@ public sealed class DesignerPanels
     /// <summary>The interior view: the hull's panels are shown but cannot change anything.</summary>
     public bool Locked;
 
+    /// <summary>The selected stroke's properties (Properties, when a stroke is selected).</summary>
+    public void DrawStrokeProperties(DesignSession session) => _brushesPanel.DrawStrokeProperties(session, Strokes);
+
+    /// <summary>A new stroke's brush and material, and Draw / Finish / Cancel (the Add dialog).</summary>
+    public void DrawAddStroke(DesignSession session) => _brushesPanel.DrawAddStroke(session, Strokes);
+
+    /// <summary>Set by the host each frame when something other than a solid is selected: Properties shows this instead.</summary>
+    public Action<DesignSession>? OtherProperties;
+
     /// <summary>Set for one frame when a room's "Edit profile" asks the Profiles tab to show its wall profile.</summary>
     public int EditProfileRequest { get; private set; } = -1;
 
@@ -109,7 +118,6 @@ public sealed class DesignerPanels
         EditProfileRequest = -1;
         ImGui.BeginDisabled(Locked);
         DrawTools(session, stats);
-        DrawSolidList(session);
         DrawProperties(session, meshEdit);
         _meshPanel.Draw(session, meshEdit);
 
@@ -141,11 +149,6 @@ public sealed class DesignerPanels
 
             if (stats.Message.Length > 0)
                 ImGui.TextWrapped($"{stats.Message}");
-
-            ImGui.SeparatorText("New solids (Add menu)"u8);
-            ImGui.Checkbox("Subtract"u8, ref _newSubtract);
-            ImGui.SameLine();
-            MaterialCombo("Material##new"u8, ref _newMaterial);
 
             ImGui.SeparatorText("Snap"u8);
             ImGui.Checkbox("Grid"u8, ref session.Snap.Enabled);
@@ -195,42 +198,32 @@ public sealed class DesignerPanels
         ImGui.End();
     }
 
-    /// <summary>Add menu: a solid at the camera target with the new-solid settings, selected.</summary>
+    private float _newSize = -1f;
+
+    /// <summary>The options a new solid gets (in the Add dialog): cut or add, material, size.</summary>
+    public void DrawAddSolidOptions()
+    {
+        // A ship's new solid starts at 4 m; a component's housing pieces are much smaller.
+        if (_newSize < 0f)
+            _newSize = Workspace == Workspace.Component ? 0.25f : 4f;
+
+        ImGui.Checkbox("Subtract (cut)"u8, ref _newSubtract);
+        MaterialCombo("Material##new"u8, ref _newMaterial);
+        DesignerStyle.ItemWidth(90f);
+        ImGui.InputFloat("Size m##new"u8, ref _newSize, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None);
+        _newSize = Math.Clamp(_newSize, 0.05f, 200f);
+    }
+
+    /// <summary>A solid at <see cref="PlaceAt"/> with the new-solid options, selected.</summary>
     public void AddSolid(DesignSession session, SolidShape shape)
     {
-        // A ship's new solid is 4 m; a component's housing pieces are much smaller.
-        var size = Workspace == Workspace.Component ? 0.25f : 4f;
-        var half = (ushort)(size * 0.5f * HullSolid.HalfUnitsPerMetre);
+        var size = _newSize > 0f ? _newSize : Workspace == Workspace.Component ? 0.25f : 4f;
+        var half = (ushort)Math.Clamp(size * 0.5f * HullSolid.HalfUnitsPerMetre, 1, ushort.MaxValue);
         var material = _catalog.All.Count > 0 ? _catalog.All[Math.Clamp(_newMaterial, 0, _catalog.All.Count - 1)].Id : default;
         var units = HullSolid.PositionUnitsPerMetre;
         HullCommands.AddSolid(session, shape, _newSubtract ? SolidOp.Subtract : SolidOp.Add,
             (int)Math.Round(PlaceAt.X * units), (int)Math.Round(PlaceAt.Y * units), (int)Math.Round(PlaceAt.Z * units),
             half, half, half, SolidRotation.Identity, material);
-    }
-
-    private void DrawSolidList(DesignSession session)
-    {
-
-        if (ImGui.Begin("Solids"u8))
-        {
-            var solids = session.Doc.Solids.AsSpan();
-
-            for (var i = 0; i < solids.Length; i++)
-            {
-                ref readonly var b = ref solids[i];
-                var interior = (b.Flags & SolidFlags.Interior) != 0 ? " interior" : "";
-
-                if (ImGui.Selectable($"{i,3}  #{b.Id}  {OpName(b.Op)} {ShapeName(b.Shape)}{interior}##{b.Id}", session.Selection.Contains(b.Id), ImGuiSelectableFlags.None, default))
-                {
-                    if (ImGui.GetIO().KeyCtrl)
-                        session.Selection.Toggle(b.Id);
-                    else
-                        session.Selection.Set(b.Id);
-                }
-            }
-        }
-
-        ImGui.End();
     }
 
     /// <summary>A box room's walls: plain, or one of the plan's wall profiles (made in the Profiles tab).</summary>
@@ -274,11 +267,27 @@ public sealed class DesignerPanels
     {
         if (ImGui.Begin("Properties"u8))
         {
+            // Another kind of object is selected (from the tree or the view): its own properties.
+            if (OtherProperties is not null)
+            {
+                // The interior view locks only the hull's solids.
+                if (Locked)
+                    ImGui.EndDisabled();
+
+                OtherProperties(session);
+
+                if (Locked)
+                    ImGui.BeginDisabled(true);
+
+                ImGui.End();
+                return;
+            }
+
             var id = session.Selection.Primary;
 
             if (!session.TryGetSolid(id, out var solid))
             {
-                ImGui.Text("No solid selected"u8);
+                ImGui.TextDisabled("Nothing selected: pick something in the Objects tree or the view."u8);
                 ImGui.End();
                 return;
             }

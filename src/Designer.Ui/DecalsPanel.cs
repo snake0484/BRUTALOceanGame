@@ -7,10 +7,10 @@ using static BrutalGame.Ships.HullSurface;
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>
-/// The Decals panel and view tool. A decal is a game image, or a shape (rectangle, ellipse, triangle, diamond) filled with
-/// one of the ship's paint slots, projected onto the hull and the brushes on it. Place one by clicking the hull (Add >
-/// Decal); pick it in the list or by its centre in the view; choose its image or shape and paint, size, how deep it
-/// reaches, its turn and opacity, or move it by clicking a new spot.
+/// Decals: the view tool, the selected decal's properties, and the options new ones get (in the Add dialog). A decal is a
+/// game image, or a shape (rectangle, ellipse, triangle, diamond) filled with one of the ship's paint slots, projected onto
+/// the hull and the brushes on it. Pick one in the object tree or by its centre in the view; choose its image or shape and
+/// paint, size, how deep it reaches, its turn and opacity, or move it by clicking a new spot.
 /// </summary>
 public sealed class DecalsPanel
 {
@@ -54,33 +54,40 @@ public sealed class DecalsPanel
 
     public void Reset() => (Selected, _placing, _surface, _surfaceVersion) = (0, Placing.None, null, -1);
 
-    public void Draw(DesignSession session)
+    /// <summary>The selected decal's properties (in the Properties tab).</summary>
+    public void DrawProperties(DesignSession session)
     {
-        ImGui.SetNextWindowDockID(new ImGuiID(ShipLayout.EditDock), ImGuiCond.FirstUseEver);
+        var set = session.Doc.Decals;
+        var index = set?.IndexOf(Selected) ?? -1;
 
-        if (ImGui.Begin("Decals"u8))
-        {
-            ImGui.TextWrapped("A decal projects a game image, or a shape in one of the ship's paints, onto the hull and the brushes on it."u8);
+        if (index >= 0)
+            DrawDecal(session, set!.Decals[index]);
 
-            if (_placing == Placing.New)
-                ImGui.TextColored(new Brutal.Numerics.float4(0.6f, 1f, 0.7f, 1f), "Click the hull to place a decal (Esc stops)."u8);
-            else
-                ImGui.TextDisabled("Add > Decal, then click the hull."u8);
+        if (_message.Length > 0)
+            ImGui.TextWrapped($"{_message}");
+    }
 
-            DrawList(session);
-            var set = session.Doc.Decals;
-            var index = set?.IndexOf(Selected) ?? -1;
+    /// <summary>The options new decals get (in the Add dialog).</summary>
+    public void DrawAddOptions(DesignSession session)
+    {
+        ImGui.TextWrapped("A decal projects a game image, or a shape in one of the ship's paints, onto the hull and the brushes on it."u8);
+        DrawTemplate(session);
+    }
 
-            if (index >= 0)
-                DrawDecal(session, set!.Decals[index]);
-            else
-                DrawTemplate(session);
+    /// <summary>A short name for the object tree.</summary>
+    public string Label(DesignSession session, uint id)
+    {
+        var set = session.Doc.Decals;
+        var index = set?.IndexOf(id) ?? -1;
+        return index < 0 ? $"Decal #{id}" : $"Decal, {Name(set!.Decals[index], session.Doc.Paint)}  #{id}";
+    }
 
-            if (_message.Length > 0)
-                ImGui.TextWrapped($"{_message}");
-        }
-
-        ImGui.End();
+    /// <summary>A decal with the new-decal options at <paramref name="at"/>, facing <paramref name="normal"/>; selected.</summary>
+    public void PlaceAt(DesignSession session, Vector3d at, Vector3d normal)
+    {
+        var image = _catalog.All.Count > 0 ? _catalog.All[Math.Clamp(_templateAsset, 0, _catalog.All.Count - 1)].Id : default;
+        Selected = DecalCommands.AddDecal(session, at, normal, image, _template);
+        _message = Selected == 0 ? DecalCommands.LastError : "";
     }
 
     private string Name(uint asset) => _catalog.IndexOf(new DefId(asset)) is var i and >= 0 ? _catalog.All[i].Name : "missing image";
@@ -123,28 +130,9 @@ public sealed class DecalsPanel
         return changed;
     }
 
-    private void DrawList(DesignSession session)
-    {
-        ImGui.SeparatorText("Decals"u8);
-        var set = session.Doc.Decals;
-
-        if (set is null || set.IsEmpty)
-        {
-            ImGui.TextDisabled("None yet."u8);
-            return;
-        }
-
-        foreach (var d in set.Decals)
-        {
-            if (ImGui.Selectable($"#{d.Id}  {Name(d, session.Doc.Paint)} {d.WidthMm / 1000.0:F2} x {d.HeightMm / 1000.0:F2} m##decal{d.Id}", d.Id == Selected, ImGuiSelectableFlags.None, default))
-                Selected = d.Id == Selected ? 0 : d.Id;
-        }
-    }
-
     /// <summary>The image or shape and size new decals get, while none is selected.</summary>
     private void DrawTemplate(DesignSession session)
     {
-        ImGui.SeparatorText("New decals"u8);
         var shape = _template.Shape;
         var slot = (int)_template.Paint;
 

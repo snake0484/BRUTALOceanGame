@@ -43,28 +43,58 @@ public sealed class PrefabPanel
         RefreshRequest = false;
     }
 
-    public void Draw(DesignSession session)
+    private PrefabNode? _addPick;
+
+    /// <summary>The options new placements get (in the Add dialog): which component, from the library.</summary>
+    public void DrawAddOptions()
     {
-        if (ImGui.Begin("Components"u8))
-        {
-            ImGui.TextDisabled("Drag a component into the view to place it."u8);
+        ImGui.TextWrapped("A component: a prefab from the library, cut into the hull as a bay. Its insides change only in the component editor."u8);
 
-            if (ImGui.Button("Refresh library"u8))
-                RefreshRequest = true;
+        if (ImGui.Button("Refresh library"u8))
+            RefreshRequest = true;
 
-            foreach (var child in _library.Root.Children)
-                Tree(child);
+        foreach (var child in _library.Root.Children)
+            Tree(child);
 
-            DrawPlacements(session);
+        if (_addPick is null)
+            ImGui.TextDisabled("Pick a component."u8);
+    }
 
-            if (_message.Length > 0)
-                ImGui.TextWrapped($"{_message}");
-        }
+    /// <summary>The component picked in the Add dialog, or null.</summary>
+    public bool HasAddPick => _addPick?.Prefab is not null;
 
-        ImGui.End();
+    /// <summary>The picked component placed at <paramref name="at"/> (snapped); selected.</summary>
+    public void PlaceAt(DesignSession session, Vector3d at, double step)
+    {
+        if (_addPick?.Prefab is not { } prefab)
+            return;
 
-        if (_dragging is not null)
-            ImGui.SetTooltip($"Place {_dragging.Name}");
+        var snapped = step > 0 ? new Vector3d(Math.Round(at.X / step) * step, Math.Round(at.Y / step) * step, Math.Round(at.Z / step) * step) : at;
+        Selected = ComponentCommands.PlacePrefab(session, prefab, snapped);
+        _message = Selected == 0 ? ComponentCommands.LastError : $"Placed {_addPick.Name}.";
+    }
+
+    /// <summary>A short name for the object tree.</summary>
+    public static string Label(DesignSession session, uint id)
+    {
+        var data = session.Doc.Components;
+        var index = data?.IndexOfPlacement(id) ?? -1;
+
+        if (index < 0)
+            return $"Component #{id}";
+
+        var p = data!.Placements[index];
+        var name = session.Doc.Prefabs.TryGetValue(p.Prefab, out var prefab) && prefab.Meta.Name.Length > 0 ? prefab.Meta.Name : $"{p.Prefab:x16}";
+        return $"Component, {name}  #{id}";
+    }
+
+    /// <summary>The selected placement's properties (in the Properties tab).</summary>
+    public void DrawProperties(DesignSession session)
+    {
+        DrawPlacement(session);
+
+        if (_message.Length > 0)
+            ImGui.TextWrapped($"{_message}");
     }
 
     private void Tree(PrefabNode node)
@@ -82,30 +112,23 @@ public sealed class PrefabPanel
             return;
         }
 
-        ImGui.TreeNodeEx($"{node.Name}##{node.GetHashCode()}", ImGuiTreeNodeFlags.Leaf | ImGuiTreeNodeFlags.NoTreePushOnOpen | ImGuiTreeNodeFlags.SpanAvailWidth);
+        var flags = ImGuiTreeNodeFlags.Leaf | ImGuiTreeNodeFlags.NoTreePushOnOpen | ImGuiTreeNodeFlags.SpanAvailWidth;
 
-        if (ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left, -1f))
-            _dragging = node;
+        if (ReferenceEquals(node, _addPick))
+            flags |= ImGuiTreeNodeFlags.Selected;
+
+        ImGui.TreeNodeEx($"{node.Name}##{node.GetHashCode()}", flags);
+
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Left))
+            _addPick = node;
     }
 
-    private void DrawPlacements(DesignSession session)
+    private void DrawPlacement(DesignSession session)
     {
         var data = session.Doc.Components;
-        ImGui.SeparatorText("Placed"u8);
 
-        if (data is null || data.Placements.Count == 0)
-        {
-            ImGui.TextDisabled("Nothing placed yet."u8);
+        if (data is null)
             return;
-        }
-
-        foreach (var p in data.Placements)
-        {
-            var name = session.Doc.Prefabs.TryGetValue(p.Prefab, out var prefab) && prefab.Meta.Name.Length > 0 ? prefab.Meta.Name : $"{p.Prefab:x16}";
-
-            if (ImGui.Selectable($"#{p.Id}  {name}##placement{p.Id}", p.Id == Selected, ImGuiSelectableFlags.None, default))
-                Selected = p.Id;
-        }
 
         var index = data.IndexOfPlacement(Selected);
 

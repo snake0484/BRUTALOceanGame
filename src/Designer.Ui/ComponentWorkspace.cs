@@ -168,7 +168,7 @@ public sealed class ComponentWorkspace
             ImGui.SeparatorText("Parts"u8);
 
             if (data is null || data.Parts.Count == 0)
-                ImGui.TextDisabled("No parts yet (Add > part). Parts snap together port to port when moved close."u8);
+                ImGui.TextDisabled("No parts yet (right-click empty space in the view > a part). Parts snap together port to port when moved close."u8);
 
             if (data is not null)
             {

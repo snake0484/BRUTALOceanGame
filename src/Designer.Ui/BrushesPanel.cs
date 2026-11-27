@@ -82,7 +82,7 @@ public sealed class BrushesPanel
         {
             var set = session.Doc.Brushes;
             DrawBrushes(session, set, tool);
-            DrawStrokes(session, session.Doc.Brushes, tool);
+            ImGui.TextDisabled("Draw a stroke: right-click empty space in the view > Brush stroke. Strokes are in the object tree."u8);
 
             var message = tool.Message.Length > 0 ? tool.Message : _message;
 
@@ -424,10 +424,31 @@ public sealed class BrushesPanel
         return changed;
     }
 
-    private void DrawStrokes(DesignSession session, HullBrushSet? set, StrokeTool tool)
+    /// <summary>The options a new stroke gets (in the Add dialog): which brush, what material; then Draw, Finish, Cancel.</summary>
+    public void DrawAddStroke(DesignSession session, StrokeTool tool)
     {
-        ImGui.SeparatorText("Strokes"u8);
-        var canDraw = tool.Brush >= 0 && set is not null && tool.Brush < set.Brushes.Count;
+        var set = session.Doc.Brushes;
+
+        if (set is null || set.Brushes.Count == 0)
+        {
+            ImGui.TextDisabled("No brushes yet: make one in the Brushes tab."u8);
+            return;
+        }
+
+        var names = new string[set.Brushes.Count];
+
+        for (var i = 0; i < names.Length; i++)
+            names[i] = $"{i + 1}  {KindNames[(int)set.Brushes[i].Kind]}";
+
+        var brush = Math.Max(tool.Brush, 0);
+        DesignerStyle.ItemWidth(160f);
+
+        if (Combo("Brush##addstroke"u8, ref brush, names))
+            Pick(brush, tool);
+        else if (tool.Brush < 0)
+            Pick(brush, tool);
+
+        var canDraw = tool.Brush >= 0 && tool.Brush < set.Brushes.Count;
         ImGui.BeginDisabled(!canDraw && !tool.Drawing);
 
         if (!tool.Drawing)
@@ -462,21 +483,32 @@ public sealed class BrushesPanel
 
         if (tool.Drawing)
             ImGui.TextDisabled("Click on the hull to add points. Double click or Enter finishes."u8);
+    }
+
+    /// <summary>A short name for the object tree.</summary>
+    public static string Label(DesignSession session, uint id)
+    {
+        var set = session.Doc.Brushes;
+        var index = set?.IndexOfStroke(id) ?? -1;
+
+        if (index < 0)
+            return $"Stroke #{id}";
+
+        var s = set!.Strokes[index];
+        var kind = s.Brush < set.Brushes.Count ? KindNames[(int)set.Brushes[s.Brush].Kind].ToLowerInvariant() : "?";
+        return $"Stroke, brush {s.Brush + 1} ({kind}), {s.Points.Count} points  #{id}";
+    }
+
+    /// <summary>The selected stroke's properties (in the Properties tab).</summary>
+    public void DrawStrokeProperties(DesignSession session, StrokeTool tool)
+    {
+        if (tool.FinishRequested)
+            Finish(session, tool);
+
+        var set = session.Doc.Brushes;
 
         if (set is null)
             return;
-
-        for (var i = 0; i < set.Strokes.Count; i++)
-        {
-            var s = set.Strokes[i];
-            var name = $"#{s.Id}  brush {s.Brush + 1}, {s.Points.Count} points";
-
-            if (ImGui.Selectable($"{name}##stroke{s.Id}", s.Id == tool.Selected, ImGuiSelectableFlags.None, default))
-            {
-                tool.Selected = s.Id;
-                tool.Drawing = false;
-            }
-        }
 
         var index = set.IndexOfStroke(tool.Selected);
 
@@ -492,7 +524,7 @@ public sealed class BrushesPanel
             _scale = stroke.Scale / (float)HullStroke.UnitScale;
         }
 
-        ImGui.SeparatorText("Selected stroke"u8);
+        ImGui.SeparatorText($"Stroke #{stroke.Id}");
         var brushIndex = (int)stroke.Brush;
         var names = new string[set.Brushes.Count];
 

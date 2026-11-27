@@ -123,6 +123,15 @@ profile; any angle, each hallway with its own gravity (a ship may have several),
   half to the ceiling, so taller rooms stretch the middle; lower rooms squeeze it. Presets: straight, chamfered, coved,
   sloped; "Make a wall from half of it" takes a hallway outline's right side. Library files carry the kind.
   `--demo-walls` shows a coved box room and a round one.
+- **Objects, Properties and Add (2026-11-27):** the **Objects** tab is the ship as a tree: each solid a hull node, with the
+  windows, decals, brush strokes and placed components on it as its sub parts (the solid a short ray back along their
+  normal hits; worked out when the plan changes); hallways and anything on no solid under the ship. One thing is selected
+  at a time (solids may be several), from the tree or the view, and **Properties** shows it whatever its kind. A
+  **right-click** in the view adds: on empty space the Add menu (new things at the camera target, surface things by a
+  click on the hull), on the hull the selection's actions and "Add here" (at the point clicked). Choosing an item opens a
+  small Add dialog with its options (solid cut/add, material, size; hallway profile and length; window shape, size and
+  pane; decal image or shape and paint; stroke brush and material, then draw; component from the library); once added,
+  it is changed in Properties. Brushes, Profiles, Paint and Hull layers stay as their own tabs.
 - **Interior view** (top bar, or I): the hull is drawn see-through (both sides of every face, blended, no depth
   writes, stronger edge on) and locked: hull panels greyed, no solid picking, gizmos, strokes or hull keys. Hallways,
   placed components and parts inside stay editable.

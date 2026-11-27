@@ -8,9 +8,10 @@ using static BrutalGame.Ships.HullSurface;
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>
-/// The Windows panel and view tool. Place a window by clicking the hull: it cuts through to the space behind and its pane
-/// follows the hull's shape. Pick one in the list or by its centre in the view; edit its shape, size, how deep the opening
-/// goes, the pane's thickness and material, turn it, or move it by clicking a new spot.
+/// Windows: the view tool, the selected window's properties, and the options new ones get (in the Add dialog). A window
+/// cuts through the hull to the space behind and its pane follows the hull's shape. Pick one in the object tree or by its
+/// centre in the view; edit its shape, size, how deep the opening goes, the pane's thickness and material, turn it, or
+/// move it by clicking a new spot.
 /// </summary>
 public sealed class WindowsPanel
 {
@@ -47,59 +48,44 @@ public sealed class WindowsPanel
 
     public void Reset() => (Selected, _placing, _surface, _surfaceVersion) = (0, Placing.None, null, -1);
 
-    public void Draw(DesignSession session)
+    /// <summary>The selected window's properties (in the Properties tab).</summary>
+    public void DrawProperties(DesignSession session)
     {
-        ImGui.SetNextWindowDockID(new ImGuiID(ShipLayout.InteriorDock), ImGuiCond.FirstUseEver);
-
-        if (ImGui.Begin("Windows"u8))
-        {
-            ImGui.TextWrapped("A window cuts through the hull to the space behind it; its pane takes the hull's shape."u8);
-
-            if (_placing == Placing.New)
-                ImGui.TextColored(new Brutal.Numerics.float4(0.6f, 1f, 0.7f, 1f), "Click the hull to place a window (Esc stops)."u8);
-            else
-                ImGui.TextDisabled("Add > Window, then click the hull."u8);
-
-            DrawList(session);
-            var set = session.Doc.Windows;
-            var index = set?.IndexOf(Selected) ?? -1;
-
-            if (index >= 0)
-                DrawWindow(session, set!.Windows[index]);
-            else
-                DrawTemplate();
-
-            if (_message.Length > 0)
-                ImGui.TextWrapped($"{_message}");
-        }
-
-        ImGui.End();
-    }
-
-    private void DrawList(DesignSession session)
-    {
-        ImGui.SeparatorText("Windows"u8);
         var set = session.Doc.Windows;
+        var index = set?.IndexOf(Selected) ?? -1;
 
-        if (set is null || set.IsEmpty)
-        {
-            ImGui.TextDisabled("None yet."u8);
-            return;
-        }
+        if (index >= 0)
+            DrawWindow(session, set!.Windows[index]);
 
-        foreach (var w in set.Windows)
-        {
-            var material = w.Material < session.Doc.Materials.Count && _catalog.TryGet(session.Doc.Materials[w.Material], out var m) ? m.Name : "?";
-
-            if (ImGui.Selectable($"#{w.Id}  {WindowGeometry.ShapeNames[(int)w.Shape]} {w.WidthMm / 1000.0:F2} x {w.HeightMm / 1000.0:F2} m, {material}##win{w.Id}", w.Id == Selected, ImGuiSelectableFlags.None, default))
-                Selected = w.Id == Selected ? 0 : w.Id;
-        }
+        if (_message.Length > 0)
+            ImGui.TextWrapped($"{_message}");
     }
 
-    /// <summary>The shape new windows get, while none is selected.</summary>
-    private void DrawTemplate()
+    /// <summary>A short name for the object tree.</summary>
+    public string Label(DesignSession session, uint id)
     {
-        ImGui.SeparatorText("New windows"u8);
+        var set = session.Doc.Windows;
+        var index = set?.IndexOf(id) ?? -1;
+
+        if (index < 0)
+            return $"Window #{id}";
+
+        var w = set!.Windows[index];
+        return $"Window, {WindowGeometry.ShapeNames[(int)w.Shape].ToLowerInvariant()} {w.WidthMm / 1000.0:F2} x {w.HeightMm / 1000.0:F2} m  #{w.Id}";
+    }
+
+    /// <summary>A window with the new-window options at <paramref name="at"/>, facing <paramref name="normal"/>; selected.</summary>
+    public void PlaceAt(DesignSession session, Vector3d at, Vector3d normal)
+    {
+        var material = _catalog.All[_templateMaterial < 0 ? FirstGlazing() : _templateMaterial].Id;
+        Selected = WindowCommands.AddWindow(session, at, normal, material, _template);
+        _message = Selected == 0 ? WindowCommands.LastError : "";
+    }
+
+    /// <summary>The options new windows get (in the Add dialog).</summary>
+    public void DrawAddOptions()
+    {
+        ImGui.TextWrapped("A window cuts through the hull to the space behind it; its pane takes the hull's shape."u8);
         Shape(ref _template.Shape, out _);
         var width = _template.WidthMm / 1000f;
         var height = _template.HeightMm / 1000f;

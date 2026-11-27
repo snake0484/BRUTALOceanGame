@@ -42,57 +42,70 @@ public sealed class InteriorPanel
 
     public void Reset() => (Selected, SelectedNode) = (0, -1);
 
-    /// <summary>Add menu: a level hallway at <paramref name="at"/>, 4 m long, selected with its far node.</summary>
+    /// <summary>Clears the one-frame request (before the panels draw).</summary>
+    public void BeginFrame() => EditProfileRequest = -1;
+
+    private int _addProfile = -1;
+    private float _addLength = 4f;
+
+    /// <summary>A level hallway at <paramref name="at"/> with the new-hallway options, selected with its far node.</summary>
     public void AddHallway(DesignSession session, Vector3d at)
     {
         var material = _catalog.All.Count > 0 ? _catalog.All[0].Id : default;
-        Selected = InteriorCommands.AddHallway(session, at, Add(at, new Vector3d(0, 0, 4)), material);
+        Selected = InteriorCommands.AddHallway(session, at, Add(at, new Vector3d(0, 0, Math.Clamp(_addLength, 0.5f, 100f))), material, _addProfile);
         SelectedNode = Selected != 0 ? 1 : -1;
-        _message = Selected == 0 ? InteriorCommands.LastError : "Drag its nodes in the view; the bar beside a node adds more.";
+        _message = Selected == 0 ? InteriorCommands.LastError : "Drag its nodes in the view; right-click a node to add more.";
     }
 
-    public void Draw(DesignSession session)
+    /// <summary>The options new hallways get (in the Add dialog): profile and length.</summary>
+    public void DrawAddOptions(DesignSession session)
+    {
+        ImGui.TextWrapped($"A walkable space cut out of the hull along a line of nodes. A person needs {HallwayGeometry.MinClearWidth:F1} x {HallwayGeometry.MinClearHeight:F1} m clear; each further {HallwayGeometry.LaneWidth:F1} m of width lets one more pass.");
+        var profiles = session.Doc.Interior?.Profiles;
+        var name = _addProfile >= 0 && profiles is not null && _addProfile < profiles.Count ? profiles[_addProfile].Name : $"{InteriorCommands.DefaultProfileName} (new)";
+        DesignerStyle.ItemWidth(220f);
+
+        if (ImGui.BeginCombo("Profile##addhall"u8, $"{name}", ImGuiComboFlags.None))
+        {
+            for (var i = 0; i < (profiles?.Count ?? 0); i++)
+            {
+                if (profiles![i].Kind == ProfileKind.Hallway && ImGui.Selectable($"{profiles[i].Name}##addprof{i}", i == _addProfile, ImGuiSelectableFlags.None, default))
+                    _addProfile = i;
+            }
+
+            ImGui.EndCombo();
+        }
+
+        DesignerStyle.ItemWidth(90f);
+        ImGui.InputFloat("Length m##addhall"u8, ref _addLength, 0f, 0f, "%.1f"u8, ImGuiInputTextFlags.None);
+    }
+
+    /// <summary>A short name for the object tree.</summary>
+    public string Label(DesignSession session, uint id)
+    {
+        var interior = session.Doc.Interior;
+        var index = interior?.IndexOf(id) ?? -1;
+
+        if (index < 0)
+            return $"Hallway #{id}";
+
+        var h = interior!.Hallways[index];
+        var profile = interior.ProfileOf(h);
+        return $"Hallway {h.Length():F1} m, {profile?.Name ?? "?"}  #{id}";
+    }
+
+    /// <summary>The selected hallway's properties (in the Properties tab).</summary>
+    public void DrawProperties(DesignSession session)
     {
         EditProfileRequest = -1;
-        ImGui.SetNextWindowDockID(new ImGuiID(ShipLayout.InteriorDock), ImGuiCond.FirstUseEver);
+        var interior = session.Doc.Interior;
+        var index = interior?.IndexOf(Selected) ?? -1;
 
-        if (ImGui.Begin("Interior"u8))
-        {
-            ImGui.TextWrapped($"Hallways are walkable spaces cut out of the hull (Add > Hallway). A person needs {HallwayGeometry.MinClearWidth:F1} m wide by {HallwayGeometry.MinClearHeight:F1} m tall clear; each further {HallwayGeometry.LaneWidth:F1} m of width lets one more pass at once.");
-            var interior = session.Doc.Interior;
-            DrawList(interior);
-            var index = interior?.IndexOf(Selected) ?? -1;
+        if (index >= 0)
+            DrawHallway(session, interior!, interior!.Hallways[index]);
 
-            if (index >= 0)
-                DrawHallway(session, interior!, interior!.Hallways[index]);
-
-            if (_message.Length > 0)
-                ImGui.TextWrapped($"{_message}");
-        }
-
-        ImGui.End();
-    }
-
-    private void DrawList(HullInterior? interior)
-    {
-        ImGui.SeparatorText("Hallways"u8);
-
-        if (interior is null || interior.Hallways.Count == 0)
-        {
-            ImGui.TextDisabled("None yet."u8);
-            return;
-        }
-
-        foreach (var h in interior.Hallways)
-        {
-            var profile = interior.ProfileOf(h);
-            var clear = profile is null ? default : HallwayGeometry.Measure(profile.Points);
-            var label = clear.Fits ? $"{clear.People} abreast" : "too small";
-            var junctions = Enumerable.Range(0, h.Nodes.Count).Count(n => h.Degree(n) >= 3);
-
-            if (ImGui.Selectable($"#{h.Id}  {h.Length():F1} m, {label}{(junctions > 0 ? $", {junctions} junction{(junctions == 1 ? "" : "s")}" : "")}##hall{h.Id}", h.Id == Selected, ImGuiSelectableFlags.None, default))
-                (Selected, SelectedNode) = (h.Id, -1);
-        }
+        if (_message.Length > 0)
+            ImGui.TextWrapped($"{_message}");
     }
 
     private void DrawHallway(DesignSession session, HullInterior interior, HullHallway hallway)
