@@ -28,9 +28,9 @@ public sealed class AeroPanel
     private readonly float[] _liftCurve = new float[CurvePoints];
     private readonly float[] _dragCurve = new float[CurvePoints];
     private readonly float[] _pitchCurve = new float[CurvePoints];
-    private readonly double[] _rotations = new double[HullJointSet.MaxJoints * 9 + 9];
-    private readonly Vector3d[] _translations = new Vector3d[HullJointSet.MaxJoints + 1];
-    private readonly double[] _angles = new double[HullJointSet.MaxJoints + 1];
+    private readonly double[] _rotations = new double[HullRenderer.MaxGroups * 9];
+    private readonly Vector3d[] _translations = new Vector3d[HullRenderer.MaxGroups];
+    private readonly double[] _angles = new double[HullRenderer.MaxGroups];
 
     private float _speed = 100f;
     private float _density = 1.225f;
@@ -177,18 +177,18 @@ public sealed class AeroPanel
                 any = true;
             }
 
-            var low = MomentAt(groups, parts, angles, g, joint.Min / 10.0, com);
-            var high = MomentAt(groups, parts, angles, g, joint.Max / 10.0, com);
+            var low = MomentAt(groups, parts, angles, g, JointPose.Value(joint, joint.Min), com);
+            var high = MomentAt(groups, parts, angles, g, JointPose.Value(joint, joint.Max), com);
             var d = Scale(Sub(high, low), q / 1000);
             ImGui.Text($"Hinge #{joint.Id}: pitch {-d.X:F1}, yaw {d.Y:F1}, roll {d.Z:F1} kN m");
         }
     }
 
-    private Vector3d MomentAt(JointGroups groups, ReadOnlySpan<AeroTable?> parts, ReadOnlySpan<double> angles, int group, double degrees, Vector3d com)
+    private Vector3d MomentAt(JointGroups groups, ReadOnlySpan<AeroTable?> parts, ReadOnlySpan<double> angles, int group, double value, Vector3d com)
     {
         var n = Math.Min(groups.Count, _angles.Length);
         angles[..Math.Min(angles.Length, n)].CopyTo(_angles);
-        _angles[group] = degrees * Math.PI / 180;
+        _angles[group] = value;
         JointPose.Transforms(groups, _angles.AsSpan(0, n), _rotations, _translations);
         Loads(parts, _rotations, _translations, _alpha, _beta, com, out _, out _, out _, out var moment, out _, out _);
         return moment;

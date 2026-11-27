@@ -2,14 +2,15 @@ using System.Buffers.Binary;
 
 namespace BrutalGame.Ships;
 
-/// <summary>A rotor turns without end; a hinge swings between limits.</summary>
-public enum JointKind : byte { Rotor, Hinge }
+/// <summary>A rotor turns without end; a hinge swings between limits; a slider slides along its axis between limits.</summary>
+public enum JointKind : byte { Rotor, Hinge, Slider }
 
 /// <summary>
 /// A movable joint: a pivot and an axis on the hull (or on another joint's moving part), with a motor. The solids that are
 /// its members, and what sits on them (windows, decals, brush strokes, components), are its moving part: a child grid of
-/// the ship with its own mass, turning about the axis. Joints nest at most <see cref="HullJointSet.MaxDepth"/> deep.
-/// Angles are in tenths of a degree, positive right-handed about the axis. Treated as immutable once in a plan.
+/// the ship with its own mass, turning about the axis (or sliding along it). Joints nest at most
+/// <see cref="HullJointSet.MaxDepth"/> deep. Angles are in tenths of a degree, positive right-handed about the axis; a
+/// slider's travel in millimetres along the axis. Treated as immutable once in a plan.
 /// </summary>
 public sealed class HullJoint
 {
@@ -27,14 +28,17 @@ public sealed class HullJoint
     /// <summary>15 degree snap rotation: the axis is it applied to +Y, the zero direction it applied to +Z.</summary>
     public uint Rotation = SolidRotation.Identity;
 
-    /// <summary>Rotor: turning speed, tenths of an rpm (signed). Hinge: swing speed, tenths of a degree per second.</summary>
+    /// <summary>Rotor: turning speed, tenths of an rpm (signed). Hinge: swing speed, tenths of a degree per second. Slider: mm per second.</summary>
     public short Speed = 100;
 
-    /// <summary>The motor's torque, N·m.</summary>
+    /// <summary>The motor's torque, N·m (a slider's force, N).</summary>
     public uint TorqueNm = 10_000;
 
-    /// <summary>Hinge: the limits and the angle it is driven to (tenths of a degree, -1800 to 1800).</summary>
+    /// <summary>Hinge: the limits and the angle it is driven to (tenths of a degree, -1800 to 1800). Slider: the travel and the position it is driven to (mm).</summary>
     public short Min = -900, Max = 900, Target;
+
+    /// <summary>Hinges and sliders stop at limits; rotors do not.</summary>
+    public bool Limited => Kind != JointKind.Rotor;
 
     public Vector3d Pivot => new(X * HullSolid.MetresPerPositionUnit, Y * HullSolid.MetresPerPositionUnit, Z * HullSolid.MetresPerPositionUnit);
 

@@ -7,7 +7,7 @@ using static BrutalGame.Ships.HullSurface;
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>What the designer can select: one thing at a time (solids may be several).</summary>
-public enum ObjectKind : byte { None, Solid, Hallway, Window, Decal, Stroke, Placement, Joint }
+public enum ObjectKind : byte { None, Solid, Hallway, Window, Decal, Stroke, Placement, Joint, Opening }
 
 public readonly record struct ObjectRef(ObjectKind Kind, uint Id)
 {
@@ -19,7 +19,8 @@ public readonly record struct ObjectRef(ObjectKind Kind, uint Id)
 /// sit under the solid they are on (found from the geometry: the solid a short ray back along their normal hits, or for a
 /// component the solid below it), worked out again when the plan changes. Rotors and hinges are nodes holding the solids
 /// that move with them (and the joints mounted on those). Hallways, and anything on no solid, sit under the ship. Click to
-/// select (Ctrl adds solids); the host shows the selection in Properties.
+/// select (Ctrl adds solids); the host shows the selection in Properties. Drag a solid or a joint onto a joint, a solid or
+/// the root to set up the structure (the host applies <see cref="Dropped"/>); what sits on the hull follows its solid.
 /// </summary>
 public sealed class ObjectTree
 {
@@ -36,11 +37,49 @@ public sealed class ObjectTree
     /// <summary>The pick was a Ctrl-click (solids: add to the selection).</summary>
     public bool Toggle { get; private set; }
 
+    /// <summary>
+    /// Set for the frame a drag ends on a node: what was dragged and what it was dropped on (<see cref="ObjectRef.None"/>:
+    /// the root, the ship or component itself).
+    /// </summary>
+    public (ObjectRef Item, ObjectRef Onto)? Dropped { get; private set; }
+
+    private ObjectRef _dragging;
+    private ObjectRef? _target;
+    private static readonly ImColor8 DropLine = new(255, 200, 90, 255);
+
+    /// <summary>What can be dragged: solids and joints (the rest sit on the hull where they are).</summary>
+    private static bool Draggable(ObjectRef item) => item.Kind is ObjectKind.Solid or ObjectKind.Joint;
+
+    /// <summary>What a node can take: solids and joints onto a joint, a solid (its part) or the root.</summary>
+    private static bool Takes(ObjectRef onto) => onto.Kind is ObjectKind.None or ObjectKind.Solid or ObjectKind.Joint;
+
+    /// <summary>After a node's item: starts a drag from it, or marks it as where a drag would drop.</summary>
+    private void DragDrop(ObjectRef item)
+    {
+        if (_dragging.Kind == ObjectKind.None)
+        {
+            if (Draggable(item) && ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left, 6f))
+                _dragging = item;
+
+            return;
+        }
+
+        if (item != _dragging && Takes(item) && ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenBlockedByActiveItem))
+        {
+            _target = item;
+            var min = ImGui.GetItemRectMin();
+            var max = ImGui.GetItemRectMax();
+            ImGui.GetWindowDrawList().AddRect(min, max, DropLine, 2f, ImDrawFlags.None, 1.5f);
+        }
+    }
+
     /// <param name="selected">The current selection (one thing; or the primary solid).</param>
     /// <param name="label">A short description of a non-solid object.</param>
     public void Draw(DesignSession session, ObjectRef selected, Func<ObjectRef, string> label, bool shipItems)
     {
         Picked = ObjectRef.None;
+        Dropped = null;
+        _target = null;
         ImGui.SetNextWindowDockID(new ImGuiID(ShipLayout.InteriorDock), ImGuiCond.FirstUseEver);
 
         // The tree is the main list: in front of its dock's other tabs when the designer starts.
@@ -54,7 +93,10 @@ public sealed class ObjectTree
 
             ImGui.TextDisabled("Right-click empty space in the view to add."u8);
 
-            if (ImGui.TreeNodeEx(shipItems ? "Ship##root"u8 : "Component##root"u8, ImGuiTreeNodeFlags.DefaultOpen | ImGuiTreeNodeFlags.SpanAvailWidth))
+            var rootOpen = ImGui.TreeNodeEx(shipItems ? "Ship##root"u8 : "Component##root"u8, ImGuiTreeNodeFlags.DefaultOpen | ImGuiTreeNodeFlags.SpanAvailWidth);
+            DragDrop(ObjectRef.None);
+
+            if (rootOpen)
             {
                 var solids = session.Doc.Solids.AsSpan();
                 var joints = session.Doc.Joints;
@@ -74,6 +116,12 @@ public sealed class ObjectTree
                     }
                 }
 
+                if (session.Doc.Openings is { } openings)
+                {
+                    foreach (var o in openings.Openings)
+                        Leaf(new ObjectRef(ObjectKind.Opening, o.Id), selected, label);
+                }
+
                 if (shipItems)
                 {
                     if (session.Doc.Interior is { } interior)
@@ -88,6 +136,28 @@ public sealed class ObjectTree
 
                 ImGui.TreePop();
             }
+
+            // A drag in progress: say what it does; on release, report it.
+            if (_dragging.Kind != ObjectKind.None)
+            {
+                if (ImGui.BeginTooltip())
+                {
+                    ImGui.Text(_target is { } t ? $"Move {label(_dragging)} {(t.Kind == ObjectKind.None ? "to the ship itself" : $"under {(t.Kind == ObjectKind.Solid ? $"solid #{t.Id}" : label(t))}")}" : $"Drag {(_dragging.Kind == ObjectKind.Solid ? $"solid #{_dragging.Id}" : label(_dragging))} onto a joint, a solid or the root");
+                    ImGui.EndTooltip();
+                }
+
+                if (!ImGui.IsMouseDown(ImGuiMouseButton.Left))
+                {
+                    if (_target is { } onto)
+                        Dropped = (_dragging, onto);
+
+                    _dragging = ObjectRef.None;
+                }
+            }
+        }
+        else
+        {
+            _dragging = ObjectRef.None;
         }
 
         ImGui.End();
@@ -105,6 +175,7 @@ public sealed class ObjectTree
             flags |= ImGuiTreeNodeFlags.Selected;
 
         var open = ImGui.TreeNodeEx($"{index,3}  {SolidName(solid)}  #{solid.Id}##solid{solid.Id}", flags);
+        DragDrop(new ObjectRef(ObjectKind.Solid, solid.Id));
 
         if (ImGui.IsItemClicked(ImGuiMouseButton.Left) && !ImGui.IsItemToggledOpen())
             (Picked, Toggle) = (new ObjectRef(ObjectKind.Solid, solid.Id), ImGui.GetIO().KeyCtrl);
@@ -128,6 +199,7 @@ public sealed class ObjectTree
             flags |= ImGuiTreeNodeFlags.Selected;
 
         var open = ImGui.TreeNodeEx($"{label(item)}##joint{joint.Id}", flags);
+        DragDrop(item);
 
         if (ImGui.IsItemClicked(ImGuiMouseButton.Left) && !ImGui.IsItemToggledOpen())
             (Picked, Toggle) = (item, false);

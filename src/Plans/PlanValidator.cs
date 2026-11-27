@@ -69,6 +69,10 @@ public enum IssueCode : ushort
     JointCount,
     JointShape,
     JointMember,
+    OpeningCount,
+    OpeningShape,
+    ProgramShape,
+    ProgramCall,
 }
 
 public readonly record struct ValidationIssue(Severity Severity, IssueCode Code, ElementRef Element, int Value);
@@ -358,7 +362,8 @@ public static class PlanValidator
 
             if (!Enum.IsDefined(j.Kind) || !SolidRotation.IsValid(j.Rotation) || j.Pivot.Length() > PlanLimits.MaxReachMetres
                 || depth is 0 or > HullJointSet.MaxDepth || j.TorqueNm > HullJoint.MaxTorqueNm
-                || (j.Kind == JointKind.Hinge && (j.Min < -1800 || j.Max > 1800 || j.Min > j.Max || j.Target < j.Min || j.Target > j.Max)))
+                || (j.Kind == JointKind.Hinge && (j.Min < -1800 || j.Max > 1800))
+                || (j.Limited && (j.Min > j.Max || j.Target < j.Min || j.Target > j.Max)))
                 log.Add(Severity.Error, IssueCode.JointShape, element, depth);
         }
 
@@ -368,6 +373,81 @@ public static class PlanValidator
         {
             if (!seen.Add(solid) || doc.Solids.IndexOf(solid) < 0 || set.IndexOf(joint) < 0)
                 log.Add(Severity.Error, IssueCode.JointMember, new ElementRef(ElementKind.Solid, solid), (int)joint);
+        }
+    }
+
+    /// <summary>
+    /// A programme: a valid interface; at most 64 nodes of known kinds, unique ids, each naming a call or state the interface
+    /// has and leading only to nodes that exist (an error, value: the node id); poses of states and joints that exist, a
+    /// joint's pose within its limits. A call with no node is a warning (value: the call's index): it does nothing.
+    /// </summary>
+    private static void ValidateProgram(PlanDocument doc, ValidationLog log)
+    {
+        if (doc.Program is not { } program)
+            return;
+
+        var face = program.Interface;
+
+        if (!Ships.Logic.ComponentInterface.IsValid(face) || program.Nodes.Count > Ships.Logic.HullProgram.MaxNodes || program.Poses.Count > Ships.Logic.HullProgram.MaxPoses)
+        {
+            log.Add(Severity.Error, IssueCode.ProgramShape, default, 0);
+            return;
+        }
+
+        var ids = new HashSet<ushort>();
+
+        foreach (var n in program.Nodes)
+        {
+            var named = n.Kind switch
+            {
+                Ships.Logic.NodeKind.OnCall => n.A < face.Calls.Count,
+                Ships.Logic.NodeKind.SetState or Ships.Logic.NodeKind.IfState or Ships.Logic.NodeKind.StateIs => n.A < face.States.Count,
+                Ships.Logic.NodeKind.JointAt => doc.Joints?.IndexOf(n.Joint) >= 0,
+                _ => true,
+            };
+
+            // Flow leads to flow nodes; a condition link leads to a condition.
+            bool Flow(ushort to) => to == 0 || (program.IndexOf(to) is var i and >= 0 && !program.Nodes[i].IsCondition);
+            var condition = n.In == 0 || (program.IndexOf(n.In) is var c and >= 0 && program.Nodes[c].IsCondition && n.TakesCondition);
+
+            if (n.Id == 0 || !ids.Add(n.Id) || !Enum.IsDefined(n.Kind) || !named || (n.Kind != Ships.Logic.NodeKind.JointAt && n.B < 0)
+                || !Flow(n.Out0) || !Flow(n.Out1) || !condition)
+                log.Add(Severity.Error, IssueCode.ProgramShape, default, n.Id);
+        }
+
+        var joints = doc.Joints;
+
+        foreach (var p in program.Poses)
+        {
+            var at = joints?.IndexOf(p.Joint) ?? -1;
+
+            if (p.State >= face.States.Count || at < 0 || (joints!.Joints[at].Limited && (p.Value < joints.Joints[at].Min || p.Value > joints.Joints[at].Max)))
+                log.Add(Severity.Error, IssueCode.ProgramShape, default, p.State);
+        }
+
+        for (var c = 0; c < face.Calls.Count; c++)
+        {
+            if (!program.Nodes.Exists(n => n.Kind == Ships.Logic.NodeKind.OnCall && n.A == c))
+                log.Add(Severity.Warning, IssueCode.ProgramCall, default, c);
+        }
+    }
+
+    /// <summary>Openings: count; each a known kind on a door profile of the plan, a valid rotation, within reach, a depth of 1 mm to 8 m.</summary>
+    private static void ValidateOpenings(PlanDocument doc, ValidationLog log)
+    {
+        if (doc.Openings is not { } set)
+            return;
+
+        if (set.Openings.Count > HullOpeningSet.MaxOpenings)
+            log.Add(Severity.Error, IssueCode.OpeningCount, default, set.Openings.Count);
+
+        var profiles = doc.Interior?.Profiles;
+
+        foreach (var o in set.Openings)
+        {
+            if (!Enum.IsDefined(o.Kind) || profiles is null || o.Profile >= profiles.Count || profiles[o.Profile].Kind != ProfileKind.Door
+                || !SolidRotation.IsValid(o.Rotation) || o.Origin.Length() > PlanLimits.MaxReachMetres || o.DepthMm is 0 or > HullOpening.MaxDepthMm)
+                log.Add(Severity.Error, IssueCode.OpeningShape, new ElementRef(ElementKind.Placement, o.Id), o.Profile);
         }
     }
 
@@ -541,6 +621,8 @@ public static class PlanValidator
         ValidateDecals(doc, log);
         ValidatePaint(doc, log);
         ValidateJoints(doc, log);
+        ValidateOpenings(doc, log);
+        ValidateProgram(doc, log);
         ValidateComponents(doc, log);
         ValidateInterior(doc, log);
         ValidateWindows(doc, log);

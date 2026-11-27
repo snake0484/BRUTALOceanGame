@@ -3,7 +3,7 @@ using Brutal.ImGuiApi;
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>What the Add menu (a right-click in the view) makes.</summary>
-public enum AddKind { None, Box, Wedge, Cylinder, Hallway, Window, Decal, Stroke, Component, Rotor, Hinge, Chamber, Nozzle, Injector, Igniter, Pipe }
+public enum AddKind { None, Box, Wedge, Cylinder, Hallway, Window, Decal, Stroke, Component, Door, DockingPort, Rotor, Hinge, Slider, Opening, PortFace, Chamber, Nozzle, Injector, Igniter, Pipe }
 
 /// <summary>One open plan as the tab bar shows it. <see cref="Key"/> stays the same while the tab lives.</summary>
 public readonly record struct DocumentTab(int Key, string Title, bool Modified, bool Component);

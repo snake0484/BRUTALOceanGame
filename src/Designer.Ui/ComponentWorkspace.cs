@@ -733,9 +733,19 @@ public sealed class ComponentWorkspace
         var hoverNode = -1;
         var hoverRun = -1;
         var best = HandlePixels;
+        var linePipe = 0u;
+        var lineBest = WholeTransform.LinePixels;
 
         foreach (var pipe in data.Pipes)
         {
+            // A click on a run picks the whole pipe.
+            foreach (var run in pipe.Runs)
+            {
+                if (run.A < pipe.Nodes.Count && run.B < pipe.Nodes.Count
+                    && WholeTransform.ToLine(camera, viewProj, viewport, mouse, pipe.Node(run.A), pipe.Node(run.B)) is var line && line < lineBest)
+                    (lineBest, linePipe) = (line, pipe.Id);
+            }
+
             if (pipe.Id == SelectedPipe)
             {
                 // The split handle in the middle of each run of the selected pipe.
@@ -790,6 +800,12 @@ public sealed class ComponentWorkspace
             return true;
         }
 
+        if (linePipe != 0)
+        {
+            (SelectedPipe, SelectedNode, SelectedPart, SelectedRun) = (linePipe, -1, 0, -1);
+            return true;
+        }
+
         var p0 = camera.Position;
         var hit = Pick(new Vector3d(p0.X, p0.Y, p0.Z), camera.Ray(mouse, viewport));
         (SelectedPart, SelectedPipe, SelectedNode) = (hit, 0, -1);
@@ -832,6 +848,36 @@ public sealed class ComponentWorkspace
             {
                 var at = ComponentCommands.Quantise(Add(route.Node(node), _gizmo.Offset));
                 ComponentCommands.SetPipe(session, route.Id, r => r.Nodes[node] = at);
+            }
+
+            return _gizmo.Dragging || _gizmo.Hovered;
+        }
+
+        if (pipe >= 0 && SelectedNode < 0)
+        {
+            // The whole pipe: its free nodes move or turn about the middle of all its nodes (nodes on a part's port stay with the port).
+            var route = data.Pipes[pipe];
+            var points = new Vector3d[route.Nodes.Count];
+
+            for (var i = 0; i < points.Length; i++)
+                points[i] = route.Node(i);
+
+            var centre = WholeTransform.Centre(points);
+
+            if (WholeTransform.Update(_gizmo, centre, true, camera, viewProj, viewport, mouse, mouseFree, down, clicked, Grid, overlay))
+            {
+                Span<double> m = stackalloc double[9];
+                WholeTransform.Turn(_gizmo, m);
+                var moved = new (int X, int Y, int Z)[points.Length];
+
+                for (var i = 0; i < points.Length; i++)
+                    moved[i] = route.EndAt(i).IsOpen ? ComponentCommands.Quantise(WholeTransform.Apply(_gizmo, m, centre, points[i])) : route.Nodes[i];
+
+                ComponentCommands.SetPipe(session, route.Id, r =>
+                {
+                    for (var i = 0; i < moved.Length && i < r.Nodes.Count; i++)
+                        r.Nodes[i] = moved[i];
+                });
             }
 
             return _gizmo.Dragging || _gizmo.Hovered;

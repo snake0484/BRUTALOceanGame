@@ -37,6 +37,7 @@ public sealed partial class DesignerApp : DesignApp
     private readonly InteriorPanel _interiorPanel;
     private readonly WindowsPanel _windowsPanel;
     private readonly JointsPanel _jointsPanel = new();
+    private readonly OpeningsPanel _openingsPanel = new();
     private readonly DecalCatalog _decalCatalog;
     private readonly DecalTextures _decalTextures;
     private readonly DecalsPanel _decalsPanel;
@@ -104,6 +105,7 @@ public sealed partial class DesignerApp : DesignApp
         _library = new PrefabLibrary(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "BRUTALGame", "Components"));
         RefreshLibrary();
         _prefabPanel = new PrefabPanel(_library, Shape);
+        InitPrograms(dataFolder);
         _interiorPanel = new InteriorPanel(_catalog);
         _windowsPanel = new WindowsPanel(_catalog);
         _profilesPanel = new ProfilesPanel(new ProfileLibrary(ProfileLibrary.DefaultFolder));
@@ -207,9 +209,16 @@ public sealed partial class DesignerApp : DesignApp
             : new WindowGeometry.Expansion();
         // Rooms with a wall profile are cut as their walled shape in their box's place.
         var walls = WallGeometry.Expand(doc.Interior, doc.Solids.AsSpan(), doc.Meshes, doc.Meshes.Count + hallways.Meshes.Count + windows.Meshes.Count);
-        var meshes = hallways.Meshes.Count + windows.Meshes.Count + walls.Meshes.Count > 0 ? [.. doc.Meshes, .. hallways.Meshes, .. windows.Meshes, .. walls.Meshes] : doc.Meshes;
+        // Openings (doorways, docking ports) cut through what they are set in: a component's own, and each placed component's.
+        var openingSolids = new List<HullSolid>();
+        var openingMeshes = new List<HullMesh>();
+        OpeningCuts(doc, doc.Meshes.Count + hallways.Meshes.Count + windows.Meshes.Count + walls.Meshes.Count, openingSolids, openingMeshes);
+        var meshes = hallways.Meshes.Count + windows.Meshes.Count + walls.Meshes.Count + openingMeshes.Count > 0
+            ? [.. doc.Meshes, .. hallways.Meshes, .. windows.Meshes, .. walls.Meshes, .. openingMeshes]
+            : doc.Meshes;
         var paint = doc.Paint;
         _groups = JointGroups.Build(doc);
+        SyncPrograms();
         var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), meshes, doc.Brushes, doc.Interior?.Profiles, paint is null ? null : id => paint.SlotOf(id), _models.Mesh);
 
         if (windows.Panes.Count > 0)
@@ -231,6 +240,7 @@ public sealed partial class DesignerApp : DesignApp
 
         solids.AddRange(hallways.Solids);
         solids.AddRange(windows.Cuts);
+        solids.AddRange(openingSolids);
 
         _stats.ComponentsKg = 0;
 
@@ -270,7 +280,9 @@ public sealed partial class DesignerApp : DesignApp
                     remap[m] = (byte)Math.Min(at, HullRenderer.PaletteSize - 1);
                 }
 
-                shape.Place(placement, m => m < remap.Length ? remap[m] : (byte)0, ExtrasOf(_groups.PlacementGroup(i), extras));
+                // Each of its moving parts (a door's leaf) in the ship's group for it.
+                for (var part = 0; part < shape.Parts.Count; part++)
+                    shape.PlacePart(part, placement, m => m < remap.Length ? remap[m] : (byte)0, ExtrasOf(_groups.PlacementPartGroup(i, part), extras));
                 solids.Add(shape.Cutter(placement, doc.Layers is not null, 0xE0000000u | (uint)i));
                 _stats.ComponentsKg += shape.PartsMassKg;
             }
@@ -329,6 +341,10 @@ public sealed partial class DesignerApp : DesignApp
         {
             var rocket = SampleComponents.ChemicalRocket(DefId.FromName("mat.part.copper"), DefId.FromName("mat.part.inconel"), DefId.FromName("mat.part.steel"));
             _catalogPrefabs.Add(("Propulsion", rocket));
+            var alloy = DefId.FromName("mat.hull.alloy");
+            _catalogPrefabs.Add(("Doors", SampleComponents.SwingDoor(alloy)));
+            _catalogPrefabs.Add(("Doors", SampleComponents.SlidingDoor(alloy)));
+            _catalogPrefabs.Add(("Docking", SampleComponents.DockingPort(alloy)));
         }
 
         return _catalogPrefabs;
@@ -377,6 +393,7 @@ public sealed partial class DesignerApp : DesignApp
         _windowsPanel.Reset();
         _decalsPanel.Reset();
         _jointsPanel.Reset();
+        _openingsPanel.Reset();
         _paintPanel.Reset();
         _profilesPanel.Reset();
         _seenVersion = -1;
@@ -566,6 +583,10 @@ public sealed partial class DesignerApp : DesignApp
         if (workspace is not null)
         {
             workspace.DrawPanels(_session);
+            _programPanel.Draw(_session, _componentProgram is null ? null : _componentRun);
+
+            // Door profiles (a doorway's or port's outline) are made and shaped here too.
+            _profilesPanel.Draw(_session);
         }
         else
         {
@@ -586,6 +607,8 @@ public sealed partial class DesignerApp : DesignApp
                 if (workspace is not null)
                 {
                     workspace.DrawContext(_session, _camera, viewport);
+                    _jointsPanel.DrawContext(_session, _camera, viewport);
+                    _openingsPanel.DrawContext(_session, _camera, viewport);
                 }
                 else
                 {
@@ -610,8 +633,8 @@ public sealed partial class DesignerApp : DesignApp
 
     /// <summary>A picked node, window, placement or part: it has the gizmo and the menu, not the selected solid.</summary>
     private bool OtherSelected => _active.Component is { } workspace
-        ? workspace.SelectedPart != 0 || workspace.SelectedNode >= 0
-        : _interiorPanel.SelectedNode >= 0 || _windowsPanel.Selected != 0 || _decalsPanel.Selected != 0 || _jointsPanel.Selected != 0 || _prefabPanel.Selected != 0;
+        ? workspace.SelectedPart != 0 || workspace.SelectedPipe != 0 || _jointsPanel.Selected != 0 || _openingsPanel.Selected != 0
+        : _interiorPanel.Selected != 0 || _panels.Strokes.Selected != 0 || _windowsPanel.Selected != 0 || _decalsPanel.Selected != 0 || _jointsPanel.Selected != 0 || _prefabPanel.Selected != 0;
 
     protected override void AfterPanels(ImGuiIOPtr io)
     {
@@ -643,9 +666,14 @@ public sealed partial class DesignerApp : DesignApp
         _hull.SetCutaway(cut.Enabled ? cut.Axis : -1, cut.Offset, cut.Flip);
 
         if (workspace is null)
+        {
             _aeroPanel.DrawOverlay(_overlay);
+            OpeningsPanel.DrawPlacedPorts(_session.Doc, _overlay, _camera);
+        }
         var used = !_tool.Dragging && (workspace is not null
             ? workspace.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
+              || _jointsPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay)
+              || _openingsPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay)
             : _windowsPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
               || _decalsPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
               || _jointsPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay)
@@ -832,12 +860,17 @@ public sealed partial class DesignerApp : DesignApp
     /// <summary>--demo-joints: a block with a turret on a rotor and a flap on a hinge.</summary>
     public static bool JointsDemo;
 
+    /// <summary>--demo-doors: a hull with a room, a swing door, a sliding door and a docking port.</summary>
+    public static bool DoorsDemo;
+
     private void DemoLayered()
     {
         var all = _catalog.All;
 
         if (JointsDemo)
             SampleHulls.JointsDemo(_session, all[0].Id);
+        else if (DoorsDemo)
+            SampleHulls.DoorsDemo(_session, DefId.FromName("mat.hull.alloy"));
         else if (WallDemo)
             SampleHulls.WallRoom(_session, all[0].Id);
         else if (HallwayDemo && HallwayPlain)

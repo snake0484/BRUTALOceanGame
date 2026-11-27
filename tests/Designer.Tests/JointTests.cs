@@ -75,10 +75,12 @@ public class JointTests
         var rotor = new HullJoint { Id = 1, Kind = JointKind.Rotor, Speed = 600 };   // 60 rpm: a turn a second
         Assert.Equal(Math.PI, JointPose.Angle(rotor, 0.5), 9);
 
-        var hinge = new HullJoint { Id = 2, Kind = JointKind.Hinge, Min = -100, Max = 200, Speed = 100 };   // 10 deg/s over 30 deg
-        Assert.Equal(-10 * Math.PI / 180, JointPose.Angle(hinge, 0), 9);
-        Assert.Equal(20 * Math.PI / 180, JointPose.Angle(hinge, 3), 9);
-        Assert.Equal(10 * Math.PI / 180, JointPose.Angle(hinge, 4), 9);
+        // 10 deg/s over 30 deg, at rest on its target (0), then up to 20, down to -10.
+        var hinge = new HullJoint { Id = 2, Kind = JointKind.Hinge, Min = -100, Max = 200, Speed = 100 };
+        Assert.Equal(0, JointPose.Angle(hinge, 0), 9);
+        Assert.Equal(20 * Math.PI / 180, JointPose.Angle(hinge, 2), 9);
+        Assert.Equal(10 * Math.PI / 180, JointPose.Angle(hinge, 3), 9);
+        Assert.Equal(-10 * Math.PI / 180, JointPose.Angle(hinge, 5), 9);
 
         // A rotor about +Y at (1, 0, 0) and a second, mounted on it, about +Y at (2, 0, 0): a half turn of each.
         var doc = new PlanDocument();
@@ -141,6 +143,36 @@ public class JointTests
 
         Assert.Equal(HullJointSet.MaxDepth, session.Doc.Joints!.Depth(last));
         Assert.Equal(0u, JointCommands.AddJoint(session, JointKind.Rotor, new Vector3d(0, 6, -1), new Vector3d(0, 1, 0), mount));
+    }
+
+    [Fact]
+    public void SetParent_Remounts_ButRefusesLoopsAndDepth()
+    {
+        var session = Demo();
+        var set = session.Doc.Joints!;
+        var rotor = set.Joints.Single(j => j.Kind == JointKind.Rotor).Id;
+        var hinge = set.Joints.Single(j => j.Kind == JointKind.Hinge).Id;
+
+        // The hinge onto the rotor's part, and back to the ship; undo is one step each.
+        Assert.True(JointCommands.SetParent(session, hinge, rotor));
+        Assert.Equal(rotor, session.Doc.Joints!.Joints.Single(j => j.Id == hinge).Parent);
+
+        // The rotor onto the hinge, which is mounted on the rotor: a loop.
+        Assert.False(JointCommands.SetParent(session, rotor, hinge));
+        Assert.Contains("own moving part", JointCommands.LastError);
+
+        // A third joint on the hinge makes three deep; the rotor (with two below it) cannot then go under anything.
+        var third = JointCommands.AddJoint(session, JointKind.Slider, new Vector3d(0, 5, 0), new Vector3d(1, 0, 0), 0);
+        Assert.True(JointCommands.SetParent(session, third, hinge));
+        Assert.Equal(3, session.Doc.Joints!.Depth(third));
+        var fourth = JointCommands.AddJoint(session, JointKind.Rotor, new Vector3d(0, 6, 0), new Vector3d(0, 1, 0), 0);
+        Assert.False(JointCommands.SetParent(session, rotor, fourth));
+        Assert.Contains("deep", JointCommands.LastError);
+
+        Assert.True(JointCommands.SetParent(session, hinge, 0));
+        Assert.Equal(0u, session.Doc.Joints!.Joints.Single(j => j.Id == hinge).Parent);
+        session.UndoLast();
+        Assert.Equal(rotor, session.Doc.Joints!.Joints.Single(j => j.Id == hinge).Parent);
     }
 
     [Fact]

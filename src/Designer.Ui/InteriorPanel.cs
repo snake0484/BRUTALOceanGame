@@ -283,6 +283,8 @@ public sealed class InteriorPanel
         var hoverNode = -1;
         var hoverRun = -1;
         var best = NodePixels;
+        var lineHall = 0u;
+        var lineBest = WholeTransform.LinePixels;
 
         foreach (var h in interior.Hallways)
         {
@@ -301,6 +303,10 @@ public sealed class InteriorPanel
                 var pb = h.Node(b);
                 var size = Math.Max(0.03, camera.Depth(pa) * 0.006);
                 overlay.Ribbon(pa, pb, size * (selected ? 0.6 : 0.4), selected ? SelectedColour : PathColour);
+
+                // A click on the line picks the whole hallway.
+                if (WholeTransform.ToLine(camera, viewProj, viewport, mouse, pa, pb) is var line && line < lineBest)
+                    (lineBest, lineHall) = (line, h.Id);
 
                 if (!selected)
                     continue;
@@ -367,6 +373,39 @@ public sealed class InteriorPanel
             if (_gizmo.Dragging || _gizmo.Hovered)
                 return true;
         }
+        else if (index >= 0 && SelectedNode < 0)
+        {
+            // The whole hallway: move every node, or turn them (and its gravity) about their middle.
+            var hallway = interior.Hallways[index];
+            var points = new Vector3d[hallway.Nodes.Count];
+
+            for (var i = 0; i < points.Length; i++)
+                points[i] = hallway.Node(i);
+
+            var centre = WholeTransform.Centre(points);
+
+            if (WholeTransform.Update(_gizmo, centre, true, camera, viewProj, viewport, mouse, mouseFree, io.MouseDown[0], clicked, step, overlay))
+            {
+                Span<double> m = stackalloc double[9];
+                WholeTransform.Turn(_gizmo, m);
+                var nodes = new (int X, int Y, int Z)[points.Length];
+
+                for (var i = 0; i < points.Length; i++)
+                    nodes[i] = ComponentCommands.Quantise(WholeTransform.Apply(_gizmo, m, centre, points[i]));
+
+                var gravity = WholeTransform.Rotation(_gizmo, m, hallway.Gravity);
+                InteriorCommands.SetHallway(session, hallway.Id, h =>
+                {
+                    for (var i = 0; i < nodes.Length && i < h.Nodes.Count; i++)
+                        h.Nodes[i] = nodes[i];
+
+                    h.Gravity = gravity;
+                });
+            }
+
+            if (_gizmo.Dragging || _gizmo.Hovered)
+                return true;
+        }
 
         if (!mouseFree || !clicked)
             return false;
@@ -381,6 +420,12 @@ public sealed class InteriorPanel
         if (hoverNode >= 0)
         {
             (Selected, SelectedNode) = (hoverHall, hoverNode);
+            return true;
+        }
+
+        if (lineHall != 0)
+        {
+            (Selected, SelectedNode) = (lineHall, -1);
             return true;
         }
 
