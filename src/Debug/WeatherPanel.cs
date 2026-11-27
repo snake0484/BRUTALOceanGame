@@ -154,7 +154,7 @@ public sealed class WeatherPanel
             ref readonly var s = ref _systems[_order[i]];
             var to = s.Centre - unit;
             var bearing = Bearing(new Vector2((float)double3.Dot(to, east), (float)double3.Dot(to, north)));
-            ImGui.Text($"{Name(s.Kind),-5} {_distance[_order[i]] / 1000f,5:F0} km {bearing,4:F0} deg  r {s.Radius / 1000f:F0} km  {100f * s.Strength,3:F0}%  {s.PeakWind:F0} m/s  {s.Pressure:F1} hPa");
+            ImGui.Text($"{Name(s.Kind),-5} {_distance[_order[i]] / 1000f,5:F0} km {bearing,4:F0} deg  r {s.Radius / 1000f:F0} km  {100f * s.Strength,3:F0}%  {s.PeakWind * s.Strength:F0} m/s  {s.Pressure * s.Strength:F1} hPa");
         }
     }
 

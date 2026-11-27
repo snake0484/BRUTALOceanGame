@@ -5,9 +5,9 @@ using Brutal.Numerics;
 namespace BrutalGame.Weather;
 
 /// <summary>
-/// <see cref="WeatherField"/> on a rotating sphere, deterministic from the climate's seed and the tick. Systems spawn in
+/// Pressure systems (<see cref="SphereSystem"/>) on a rotating sphere, deterministic from the climate's seed and the tick. Systems spawn in
 /// latitude rows of ~24 km cells (fewer cells per row toward the poles); each row drifts east or west with its zonal
-/// steering wind in closed form. Slots, lives, kinds and profiles are the island's, distances are great-circle, and
+/// steering wind in closed form. Slots, lives, kinds and profiles are the old island field's, distances are great-circle, and
 /// circulation turns cyclonically about local up in the north, the other way in the south, fading out at the equator.
 /// Winds come back in the local tangent frame: X east, Y north. Read-only; safe to call from jobs.
 /// </summary>
