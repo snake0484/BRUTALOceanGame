@@ -534,7 +534,8 @@ public sealed class CoastRegionSet : IDisposable
             region.Window = new CoastWindow(_tiles, key);
             region.State = CoastRegionState.Baking;
             region.Fade = 0f;
-            _bake.Prepare(_depth, region.Window, key, _atlases[slot], _breakDepth);
+            var probe = Find(key.Tile, key.X, key.Z);
+            _bake.Prepare(_depth, region.Window, key, _atlases[slot], _breakDepth, probe < 0 ? float.NaN : _probes[probe].Min, probe < 0 ? float.NaN : _probes[probe].Max);
             _scheduler.Queue(_bake, 1);
             _scheduler.ExecuteJobs();
             _running = Work.Bake;

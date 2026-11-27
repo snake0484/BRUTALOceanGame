@@ -21,10 +21,11 @@ public sealed class CoastBake : IJob
     public const int ProbeSide = 32;
 
     /// <summary>
-    /// Depths are sampled every this many cells of a level (8 m in the window, 64 m in the coarse domain) and
+    /// Depths are sampled every this many cells of a level (8 m in the window, 128 m in the coarse domain) and
     /// interpolated: the planet's height costs 0.7 us a call, and a sample a cell would be 50 ms of the bake.
     /// </summary>
     public const int DepthStep = 2;
+    public const int CoarseDepthStep = 4;
 
     /// <summary>A region is baked only if it has water shallower than this × Hs / <see cref="OceanSwell.DepthCapGamma"/>.</summary>
     public const float BreakDepthMargin = 1.3f;
@@ -80,6 +81,9 @@ public sealed class CoastBake : IJob
     private const float SlopeMinSpan = 4f;
     private const float SlopeMaxSpan = 20f;
     private const float PlungeHold = 2f;
+
+    /// <summary>The break clock's sweeps stop once none moves a cell by this (m).</summary>
+    private const float BreakSettled = 0.01f;
 
     private readonly float[] _samples = new float[N * N / (DepthStep * DepthStep)];
     private readonly float[] _depth = new float[N * N];
@@ -145,13 +149,16 @@ public sealed class CoastBake : IJob
     public static float BreakDepth(float significantHeight) => BreakDepthMargin * significantHeight / OceanSwell.DepthCapGamma;
 
     /// <param name="breakDepth">Regions with no water shallower than this (m) are not baked (<see cref="BreakDepth"/>).</param>
-    public void Prepare(ICoastDepth source, in CoastWindow window, in CoastRegionKey key, CoastAtlas atlas, float breakDepth)
+    /// <param name="probeMin">The window's probed depths (<see cref="Probe"/>) if the caller has them: the run then does not probe again.</param>
+    public void Prepare(ICoastDepth source, in CoastWindow window, in CoastRegionKey key, CoastAtlas atlas, float breakDepth, float probeMin = float.NaN, float probeMax = float.NaN)
     {
         _source = source;
         _window = window;
         _key = key;
         _atlas = atlas;
         _breakDepth = breakDepth;
+        ProbeMin = probeMin;
+        ProbeMax = probeMax;
     }
 
     public void Run()
@@ -159,9 +166,13 @@ public sealed class CoastBake : IJob
         var start = Stopwatch.GetTimestamp();
         Baked = false;
         DepthMs = 0f;
-        Probe(_source!, _window, out var min, out var max);
-        ProbeMin = min;
-        ProbeMax = max;
+
+        if (float.IsNaN(ProbeMin) || float.IsNaN(ProbeMax))
+        {
+            Probe(_source!, _window, out var min, out var max);
+            ProbeMin = min;
+            ProbeMax = max;
+        }
 
         if (Coastal(ProbeMin, ProbeMax, _breakDepth) && !_key.Carrier.Calm)
         {
@@ -205,23 +216,24 @@ public sealed class CoastBake : IJob
         Write();
     }
 
-    /// <summary>The level's depths: sampled every <see cref="DepthStep"/> cells, bilinear between the samples.</summary>
+    /// <summary>The level's depths: sampled every <see cref="DepthStep"/> cells (<see cref="CoarseDepthStep"/> in the coarse domain), bilinear between the samples.</summary>
     private void FillDepth()
     {
         var start = Stopwatch.GetTimestamp();
-        var side = _n / DepthStep;
-        _window.FillDepth(_source!, _samples, _origin, _origin, _cell * DepthStep, side, 0, side);
+        var step = _nested ? DepthStep : CoarseDepthStep;
+        var side = _n / step;
+        _window.FillDepth(_source!, _samples, _origin, _origin, _cell * step, side, 0, side);
         DepthMs += (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
 
         for (var z = 0; z < _n; z++)
         {
-            var fz = Math.Clamp((z + 0.5f) / DepthStep - 0.5f, 0f, side - 1.001f);
+            var fz = Math.Clamp((z + 0.5f) / step - 0.5f, 0f, side - 1.001f);
             var iz = (int)fz;
             var tz = fz - iz;
 
             for (var x = 0; x < _n; x++)
             {
-                var fx = Math.Clamp((x + 0.5f) / DepthStep - 0.5f, 0f, side - 1.001f);
+                var fx = Math.Clamp((x + 0.5f) / step - 0.5f, 0f, side - 1.001f);
                 var ix = (int)fx;
                 var s = ix + iz * side;
                 var tx = fx - ix;
@@ -630,14 +642,20 @@ public sealed class CoastBake : IJob
 
         var incoherent = SurfCarrier.IncoherentKh / _k0;
 
+        // The breaker type each cell would give a wave beginning to break there, where one could (the transport's F is done with).
         for (var c = 0; c < _n * _n; c++)
+        {
             _unbroken[c] = _depth[c] < incoherent ? SurfCarrier.Unbroken(carrier.Height, _omega, _depth[c], _amp[c]) : 0f;
+            _f[c] = _wet[c] != 0 && SurfCarrier.RawCap(_unbroken[c], _depth[c]) <= IdleCap ? LocalPlunge(c % _n, c / _n, _ux[c], _uz[c]) : 0f;
+        }
 
         Array.Clear(_break);
         Array.Clear(_plunge);
 
         for (var it = 0; it < BreakIterations; it++)
         {
+            var changed = false;
+
             for (var order = 0; order < 4; order++)
             {
                 Order(order, out var x0, out var dx, out var z0, out var dz);
@@ -645,18 +663,22 @@ public sealed class CoastBake : IJob
                 for (int z = z0, zi = 0; zi < _n; z += dz, zi++)
                 {
                     for (int x = x0, xi = 0; xi < _n; x += dx, xi++)
-                        BreakUpdate(x, z);
+                        changed |= BreakUpdate(x, z);
                 }
             }
+
+            if (!changed)
+                break;
         }
     }
 
-    private void BreakUpdate(int x, int z)
+    /// <summary>True if the cell's clock moved by more than <see cref="BreakSettled"/>.</summary>
+    private bool BreakUpdate(int x, int z)
     {
         var c = x + z * _n;
 
         if (_wet[c] == 0)
-            return;
+            return false;
 
         var ux = _ux[c];
         var uz = _uz[c];
@@ -668,19 +690,22 @@ public sealed class CoastBake : IJob
         var upwind = (wx * UpwindBreak(_break, _parentBreak, c, ax, z) + wz * UpwindBreak(_break, _parentBreak, c, x, az)) / sum;
         var raw = SurfCarrier.RawCap(_unbroken[c], _depth[c]);
 
+        var before = _break[c];
+
         if (upwind <= 0f && raw > IdleCap)
         {
             _break[c] = 0f;
             _plunge[c] = 0f;
-            return;
+            return before > BreakSettled;
         }
 
         var travel = _cell / sum;
         var rate = SurfCarrier.Smooth(((upwind > ClockStartedDistance ? ClockStopCap : ClockStartCap) - raw) / ClockRampCap);
-        _break[c] = MathF.Min(upwind * MathF.Exp(-travel * (1f - rate) / ReformDistance) + travel * rate, CoastAtlas.MaxBreakDistance);
-
+        var clock = MathF.Min(upwind * MathF.Exp(-travel * (1f - rate) / ReformDistance) + travel * rate, CoastAtlas.MaxBreakDistance);
         var carried = (wx * UpwindBreak(_plunge, _parentPlunge, c, ax, z) + wz * UpwindBreak(_plunge, _parentPlunge, c, x, az)) / sum;
-        _plunge[c] = float.Lerp(LocalPlunge(x, z, ux, uz), carried, SurfCarrier.Smooth(upwind / PlungeHold));
+        _break[c] = clock;
+        _plunge[c] = float.Lerp(_f[c], carried, SurfCarrier.Smooth(upwind / PlungeHold));
+        return MathF.Abs(clock - before) > BreakSettled;
     }
 
     private float UpwindBreak(float[] field, float[] parent, int c, int x, int z)
