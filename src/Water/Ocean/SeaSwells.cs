@@ -128,6 +128,63 @@ public sealed unsafe class SeaSwells
     /// <summary>The swell drawn about a point: its tile's, else the uniform one (for the GPU and readouts, not for queries).</summary>
     public OceanSwell Near(in double3 planetLocal) => For(TileAt(planetLocal)) ?? Uniform;
 
+    /// <summary>
+    /// The GPU detail's spectrum about a point: its blend's live tiles' spectra mixed by their squared weights (wind
+    /// direction as a vector), so the FFT detail changes smoothly across a tile edge as the swell does.
+    /// </summary>
+    public SpectrumState SpectrumAt(in double3 planetLocal)
+    {
+        Tiles.Locate(double3.Normalize(planetLocal), out var blend);
+
+        if (!_driven)
+            return Uniform.GpuSpectrum;
+
+        var total = 0f;
+        var p = new SwellParams();
+        (p.WindSpeed, p.Fetch, p.Gamma, p.Spread, p.MinWavelength, p.Choppiness) = (0f, 0f, 0f, 0f, 0f, 0f);
+        var depth = 0f;
+        var finite = true;
+        var dx = 0f;
+        var dz = 0f;
+        OceanSwell? only = null;
+
+        for (var k = 0; k < blend.Count; k++)
+        {
+            if (For(blend.Tile[k]) is not { } swell)
+                continue;
+
+            var w = blend.Weight[k] * blend.Weight[k];
+            var q = swell.GpuSpectrum.Params;
+            only = total == 0f ? swell : null;
+            total += w;
+            p.WindSpeed += w * q.WindSpeed;
+            p.Fetch += w * q.Fetch;
+            p.Gamma += w * q.Gamma;
+            p.Spread += w * q.Spread;
+            p.MinWavelength += w * q.MinWavelength;
+            p.Choppiness += w * q.Choppiness;
+            depth += w * q.Depth;
+            finite &= float.IsFinite(q.Depth);
+            var (sin, cos) = MathF.SinCos(q.WindDirection);
+            dx += w * cos;
+            dz += w * sin;
+        }
+
+        if (only is not null || total <= 0f)
+            return (only ?? Uniform).GpuSpectrum;
+
+        var scale = 1f / total;
+        p.WindSpeed *= scale;
+        p.Fetch *= scale;
+        p.Gamma *= scale;
+        p.Spread *= scale;
+        p.MinWavelength *= scale;
+        p.Choppiness *= scale;
+        p.Depth = finite ? depth * scale : float.PositiveInfinity;
+        p.WindDirection = MathF.Atan2(dz, dx);
+        return OceanSwell.Spectrum(p);
+    }
+
     /// <summary>The swell on a tile, or null where none is live.</summary>
     public OceanSwell? For(int tile)
     {

@@ -409,14 +409,22 @@ public sealed class OceanSwell
             _spreadNorm = Jonswap.SpreadingNormalisation(p.Spread);
         }
 
+        GpuSpectrum = Spectrum(p, _spreadNorm);
+    }
+
+    /// <summary>The GPU detail's spectrum for <paramref name="p"/>.</summary>
+    public static SpectrumState Spectrum(in SwellParams p) => Spectrum(p, Jonswap.SpreadingNormalisation(p.Spread));
+
+    private static SpectrumState Spectrum(in SwellParams p, double spreadNorm)
+    {
         var calm = p.WindSpeed < 0.1f;
         var fetch = Math.Max(p.Fetch, Jonswap.MinFetch);
-        GpuSpectrum = new SpectrumState
+        return new SpectrumState
         {
             Params = p,
             Alpha = calm ? 0f : (float)Jonswap.Alpha(p.WindSpeed, fetch),
             PeakOmega = calm ? 1f : (float)Jonswap.PeakOmega(p.WindSpeed, fetch),
-            SpreadNorm = (float)_spreadNorm,
+            SpreadNorm = (float)spreadNorm,
         };
     }
 
@@ -470,21 +478,6 @@ public sealed class OceanSwell
                 Omega = _omega[i],
             };
         }
-
-        return count;
-    }
-
-    /// <summary>
-    /// The phases alone, for another origin of the same components (a neighbouring sea tile's plane): every
-    /// <paramref name="stride"/>th float from <paramref name="offset"/>. Returns the count written.
-    /// </summary>
-    public int CopyGpuPhases(Span<float> destination, int offset, int stride, double renderTime, double originX, double originZ)
-    {
-        var count = Math.Min(_count, (destination.Length - offset + stride - 1) / stride);
-        var dt = renderTime - Time;
-
-        for (var i = 0; i < count; i++)
-            destination[offset + i * stride] = GpuPhase(i, dt, originX, originZ);
 
         return count;
     }

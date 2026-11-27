@@ -386,7 +386,8 @@ public sealed partial class GameApp : IDisposable
                 _sections.Uploads = Lap(ref mark);
 
                 gpu.Begin(commands, _fftScope);
-                _oceanFft.Record(commands, _renderer.FrameIndex, Swell, renderTime, (float)frameSeconds);
+                var spectrum = _sim.Ocean.Swells.SpectrumAt(_camera.Position);
+                _oceanFft.Record(commands, _renderer.FrameIndex, spectrum, renderTime, (float)frameSeconds);
                 gpu.End(commands, _fftScope);
 
                 if (ocean)
@@ -405,7 +406,7 @@ public sealed partial class GameApp : IDisposable
                         DepthCellX = _depths.Origin.X,
                         DepthCellZ = _depths.Origin.Z,
                         DepthVersion = _depths.FrameVersion,
-                    }, _coast);
+                    }, spectrum, _coast);
                     _sections.Prepare = Lap(ref mark);
                     gpu.Begin(commands, _oceanComputeScope);
                     _ocean.RecordCompute(commands, _renderer.FrameIndex, (float)frameSeconds, _sim.Clock.TickIndex);
