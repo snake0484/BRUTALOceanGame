@@ -23,6 +23,8 @@ string[]? cutaway = null;
 double[]? view = null;
 string? script = null;
 
+DesignerApp.ParsePlanetArgs(args);
+
 for (var i = 0; i < args.Length; i++)
 {
     if (args[i] == "--data" && i + 1 < args.Length)

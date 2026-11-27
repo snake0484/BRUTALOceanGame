@@ -1,7 +1,8 @@
 using Brutal.Numerics;
+using BrutalGame.Designer.Planets;
 using BrutalGame.Terrain;
 
-namespace BrutalGame.PlanetDesigner.Tests;
+namespace BrutalGame.Designer.Tests;
 
 public sealed class PlanetDesignSessionTests : IDisposable
 {

@@ -7,7 +7,7 @@ using BrutalGame.Ships.Interior;
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>What the File menu asks the host to do this frame (file dialogs and disk live in the host).</summary>
-public enum FileRequest { None, New, NewComponent, Open, Save, SaveAs }
+public enum FileRequest { None, New, NewComponent, Open, Save, SaveAs, OpenPlanet }
 
 /// <summary>What the open tab is: a ship, or a component (its own plan, made into a prefab by saving it).</summary>
 public enum Workspace { Ship, Component }

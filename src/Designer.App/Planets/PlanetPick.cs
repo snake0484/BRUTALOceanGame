@@ -1,7 +1,7 @@
 using Brutal.Numerics;
 using BrutalGame.Terrain;
 
-namespace BrutalGame.PlanetDesigner.App;
+namespace BrutalGame.Designer.App.Planets;
 
 /// <summary>Ray against the analytic surface (generated + authored): the sphere of the relief top, then march and bisect.</summary>
 public static class PlanetPick

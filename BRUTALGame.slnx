@@ -18,8 +18,6 @@
     <Project Path="src/Server/Server.csproj" />
     <Project Path="src/Ships/Ships.csproj" />
     <Project Path="src/Sim/Sim.csproj" />
-    <Project Path="src/PlanetDesigner/PlanetDesigner.csproj" />
-    <Project Path="src/PlanetDesigner.App/PlanetDesigner.App.csproj" />
     <Project Path="src/Terrain/Terrain.csproj" />
     <Project Path="src/Terrain.Runtime/Terrain.Runtime.csproj" />
     <Project Path="src/Water/Water.csproj" />
@@ -36,7 +34,6 @@
     <Project Path="tests/Physics.Tests/Physics.Tests.csproj" />
     <Project Path="tests/Plans.Tests/Plans.Tests.csproj" />
     <Project Path="tests/Sim.Tests/Sim.Tests.csproj" />
-    <Project Path="tests/PlanetDesigner.Tests/PlanetDesigner.Tests.csproj" />
     <Project Path="tests/Terrain.Tests/Terrain.Tests.csproj" />
     <Project Path="tests/Water.Tests/Water.Tests.csproj" />
     <Project Path="tests/Weather.Tests/Weather.Tests.csproj" />

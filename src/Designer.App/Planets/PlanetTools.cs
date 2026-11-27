@@ -1,10 +1,11 @@
 using System.Numerics;
 using Brutal.ImGuiApi;
 using Brutal.Numerics;
+using BrutalGame.Designer.Planets;
 using BrutalGame.DesignKit.Ui;
 using BrutalGame.Terrain;
 
-namespace BrutalGame.PlanetDesigner.App;
+namespace BrutalGame.Designer.App.Planets;
 
 public enum PlanetTool : byte
 {
@@ -14,9 +15,9 @@ public enum PlanetTool : byte
 }
 
 /// <summary>
-/// The planet designer's tools and panel (planet-designer-brief.md §6): the height brush (raise, lower, level, erase with
-/// radius, height and strength), sites (Shift + click places, drag moves, core, blend and height in the panel) and the
-/// selected site's marker. Rings draw in the kit's 3D overlay, labels in ImGui. A stroke or drag is one undo step; the
+/// A planet tab's tools and its Planet panel (planet-designer-brief.md §6): the height brush (raise, lower, level, erase
+/// with radius, height and strength), sites (Shift + click places, drag moves, core, blend and height in the kit's
+/// inspector) and the selected site's marker. Rings draw in the kit's 3D overlay, labels in ImGui. A stroke or drag is one undo step; the
 /// terrain refreshes when it ends.
 /// </summary>
 public sealed class PlanetTools
@@ -36,18 +37,17 @@ public sealed class PlanetTools
     private static readonly string[] MarkerTypes = ["city", "outpost"];
 
     private readonly PlanetDesignSession _session;
+    private readonly Inspector _inspector = new();
     private readonly ImInputString _markerName = new(48, "New settlement"u8);
     private int _brush;
-    private float _radiusKm = 8f;
-    private float _metres = 200f;
-    private float _strength = 0.5f;
+    private double _radiusKm = 8.0;
+    private double _metres = 200.0;
+    private double _strength = 0.5;
     private double3 _lastDab;
     private string? _selected;
     private bool _dragging;
     private double3 _dragTo;
     private int _markerType;
-    private string? _draftFor;
-    private float _core, _blend, _height;
 
     public PlanetTools(PlanetDesignSession session) => _session = session;
 
@@ -104,10 +104,10 @@ public sealed class PlanetTools
             0 => (AuthoredBrush.Raise, _metres),
             1 => (AuthoredBrush.Raise, -_metres),
             2 => (AuthoredBrush.Level, _metres),
-            _ => (AuthoredBrush.Erase, 0f),
+            _ => (AuthoredBrush.Erase, 0.0),
         };
 
-        _session.Dab(d, _radiusKm * 1000.0, metres, brush, _strength);
+        _session.Dab(d, _radiusKm * 1000.0, (float)metres, brush, (float)_strength);
         _lastDab = d;
     }
 
@@ -157,8 +157,10 @@ public sealed class PlanetTools
         return null;
     }
 
-    public void DrawPanel(string body, float refreshMs, (float Ms, float MainMs, int Leaves) replace, int pendingJobs)
+    public void DrawPanel(string body, uint dock, float refreshMs, (float Ms, float MainMs, int Leaves) replace, int pendingJobs)
     {
+        ImGui.SetNextWindowDockID(new ImGuiID(dock), ImGuiCond.FirstUseEver);
+
         if (!ImGui.Begin("Planet"u8))
         {
             ImGui.End();
@@ -168,22 +170,25 @@ public sealed class PlanetTools
         var layer = _session.Layer;
         ImGui.Text($"Body {body}  kind {layer.Kind}");
         ImGui.Text($"Version {layer.Version}{(_session.Modified ? " (unsaved)" : "")}  {layer.Sites.Count} sites, {layer.Markers.Count} markers");
-        ImGui.Text($"Refresh {refreshMs:F0} ms, swap after {replace.Ms:F0} ms ({replace.MainMs:F1} ms main)");
-        ImGui.Text($"{replace.Leaves} leaves regenerated; {pendingJobs} jobs");
+        ImGui.TextDisabled($"Refresh {refreshMs:F0} ms, swap after {replace.Ms:F0} ms ({replace.MainMs:F1} ms main), {replace.Leaves} leaves; {pendingJobs} jobs");
 
         if (ImGui.Button("Save (Ctrl+S)"u8))
             _session.Save();
 
         ImGui.SameLine();
+        ImGui.BeginDisabled(!_session.CanUndo);
 
         if (ImGui.Button("Undo"u8))
             _session.Undo();
 
+        ImGui.EndDisabled();
         ImGui.SameLine();
+        ImGui.BeginDisabled(!_session.CanRedo);
 
         if (ImGui.Button("Redo"u8))
             _session.Redo();
 
+        ImGui.EndDisabled();
         ImGui.Separator();
 
         for (var i = 0; i < ToolNames.Length; i++)
@@ -199,51 +204,55 @@ public sealed class PlanetTools
             BrushPanel();
         else if (Tool == PlanetTool.Site)
             SitePanel();
+        else
+            ImGui.TextDisabled("Right drag orbits, middle drag pans, wheel zooms. 1 2 3 pick the tool."u8);
 
         ImGui.End();
     }
 
     private void BrushPanel()
     {
-        for (var i = 0; i < BrushNames.Length; i++)
-        {
-            if (ImGui.RadioButton(BrushNames[i], _brush == i))
-                _brush = i;
+        _inspector.Begin("Brush"u8, BrushNames[_brush]);
 
-            if (i < BrushNames.Length - 1)
-                ImGui.SameLine();
+        if (_inspector.Section("Height brush"u8))
+        {
+            _inspector.Choice("Mode"u8, ref _brush, BrushNames, 0, "Raise and lower add height; level pulls toward a height; erase takes paint away"u8);
+            _inspector.Float("Radius"u8, ref _radiusKm, 8.0, 0.1f, 2.0, 200.0, "%.1f km"u8, "Across the brush's falloff"u8);
+
+            if (_brush != 3)
+                _inspector.Float(_brush == 2 ? "Level to"u8 : "Height"u8, ref _metres, 200.0, 5f, _brush == 2 ? -1500.0 : 1.0, 1500.0, "%.0f m"u8, "Height a dab adds at the centre, or the height it levels to"u8);
+
+            _inspector.Float("Strength"u8, ref _strength, 0.5, 0.01f, 0.05, 1.0, "%.2f"u8, "How much of the height one dab applies"u8);
         }
 
-        ImGui.SliderFloat("Radius km"u8, ref _radiusKm, 2f, 200f, "%.1f"u8, ImGuiSliderFlags.Logarithmic);
-        ImGui.SliderFloat(_brush == 2 ? "Level to m"u8 : "Height m"u8, ref _metres, _brush == 2 ? -1500f : 1f, 1500f, "%.0f"u8);
-        ImGui.SliderFloat("Strength"u8, ref _strength, 0.05f, 1f, "%.2f"u8);
-        ImGui.TextWrapped("Left drag paints. Right drag orbits, middle drag pans, wheel zooms. 1 2 3 pick the tool."u8);
+        _inspector.End();
+        ImGui.TextDisabled("Left drag paints; one stroke is one undo step."u8);
     }
 
     private void SitePanel()
     {
-        ImGui.TextWrapped("Shift + click places a site; click a site to select it, drag to move it."u8);
+        ImGui.TextDisabled("Shift + click places a site; click a site to select it, drag to move it."u8);
 
         if (_selected is null || Site(_selected) is not { } s)
             return;
 
-        ImGui.Separator();
-        ImGui.Text($"{s.Id} (since v{s.Since})");
-
-        // The widgets edit a draft that commits when one is released, so a drag is one undo step.
-        if (_draftFor != s.Id || !ImGui.IsAnyItemActive())
-            (_draftFor, _core, _blend, _height) = (s.Id, s.CoreM, s.BlendM, s.HeightM);
-
-        ImGui.SliderFloat("Core m"u8, ref _core, 20f, 3000f, "%.0f"u8, ImGuiSliderFlags.Logarithmic);
-        var commit = ImGui.IsItemDeactivatedAfterEdit();
-        ImGui.SliderFloat("Blend m"u8, ref _blend, 10f, 3000f, "%.0f"u8, ImGuiSliderFlags.Logarithmic);
-        commit |= ImGui.IsItemDeactivatedAfterEdit();
-        ImGui.InputFloat("Height m"u8, ref _height, 0.5f, 5f, "%.1f"u8, ImGuiInputTextFlags.None);
-        commit |= ImGui.IsItemDeactivatedAfterEdit();
         var d = double3.Normalize(s.Position);
+        double core = s.CoreM, blend = s.BlendM, height = s.HeightM;
+        var commit = false;
+        _inspector.Begin("Site"u8, s.Id);
+
+        if (_inspector.Section("Flatten"u8))
+        {
+            commit |= _inspector.Float("Core"u8, ref core, 250.0, 2f, 20.0, 3000.0, "%.0f m"u8, "Flat at the site's height out to here"u8);
+            commit |= _inspector.Float("Blend"u8, ref blend, 200.0, 2f, 10.0, 3000.0, "%.0f m"u8, "Eases back to the ground over this much past the core"u8);
+            commit |= _inspector.Float("Height"u8, ref height, s.HeightM, 0.5f, -1500.0, 6000.0, "%.1f m"u8, "The flat's height above the datum"u8);
+            _inspector.Info("Since"u8, $"v{s.Since}");
+        }
+
+        _inspector.End();
 
         if (commit)
-            _session.SetSite(s.Id, d, _core, _blend, _height);
+            _session.SetSite(s.Id, d, (float)core, (float)blend, (float)height);
 
         if (ImGui.Button("Ground height"u8))
             _session.SetSite(s.Id, d, s.CoreM, s.BlendM, _session.SiteHeight(d));

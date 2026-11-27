@@ -5,7 +5,7 @@ using Brutal.ImGuiApi;
 using Brutal.Logging;
 using Brutal.Numerics;
 using Brutal.VulkanApi;
-using BrutalGame.DesignKit.Ui;
+using BrutalGame.Designer.Planets;
 using BrutalGame.Engine.Rendering;
 using BrutalGame.Engine.Scene;
 using BrutalGame.Frames;
@@ -14,32 +14,25 @@ using BrutalGame.Terrain;
 using BrutalGame.Terrain.Runtime;
 using BrutalGame.Terrain.Runtime.Rendering;
 
-namespace BrutalGame.PlanetDesigner.App;
+namespace BrutalGame.Designer.App.Planets;
 
-/// <summary>What to open and how to start.</summary>
-public sealed class PlanetDesignerOptions
+/// <summary>Where a planet tab starts: the body, and optionally the camera's target direction, distance and pitch.</summary>
+public sealed class PlanetStart
 {
-    /// <summary>The repository's data folder: layers load from and save to <c>planets/&lt;body&gt;/</c> there.</summary>
-    public required string DataRoot;
     public string Body = "home";
-
-    /// <summary>Show the layers built into the assembly (what the game reads) instead of the ones on disk.</summary>
-    public bool Embedded;
     public double3? Look;
     public double? Distance;
     public double? Pitch;
-    public string? ScriptPath;
-    public int CloseAfterFrames;
 }
 
 /// <summary>
-/// BRUTALPlanetDesigner (D89, planet-designer-brief.md §6) on the shared DesignKit shell: one body of the fixed test
-/// system with its authored layer open. The body renders as the game draws it (CelestialView's impostor from orbit,
-/// TerrainWorld's octree near the ground), lit by the star; the orbit camera keeps its target on the ground with the
-/// local vertical as up. A committed stroke, site change, undo or redo re-registers the layer and rebuilds the terrain
-/// around it. No ticks, ocean or physics.
+/// A planet tab of BRUTALDesigner (D89, planet-designer-brief.md §6): one body of the fixed test system with its
+/// authored layer open. The body renders as the game draws it (CelestialView's impostor from orbit, TerrainWorld's
+/// octree near the ground), lit by the star; the tab's orbit camera keeps its target on the ground with the local
+/// vertical as up. A committed stroke, site change, undo or redo re-registers the layer and rebuilds the terrain around
+/// it. No ticks, ocean or physics. Main thread only; the host calls it only while its tab is in front.
 /// </summary>
-public sealed class PlanetDesignerApp : DesignApp
+public sealed class PlanetWorkspace : IDisposable
 {
     public const string SystemId = "test";
 
@@ -56,12 +49,11 @@ public sealed class PlanetDesignerApp : DesignApp
     private readonly TerrainRenderer _terrainRenderer;
     private readonly CelestialView _celestial;
     private readonly TerrainWorld _terrain;
-    private readonly OrbitCamera _camera = new() { FovY = 60f * MathF.PI / 180f };
+    private readonly OrbitCamera _camera;
     private readonly FlyCamera _view = new();
     private readonly PlanetDesignSession _session;
     private readonly PlanetTools _tools;
     private readonly PlanetParams _params;
-    private readonly string _bodyId;
     private readonly int _body;
     private readonly int _terrainBody;
     private readonly FrameId _surface;
@@ -76,75 +68,70 @@ public sealed class PlanetDesignerApp : DesignApp
     private bool _focusUpgraded;
     private float _focusBakeMs;
 
-    public PlanetDesignerApp(PlanetDesignerOptions options)
-        : base(new DesignAppOptions
-        {
-            Title = $"BRUTAL Planet Designer - {options.Body}",
-            LayoutFile = "planet-designer-layout.ini",
-            ScriptPath = options.ScriptPath,
-            CloseAfterFrames = options.CloseAfterFrames,
-            ClearColour = new float4(0f, 0f, 0f, 1f),
-        })
+    /// <param name="planets">The data folder's <c>planets/</c>: layers load from and save to <c>&lt;body&gt;/</c> there.</param>
+    public PlanetWorkspace(Renderer renderer, OrbitCamera camera, string planets, PlanetStart start)
     {
-        _bodyId = options.Body;
-
-        if (!options.Embedded)
-            RegisterDiskLayers(Path.Combine(options.DataRoot, "planets"));
-
+        Body = start.Body;
+        _camera = camera;
         var seed = AuthoredWorld.SystemSeed(SystemId);
         _sim = new SimWorld(seed, workerThreads: 1);
         _body = -1;
 
         for (var i = 0; i < _sim.Celestial.Count; i++)
         {
-            if (AuthoredWorld.BodyId(seed, i) == _bodyId && _sim.BodyParams[i] is not null)
+            if (AuthoredWorld.BodyId(seed, i) == Body && _sim.BodyParams[i] is not null)
                 _body = i;
         }
 
         if (_body < 0)
-            throw new ArgumentException($"No body '{_bodyId}' in the fixed system '{SystemId}'");
+        {
+            _sim.Dispose();
+            throw new ArgumentException($"No body '{Body}' in the fixed system '{SystemId}'");
+        }
 
         for (var i = 0; i < _body; i++)
             _terrainBody += _sim.BodyParams[i] is null ? 0 : 1;
 
         _params = _sim.BodyParams[_body]!.Value;
         _surface = _sim.Celestial[_body].Surface;
-        _session = PlanetDesignSession.Open(Path.Combine(options.DataRoot, "planets", _bodyId), _params, _bodyId);
+        _session = PlanetDesignSession.Open(Path.Combine(planets, Body), _params, Body);
         _tools = new PlanetTools(_session);
 
-        _instances = new InstanceBuffer(Renderer);
-        _terrainRenderer = new TerrainRenderer(Renderer, _instances);
-        _celestial = new CelestialView(Renderer, _sim);
+        _instances = new InstanceBuffer(renderer);
+        _terrainRenderer = new TerrainRenderer(renderer, _instances);
+        _celestial = new CelestialView(renderer, _sim);
         _generator = _celestial.TerrainGenerators[_terrainBody];
         _terrain = new TerrainWorld(_terrainRenderer, _sim.Physics, _celestial.TerrainGenerators, -1, -1);
 
+        _camera.FovY = 60f * MathF.PI / 180f;
         _camera.MinDistance = 5.0;
         _camera.MaxDistance = 4.0 * _params.Radius;
-        _camera.Distance = options.Distance ?? 3.0 * _params.Radius;
-        _camera.Pitch = options.Pitch ?? 0.9;
+        _camera.Distance = start.Distance ?? 3.0 * _params.Radius;
+        _camera.Pitch = start.Pitch ?? 0.9;
         _camera.Yaw = 0.0;
         _sim.UpdateRenderPoses();
         FollowGround(double3.Normalize(new double3(0.3, 0.5, 0.8)));
         _celestial.Update(_view);
-        FollowGround(options.Look is { } look ? double3.Normalize(look) : DaySideLand(_generator.Surface, _celestial.SunFrom(_body)));
-        Log.Info($"{_bodyId}: layer version {_session.Layer.Version}, {_session.Layer.Sites.Count} sites, hash {_session.Layer.Hash():X16}; terrain bounds {_terrain.BoundsMs:F0} ms");
+        FollowGround(start.Look is { } look ? double3.Normalize(look) : DaySideLand(_generator.Surface, _celestial.SunFrom(_body)));
+        Log.Info($"{Body}: layer version {_session.Layer.Version}, {_session.Layer.Sites.Count} sites, hash {_session.Layer.Hash():X16}; terrain bounds {_terrain.BoundsMs:F0} ms");
     }
 
-    public PlanetDesignSession Session => _session;
+    /// <summary>The body's id in the fixed system (its folder under <c>data/planets/</c>).</summary>
+    public string Body { get; }
 
-    public OrbitCamera Orbit => _camera;
+    public PlanetDesignSession Session => _session;
 
     /// <summary>The unit direction the camera looks at on the ground.</summary>
     public double3 Target => double3.Normalize(_camera.Target);
 
     /// <summary>Runs once, on the first frame the octree has settled (scripted checks of the live refresh).</summary>
-    public Action<PlanetDesignerApp>? OnSettled;
+    public Action<PlanetWorkspace>? OnSettled;
 
-    protected override OrbitCamera Camera => _camera;
+    /// <summary>A stroke or a site drag owns the left mouse: the camera leaves it alone.</summary>
+    public bool CameraHeld => _tools.Busy;
 
-    protected override bool CameraHeld => _tools.Busy;
-
-    protected override bool Busy => _octreeActive && !_terrain.Settled;
+    /// <summary>The octree is still loading around the camera.</summary>
+    public bool Busy => _octreeActive && !_terrain.Settled;
 
     /// <summary>Land above the sea with the sun about 25 degrees up, as a seeded search finds it: where the view opens, relief in raking light.</summary>
     private static double3 DaySideLand(PlanetSurface surface, double3 sun)
@@ -166,8 +153,23 @@ public sealed class PlanetDesignerApp : DesignApp
         return best;
     }
 
+    /// <summary>The ids of the fixed system's bodies, in order.</summary>
+    public static List<string> Bodies()
+    {
+        var seed = AuthoredWorld.SystemSeed(SystemId);
+        var list = new List<string>();
+
+        for (var i = 0; i < 64; i++)
+        {
+            if (AuthoredWorld.BodyId(seed, i) is { } id)
+                list.Add(id);
+        }
+
+        return list;
+    }
+
     /// <summary>Layers on disk win over the ones built into the assembly: the designer edits what is in the repository now.</summary>
-    private static void RegisterDiskLayers(string planets)
+    public static void RegisterDiskLayers(string planets)
     {
         if (!Directory.Exists(planets))
             return;
@@ -194,7 +196,7 @@ public sealed class PlanetDesignerApp : DesignApp
         _view.Near = _camera.Near;
     }
 
-    protected override void Tick()
+    public void Tick(long frame)
     {
         var now = Stopwatch.GetTimestamp();
         var seconds = _lastFrame == 0 ? 0.0 : Stopwatch.GetElapsedTime(_lastFrame, now).TotalSeconds;
@@ -218,7 +220,7 @@ public sealed class PlanetDesignerApp : DesignApp
         if (_celestial.FocusUpgraded != _focusUpgraded || _celestial.FocusBakeMs != _focusBakeMs)
         {
             (_focusUpgraded, _focusBakeMs) = (_celestial.FocusUpgraded, _celestial.FocusBakeMs);
-            Log.Info($"focus impostor {(_focusUpgraded ? "on screen" : "gone")} at frame {Frames} (bake {_focusBakeMs:F0} ms)");
+            Log.Info($"focus impostor {(_focusUpgraded ? "on screen" : "gone")} at frame {frame} (bake {_focusBakeMs:F0} ms)");
         }
 
         UpdateCover(_terrainDrawn, seconds);
@@ -226,22 +228,24 @@ public sealed class PlanetDesignerApp : DesignApp
         if (OnSettled is { } settled && _terrain.Settled)
         {
             OnSettled = null;
-            Log.Info($"settled after {Frames} frames with {_terrain.LoadedChunks} leaves; running the scripted edit");
+            Log.Info($"settled after {frame} frames with {_terrain.LoadedChunks} leaves; running the scripted edit");
             settled(this);
         }
     }
 
-    protected override void DrawPanels(ImGuiIOPtr io) => _tools.DrawPanel(_bodyId, _refreshMs, _terrain.LastReplace, _terrain.PendingJobs);
+    /// <param name="dock">Where the Planet panel docks on first use.</param>
+    public void DrawPanels(uint dock) => _tools.DrawPanel(Body, dock, _refreshMs, _terrain.LastReplace, _terrain.PendingJobs);
 
-    protected override void UpdateViewport(ImGuiIOPtr io, Vector2 viewport, in Matrix4x4 viewProj, bool mouseFree)
+    public void UpdateViewport(ImGuiIOPtr io, Vector2 viewport, in Matrix4x4 viewProj, bool mouseFree, OverlayRenderer overlay)
     {
         var mouse = new Vector2(io.MousePos.X, io.MousePos.Y);
         double3? hit = mouseFree && PlanetPick.Ray(_generator.Surface, _camera.Position, _camera.Ray(mouse, viewport), out var point) ? point : null;
         _tools.Update(_params.Radius, hit, mouseFree);
-        _tools.DrawOverlay(Overlay, _camera, viewProj, viewport, _generator.Surface);
+        _tools.DrawOverlay(overlay, _camera, viewProj, viewport, _generator.Surface);
     }
 
-    protected override void HandleKey(GlfwKey key, bool ctrl)
+    /// <summary>Undo, redo, save and the tool keys; anything else does nothing on a planet tab.</summary>
+    public void HandleKey(GlfwKey key, bool ctrl)
     {
         if (ctrl && key == GlfwKey.Z)
             _session.Undo();
@@ -261,7 +265,7 @@ public sealed class PlanetDesignerApp : DesignApp
 
         var start = Stopwatch.GetTimestamp();
         AuthoredWorld.Register(_session.Snapshot());
-        _generator = new PlanetGenerator(_params.WithBody(_bodyId));
+        _generator = new PlanetGenerator(_params.WithBody(Body));
         _terrain.ReplaceGenerator(_terrainBody, _generator, region.Direction, region.Angle);
         _celestial.ReplaceGenerator(_body, _generator);
         _refreshMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
@@ -297,7 +301,7 @@ public sealed class PlanetDesignerApp : DesignApp
         _focusBlend = DetailLadder.Blend(_celestial.FocusAltitude, _octreeCover);
     }
 
-    protected override void RecordBeforeScene(CommandBuffer commands, int frameIndex, in Matrix4x4 viewProj)
+    public void RecordBeforeScene(CommandBuffer commands, int frameIndex, in Matrix4x4 viewProj)
     {
         _instances.BeginFrame(frameIndex);
         _terrainRenderer.RecordUploads(commands, frameIndex);
@@ -309,12 +313,11 @@ public sealed class PlanetDesignerApp : DesignApp
             _terrainRenderer.Skip(frameIndex);
     }
 
-    protected override void RecordScene(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj)
+    public void RecordScene(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, VkExtent2D output)
     {
         if (_terrainDrawn)
             _terrainRenderer.Draw(commands, frameIndex, extent, viewProj, Lighting());
 
-        var output = Renderer.OutputExtent;
         _celestial.Draw(commands, frameIndex, extent, _view, output.Width / (float)Math.Max(1u, output.Height), _focusBlend);
     }
 
@@ -343,7 +346,8 @@ public sealed class PlanetDesignerApp : DesignApp
         };
     }
 
-    protected override void DisposeGpu()
+    /// <summary>GPU resources included: the host waits for the device to go idle first.</summary>
+    public void Dispose()
     {
         _terrain.Dispose();
         _terrainRenderer.Dispose();

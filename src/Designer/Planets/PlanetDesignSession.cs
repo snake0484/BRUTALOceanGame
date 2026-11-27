@@ -2,7 +2,7 @@ using Brutal.Numerics;
 using BrutalGame.DesignKit;
 using BrutalGame.Terrain;
 
-namespace BrutalGame.PlanetDesigner;
+namespace BrutalGame.Designer.Planets;
 
 /// <summary>Where a change landed: a unit direction and an angle (rad) about it; the whole body when the angle is π.</summary>
 public readonly record struct DesignRegion(double3 Direction, double Angle)

@@ -37,6 +37,12 @@ public sealed class DocumentBar
     /// <summary>The tab the user switched to this frame, or -1.</summary>
     public int SelectedKey { get; private set; } = -1;
 
+    /// <summary>The fixed system's bodies, for File > Open planet (the host fills it).</summary>
+    public IReadOnlyList<string> Planets = [];
+
+    /// <summary>The body picked when <see cref="Request"/> is <see cref="FileRequest.OpenPlanet"/>.</summary>
+    public string PlanetBody { get; private set; } = "";
+
     /// <summary>The tab to close this frame (confirmed if it had changes), or -1.</summary>
     public int CloseKey { get; private set; } = -1;
 
@@ -104,6 +110,17 @@ public sealed class DocumentBar
 
         if (ImGui.MenuItem("Open..."u8, "Ctrl+O"u8))
             Request = FileRequest.Open;
+
+        if (Planets.Count > 0 && ImGui.BeginMenu("Open planet"u8))
+        {
+            foreach (var body in Planets)
+            {
+                if (ImGui.MenuItem(body))
+                    (Request, PlanetBody) = (FileRequest.OpenPlanet, body);
+            }
+
+            ImGui.EndMenu();
+        }
 
         if (ImGui.MenuItem("Save"u8, "Ctrl+S"u8))
             Request = FileRequest.Save;
