@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
     <RootNamespace>BrutalGame</RootNamespace>
     <AssemblyName>BRUTALGame</AssemblyName>
   </PropertyGroup>

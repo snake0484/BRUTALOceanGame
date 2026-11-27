@@ -2,6 +2,7 @@ using Brutal.Logging;
 using BrutalGame;
 using Microsoft.Extensions.Logging;
 
+BackgroundLaunch.AttachConsole(args);
 LogSystem.Initialize(builder => builder.AddSimpleConsole(o => o.SingleLine = true).SetMinimumLevel(LogLevel.Information));
 
 var windSpeed = 10f;

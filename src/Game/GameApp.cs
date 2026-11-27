@@ -191,11 +191,13 @@ public sealed partial class GameApp : IDisposable
             throw new InvalidOperationException("Failed to initialize GLFW");
 
         Glfw.WindowHint(GlfwWindowHint.ClientApi, 0);
+        BackgroundLaunch.SetHints();
         _window = Glfw.CreateWindow(new GlfwWindow.CreateInfo
         {
             Title = Title,
             Size = new int2(1600, 900),
         });
+        BackgroundLaunch.Show(_window);
         _window.OnKey += OnKey;
 
         _renderer = new Renderer(_window, _stats, Validation, vsync: benchSeconds <= 0.0, renderScale);
