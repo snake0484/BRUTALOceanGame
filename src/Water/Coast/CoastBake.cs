@@ -183,7 +183,7 @@ public sealed class CoastBake : IJob
         Ms = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
     }
 
-    /// <summary>The shallowest and deepest of <see cref="ProbeSide"/>² depths across a window. Called from jobs.</summary>
+    /// <summary>The shallowest and deepest of <see cref="ProbeSide"/>Â² depths across a window. Called from jobs.</summary>
     public static void Probe(ICoastDepth source, in CoastWindow window, out float min, out float max)
     {
         const double step = CoastWindow.Size / ProbeSide;
@@ -749,6 +749,7 @@ public sealed class CoastBake : IJob
     {
         var atlas = _atlas!;
         atlas.Key = _key;
+        atlas.Height = _key.Carrier.Height;
         atlas.OriginU = _window.OriginU;
         atlas.OriginV = _window.OriginV;
 

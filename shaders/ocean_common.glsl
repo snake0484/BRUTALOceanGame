@@ -33,7 +33,7 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 cascadeAnchorZ; // xyz = frac(camera z / L) per cascade, w = camera z mod the lace period
     vec4 depthRect;      // near depth map: xy = window corner relative to the camera, z = world size (0 = none), w = depth outside both maps
     vec4 depthFar;       // far depth map: xy = corner relative to the camera, z = world size (0 = none)
-    vec4 depthWrap;      // xy = the near window's corner cell mod the map's size (it is stored toroidally), zw unused
+    vec4 depthWrap;      // xy = the near window's corner cell mod the map's size (it is stored toroidally), z = the grid spacing the camera's height calls for (m, continuous: OceanRenderer.FaceSpacing), w unused
     vec4 depthValid;     // the part of the near window that holds its depth: xy = min, zw = max, relative to the camera (empty: min > max)
     vec4 carrier;        // surf carrier (OceanSwell.GpuCarrier): x = omega, y = phase, z = set group ratio (a set every 1 / this waves), w = set group phase
     vec4 shore;          // xy = carrier travel direction, z = its breaker height (0 = no shore wash), w = open swell Hs

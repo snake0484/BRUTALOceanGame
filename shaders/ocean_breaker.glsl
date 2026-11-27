@@ -10,7 +10,8 @@ layout(set = 0, binding = 9) uniform sampler2DArray coastDir;    // rg = directi
 const float COAST_CELLS = 256.0;          // CoastWindow.Cells
 const float COAST_CELL = 4.0;             // CoastWindow.CellSize
 const float COAST_BLEND = 32.0;           // CoastWindow.Blend
-const float COAST_MAX_SPACING = 32.0;     // grid spacing (m) past which no carrier can be drawn
+const float COAST_MAX_SPACING = 32.0;     // grid spacing (m) past which no carrier can be drawn ...
+const float COAST_FADE_SPACING = 16.0;    // ... and from which the face fades out toward it, whatever its wavelength
 const float SURF_GAMMA = 0.78;            // SurfCarrier.BreakingGamma
 const float COHERENT_KH = 0.4;
 const float INCOHERENT_KH = 1.2;
@@ -235,7 +236,7 @@ Face breakerFace(int r, vec2 c, float se)
     float narrowest = FACE_MIN_CELLS * se;
     Face o = Face(0.0, vec2(0.0), vec2(0.0), vec3(0.0), 0.0);
     SurfPoint here = surfCarrierAt(r, c);
-    float resolved = smoothstep(lo, hi, TWO_PI / here.k);
+    float resolved = smoothstep(lo, hi, TWO_PI / here.k) * (1.0 - smoothstep(COAST_FADE_SPACING, COAST_MAX_SPACING, se));
     if (here.unbroken < FACE_MIN_HEIGHT || resolved <= 0.0)
         return o;
 
@@ -338,10 +339,12 @@ float coastRamp(float c)
 }
 
 // The faces of every region over x0, in the sea frame: each by its window's weight (neighbours cross-fade over the cells
-// they share), its fade (load, unload, rebake) and its tile's share of the sea there.
+// they share), its fade (load, unload, rebake) and its tile's share of the sea there. The spacing is at least
+// frame.depthWrap.z, which does not step where the finest level drawn does.
 Face coastFace(vec2 x0, float se)
 {
     Face o = Face(0.0, vec2(0.0), vec2(0.0), vec3(0.0), 0.0);
+    se = max(se, frame.depthWrap.z);
     if (frame.coastCount == 0 || se >= COAST_MAX_SPACING)
         return o;
 

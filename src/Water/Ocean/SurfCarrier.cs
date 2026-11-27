@@ -86,7 +86,7 @@ public static class SurfCarrier
             DirX = s.DirX / length,
             DirZ = s.DirZ / length,
             K = WaveNumber(carrier.Omega, MathF.Max(depth, SpentDepthK)),
-            Unbroken = Unbroken(carrier.Height, carrier.Omega, depth, s.Amplitude),
+            Unbroken = Unbroken(atlas.Height, carrier.Omega, depth, s.Amplitude),
             Depth = s.Depth,
             BreakDistance = s.BreakDistance,
             Plunge = s.Plunge,

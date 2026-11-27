@@ -39,9 +39,9 @@ public struct CoastRegion
 /// The coast regions round the camera (breaking-waves-brief.md §3): the nearest <see cref="MaxDesired"/> lattice windows
 /// that hold a coast are baked for the swell's carrier, one at a time on a job, into a fixed pool of
 /// <see cref="Capacity"/> atlases. Windows load within <see cref="LoadDistance"/> of the camera and unload past
-/// <see cref="UnloadDistance"/>, fading in and out over <see cref="FadeSeconds"/>; when the carrier changes each window
-/// is baked again into the spare slot and cross-faded. Whether a window holds a coast comes from a probe of its depths,
-/// remembered in a fixed table. The main thread only coordinates; nothing is allocated after construction.
+/// <see cref="UnloadDistance"/>, fading in and out over <see cref="FadeSeconds"/>; when the carrier leaves the baked one's
+/// tolerance each window is baked again into the spare slot and cross-faded, and inside it only the drawn height
+/// follows. Whether a window holds a coast comes from a probe of its depths, remembered in a fixed table. The main thread only coordinates; nothing is allocated after construction.
 /// </summary>
 public sealed class CoastRegionSet : IDisposable
 {
@@ -50,6 +50,14 @@ public sealed class CoastRegionSet : IDisposable
     public const double LoadDistance = 3000.0;
     public const double UnloadDistance = 6000.0;
     public const float FadeSeconds = 2f;
+
+    /// <summary>The maps are kept while the swell's carrier is within these of the one they were baked for: 1° of direction, and shares of its frequency and height.</summary>
+    public const int DirectionTolerance = CoastCarrier.DirectionSteps / 360;
+    public const float OmegaTolerance = 0.01f;
+    public const float HeightTolerance = 0.05f;
+
+    /// <summary>A kept map's drawn height follows the carrier's over this (s).</summary>
+    private const float HeightSeconds = 2f;
 
     /// <summary>A loaded window ranks as this much nearer (m), so two windows at the pool's edge do not swap back and forth.</summary>
     private const double Stickiness = 500.0;
@@ -118,6 +126,7 @@ public sealed class CoastRegionSet : IDisposable
     private Work _running;
     private int _bakeSlot;
     private CoastCarrier _carrier;
+    private CoastCarrier _baked;
     private float _breakDepth;
     private double3 _selectedAt;
     private bool _dirty = true;
@@ -138,7 +147,10 @@ public sealed class CoastRegionSet : IDisposable
 
     public ReadOnlySpan<CoastRegion> Regions => _regions;
 
-    public CoastCarrier Carrier => _carrier;
+    /// <summary>The carrier the maps are baked for, and the swell's own, which it follows in steps (<see cref="Keeps"/>).</summary>
+    public CoastCarrier Carrier => _baked;
+
+    public CoastCarrier Wanted => _carrier;
 
     /// <summary>Worker time of the last bake (ms) and of its depth sampling; bakes and probes run so far; slots drawn.</summary>
     public float LastBakeMs { get; private set; }
@@ -169,15 +181,22 @@ public sealed class CoastRegionSet : IDisposable
     {
         var breakDepth = CoastBake.BreakDepth(significantHeight);
 
-        if (carrier != _carrier || breakDepth != _breakDepth)
+        if (!Keeps(_baked, carrier))
         {
-            _carrier = carrier;
+            _baked = carrier;
+            _dirty = true;
+        }
+
+        if (breakDepth != _breakDepth)
+        {
             _breakDepth = breakDepth;
             _dirty = true;
         }
 
+        _carrier = carrier;
         Collect();
         Fade(seconds);
+        Heights(seconds);
 
         if (_dirty || (camera - _selectedAt).LengthSquared() > Reselect * Reselect)
         {
@@ -191,6 +210,39 @@ public sealed class CoastRegionSet : IDisposable
             Start();
 
         Settled = _running == Work.None && !Fading();
+    }
+
+    /// <summary>A map baked for <paramref name="baked"/> still serves <paramref name="wanted"/>.</summary>
+    public static bool Keeps(CoastCarrier baked, CoastCarrier wanted)
+    {
+        if (baked.Calm || wanted.Calm)
+            return baked.Calm && wanted.Calm;
+
+        var turn = Math.Abs(baked.DirectionStep - wanted.DirectionStep);
+        turn = Math.Min(turn, CoastCarrier.DirectionSteps - turn);
+
+        return turn <= DirectionTolerance
+            && MathF.Abs(wanted.Omega - baked.Omega) <= OmegaTolerance * baked.Omega
+            && MathF.Abs(wanted.Height - baked.Height) <= HeightTolerance * baked.Height;
+    }
+
+    /// <summary>The height a slot's map is drawn with: the swell's carrier's while the map serves it, else its own.</summary>
+    private float DrawHeight(in CoastRegion region) => Keeps(region.Key.Carrier, _carrier) ? _carrier.Height : region.Key.Carrier.Height;
+
+    private void Heights(float seconds)
+    {
+        var ease = 1f - MathF.Exp(-seconds / HeightSeconds);
+
+        for (var i = 0; i < Capacity; i++)
+        {
+            ref readonly var region = ref _regions[i];
+
+            if (region.State is not (CoastRegionState.Live or CoastRegionState.Retiring))
+                continue;
+
+            var atlas = _atlases[i];
+            atlas.Height += (DrawHeight(region) - atlas.Height) * ease;
+        }
     }
 
     private bool Fading()
@@ -300,8 +352,8 @@ public sealed class CoastRegionSet : IDisposable
             LastBakeMs = _bake.Ms;
             LastBakeDepthMs = _bake.DepthMs;
 
-            if (_bake.Baked && region.Key.Carrier == _carrier)
-                GoLive(ref region);
+            if (_bake.Baked && region.Key.Carrier == _baked)
+                GoLive(ref region, _atlases[_bakeSlot]);
             else
                 region.State = CoastRegionState.Free;
         }
@@ -311,8 +363,10 @@ public sealed class CoastRegionSet : IDisposable
     }
 
     /// <summary>The slot's map fades in; any other map of its window fades out under it.</summary>
-    private void GoLive(ref CoastRegion region)
+    private void GoLive(ref CoastRegion region, CoastAtlas atlas)
     {
+        atlas.Height = DrawHeight(region);
+
         for (var i = 0; i < Capacity; i++)
         {
             ref var other = ref _regions[i];
@@ -369,7 +423,7 @@ public sealed class CoastRegionSet : IDisposable
         if (_running != Work.Probe)
             _probe.Count = 0;
 
-        if (_carrier.Calm)
+        if (_baked.Calm)
             return;
 
         for (var i = 0; i < Capacity; i++)
@@ -377,7 +431,7 @@ public sealed class CoastRegionSet : IDisposable
             ref readonly var region = ref _regions[i];
 
             if (region.State is CoastRegionState.Live or CoastRegionState.Baking && !Desired(region.Key))
-                Consider(camera, region.Window, region.Key.Tile, region.Key.X, region.Key.Z, UnloadDistance, Stickiness);
+                Consider(camera, region.Window, region.Key.Tile, region.Key.X, region.Key.Z, UnloadDistance, Stickiness, loaded: true);
         }
 
         var dir = double3.Normalize(camera);
@@ -412,13 +466,14 @@ public sealed class CoastRegionSet : IDisposable
                     if (du * du + dv * dv > reach * reach || Loaded(tile, (short)x, (short)z))
                         continue;
 
-                    Consider(camera, new CoastWindow(_tiles, tile, x, z), tile, (short)x, (short)z, LoadDistance, 0.0);
+                    Consider(camera, new CoastWindow(_tiles, tile, x, z), tile, (short)x, (short)z, LoadDistance, 0.0, loaded: false);
                 }
             }
         }
     }
 
-    private unsafe void Consider(in double3 camera, in CoastWindow window, int tile, short x, short z, double limit, double stickiness)
+    /// <param name="loaded">The window has a map: it holds a coast whatever the probes' table remembers.</param>
+    private unsafe void Consider(in double3 camera, in CoastWindow window, int tile, short x, short z, double limit, double stickiness, bool loaded)
     {
         var centre = window.Direction(0.5 * CoastWindow.Size, 0.5 * CoastWindow.Size);
         var distance = (camera - centre * _tiles.SeaRadius).Length();
@@ -436,22 +491,8 @@ public sealed class CoastRegionSet : IDisposable
             return;
 
         var candidate = new Candidate { Tile = tile, X = x, Z = z, Rank = distance - stickiness };
-        var probe = Find(tile, x, z);
 
-        if (probe < 0)
-        {
-            if (_running != Work.Probe && _probe.Count < ProbeBatch)
-            {
-                _probe.Keys[_probe.Count] = candidate;
-                _probe.Windows[_probe.Count++] = window;
-            }
-
-            return;
-        }
-
-        _probes[probe].Stamp = ++_stamp;
-
-        if (!CoastBake.Coastal(_probes[probe].Min, _probes[probe].Max, _breakDepth))
+        if (!loaded && !Coastal(candidate, window))
             return;
 
         var at = _desiredCount;
@@ -468,6 +509,26 @@ public sealed class CoastRegionSet : IDisposable
             _desired[i] = _desired[i - 1];
 
         _desired[at] = candidate;
+    }
+
+    /// <summary>The probes' table has the window as a coast; one it does not know is queued for a probe.</summary>
+    private bool Coastal(in Candidate candidate, in CoastWindow window)
+    {
+        var probe = Find(candidate.Tile, candidate.X, candidate.Z);
+
+        if (probe < 0)
+        {
+            if (_running != Work.Probe && _probe.Count < ProbeBatch)
+            {
+                _probe.Keys[_probe.Count] = candidate;
+                _probe.Windows[_probe.Count++] = window;
+            }
+
+            return false;
+        }
+
+        _probes[probe].Stamp = ++_stamp;
+        return CoastBake.Coastal(_probes[probe].Min, _probes[probe].Max, _breakDepth);
     }
 
     private bool Loaded(int tile, short x, short z)
@@ -494,15 +555,18 @@ public sealed class CoastRegionSet : IDisposable
         return false;
     }
 
-    /// <summary>Live maps of windows no longer wanted fade out.</summary>
+    /// <summary>Live maps of windows no longer wanted fade out; one still fading out when its window is wanted again fades back in.</summary>
     private void Reconcile()
     {
         for (var i = 0; i < Capacity; i++)
         {
             ref var region = ref _regions[i];
+            var desired = Desired(region.Key);
 
-            if (region.State == CoastRegionState.Live && !Desired(region.Key))
+            if (region.State == CoastRegionState.Live && !desired)
                 region.State = CoastRegionState.Retiring;
+            else if (region.State == CoastRegionState.Retiring && desired && region.Key.Carrier == _baked && !Has(region.Key))
+                region.State = CoastRegionState.Live;
         }
     }
 
@@ -519,7 +583,7 @@ public sealed class CoastRegionSet : IDisposable
 
         for (var d = 0; d < _desiredCount; d++)
         {
-            var key = new CoastRegionKey(_desired[d].Tile, _desired[d].X, _desired[d].Z, _carrier);
+            var key = new CoastRegionKey(_desired[d].Tile, _desired[d].X, _desired[d].Z, _baked);
 
             if (Has(key))
                 continue;

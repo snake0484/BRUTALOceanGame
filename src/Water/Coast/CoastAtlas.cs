@@ -40,6 +40,9 @@ public sealed class CoastAtlas
 
     public CoastRegionKey Key;
 
+    /// <summary>The carrier's deep-water height the map is drawn with (m): its key's when baked, then the swell's while it stays within the key's tolerance.</summary>
+    public float Height;
+
     /// <summary>The window's corner in its tile's plane (m).</summary>
     public double OriginU;
     public double OriginV;

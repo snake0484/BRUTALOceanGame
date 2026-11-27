@@ -192,6 +192,92 @@ public sealed class CoastRegionSetTests(ITestOutputHelper output)
         Assert.True(least > 0.999f, $"a window's maps summed to {least:F3} in a cross-fade");
     }
 
+    /// <summary>Inside the tolerance a new carrier keeps the maps and only the drawn height follows; past it they are baked again.</summary>
+    [Fact]
+    public void CarrierInsideTheTolerance_KeepsTheMaps()
+    {
+        using var set = Beach();
+        var camera = Camera(790.0, 512.0);
+        Settle(set, camera, Swell);
+        var bakes = set.Bakes;
+        var near = CoastCarrier.From(Swell.Direction + 0.008f, Swell.Omega * 1.005f, Swell.Height * 1.03f);
+        Assert.True(CoastRegionSet.Keeps(Swell, near));
+        var point = Home.Direction(778.0, 512.0);
+        set.Sample(point, 0.0, out var before);
+        var worst = 0f;
+
+        for (var i = 1; i <= 600; i++)
+        {
+            set.Update(camera, near, Hs, Frame);
+            set.Sample(point, i * (double)Frame, out var face);
+            worst = MathF.Max(worst, MathF.Abs(face.Height - before.Height));
+            before = face;
+        }
+
+        Assert.Equal(bakes, set.Bakes);
+        Assert.Equal(Swell, set.Carrier);
+        Assert.True(worst <= 0.03f, $"the face moved {worst:F3} m in a tick as the height followed");
+
+        for (var slot = 0; slot < CoastRegionSet.Capacity; slot++)
+        {
+            if (set.Regions[slot].Drawn)
+                Assert.Equal(near.Height, set.Atlas(slot).Height, 0.002f);
+        }
+
+        var far = CoastCarrier.From(Swell.Direction + 0.05f, Swell.Omega, Swell.Height);
+        Assert.False(CoastRegionSet.Keeps(Swell, far));
+        Assert.False(CoastRegionSet.Keeps(Swell, CoastCarrier.From(Swell.Direction, Swell.Omega * 1.02f, Swell.Height)));
+        Assert.False(CoastRegionSet.Keeps(Swell, CoastCarrier.From(Swell.Direction, Swell.Omega, Swell.Height * 1.08f)));
+        Assert.False(CoastRegionSet.Keeps(Swell, default));
+        Settle(set, camera, far);
+        Assert.Equal(far, set.Carrier);
+        Assert.Equal(bakes + CoastRegionSet.MaxDesired, set.Bakes);
+    }
+
+    /// <summary>A window dropped and wanted again before its map has faded out fades back in: no bake, and its weight never steps.</summary>
+    [Fact]
+    public void RetiringWindow_WantedAgain_FadesBackIn()
+    {
+        using var set = Beach();
+        var camera = Camera(790.0, 512.0);
+        Settle(set, camera, Swell);
+        var bakes = set.Bakes;
+        var away = Camera(790.0, 512.0, 7000.0);
+        var before = Weights(set);
+        var worst = 0f;
+
+        void Step(double3 at)
+        {
+            set.Update(at, Swell, Hs, Frame);
+            var now = Weights(set);
+            worst = MathF.Max(worst, MathF.Abs(now - before));
+            before = now;
+        }
+
+        for (var i = 0; i < 40; i++)
+            Step(away);
+
+        Assert.InRange(before, 0.1f * CoastRegionSet.MaxDesired, 0.9f * CoastRegionSet.MaxDesired);
+
+        for (var i = 0; i < 240; i++)
+            Step(camera);
+
+        Assert.Equal(bakes, set.Bakes);
+        Assert.Equal(CoastRegionSet.MaxDesired, Live(set));
+        Assert.Equal((float)CoastRegionSet.MaxDesired, before, 0.001f);
+        Assert.True(worst < 0.15f, $"the weights stepped {worst:F3} in a frame");
+    }
+
+    private static float Weights(CoastRegionSet set)
+    {
+        var sum = 0f;
+
+        foreach (var region in set.Regions)
+            sum += region.Drawn ? region.Weight : 0f;
+
+        return sum;
+    }
+
     /// <summary>The GPU's map from the camera-relative sea frame to a region's cells lands where the window says, to the linearisation's error.</summary>
     [Fact]
     public unsafe void Placement_PutsTheRegionAgainstTheCamera()
