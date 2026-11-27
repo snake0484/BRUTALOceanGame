@@ -25,9 +25,12 @@ public static class PlanetKindCompiler
     private const uint OctaveSalt = 0x9E3779B9u;
     private const int None = PlanetKindProgram.None;
 
-    public static PlanetKindProgram Compile(PlanetKind kind, in PlanetParams p)
+    public static PlanetKindProgram Compile(PlanetKind kind, in PlanetParams p) => Compile(kind, p, AuthoredWorld.For(p));
+
+    /// <param name="authored">The body's authored layer; null, or one that changes no terrain, compiles the generated program bit for bit.</param>
+    public static PlanetKindProgram Compile(PlanetKind kind, in PlanetParams p, AuthoredLayer? authored)
     {
-        var b = new Builder(kind, p);
+        var b = new Builder(kind, p, authored is { ChangesTerrain: true } ? authored : null);
 
         foreach (var layer in kind.Layers.EnumerateArray())
         {
@@ -54,7 +57,7 @@ public static class PlanetKindCompiler
         return z ^ (z >> 31);
     }
 
-    private sealed class Builder(PlanetKind kind, PlanetParams p)
+    private sealed class Builder(PlanetKind kind, PlanetParams p, AuthoredLayer? authored)
     {
         private static readonly string[] NoiseKeys = ["name", "type", "out", "lambdaM", "lambdaR", "octaves", "amplitude", "amplitudeM", "gain", "normalize", "precise", "gradient", "warp", "gate", "scale", "ridgeGain", "damping"];
         private static readonly string[] CurveKeys = ["name", "type", "in", "out", "knots", "ease", "op"];
@@ -748,6 +751,7 @@ public static class PlanetKindCompiler
             float top = MathF.Max(sumHi + 1f, p.MaxHeight), bottom = MathF.Min(sumLo - 1f, p.MinHeight);
             var knee = Push(kneeHi, top, p.MaxHeight, (top - kneeHi) / (p.MaxHeight - kneeHi), kneeLo, bottom, p.MinHeight, (kneeLo - bottom) / (kneeLo - p.MinHeight));
             Emit(LayerOp.Curve, PlanetKindProgram.Height, PlanetKindProgram.Height, mode: LayerMode.CurveKnee, paramBase: knee);
+            var maps = AuthoredMaps();
 
             if (p.HasSea)
             {
@@ -756,11 +760,62 @@ public static class PlanetKindCompiler
                 Emit(LayerOp.SeaClamp, PlanetKindProgram.Height, continent, paramBase: clamp);
             }
 
+            var sites = AuthoredSites();
             var final = Build();
+            final.Maps = maps;
+            final.Sites = sites;
+            final.AuthoredHash = authored?.Hash() ?? 0;
             program.OctaveMean.CopyTo(final.OctaveMean, 0);
             CopyCalibration(program, final);
             BuildLodTables(final);
             return Seal(final);
+        }
+
+        /// <summary>Authored height maps after the knee (a local stroke never moves the knee elsewhere), each clamped to the relief range.</summary>
+        private AuthoredMap[] AuthoredMaps()
+        {
+            if (authored is null)
+                return [];
+
+            _layer = $"(authored {authored.Id})";
+            var maps = new List<AuthoredMap>();
+
+            foreach (var m in authored.Maps)
+            {
+                if (m.Map.IsEmpty)
+                    continue;
+
+                Emit(LayerOp.MapAdd, PlanetKindProgram.Height, paramBase: Push(maps.Count, p.MinHeight, p.MaxHeight));
+                maps.Add(m.Map.Freeze());
+            }
+
+            return [.. maps];
+        }
+
+        /// <summary>Authored sites last, after the sea clamp: a target must stand clear of the protected band (D30) and inside the relief range.</summary>
+        private SiteStamp[] AuthoredSites()
+        {
+            if (authored is null || authored.Sites.Count == 0)
+                return [];
+
+            _layer = $"(authored {authored.Id})";
+            var floor = p.HasSea ? p.SeaHeight + p.ShoreProtectHeight + 1f : p.MinHeight;
+            var sites = new SiteStamp[authored.Sites.Count];
+
+            for (var k = 0; k < sites.Length; k++)
+            {
+                var s = authored.Sites[k];
+
+                if (s.HeightM < floor || s.HeightM > p.MaxHeight)
+                    throw Error($"site {s.Id} height {s.HeightM:F1} m is outside {floor:F1} .. {p.MaxHeight:F1} m");
+
+                var c = s.Position;
+                var scale = p.Radius / c.Length();
+                sites[k] = new SiteStamp { X = c.X * scale, Y = c.Y * scale, Z = c.Z * scale, Core = s.CoreM, Reach = s.CoreM + s.BlendM, InvBlend = 1f / s.BlendM, Target = s.HeightM };
+            }
+
+            Emit(LayerOp.Sites, PlanetKindProgram.Height);
+            return sites;
         }
 
         private PlanetKindProgram Build()
@@ -1110,6 +1165,12 @@ public static class PlanetKindCompiler
                 Span<float> fields = [(float)c.Kind, c.Rotation, c.CellsPerSide, c.Seed, c.RadiusMin, c.RadiusMax, c.Presence, c.Reach, c.Jitter, c.AgeMin, c.AgeMax,
                     c.ComplexDiameter, c.DepthMax, c.RimMax, c.LambdaMin, c.LambdaMax, c.RatioMin, c.RatioMax];
                 hash = Fnv(MemoryMarshal.AsBytes(fields), hash);
+            }
+
+            if (program.AuthoredHash != 0)
+            {
+                Span<ulong> authored = [program.AuthoredHash];
+                hash = Fnv(MemoryMarshal.AsBytes(authored), hash);
             }
 
             Span<double> body = [program.Radius, program.AxisX, program.AxisY, program.AxisZ, program.MinHeight, program.MaxHeight, program.SeaHeight];

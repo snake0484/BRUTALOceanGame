@@ -5,6 +5,14 @@ public enum LayerOp : byte
     Fbm, Ridged, Billow, Eroded, Warp,
     Craters, Ergs,
     Curve, Terrace, Canyon, Mask, Combine, SeaClamp, Legacy,
+    MapAdd, Sites,
+}
+
+/// <summary>An authored flatten site (planet-designer-brief.md §2): datum point, core and reach (m), 1 / blend, target height.</summary>
+public struct SiteStamp
+{
+    public double X, Y, Z;
+    public float Core, Reach, InvBlend, Target;
 }
 
 /// <summary>Per-layer mode bytes: flags for noise layers, the variant for compose ops.</summary>
@@ -100,6 +108,11 @@ public sealed class PlanetKindProgram
     public int[] CoarseSlots = new int[Lods];
 
     public StampClass[] Classes = [];
+
+    /// <summary>The authored layer's frozen height maps and sites (D83); empty when the body has none.</summary>
+    public AuthoredMap[] Maps = [];
+    public SiteStamp[] Sites = [];
+    public ulong AuthoredHash;
 
     /// <summary>The JSON layer each op came from (debug only, not hashed).</summary>
     public string[] LayerNames = [];

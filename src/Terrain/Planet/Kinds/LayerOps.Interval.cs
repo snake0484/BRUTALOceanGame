@@ -62,6 +62,12 @@ internal static partial class LayerOps
                 case LayerOp.Legacy:
                     LegacyBounds(p, layer, lo, hi);
                     break;
+                case LayerOp.MapAdd:
+                    MapAddBounds(p, layer, qx, qy, qz, rho, lo, hi);
+                    break;
+                case LayerOp.Sites:
+                    SitesBounds(p, layer, qx, qy, qz, rho, lo, hi);
+                    break;
             }
         }
     }

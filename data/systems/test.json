@@ -1,0 +1,5 @@
+{
+  "id": "test",
+  "seed": 1,
+  "bodies": ["", "home", "home-moon"]
+}
