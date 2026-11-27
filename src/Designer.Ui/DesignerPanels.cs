@@ -7,7 +7,7 @@ using BrutalGame.Ships.Interior;
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>What the File menu asks the host to do this frame (file dialogs and disk live in the host).</summary>
-public enum FileRequest { None, New, NewComponent, Open, Save, SaveAs }
+public enum FileRequest { None, New, NewComponent, NewTool, Open, Save, SaveAs }
 
 /// <summary>What the open tab is: a ship, or a component (its own plan, made into a prefab by saving it).</summary>
 public enum Workspace { Ship, Component }
@@ -38,6 +38,10 @@ public sealed class DesignStats
     public int SurfaceTriangles;
     public double FlairKg;
     public double ComponentsKg;
+
+    /// <summary>A tool's (D91) mass budget line, and whether it is over or has no grip ("" for other plans).</summary>
+    public string ToolBudget = "";
+    public bool ToolProblem;
 
     /// <summary>Debug: draw the 0.25 m grid mesh (mass and collision's view of the hull) instead of the exact surface.</summary>
     public bool ShowGrid;
@@ -447,6 +451,14 @@ public sealed class DesignerPanels
     {
         if (ImGui.Begin("Stats"u8))
         {
+            if (stats.ToolBudget.Length > 0)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, stats.ToolProblem ? new float4(1f, 0.38f, 0.32f, 1f) : DesignerStyle.Text);
+                ImGui.TextWrapped(stats.ToolBudget);
+                ImGui.PopStyleColor(1);
+                ImGui.Separator();
+            }
+
             var mass = stats.Mass;
             var com = mass.CentreOfMass;
             var inertia = mass.Inertia;

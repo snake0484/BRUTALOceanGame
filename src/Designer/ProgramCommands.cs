@@ -40,6 +40,14 @@ public sealed class InterfaceLibrary
         States = ["Auto", "On", "Off"],
     };
 
+    /// <summary>The built-in Tool interface (<c>data/interfaces/tool.json</c>): Ready follows the trigger, Safe never fires.</summary>
+    public static ComponentInterface Tool => new()
+    {
+        Name = "Tool",
+        Calls = ["Ready", "Safe"],
+        States = ["Ready", "Safe"],
+    };
+
     public static string DefaultFolder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "BRUTALGame", "Interfaces");
 
     public void Refresh()
@@ -337,6 +345,65 @@ public static class ProgramCommands
         var darkOff = Add(NodeKind.SetInput, 2, 3.5, 0, 0, lamp);
         Link(onOff, 0, setOff);
         Link(setOff, 0, darkOff);
+        return true;
+    }
+
+    /// <summary>
+    /// Replaces the graph with the trigger sequence (the Tool interface): on start and on Ready, full power, then for
+    /// ever: wait until <paramref name="grip"/>'s trigger is pulled, fire <paramref name="emitter"/>, wait until it is let
+    /// go, stop firing. Safe stops firing and stops following the trigger. False when a name is missing.
+    /// </summary>
+    public static bool TriggerSequence(HullProgram program, uint grip, uint emitter)
+    {
+        var face = program.Interface;
+        int ready = face.Calls.FindIndex(c => c.Equals("Ready", StringComparison.OrdinalIgnoreCase)), safe = face.Calls.FindIndex(c => c.Equals("Safe", StringComparison.OrdinalIgnoreCase));
+        int readyState = face.States.FindIndex(c => c.Equals("Ready", StringComparison.OrdinalIgnoreCase)), safeState = face.States.FindIndex(c => c.Equals("Safe", StringComparison.OrdinalIgnoreCase));
+
+        if (Math.Min(Math.Min(ready, safe), Math.Min(readyState, safeState)) < 0)
+            return false;
+
+        program.Nodes.Clear();
+        ushort id = 0;
+
+        ushort Add(NodeKind kind, int col, double row, int a = 0, short b = 0, uint core = 0)
+        {
+            program.Nodes.Add(new ProgramNode { Id = ++id, Kind = kind, X = (short)(20 + col * ColumnPixels), Y = (short)(20 + row * RowPixels), A = (byte)a, B = b, Joint = core });
+            return id;
+        }
+
+        void Set(ushort node, Func<ProgramNode, ProgramNode> change)
+        {
+            var i = program.IndexOf(node);
+            program.Nodes[i] = change(program.Nodes[i]);
+        }
+
+        // Emitter inputs: 0 Fire, 1 Power. Grip signals: 1 Trigger.
+        var onStart = Add(NodeKind.OnStart, 0, 0);
+        var onReady = Add(NodeKind.OnCall, 0, 1, ready);
+        var setReady = Add(NodeKind.SetState, 1, 0, readyState);
+        var full = Add(NodeKind.SetInput, 2, 0, 1, 100, emitter);
+        var pulled = Add(NodeKind.WaitUntil, 3, 0);
+        var fire = Add(NodeKind.SetInput, 4, 0, 0, 1, emitter);
+        var released = Add(NodeKind.WaitUntil, 5, 0);
+        var stop = Add(NodeKind.SetInput, 6, 0, 0, 0, emitter);
+        var down = Add(NodeKind.SignalIs, 3, 1, 1 | (int)Compare.Equal << 4, 1, grip);
+        var up = Add(NodeKind.SignalIs, 5, 1, 1 | (int)Compare.Equal << 4, 0, grip);
+        Set(pulled, n => n with { In = down });
+        Set(released, n => n with { In = up });
+        Set(onStart, n => n with { Out0 = setReady });
+        Set(onReady, n => n with { Out0 = setReady });
+        Set(setReady, n => n with { Out0 = full });
+        Set(full, n => n with { Out0 = pulled });
+        Set(pulled, n => n with { Out0 = fire });
+        Set(fire, n => n with { Out0 = released });
+        Set(released, n => n with { Out0 = stop });
+        Set(stop, n => n with { Out0 = pulled });
+
+        var onSafe = Add(NodeKind.OnCall, 0, 2.5, safe);
+        var setSafe = Add(NodeKind.SetState, 1, 2.5, safeState);
+        var cold = Add(NodeKind.SetInput, 2, 2.5, 0, 0, emitter);
+        Set(onSafe, n => n with { Out0 = setSafe });
+        Set(setSafe, n => n with { Out0 = cold });
         return true;
     }
 

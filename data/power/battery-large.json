@@ -1,0 +1,28 @@
+{
+  "id": "power.battery-large",
+  "name": "Tool battery, 600 Wh",
+  "kind": "Battery",
+  "rateHz": 60,
+  "powerW": 0,
+  "tickCostNs": 30,
+  "massKg": 3.2,
+  "capacityWh": 600,
+  "signals": [
+    {
+      "name": "Charge",
+      "unit": "%",
+      "step": 0.1,
+      "min": 0,
+      "max": 100,
+      "input": false
+    },
+    {
+      "name": "Draw",
+      "unit": "W",
+      "step": 1,
+      "min": 0,
+      "max": 5000,
+      "input": false
+    }
+  ]
+}

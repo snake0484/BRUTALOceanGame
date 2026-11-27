@@ -317,7 +317,7 @@ public static class PlanFormat
         if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat or InteriorFormat or WindowFormat or RouteFormat or WallFormat or BrushProfileFormat or PaintFormat or RepeatFormat or JointFormat or OpeningFormat or ProgramFormat or ConditionFormat or CoreFormat))
             return PlanFormatError.UnsupportedFormat;
 
-        if (header.Level is not (PlanLevel.Ship or PlanLevel.HullChunk or PlanLevel.Component))
+        if (header.Level is not (PlanLevel.Ship or PlanLevel.HullChunk or PlanLevel.Component or PlanLevel.Tool))
             return PlanFormatError.UnsupportedLevel;
 
         if (header.SectionCount > PlanLimits.MaxSections)

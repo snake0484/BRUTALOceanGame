@@ -1,0 +1,54 @@
+{
+  "id": "effector.cutting-torch",
+  "name": "Plasma cutting head",
+  "kind": "Emitter",
+  "rateHz": 60,
+  "powerW": 1200,
+  "tickCostNs": 80,
+  "massKg": 0.7,
+  "range": 0.25,
+  "heatPerSecond": 8,
+  "coolPerSecond": 15,
+  "signals": [
+    {
+      "name": "Fire",
+      "unit": "",
+      "step": 1,
+      "min": 0,
+      "max": 1,
+      "input": true
+    },
+    {
+      "name": "Power",
+      "unit": "%",
+      "step": 1,
+      "min": 0,
+      "max": 100,
+      "input": true
+    },
+    {
+      "name": "Firing",
+      "unit": "",
+      "step": 1,
+      "min": 0,
+      "max": 1,
+      "input": false
+    },
+    {
+      "name": "Heat",
+      "unit": "%",
+      "step": 1,
+      "min": 0,
+      "max": 100,
+      "input": false
+    },
+    {
+      "name": "Overheated",
+      "unit": "",
+      "step": 1,
+      "min": 0,
+      "max": 1,
+      "input": false
+    }
+  ]
+}

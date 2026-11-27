@@ -13,6 +13,9 @@ public static class CoreIds
     public static readonly uint RotaryMotor = CoreCatalog.Hash("effector.rotary-motor");
     public static readonly uint SolenoidBolt = CoreCatalog.Hash("effector.solenoid-bolt");
     public static readonly uint Lamp = CoreCatalog.Hash("effector.lamp");
+    public static readonly uint Grip = CoreCatalog.Hash("sensor.grip");
+    public static readonly uint SmallBattery = CoreCatalog.Hash("power.battery-small");
+    public static readonly uint CuttingTorch = CoreCatalog.Hash("effector.cutting-torch");
 }
 
 /// <summary>Core edits in a component plan, each one undo group that swaps the core set for an edited copy.</summary>

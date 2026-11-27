@@ -5,6 +5,7 @@
   "rateHz": 60,
   "powerW": 20,
   "tickCostNs": 20,
+  "massKg": 0.3,
   "signals": [
     {
       "name": "On",

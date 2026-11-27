@@ -135,6 +135,8 @@ public sealed partial class DesignerApp : DesignApp
 
         if (load is not null)
             Open(load);
+        else if (ToolDemo)
+            NewDocument(component: true, SampleTools.CuttingTorch(DefId.FromName("mat.hull.alloy")).Clone(), name: "Cutting torch");
         else if (ComponentDemo is { } name && Catalog().FirstOrDefault(c => c.Prefab.Meta.Name.Contains(name, StringComparison.OrdinalIgnoreCase)) is { Prefab: not null } named)
             OpenComponentCopy(named.Prefab);
         else if (EngineDemo)
@@ -465,6 +467,7 @@ public sealed partial class DesignerApp : DesignApp
         AddGroupBricks(bricks, groups);
         _hull.Upload(bricks, groups);
         _stats.Mass = TotalMass();
+        ToolBudget();
         (_stats.Projectors, _stats.ProjectorRefs) = (_hull.Projectors, _hull.ProjectorRefs);
     }
 
@@ -508,6 +511,7 @@ public sealed partial class DesignerApp : DesignApp
         _surfaceChanged = false;
         UploadSurface();
         _stats.Mass = TotalMass();
+        ToolBudget();
         _stats.Bricks = _baker.Bricks.Count;
         _stats.Triangles = _baker.TriangleCount;
         _stats.BakeMs = _baker.LastBakeMs;
@@ -769,6 +773,10 @@ public sealed partial class DesignerApp : DesignApp
                 NewDocument(component: true);
                 _stats.Message = "New component: add parts in the Parts panel";
                 break;
+            case FileRequest.NewTool:
+                NewDocument(component: true, new PlanDocument { Level = PlanLevel.Tool }, name: $"Tool {++_componentCount}");
+                _stats.Message = "New tool: give it a grip, a battery and an effector (Programme panel), under the mass limit";
+                break;
             case FileRequest.Open:
                 PickAndOpen();
                 break;
@@ -846,7 +854,7 @@ public sealed partial class DesignerApp : DesignApp
             return;
         }
 
-        NewDocument(doc.Level == PlanLevel.Component, doc, path);
+        NewDocument(doc.Level is PlanLevel.Component or PlanLevel.Tool, doc, path);
         _stats.Message = $"Opened {Path.GetFileName(path)}";
         Console.WriteLine($"opened {path}: {doc.Solids.Count} solids, hash {PlanFormat.HashBody(doc)}");
     }
@@ -894,6 +902,9 @@ public sealed partial class DesignerApp : DesignApp
 
     /// <summary>--demo-engine: the catalog rocket open in the component editor; with --place, placed on the demo ship.</summary>
     public static bool EngineDemo;
+
+    /// <summary>--demo-tool: opens the sample cutting torch.</summary>
+    public static bool ToolDemo;
 
     /// <summary>--demo-component name: opens a copy of the first catalog component whose name contains it.</summary>
     public static string? ComponentDemo;

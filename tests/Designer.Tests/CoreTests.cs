@@ -29,7 +29,7 @@ public class CoreTests(ITestOutputHelper output)
     [Fact]
     public void Catalog_LoadsEveryCore_InTheRightRole()
     {
-        Assert.Equal(9, Catalog.All.Count);
+        Assert.Equal(13, Catalog.All.Count);
         Assert.All(Catalog.All, d => Assert.True(d.IsValid(), d.Id));
         Assert.True(Catalog.TryGet(CoreIds.LimitSwitch, out var limit) && limit.IsSensor);
         Assert.True(Catalog.TryGet(CoreIds.Lamp, out var lamp) && !lamp.IsSensor);

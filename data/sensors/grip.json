@@ -1,0 +1,43 @@
+{
+  "id": "sensor.grip",
+  "name": "Pistol grip",
+  "kind": "Grip",
+  "rateHz": 60,
+  "powerW": 0.05,
+  "tickCostNs": 20,
+  "massKg": 0.15,
+  "signals": [
+    {
+      "name": "Holding",
+      "unit": "",
+      "step": 1,
+      "min": 0,
+      "max": 1,
+      "input": false
+    },
+    {
+      "name": "Trigger",
+      "unit": "",
+      "step": 1,
+      "min": 0,
+      "max": 1,
+      "input": false
+    },
+    {
+      "name": "Alt",
+      "unit": "",
+      "step": 1,
+      "min": 0,
+      "max": 1,
+      "input": false
+    },
+    {
+      "name": "Mode",
+      "unit": "",
+      "step": 1,
+      "min": 0,
+      "max": 3,
+      "input": false
+    }
+  ]
+}

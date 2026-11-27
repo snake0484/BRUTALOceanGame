@@ -25,6 +25,27 @@ public enum CoreKind : byte
 
     /// <summary>Effector: On and Brightness (%); reports Lit.</summary>
     Light,
+
+    /// <summary>Sensor: a tool's handle (D91), where it is held; reads the holder's controls: Holding, Trigger, Alt, Mode.</summary>
+    Grip,
+
+    /// <summary>Power: stores energy (its capacity) and supplies the component; reports Charge (%) and Draw (W). Empty: no power.</summary>
+    Battery,
+
+    /// <summary>Effector: a beam or flame from its facing (cutting torch, welder, mining laser): Fire and Power (%) in; Firing, Heat (%), Overheated out. It heats while firing and cuts out at full heat until cooled to half.</summary>
+    Emitter,
+}
+
+/// <summary>What a core is for: measuring, acting, or supplying power.</summary>
+public enum CoreRole : byte { Sensor, Effector, Power }
+
+/// <summary>What the person holding a tool is doing with it (D91): set by the game from their input, by the bench from its controls.</summary>
+public struct HolderInput
+{
+    public bool Holding;
+    public bool Trigger;
+    public bool Alt;
+    public byte Mode;
 }
 
 /// <summary>One signal of a core: in the catalog, its name, unit, resolution (<see cref="Step"/>) and range. Values are whole counts of the step.</summary>
@@ -44,7 +65,7 @@ public sealed class CoreSignal
 }
 
 /// <summary>
-/// A catalog core (<c>data/sensors/*.json</c>, <c>data/effectors/*.json</c>): its kind, its signals in the kind's order,
+/// A catalog core (<c>data/sensors</c>, <c>data/effectors</c>, <c>data/power</c>): its kind, its signals in the kind's order,
 /// how often it updates, its power draw and the tick cost it declares. Better parts read finer (smaller steps) and faster.
 /// </summary>
 public sealed class CoreDef
@@ -67,11 +88,29 @@ public sealed class CoreDef
     /// <summary>Limit switch: how near its trip position the joint must be (the joint's stored units: mm or 0.1 degree).</summary>
     public short Tolerance { get; set; }
 
+    /// <summary>What it weighs, on top of the solids around it.</summary>
+    public double MassKg { get; set; }
+
+    /// <summary>Battery: the energy it holds when full.</summary>
+    public double CapacityWh { get; set; }
+
+    /// <summary>Emitter: how fast it heats at full power and cools when off (% of its limit a second).</summary>
+    public double HeatPerSecond { get; set; }
+
+    public double CoolPerSecond { get; set; }
+
     public List<CoreSignal> Signals { get; set; } = new();
 
     public uint Key => CoreCatalog.Hash(Id);
 
-    public bool IsSensor => Kind is CoreKind.JointPosition or CoreKind.JointLimit or CoreKind.Proximity;
+    public CoreRole Role => Kind switch
+    {
+        CoreKind.JointPosition or CoreKind.JointLimit or CoreKind.Proximity or CoreKind.Grip => CoreRole.Sensor,
+        CoreKind.Battery => CoreRole.Power,
+        _ => CoreRole.Effector,
+    };
+
+    public bool IsSensor => Role == CoreRole.Sensor;
 
     public bool NeedsJoint => Kind is CoreKind.JointPosition or CoreKind.JointLimit or CoreKind.JointMotor;
 
@@ -86,6 +125,9 @@ public sealed class CoreDef
         CoreKind.Proximity => [("Detected", false), ("Range", false)],
         CoreKind.JointMotor => [("Target", true), ("Moving", false), ("Jammed", false)],
         CoreKind.Light => [("On", true), ("Brightness", true), ("Lit", false)],
+        CoreKind.Grip => [("Holding", false), ("Trigger", false), ("Alt", false), ("Mode", false)],
+        CoreKind.Battery => [("Charge", false), ("Draw", false)],
+        CoreKind.Emitter => [("Fire", true), ("Power", true), ("Firing", false), ("Heat", false), ("Overheated", false)],
         _ => [],
     };
 
@@ -94,7 +136,8 @@ public sealed class CoreDef
     {
         var layout = Layout(Kind);
 
-        if (Id.Length == 0 || Signals.Count != layout.Length || RateHz <= 0 || PowerW < 0 || TickCostNs < 0)
+        if (Id.Length == 0 || Signals.Count != layout.Length || RateHz <= 0 || PowerW < 0 || TickCostNs < 0 || MassKg < 0 || CapacityWh < 0
+            || (Kind == CoreKind.Battery && CapacityWh <= 0))
             return false;
 
         for (var i = 0; i < layout.Length; i++)
@@ -130,12 +173,13 @@ public sealed class CoreCatalog
         All.Add(def);
     }
 
-    /// <summary><c>sensors/*.json</c> (sensor kinds only) and <c>effectors/*.json</c> (effector kinds only) under <paramref name="dataFolder"/>.</summary>
+    /// <summary><c>sensors</c>, <c>effectors</c> and <c>power</c> (<c>*.json</c>) under <paramref name="dataFolder"/>, each folder only its role's kinds.</summary>
     public static CoreCatalog Load(string dataFolder)
     {
         var catalog = new CoreCatalog();
-        Read(catalog, Path.Combine(dataFolder, "sensors"), true);
-        Read(catalog, Path.Combine(dataFolder, "effectors"), false);
+        Read(catalog, Path.Combine(dataFolder, "sensors"), CoreRole.Sensor);
+        Read(catalog, Path.Combine(dataFolder, "effectors"), CoreRole.Effector);
+        Read(catalog, Path.Combine(dataFolder, "power"), CoreRole.Power);
         return catalog;
     }
 
@@ -151,14 +195,14 @@ public sealed class CoreCatalog
         }
     }
 
-    private static void Read(CoreCatalog catalog, string folder, bool sensors)
+    private static void Read(CoreCatalog catalog, string folder, CoreRole role)
     {
         if (!Directory.Exists(folder))
             return;
 
         foreach (var file in Directory.EnumerateFiles(folder, "*.json").Order(StringComparer.OrdinalIgnoreCase))
         {
-            if (FromJson(File.ReadAllText(file)) is { } def && def.IsSensor == sensors)
+            if (FromJson(File.ReadAllText(file)) is { } def && def.Role == role)
                 catalog.Add(def);
         }
     }
@@ -314,6 +358,13 @@ public sealed class CoreLayout
 
     public bool HasMotors { get; private set; }
 
+    public bool HasBatteries { get; private set; }
+
+    /// <summary>The cores' own mass, and the batteries' full charge (millijoules).</summary>
+    public double MassKg { get; private set; }
+
+    public long CapacityMj { get; private set; }
+
     public double PowerW { get; private set; }
 
     public int TickCostNs { get; private set; }
@@ -328,6 +379,9 @@ public sealed class CoreLayout
 
         return -1;
     }
+
+    /// <summary>A battery's full charge in millijoules.</summary>
+    public static long Capacity(CoreDef def) => (long)Math.Round(def.CapacityWh * 3_600_000.0);
 
     public static CoreLayout Build(HullCoreSet? set, CoreCatalog catalog, IReadOnlyList<HullJoint> joints)
     {
@@ -366,6 +420,9 @@ public sealed class CoreLayout
                 layout.Inputs += def.Signals.Count(s => s.Input);
 
             layout.HasMotors |= def.Kind == CoreKind.JointMotor;
+            layout.HasBatteries |= def.Kind == CoreKind.Battery;
+            layout.MassKg += def.MassKg;
+            layout.CapacityMj += Capacity(def);
             layout.PowerW += def.PowerW;
             layout.TickCostNs += def.TickCostNs;
         }

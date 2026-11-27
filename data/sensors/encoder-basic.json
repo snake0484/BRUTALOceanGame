@@ -5,6 +5,7 @@
   "rateHz": 10,
   "powerW": 0.5,
   "tickCostNs": 40,
+  "massKg": 0.1,
   "signals": [
     {
       "name": "Position",

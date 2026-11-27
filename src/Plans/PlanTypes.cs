@@ -3,7 +3,8 @@ using BrutalGame.Ships;
 
 namespace BrutalGame.Plans;
 
-public enum PlanLevel : byte { Laminate, Part, Component, HullChunk, Ship }
+/// <summary>What a plan is. A <see cref="Tool"/> (D91) is built like a component but carried by a person: a mass limit, no dynamic damage, no hull-only features.</summary>
+public enum PlanLevel : byte { Laminate, Part, Component, HullChunk, Ship, Tool }
 
 public enum PlanClass : byte { Ship, Station }
 
@@ -50,4 +51,7 @@ public static class PlanLimits
 
     /// <summary>Smallest half extent of a solid, 1/16 m (half a 0.125 m cell edge): anything thinner bakes to nothing.</summary>
     public const int MinHalfUnits = HullSolid.HalfUnitsPerMetre / 16;
+
+    /// <summary>A tool's (D91) smallest half extent, about 8 mm: it is drawn from its exact surface and weighed by sampling, never from the grid.</summary>
+    public const int MinToolHalfUnits = 2;
 }

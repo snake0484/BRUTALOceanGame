@@ -5,6 +5,7 @@
   "rateHz": 60,
   "powerW": 0.1,
   "tickCostNs": 30,
+  "massKg": 0.05,
   "tolerance": 3,
   "signals": [
     {

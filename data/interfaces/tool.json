@@ -1,0 +1,11 @@
+{
+  "name": "Tool",
+  "calls": [
+    "Ready",
+    "Safe"
+  ],
+  "states": [
+    "Ready",
+    "Safe"
+  ]
+}

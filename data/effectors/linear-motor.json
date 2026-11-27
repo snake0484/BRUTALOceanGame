@@ -5,6 +5,7 @@
   "rateHz": 60,
   "powerW": 150,
   "tickCostNs": 60,
+  "massKg": 4.0,
   "signals": [
     {
       "name": "Target",

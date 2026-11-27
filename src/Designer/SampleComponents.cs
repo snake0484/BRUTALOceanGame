@@ -104,7 +104,7 @@ public static class SampleComponents
     }
 
     /// <summary>
-    /// A proximity lamp: a 0.3 x 0.3 x 0.1 m housing on the surface at the origin facing +Z, a proximity sensor and a lamp
+    /// A proximity lamp: a 0.3 x 0.3 x 0.125 m housing on the surface at the origin facing +Z, a proximity sensor and a lamp
     /// on its face. It implements Lamp: on Auto (and at start) it lights while something is within the sensor's range.
     /// </summary>
     public static PlanDocument ProximityLamp(DefId alloy)
@@ -114,7 +114,8 @@ public static class SampleComponents
         var session = new DesignSession();
         session.Doc.Level = PlanLevel.Component;
         session.Doc.Meta.Name = "Proximity lamp";
-        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 0, (int)(0.05 * m), (ushort)(0.15 * h), (ushort)(0.15 * h), (ushort)(0.05 * h), SolidRotation.Identity, alloy);
+        session.Snap.Enabled = false;
+        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 0, (int)(0.05 * m), (ushort)(0.15 * h), (ushort)(0.15 * h), (ushort)PlanLimits.MinHalfUnits, SolidRotation.Identity, alloy);
         var sensor = CoreCommands.Add(session, CoreIds.Proximity, 0, new Vector3d(0, -0.08, 0.1), new Vector3d(0, 0, 1));
         var lamp = CoreCommands.Add(session, CoreIds.Lamp, 0, new Vector3d(0, 0.05, 0.1), new Vector3d(0, 0, 1));
         ProgramCommands.Implement(session, InterfaceLibrary.Lamp);

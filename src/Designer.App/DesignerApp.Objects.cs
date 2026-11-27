@@ -291,9 +291,14 @@ public sealed partial class DesignerApp
         ImGui.TextDisabled(_addOnSurface ? "Add here"u8 : "Add"u8);
         var items = _active.Component is null ? ShipAdds : ComponentAdds;
         var groups = _active.Component is null ? ShipGroups : ComponentGroups;
+        var tool = _session.Doc.Level == BrutalGame.Plans.PlanLevel.Tool;
 
         foreach (var (group, kinds) in groups)
         {
+            // A tool has no openings (doorways, docking ports): those are the hull's.
+            if (tool && group == "Openings")
+                continue;
+
             if (!ImGui.TreeNodeEx($"{group}##addgroup", ImGuiTreeNodeFlags.SpanAvailWidth))
                 continue;
 

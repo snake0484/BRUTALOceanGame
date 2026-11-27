@@ -40,6 +40,30 @@ public sealed class ProgramInstance
     public CoreLayout? Cores;
     public ISensorWorld? World;
 
+    /// <summary>A tool's holder (D91): read by its grip.</summary>
+    public HolderInput Holder;
+
+    /// <summary>Per core (by layout entry), what it keeps between ticks: a battery's charge (mJ), an emitter's heat (millionths of its limit). Server-side.</summary>
+    public readonly long[] CoreState = new long[HullCoreSet.MaxCores];
+
+    /// <summary>Whether its batteries (if it has any) hold any charge.</summary>
+    public bool Charged
+    {
+        get
+        {
+            if (Cores is not { HasBatteries: true } cores)
+                return true;
+
+            for (var i = 0; i < cores.Entries.Count; i++)
+            {
+                if (cores.Entries[i].Def.Kind == CoreKind.Battery && CoreState[i] > 0)
+                    return true;
+            }
+
+            return false;
+        }
+    }
+
     /// <summary>Every core's signals in counts of their steps (<see cref="CoreLayout"/> places them), and which are live (have a reading, or a value set).</summary>
     public readonly int[] Signals = new int[MaxSignals];
     public readonly ulong[] Live = new ulong[MaxSignals / 64];
@@ -78,6 +102,17 @@ public static class ProgramRunner
         Array.Clear(instance.Inputs);
         Array.Clear(instance.Signals);
         Array.Clear(instance.Live);
+        Array.Clear(instance.CoreState);
+
+        // Batteries start full.
+        if (instance.Cores is { } cores)
+        {
+            for (var i = 0; i < cores.Entries.Count; i++)
+            {
+                if (cores.Entries[i].Def.Kind == CoreKind.Battery)
+                    instance.CoreState[i] = CoreLayout.Capacity(cores.Entries[i].Def);
+            }
+        }
 
         for (var j = 0; j < joints.Count && j < ProgramInstance.MaxJoints; j++)
             instance.Start[j] = instance.Target[j] = program.PoseOf(0, joints[j].Id, out var v) ? v : joints[j].Target;
@@ -189,7 +224,8 @@ public static class ProgramRunner
     public static bool Step(HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, long tick)
     {
         var changed = false;
-        var stopped = instance.Obstructed || (instance.Unpowered && instance.Cores is { HasMotors: true });
+        var powered = !instance.Unpowered && instance.Charged;
+        var stopped = instance.Obstructed || (!powered && instance.Cores is { HasMotors: true });
 
         // Stopped where they are by whatever is in the way (or no power); when it clears, the motors drive them on from there.
         if (stopped && !instance.Held && !Arrived(program, joints, instance, tick))
@@ -205,12 +241,12 @@ public static class ProgramRunner
         }
 
         if (instance.Cores is { } cores)
-            Sense(cores, program, joints, instance, tick);
+            Sense(cores, program, joints, instance, tick, powered);
 
         changed |= Run(program, joints, instance, tick, stopped);
 
         if (instance.Cores is { } after)
-            Report(after, program, joints, instance, tick);
+            Report(after, program, joints, instance, tick, powered);
 
         return changed;
     }
@@ -313,7 +349,7 @@ public static class ProgramRunner
     }
 
     /// <summary>Sensors due on this tick read the world (one with no reading yet reads at once; unpowered, their signals go dead).</summary>
-    private static void Sense(CoreLayout cores, HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, long tick)
+    private static void Sense(CoreLayout cores, HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, long tick, bool powered)
     {
         for (var i = 0; i < cores.Entries.Count; i++)
         {
@@ -324,7 +360,7 @@ public static class ProgramRunner
 
             var signals = e.Def.Signals;
 
-            if (instance.Unpowered)
+            if (!powered)
             {
                 for (var s = 0; s < signals.Count; s++)
                 {
@@ -353,14 +389,25 @@ public static class ProgramRunner
                     Write(instance, e.SignalBase, seen ? 1 : 0, signals[0]);
                     Write(instance, e.SignalBase + 1, Quantise(seen ? d : range, signals[1].Step), signals[1]);
                     break;
+                case CoreKind.Grip:
+                    var holder = instance.Holder;
+                    Write(instance, e.SignalBase, holder.Holding ? 1 : 0, signals[0]);
+                    Write(instance, e.SignalBase + 1, holder.Holding && holder.Trigger ? 1 : 0, signals[1]);
+                    Write(instance, e.SignalBase + 2, holder.Holding && holder.Alt ? 1 : 0, signals[2]);
+                    Write(instance, e.SignalBase + 3, holder.Mode, signals[3]);
+                    break;
             }
         }
     }
 
-    /// <summary>The effectors report: their inputs as set, and what they did (unpowered, what they did is dead).</summary>
-    private static void Report(CoreLayout cores, HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, long tick)
+    /// <summary>
+    /// The effectors report: their inputs as set, and what they did (unpowered, what they did is dead). Then the
+    /// batteries pay for the tick: every powered sensor, and each effector while it works, draws its power, taken from
+    /// the first battery with charge left.
+    /// </summary>
+    private static void Report(CoreLayout cores, HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, long tick, bool powered)
     {
-        var powered = !instance.Unpowered;
+        var drawW = 0.0;
 
         for (var i = 0; i < cores.Entries.Count; i++)
         {
@@ -375,6 +422,7 @@ public static class ProgramRunner
                     Write(instance, e.SignalBase, Quantise(target * JointUnit(joints[e.Joint]), signals[0].Step), signals[0]);
                     Flag(instance, e.SignalBase + 1, away && !instance.Held, powered);
                     Flag(instance, e.SignalBase + 2, away && instance.Held, powered);
+                    drawW += powered && away && !instance.Held ? e.Def.PowerW : 0;
                     break;
                 case CoreKind.Light:
                     var on = instance.Inputs[e.InputBase];
@@ -382,9 +430,63 @@ public static class ProgramRunner
                     Write(instance, e.SignalBase, on, signals[0]);
                     Write(instance, e.SignalBase + 1, brightness, signals[1]);
                     Flag(instance, e.SignalBase + 2, on > 0 && brightness > 0, powered);
+                    drawW += powered && on > 0 ? e.Def.PowerW * brightness / 100.0 : 0;
+                    break;
+                case CoreKind.Emitter:
+                    drawW += Emit(e, i, instance, powered);
+                    break;
+                default:
+                    drawW += powered && e.Def.IsSensor ? e.Def.PowerW : 0;
                     break;
             }
         }
+
+        if (!cores.HasBatteries)
+            return;
+
+        var cost = (long)Math.Round(drawW * 1000.0 / TicksPerSecond);
+
+        for (var i = 0; i < cores.Entries.Count; i++)
+        {
+            var e = cores.Entries[i];
+
+            if (e.Def.Kind != CoreKind.Battery)
+                continue;
+
+            var taken = Math.Min(cost, instance.CoreState[i]);
+            instance.CoreState[i] -= taken;
+            cost -= taken;
+            var capacity = Math.Max(1, CoreLayout.Capacity(e.Def));
+            Write(instance, e.SignalBase, Quantise(100.0 * instance.CoreState[i] / capacity, e.Def.Signals[0].Step), e.Def.Signals[0]);
+            Write(instance, e.SignalBase + 1, Quantise(taken * (double)TicksPerSecond / 1000.0, e.Def.Signals[1].Step), e.Def.Signals[1]);
+        }
+    }
+
+    /// <summary>An emitter's tick: it fires while told to, powered and not overheated, heating with its power; off, it cools. Full heat cuts it out until it is down to half. Its draw (W).</summary>
+    private static double Emit(in CoreLayout.Entry e, int index, ProgramInstance instance, bool powered)
+    {
+        const long limit = 1_000_000;
+        var signals = e.Def.Signals;
+        var fire = instance.Inputs[e.InputBase];
+        var power = instance.Inputs[e.InputBase + 1] * signals[1].Step / 100.0;
+        var overheated = instance.IsLive(e.SignalBase + 4) && instance.Signals[e.SignalBase + 4] != 0;
+        ref var heat = ref instance.CoreState[index];
+
+        if (overheated && heat <= limit / 2)
+            overheated = false;
+
+        var firing = powered && fire > 0 && power > 0 && !overheated;
+        heat = firing
+            ? Math.Min(limit, heat + (long)Math.Round(e.Def.HeatPerSecond * power * limit / 100.0 / TicksPerSecond))
+            : Math.Max(0, heat - (long)Math.Round(e.Def.CoolPerSecond * limit / 100.0 / TicksPerSecond));
+        overheated |= heat >= limit;
+
+        Write(instance, e.SignalBase, fire, signals[0]);
+        Write(instance, e.SignalBase + 1, instance.Inputs[e.InputBase + 1], signals[1]);
+        Flag(instance, e.SignalBase + 2, firing, powered);
+        Write(instance, e.SignalBase + 3, Quantise(100.0 * heat / limit, signals[3].Step), signals[3]);
+        Flag(instance, e.SignalBase + 4, overheated, true);
+        return firing ? e.Def.PowerW * power : 0;
     }
 
     /// <summary>Sets an effector's input: a motor's Target moves its joint's target (the others start again from where they are); other inputs go in the record. True when the record changed.</summary>

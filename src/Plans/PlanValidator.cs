@@ -74,6 +74,7 @@ public enum IssueCode : ushort
     ProgramShape,
     ProgramCall,
     CoreShape,
+    ToolFeature,
 }
 
 public readonly record struct ValidationIssue(Severity Severity, IssueCode Code, ElementRef Element, int Value);
@@ -216,7 +217,7 @@ public static class PlanValidator
             if (p.Material >= doc.Materials.Count)
                 log.Add(Severity.Error, IssueCode.PartMaterial, element, p.Material);
 
-            if (doc.Level == PlanLevel.Component && p.Position.Length() > PlanLimits.MaxComponentMetres)
+            if (doc.Level is PlanLevel.Component or PlanLevel.Tool && p.Position.Length() > PlanLimits.MaxComponentMetres)
                 log.Add(Severity.Error, IssueCode.ComponentSize, element, 0);
         }
 
@@ -461,6 +462,32 @@ public static class PlanValidator
         }
     }
 
+    /// <summary>
+    /// A tool (D91) has none of the hull's features: hull layers (1), interior (2), windows (3), openings (4), placed
+    /// components (5). Value: which. (Pipes are allowed: a tank can feed its head.) Its mass limit needs the bake and the core catalog, so the designer
+    /// checks it.
+    /// </summary>
+    private static void ValidateTool(PlanDocument doc, ValidationLog log)
+    {
+        if (doc.Level != PlanLevel.Tool)
+            return;
+
+        if (doc.Layers is not null)
+            log.Add(Severity.Error, IssueCode.ToolFeature, default, 1);
+
+        if (doc.Interior is { IsEmpty: false })
+            log.Add(Severity.Error, IssueCode.ToolFeature, default, 2);
+
+        if (doc.Windows is { IsEmpty: false })
+            log.Add(Severity.Error, IssueCode.ToolFeature, default, 3);
+
+        if (doc.Openings is { IsEmpty: false })
+            log.Add(Severity.Error, IssueCode.ToolFeature, default, 4);
+
+        if (doc.Components is { Placements.Count: > 0 } || doc.Prefabs.Count > 0)
+            log.Add(Severity.Error, IssueCode.ToolFeature, default, 5);
+    }
+
     /// <summary>Openings: count; each a known kind on a door profile of the plan, a valid rotation, within reach, a depth of 1 mm to 8 m.</summary>
     private static void ValidateOpenings(PlanDocument doc, ValidationLog log)
     {
@@ -596,11 +623,13 @@ public static class PlanValidator
     {
         log.Clear();
 
-        if (doc.Level is not (PlanLevel.Ship or PlanLevel.HullChunk or PlanLevel.Component))
+        if (doc.Level is not (PlanLevel.Ship or PlanLevel.HullChunk or PlanLevel.Component or PlanLevel.Tool))
         {
             log.Add(Severity.Error, IssueCode.UnsupportedLevel, default, (int)doc.Level);
             return;
         }
+
+        ValidateTool(doc, log);
 
         var solids = doc.Solids.AsSpan();
 
@@ -716,7 +745,7 @@ public static class PlanValidator
 
             var thinnest = solid.Shape == SolidShape.Mesh ? PlanLimits.MinHalfUnits : solid.Shape == SolidShape.Cylinder ? Math.Min(solid.HalfX, solid.HalfY) : Math.Min(solid.HalfX, Math.Min(solid.HalfY, solid.HalfZ));
 
-            if (thinnest < PlanLimits.MinHalfUnits)
+            if (thinnest < (doc.Level == PlanLevel.Tool ? PlanLimits.MinToolHalfUnits : PlanLimits.MinHalfUnits))
                 log.Add(Severity.Error, IssueCode.ExtentTooSmall, element, thinnest);
 
             SolidGeometry.Bounds(solid, out var min, out var max);

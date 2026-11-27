@@ -100,6 +100,9 @@ public sealed class DocumentBar
         if (ImGui.MenuItem("New component"u8))
             Request = FileRequest.NewComponent;
 
+        if (ImGui.MenuItem("New tool"u8))
+            Request = FileRequest.NewTool;
+
         ImGui.Separator();
 
         if (ImGui.MenuItem("Open..."u8, "Ctrl+O"u8))

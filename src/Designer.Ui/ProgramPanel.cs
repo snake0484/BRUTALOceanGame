@@ -66,6 +66,10 @@ public sealed class ProgramPanel
     /// <summary>The catalog's cores (set by the host).</summary>
     public CoreCatalog Catalog = new();
 
+    /// <summary>A tool (D91): the preview shows the holder's controls, read by its grip.</summary>
+    public bool IsTool;
+    public HolderInput Holder;
+
     private int _newCore;
 
     public ProgramPanel(InterfaceLibrary library) => _library = library;
@@ -263,6 +267,9 @@ public sealed class ProgramPanel
         ImGui.SameLine();
         ImGui.TextDisabled("(they stop where they are, as if something were in the way)"u8);
 
+        if (IsTool)
+            DrawHolder();
+
         ImGui.Checkbox("Power"u8, ref Powered);
         ImGui.SameLine();
         DesignerStyle.ItemWidth(200f);
@@ -276,6 +283,22 @@ public sealed class ProgramPanel
 
         if (run?.Cores is { Entries.Count: > 0 } cores)
             DrawSignals(cores, run);
+    }
+
+    /// <summary>The holder's controls: holding it, the trigger (held while the button is), the alternate trigger, the mode.</summary>
+    private void DrawHolder()
+    {
+        ImGui.Checkbox("Held"u8, ref Holder.Holding);
+        ImGui.SameLine();
+        ImGui.Button("Trigger (hold)"u8);
+        Holder.Trigger = ImGui.IsItemActive();
+        ImGui.SameLine();
+        ImGui.Checkbox("Alt"u8, ref Holder.Alt);
+        ImGui.SameLine();
+        int mode = Holder.Mode;
+        DesignerStyle.ItemWidth(90f);
+        ImGui.SliderInt("Mode"u8, ref mode, 0, 3, "%d", ImGuiSliderFlags.None);
+        Holder.Mode = (byte)mode;
     }
 
     /// <summary>Every core's signals as they are now: value in its unit, or dead (no power, no reading yet).</summary>
@@ -336,11 +359,11 @@ public sealed class ProgramPanel
         _newCore = Math.Clamp(_newCore, 0, all.Count - 1);
         DesignerStyle.ItemWidth(220f);
 
-        if (ImGui.BeginCombo("##newcore"u8, $"{(all[_newCore].IsSensor ? "Sensor" : "Effector")}: {all[_newCore].Name}", ImGuiComboFlags.None))
+        if (ImGui.BeginCombo("##newcore"u8, $"{all[_newCore].Role}: {all[_newCore].Name}", ImGuiComboFlags.None))
         {
             for (var i = 0; i < all.Count; i++)
             {
-                if (ImGui.Selectable($"{(all[i].IsSensor ? "Sensor" : "Effector")}: {all[i].Name}##def{i}", i == _newCore, ImGuiSelectableFlags.None, default))
+                if (ImGui.Selectable($"{all[i].Role}: {all[i].Name}##def{i}", i == _newCore, ImGuiSelectableFlags.None, default))
                     _newCore = i;
             }
 

@@ -1,0 +1,28 @@
+{
+  "id": "power.battery-small",
+  "name": "Tool battery, 150 Wh",
+  "kind": "Battery",
+  "rateHz": 60,
+  "powerW": 0,
+  "tickCostNs": 30,
+  "massKg": 0.9,
+  "capacityWh": 150,
+  "signals": [
+    {
+      "name": "Charge",
+      "unit": "%",
+      "step": 1,
+      "min": 0,
+      "max": 100,
+      "input": false
+    },
+    {
+      "name": "Draw",
+      "unit": "W",
+      "step": 1,
+      "min": 0,
+      "max": 5000,
+      "input": false
+    }
+  ]
+}

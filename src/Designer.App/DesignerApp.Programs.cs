@@ -21,6 +21,7 @@ public sealed partial class DesignerApp
     private long _programTick;
     private double _programClock;
     private CoreCatalog _coreCatalog = new();
+    private ToolLimits _toolLimits = new();
     private HullCoreSet? _componentCores;
     private readonly TestObject _testObject = new();
 
@@ -42,6 +43,7 @@ public sealed partial class DesignerApp
     private void InitPrograms(string dataFolder)
     {
         _coreCatalog = CoreCatalog.Load(dataFolder);
+        _toolLimits = ToolLimits.Load(dataFolder);
         _programPanel = new ProgramPanel(new InterfaceLibrary(dataFolder, InterfaceLibrary.DefaultFolder)) { Catalog = _coreCatalog };
         _prefabPanel.ProgramState = id =>
             _placedRuns.TryGetValue(id, out var r) && r.Run.State < r.Program.Interface.States.Count
@@ -109,6 +111,23 @@ public sealed partial class DesignerApp
             _placedRuns.Remove(id);
     }
 
+    /// <summary>A tool's mass budget for the Stats panel: its solids' mass (sampled finely: the bake's grid is too coarse for a tool) plus its cores', against the limit; and whether it has a grip.</summary>
+    private void ToolBudget()
+    {
+        _programPanel.IsTool = _session.Doc.Level == BrutalGame.Plans.PlanLevel.Tool;
+
+        if (!_programPanel.IsTool)
+        {
+            (_stats.ToolBudget, _stats.ToolProblem) = ("", false);
+            return;
+        }
+
+        var b = ToolRules.Check(_session.Doc, SolidMass.Sample(_session.Doc.Solids.AsSpan(), _densities).MassKg, _coreCatalog, _toolLimits);
+        _stats.ToolBudget = $"Tool mass {b.TotalKg:F2} of {b.MaxKg:0.#} kg ({b.SolidsKg:F2} body, {b.CoresKg:F2} cores)"
+            + (b.Over ? ": too heavy to carry" : "") + (b.HasGrip ? "" : "; no grip to hold it by (add one in the Programme panel)");
+        _stats.ToolProblem = !b.Usable;
+    }
+
     /// <summary>Each frame: the preview's requests, then whole 60 Hz ticks of every run.</summary>
     private void StepPrograms(double dt)
     {
@@ -124,6 +143,7 @@ public sealed partial class DesignerApp
 
             _componentRun.Obstructed = _programPanel.Jammed;
             _componentRun.Unpowered = !_programPanel.Powered;
+            _componentRun.Holder = _programPanel.Holder;
             _testObject.Distance = _programPanel.ProbeDistance >= ProgramPanel.ProbeNone ? double.PositiveInfinity : _programPanel.ProbeDistance;
         }
 

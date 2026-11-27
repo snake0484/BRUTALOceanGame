@@ -5,6 +5,7 @@
   "rateHz": 30,
   "powerW": 12,
   "tickCostNs": 600,
+  "massKg": 0.6,
   "range": 12,
   "halfAngleDeg": 10,
   "signals": [

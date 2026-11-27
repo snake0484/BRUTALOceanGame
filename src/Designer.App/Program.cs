@@ -47,6 +47,8 @@ for (var i = 0; i < args.Length; i++)
     }
     else if (args[i] == "--demo-engine")
         DesignerApp.EngineDemo = true;
+    else if (args[i] == "--demo-tool")
+        DesignerApp.ToolDemo = true;
     else if (args[i] == "--demo-component" && i + 1 < args.Length)
         DesignerApp.ComponentDemo = args[++i];
     else if (args[i] == "--place")

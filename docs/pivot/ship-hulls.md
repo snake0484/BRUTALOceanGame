@@ -325,6 +325,16 @@ public sealed class HullDeformation
 - **Reach:** a programme reads only cores its own component has; across components goes through data cables (D71, not yet). Docking carries nothing; transfer between craft through aligned pipe ports or a hose between ports (later).
 - **Not yet:** data cables between components, consoles, damage degrading cores, the game's world query for proximity, thrusters, pumps, valves, the tractor and the long-range sensors.
 
+### Hand tools (designer, 2026-11-27, D91)
+
+- **A tool is a plan of level `Tool`**, edited in the component editor (File > New tool; `--demo-tool` opens the sample). It has solids, cores and a programme like a component, but none of the hull's features: the validator refuses hull layers, interior, windows, openings and placed components (`ToolFeature`), and placing a tool on a hull is refused. Pipes are allowed (a tank can feed its head).
+- **Small solids:** a tool's solids may be as thin as 2 half units (about 16 mm across) where a ship's must be 125 mm: tools draw from their exact surface and are weighed by sampling, never from the 0.25 m grid.
+- **Mass:** `SolidMass` samples the ordered CSG at 2 mm cells per material (within a few percent of the exact volume), plus the cores' own `massKg`. The limit is a placeholder, `data/tools/limits.json` (20 kg) until decided. The Stats panel shows the budget live and turns red when the tool is too heavy or has no grip.
+- **New core kinds:** `Grip` (a sensor: where it is held; reads the holder's Holding, Trigger, Alt, Mode, set by the game from input and by the bench's controls), `Battery` (role Power, `data/power`: capacity in Wh; every powered sensor and working effector draws from it each tick; empty means no power), `Emitter` (cutting torch, welder, mining laser: Fire and Power in; Firing, Heat, Overheated out; heats while firing, cuts out at full heat until cooled to half).
+- **Sample: plasma cutting torch** (`SampleTools.CuttingTorch`): a pistol grip, a hollow alloy body, a 150 Wh battery, a 1.2 kW cutting head; about 0.3 kg of solids (the hull alloy is 800 kg/m³) and 1.75 kg of cores. It implements Tool (Ready, Safe): Ready fires while the trigger is held, Safe never fires.
+- **Bench:** the Programme panel shows the holder's controls for a tool (held, trigger while the button is held, alt, mode); Reset refills the batteries.
+- **Not yet:** wear (tool parts are to wear as ship parts do; ship wear is not built), charging, what the emitter does to the world (it acts from where the tool is held: the game's side), a tool in a person's hand in game, two-handed limits.
+
 ### Collision (Jolt)
 
 **Constraints found:**
