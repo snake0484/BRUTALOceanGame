@@ -298,7 +298,16 @@ public sealed class HullDeformation
 - **Leaves move in the ship.** A placed component's joints become ship groups after the plan's own (ids `0xA0000000 | placement << 5 | group`), placed with it and mounted on what it sits on; their parts are drawn from the prefab's per-part surface, binned on the spot (no grid bake, no worker). They get air tables like any part.
 - **Docking.** Genderless: two ports mate face to face when their profiles are the same shape (the designer shows a four-digit port type); a lopsided outline is flagged, since two of it would not line up mirrored. In a ship, port faces are outlined, red when the hull stands within 2 m in front of one.
 - **Catalog:** swing door and sliding door (1 x 2.1 m), docking port (1.4 m octagon). Add > Door or Docking port in a ship places one facing out of the wall clicked, upright; in the component editor Add > Doorway or Docking port face, and the joints.
-- **Not yet:** door state on the wire and in the room graph (portals), powered and wired opening, docking itself (alignment, latching, the combined bake of D85).
+- **Not yet:** door state in the room graph (portals), powered and wired opening, docking itself (alignment, latching, the combined bake of D85).
+
+### Component programmes (designer, 2026-11-27, D87)
+
+- **Interfaces** (`ComponentInterface`, `src/Ships/Logic`): a name, up to 16 calls and 16 states. Built-ins in `data/interfaces/*.json` (Door); the player's as `*.binterface` JSON in `Documents/BRUTALGame/Interfaces`. A programme carries a copy, so a plan stands alone; two interfaces are the same when name, calls and states match (`Key`), and "call every Door" means every component whose interface has that key.
+- **Programme** (`HullProgram`, plan format 15, a second flags byte): the interface, up to 64 nodes and a pose per state (joint and value, in the joint's stored units; a joint a state does not name holds). Nodes: On call, Set state, Wait until in place (out: in place / in the way; unlinked "in the way" keeps moving), Wait (ticks), If state is, If something is in the way. Flow is node outputs to node ids.
+- **Runner** (`ProgramRunner`): deterministic on the integer 60 Hz tick; a call replaces the running sequence; at most 32 nodes a tick; no allocation. The **state record** (`ProgramInstance`: state, the tick entered, each joint's start, held) gives every joint's position at any tick in closed form: joints move at their own speed from their start to the state's pose. Only a new record goes on the wire; the running node and wait stay on the server.
+- **Designer:** the component editor's Programme panel (interface pick or a new one saved to the library; the node canvas; the state poses; a preview button per call, "Something in the way", the running node highlighted; "Start from the standard door sequence"). Placed components with a programme run in the ship view; Properties has a button per call and "every <interface> in the ship" buttons. Their parts are posed from the record, in place of the joints preview.
+- **Catalog doors** implement Door with the standard sequence; the sliding door has an 80 mm lock bolt on a second slider, out only in Locked.
+- **Not yet:** the game's sweep for "in the way", wiring calls to data inputs (consoles, buttons), outputs on data cables.
 
 ### Collision (Jolt)
 

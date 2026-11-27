@@ -16,7 +16,7 @@ public class DoorTests
     {
         var door = SampleComponents.SwingDoor(Alloy);
 
-        Assert.Equal(PlanFormat.OpeningFormat, PlanFormat.FormatOf(door));
+        Assert.Equal(PlanFormat.ProgramFormat, PlanFormat.FormatOf(door));   // it carries the Door programme too
         Assert.True(PlanFormat.TryDecode(PlanFormat.Encode(door), out var back, out var error), error.ToString());
         Assert.Equal(PlanFormat.HashBody(door), PlanFormat.HashBody(back));
         var opening = Assert.Single(back.Openings!.Openings);
@@ -83,7 +83,7 @@ public class DoorTests
 
         // Each placed component's joint is a moving part of the ship, placed with it.
         var groups = JointGroups.Build(doc);
-        Assert.Equal(4, groups.Count);
+        Assert.Equal(5, groups.Count);   // the swing door's hinge, the sliding door's leaf and bolt, the port's hatch
         var hinge = groups.Joints[0];
         Assert.Equal(JointKind.Hinge, hinge.Kind);
         AssertNear(new Vector3d(5, 0.4, 2.5), hinge.Pivot);

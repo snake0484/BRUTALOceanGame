@@ -136,7 +136,8 @@ public static class ProgramRunner
                         break;
                     }
 
-                    if (!instance.Blocked)
+                    // Nothing in the way, or no path for it (moving back out of the way, say): keep going.
+                    if (!instance.Blocked || node.Out1 == 0)
                         return changed;
 
                     // In the way: stop where it is, and go on the blocked path.

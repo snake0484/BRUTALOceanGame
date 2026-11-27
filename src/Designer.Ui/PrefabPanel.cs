@@ -47,6 +47,15 @@ public sealed class PrefabPanel
 
     private OpeningKind? _filter;
 
+    /// <summary>A placed component's programme state (null: it has none), from the host's runs.</summary>
+    public Func<uint, string?>? ProgramState;
+
+    /// <summary>Calls a placed component's programme (placement id, call index).</summary>
+    public Action<uint, int>? CallPlacement;
+
+    /// <summary>Calls every placed component implementing an interface (its key, call index).</summary>
+    public Action<string, int>? CallEvery;
+
     /// <summary>The options new placements get (in the Add dialog): which component, from the library.</summary>
     public void DrawAddOptions()
     {
@@ -201,6 +210,36 @@ public sealed class PrefabPanel
         {
             var shape = _shape(held);
             ImGui.Text($"Parts and pipes {shape.PartsMassKg:F1} kg; cuts a {(shape.Max.X - shape.Min.X):F2} x {(shape.Max.Y - shape.Min.Y):F2} x {(shape.Max.Z - shape.Min.Z):F2} m bay");
+
+            // Its programme: call it, or every component in the ship with the same interface.
+            if (held.Program is { } program)
+            {
+                var face = program.Interface;
+                ImGui.SeparatorText($"Programme: {face.Name}");
+
+                if (ProgramState?.Invoke(placement.Id) is { } state)
+                    ImGui.Text($"State: {state}");
+
+                for (var c = 0; c < face.Calls.Count; c++)
+                {
+                    if (c > 0)
+                        ImGui.SameLine();
+
+                    if (ImGui.Button($"{face.Calls[c]}##pcall{c}"))
+                        CallPlacement?.Invoke(placement.Id, c);
+                }
+
+                ImGui.Text($"Every {face.Name} in the ship:");
+
+                for (var c = 0; c < face.Calls.Count; c++)
+                {
+                    if (c > 0)
+                        ImGui.SameLine();
+
+                    if (ImGui.Button($"{face.Calls[c]} all##pall{c}"))
+                        CallEvery?.Invoke(face.Key, c);
+                }
+            }
 
             // Its doorways cut through the wall; a docking port's face must be clear of the hull to mate.
             if (held.Openings is { } openings)

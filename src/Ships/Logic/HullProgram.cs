@@ -56,7 +56,7 @@ public sealed class ComponentInterface
 /// <list type="bullet">
 /// <item><see cref="OnCall"/>: where a call (A) starts; out 0.</item>
 /// <item><see cref="SetState"/>: enters state A, its joints moving from where they are to that state's pose; out 0.</item>
-/// <item><see cref="WaitArrived"/>: waits until the state's joints reach their pose (out 0), or something is in the way while they move (out 1).</item>
+/// <item><see cref="WaitArrived"/>: waits until the state's joints reach their pose (out 0), or something is in the way while they move (out 1: they stop there; with out 1 unlinked they carry on).</item>
 /// <item><see cref="Wait"/>: waits B ticks; out 0.</item>
 /// <item><see cref="IfState"/>: out 0 when the state is A, else out 1.</item>
 /// <item><see cref="IfBlocked"/>: out 0 when something is in the way now, else out 1.</item>

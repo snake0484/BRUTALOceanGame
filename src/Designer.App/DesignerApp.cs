@@ -105,6 +105,7 @@ public sealed partial class DesignerApp : DesignApp
         _library = new PrefabLibrary(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "BRUTALGame", "Components"));
         RefreshLibrary();
         _prefabPanel = new PrefabPanel(_library, Shape);
+        InitPrograms(dataFolder);
         _interiorPanel = new InteriorPanel(_catalog);
         _windowsPanel = new WindowsPanel(_catalog);
         _profilesPanel = new ProfilesPanel(new ProfileLibrary(ProfileLibrary.DefaultFolder));
@@ -217,6 +218,7 @@ public sealed partial class DesignerApp : DesignApp
             : doc.Meshes;
         var paint = doc.Paint;
         _groups = JointGroups.Build(doc);
+        SyncPrograms();
         var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), meshes, doc.Brushes, doc.Interior?.Profiles, paint is null ? null : id => paint.SlotOf(id), _models.Mesh);
 
         if (windows.Panes.Count > 0)
@@ -581,6 +583,7 @@ public sealed partial class DesignerApp : DesignApp
         if (workspace is not null)
         {
             workspace.DrawPanels(_session);
+            _programPanel.Draw(_session, _componentProgram is null ? null : _componentRun);
 
             // Door profiles (a doorway's or port's outline) are made and shaped here too.
             _profilesPanel.Draw(_session);

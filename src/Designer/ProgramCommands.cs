@@ -24,6 +24,14 @@ public sealed class InterfaceLibrary
 
     public string UserFolder { get; }
 
+    /// <summary>The built-in Door interface (the same as <c>data/interfaces/door.json</c>), for doors made in code.</summary>
+    public static ComponentInterface Door => new()
+    {
+        Name = "Door",
+        Calls = ["Open", "Close", "Lock", "Unlock"],
+        States = ["Closed", "Opening", "Open", "Closing", "Locked", "Blocked"],
+    };
+
     public static string DefaultFolder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "BRUTALGame", "Interfaces");
 
     public void Refresh()
