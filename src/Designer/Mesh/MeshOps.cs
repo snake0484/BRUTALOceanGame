@@ -62,6 +62,39 @@ public static class MeshOps
     }
 
     /// <summary>
+    /// Moves vertices of a mesh kept symmetric across local X = 0 (live mirror; run <see cref="MirrorX"/> after). Seam
+    /// vertices (X = 0) stay on the plane, moving only in Y and Z, so the halves stay joined; a +X vertex stops at the
+    /// plane rather than crossing it; a -X vertex moves its +X twin by the mirrored delta (the -X half is rebuilt from
+    /// the +X one). A vertex picked on both sides moves once.
+    /// </summary>
+    public static void TranslateMirrored(MeshBuilder b, IEnumerable<int> vertices, int dx, int dy, int dz)
+    {
+        var at = new Dictionary<MeshVertex, int>(b.Vertices.Count);
+
+        for (var i = 0; i < b.Vertices.Count; i++)
+            at.TryAdd(b.Vertices[i], i);
+
+        var moved = new HashSet<int>();
+
+        foreach (var v in vertices)
+        {
+            var p = b.Vertices[v];
+            var target = v;
+            var sx = 1;
+
+            if (p.X < 0 && at.TryGetValue(new MeshVertex(-p.X, p.Y, p.Z), out var twin))
+                (target, sx) = (twin, -1);
+
+            if (!moved.Add(target))
+                continue;
+
+            var q = b.Vertices[target];
+            var x = q.X == 0 ? 0 : q.X > 0 ? Math.Max(0, q.X + sx * dx) : q.X + sx * dx;
+            b.Vertices[target] = new MeshVertex(x, q.Y + dy, q.Z + dz);
+        }
+    }
+
+    /// <summary>
     /// Region extrude: the selected faces move out by <paramref name="distance"/> (1/1024 m) along their vertices' mean
     /// face normal; a quad wall joins every boundary edge of the region to its copy.
     /// </summary>
@@ -545,11 +578,15 @@ public static class MeshOps
     }
 
     /// <summary>
-    /// Symmetrise across local X = 0: faces on the +X side (every corner at x ≥ 0, some above) are kept and mirrored with
-    /// reversed winding; vertices on the plane are shared. Live mirror runs this after every op.
+    /// Symmetrise across local X = 0: faces that cross the plane are first split on it (a knife at X = 0), then faces on
+    /// the +X side (every corner at x ≥ 0, some above) are kept and mirrored with reversed winding; vertices on the plane
+    /// are shared, so the halves meet along the seam. Live mirror runs this after every op.
     /// </summary>
     public static bool MirrorX(MeshBuilder b)
     {
+        if (CrossesX(b))
+            Knife(b, 0, 0);
+
         var keep = new List<(int[] Face, ushort Panel)>();
 
         for (var f = 0; f < b.Faces.Count; f++)
@@ -611,6 +648,26 @@ public static class MeshOps
         }
 
         return true;
+    }
+
+    /// <summary>Any face with corners on both sides of X = 0.</summary>
+    private static bool CrossesX(MeshBuilder b)
+    {
+        foreach (var face in b.Faces)
+        {
+            bool positive = false, negative = false;
+
+            foreach (var v in face)
+            {
+                positive |= b.Vertices[v].X > 0;
+                negative |= b.Vertices[v].X < 0;
+            }
+
+            if (positive && negative)
+                return true;
+        }
+
+        return false;
     }
 
     public static void SetCrease(MeshBuilder b, IEnumerable<(int A, int B)> edges, bool sharp)

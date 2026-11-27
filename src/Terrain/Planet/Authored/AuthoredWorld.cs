@@ -4,7 +4,7 @@ using System.Text.Json;
 namespace BrutalGame.Terrain;
 
 /// <summary>
-/// The shipped world (D83, D85): the fixed systems (<c>data/systems/*.json</c>: a system seed and the id of each
+/// The shipped world (D83, D90): the fixed systems (<c>data/systems/*.json</c>: a system seed and the id of each
 /// authored body by index) and the authored layer of each body (<c>data/planets/&lt;body&gt;/</c>), embedded in the
 /// assembly like the kinds so every peer of a build agrees. The planet designer registers its working copy in place
 /// of the shipped one.

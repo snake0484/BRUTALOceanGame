@@ -113,7 +113,7 @@ public readonly struct PlanetOp : IUndoOp<PlanetOp, PlanetDoc>
 }
 
 /// <summary>
-/// One body's authored layer open in the planet designer (planet-designer-brief.md §6, D84, D85) on the shared
+/// One body's authored layer open in the planet designer (planet-designer-brief.md §6, D89, D90) on the shared
 /// <see cref="EditSession{TOp,TDoc}"/>: strokes paint the working map and commit as tile ops when they end; sites and
 /// markers are ops; save writes <c>data/planets/&lt;body&gt;/</c> with the content version bumped. Jobs only ever see
 /// frozen snapshots. Main thread only.
@@ -178,7 +178,7 @@ public sealed class PlanetDesignSession : EditSession<PlanetOp, PlanetDoc>
 
     public bool CanRedo => UndoLog.RedoCount > 0 && !Stroking;
 
-    /// <summary>The version the next save writes: what new and moved sites are stamped with (D85).</summary>
+    /// <summary>The version the next save writes: what new and moved sites are stamped with (D90).</summary>
     public int NextVersion => Layer.Version + 1;
 
     /// <summary>Where the terrain changed since the app last took it (commits, undo and redo).</summary>

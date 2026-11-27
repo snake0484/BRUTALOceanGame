@@ -2,11 +2,12 @@ using Brutal.ImGuiApi;
 using Brutal.Numerics;
 using BrutalGame.Plans;
 using BrutalGame.Ships;
+using BrutalGame.Ships.Interior;
 
 namespace BrutalGame.Designer.Ui;
 
-/// <summary>What the panels ask the host to do this frame (file dialogs and disk live in the host).</summary>
-public enum FileRequest { None, New, NewComponent, Open, Save, SaveAs, OpenPath, SavePath }
+/// <summary>What the File menu asks the host to do this frame (file dialogs and disk live in the host).</summary>
+public enum FileRequest { None, New, NewComponent, Open, Save, SaveAs }
 
 /// <summary>What the open tab is: a ship, or a component (its own plan, made into a prefab by saving it).</summary>
 public enum Workspace { Ship, Component }
@@ -25,6 +26,12 @@ public sealed class DesignStats
     public bool Baking;
     public float PrepareMs;
     public int Generated;
+
+    /// <summary>Paint and decal boxes the hull shader tests, and how many brick-list entries point at them (each a test per fragment of that brick).</summary>
+    public int Projectors, ProjectorRefs;
+
+    /// <summary>The hull draw's GPU time (opaque pass, averaged over the timer's ring).</summary>
+    public float HullGpuMs;
     public int Unstuck;
     public float SurfaceMs;
     public int SurfacePieces;
@@ -52,7 +59,6 @@ public sealed class DesignerPanels
     private static readonly string[] StepNames = ["1/8 m", "1/4 m", "1/2 m", "1 m"];
 
     private readonly HullMaterialCatalog _catalog;
-    private readonly byte[] _pathBuffer = new byte[512];
     private Draft _draft;
     private uint _draftId;
     private int _draftVersion = -1;
@@ -79,48 +85,55 @@ public sealed class DesignerPanels
         public bool Interior;
     }
 
-    public DesignerPanels(HullMaterialCatalog catalog)
+    public DesignerPanels(HullMaterialCatalog catalog, ModelCatalog models)
     {
         _catalog = catalog;
         _layersPanel = new LayersPanel(catalog);
-        _brushesPanel = new BrushesPanel(catalog);
+        _brushesPanel = new BrushesPanel(catalog, models);
     }
-
-    public FileRequest Request { get; private set; }
 
     /// <summary>What the open tab is (the host sets it); a ship shows hull layers and brushes.</summary>
     public Workspace Workspace;
 
-    /// <summary>The path field's text (fallback when no file dialog is available).</summary>
-    public string PathText
-    {
-        get
-        {
-            var length = Array.IndexOf(_pathBuffer, (byte)0);
-            return System.Text.Encoding.UTF8.GetString(_pathBuffer, 0, length < 0 ? _pathBuffer.Length : length);
-        }
-        set
-        {
-            Array.Clear(_pathBuffer);
-            System.Text.Encoding.UTF8.GetBytes(value.AsSpan(0, Math.Min(value.Length, _pathBuffer.Length / 4)), _pathBuffer);
-        }
-    }
-
     /// <summary>Where new solids go: the host sets it to the camera target.</summary>
     public double3 PlaceAt;
 
+    /// <summary>The interior view: the hull's panels are shown but cannot change anything.</summary>
+    public bool Locked;
+
+    /// <summary>The selected stroke's properties (Properties, when a stroke is selected).</summary>
+    public void DrawStrokeProperties(DesignSession session) => _brushesPanel.DrawStrokeProperties(session, Strokes);
+
+    /// <summary>A new stroke's brush and material, and Draw / Finish / Cancel (the Add dialog).</summary>
+    public void DrawAddStroke(DesignSession session) => _brushesPanel.DrawAddStroke(session, Strokes);
+
+    /// <summary>Set by the host each frame when something other than a solid is selected: Properties shows this instead.</summary>
+    public Action<DesignSession>? OtherProperties;
+
+    /// <summary>The Properties tab's inspector (its filter and section state carry over between selections).</summary>
+    public readonly Inspector Inspector = new();
+
+    /// <summary>Set for one frame when a room's "Edit profile" asks the Profiles tab to show its wall profile.</summary>
+    public int EditProfileRequest { get; private set; } = -1;
+
     public void Draw(DesignSession session, DesignStats stats, MeshEditState meshEdit)
     {
-        Request = FileRequest.None;
+        EditProfileRequest = -1;
+        ImGui.BeginDisabled(Locked);
         DrawTools(session, stats);
-        DrawSolidList(session);
         DrawProperties(session, meshEdit);
         _meshPanel.Draw(session, meshEdit);
+
         if (Workspace == Workspace.Ship)
         {
             _layersPanel.Draw(session);
             _brushesPanel.Draw(session, Strokes);
+
+            if (_brushesPanel.EditProfileRequest >= 0)
+                EditProfileRequest = _brushesPanel.EditProfileRequest;
         }
+
+        ImGui.EndDisabled();
         DrawStats(session, stats);
     }
 
@@ -131,43 +144,14 @@ public sealed class DesignerPanels
             var name = session.Path.Length > 0 ? Path.GetFileName(session.Path) : "not saved yet";
             ImGui.Text($"{(Workspace == Workspace.Component ? "Component" : "Ship")}: {name}{(session.Modified ? " *" : "")}  ({session.Doc.Solids.Count} solids)");
 
+            if (session.Path.Length > 0 && ImGui.IsItemHovered())
+                ImGui.SetTooltip($"{session.Path}");
+
             if (Workspace == Workspace.Component)
                 ImGui.TextDisabled("Save it to make it a prefab the ship tabs can place."u8);
 
             if (stats.Message.Length > 0)
                 ImGui.TextWrapped($"{stats.Message}");
-
-            if (ImGui.CollapsingHeader("Load or save by path"u8, ImGuiTreeNodeFlags.None))
-            {
-                ImGui.SetNextItemWidth(-1f);
-                ImGui.InputText("##path"u8, _pathBuffer, ImGuiInputTextFlags.None, (ImGuiInputTextCallback?)null, default);
-
-                if (ImGui.Button("Load path"u8))
-                    Request = FileRequest.OpenPath;
-
-                ImGui.SameLine();
-
-                if (ImGui.Button("Save path"u8))
-                    Request = FileRequest.SavePath;
-            }
-
-            ImGui.SeparatorText("Add solid"u8);
-            ImGui.Checkbox("Subtract"u8, ref _newSubtract);
-            ImGui.SameLine();
-            MaterialCombo("Material##new"u8, ref _newMaterial);
-
-            if (ImGui.Button("Box"u8))
-                AddSolid(session, SolidShape.Box);
-
-            ImGui.SameLine();
-
-            if (ImGui.Button("Wedge"u8))
-                AddSolid(session, SolidShape.Wedge);
-
-            ImGui.SameLine();
-
-            if (ImGui.Button("Cylinder"u8))
-                AddSolid(session, SolidShape.Cylinder);
 
             ImGui.SeparatorText("Snap"u8);
             ImGui.Checkbox("Grid"u8, ref session.Snap.Enabled);
@@ -210,18 +194,34 @@ public sealed class DesignerPanels
 
             ImGui.EndDisabled();
             ImGui.TextDisabled("RMB orbit, MMB/Shift+RMB pan, wheel zoom, LMB pick (Ctrl adds)"u8);
-            ImGui.TextDisabled("W move, E rotate, R scale; Del delete, Ctrl+D duplicate"u8);
+            ImGui.TextDisabled("Gizmo: arrows move, rings turn, cubes resize; Del delete, Ctrl+D duplicate"u8);
             ImGui.TextDisabled("Ctrl+Z/Y undo/redo, F frame, Ctrl+W close tab"u8);
         }
 
         ImGui.End();
     }
 
-    private void AddSolid(DesignSession session, SolidShape shape)
+    private float _newSize = -1f;
+
+    /// <summary>The options a new solid gets (in the Add dialog): cut or add, material, size.</summary>
+    public void DrawAddSolidOptions()
     {
-        // A ship's new solid is 4 m; a component's housing pieces are much smaller.
-        var size = Workspace == Workspace.Component ? 0.25f : 4f;
-        var half = (ushort)(size * 0.5f * HullSolid.HalfUnitsPerMetre);
+        // A ship's new solid starts at 4 m; a component's housing pieces are much smaller.
+        if (_newSize < 0f)
+            _newSize = Workspace == Workspace.Component ? 0.25f : 4f;
+
+        ImGui.Checkbox("Subtract (cut)"u8, ref _newSubtract);
+        MaterialCombo("Material##new"u8, ref _newMaterial);
+        DesignerStyle.ItemWidth(90f);
+        ImGui.InputFloat("Size m##new"u8, ref _newSize, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None);
+        _newSize = Math.Clamp(_newSize, 0.05f, 200f);
+    }
+
+    /// <summary>A solid at <see cref="PlaceAt"/> with the new-solid options, selected.</summary>
+    public void AddSolid(DesignSession session, SolidShape shape)
+    {
+        var size = _newSize > 0f ? _newSize : Workspace == Workspace.Component ? 0.25f : 4f;
+        var half = (ushort)Math.Clamp(size * 0.5f * HullSolid.HalfUnitsPerMetre, 1, ushort.MaxValue);
         var material = _catalog.All.Count > 0 ? _catalog.All[Math.Clamp(_newMaterial, 0, _catalog.All.Count - 1)].Id : default;
         var units = HullSolid.PositionUnitsPerMetre;
         HullCommands.AddSolid(session, shape, _newSubtract ? SolidOp.Subtract : SolidOp.Add,
@@ -229,40 +229,91 @@ public sealed class DesignerPanels
             half, half, half, SolidRotation.Identity, material);
     }
 
-    private void DrawSolidList(DesignSession session)
+    /// <summary>Which rotor or hinge the solid moves with (it joins that joint's moving part), or the ship itself.</summary>
+    private static void DrawMovesWith(DesignSession session, HullJointSet joints, uint id)
     {
+        var current = joints.JointOf(id);
+        var index = joints.IndexOf(current);
+        var name = index < 0 ? "The ship (fixed)" : $"{JointsPanel.KindName(joints.Joints[index].Kind)} #{current}";
+        DesignerStyle.ItemWidth(160f);
 
-        if (ImGui.Begin("Solids"u8))
+        if (!ImGui.BeginCombo("Moves with"u8, $"{name}", ImGuiComboFlags.None))
+            return;
+
+        if (ImGui.Selectable("The ship (fixed)##moves"u8, current == 0, ImGuiSelectableFlags.None, default) && current != 0)
+            JointCommands.SetMember(session, id, 0);
+
+        foreach (var j in joints.Joints)
         {
-            var solids = session.Doc.Solids.AsSpan();
-
-            for (var i = 0; i < solids.Length; i++)
-            {
-                ref readonly var b = ref solids[i];
-                var interior = (b.Flags & SolidFlags.Interior) != 0 ? " interior" : "";
-
-                if (ImGui.Selectable($"{i,3}  #{b.Id}  {OpName(b.Op)} {ShapeName(b.Shape)}{interior}##{b.Id}", session.Selection.Contains(b.Id), ImGuiSelectableFlags.None, default))
-                {
-                    if (ImGui.GetIO().KeyCtrl)
-                        session.Selection.Toggle(b.Id);
-                    else
-                        session.Selection.Set(b.Id);
-                }
-            }
+            if (ImGui.Selectable($"{JointsPanel.KindName(j.Kind)} #{j.Id}##moves{j.Id}", j.Id == current, ImGuiSelectableFlags.None, default) && j.Id != current)
+                JointCommands.SetMember(session, id, j.Id);
         }
 
-        ImGui.End();
+        ImGui.EndCombo();
+    }
+
+    /// <summary>A box room's walls: plain, or one of the plan's wall profiles (made in the Profiles tab).</summary>
+    private void DrawWalls(DesignSession session, uint id)
+    {
+        var interior = session.Doc.Interior;
+        var current = interior?.WallOf(id) ?? -1;
+        var name = current >= 0 && current < interior!.Profiles.Count ? interior.Profiles[current].Name : "Plain";
+        DesignerStyle.ItemWidth(120f);
+
+        if (ImGui.BeginCombo("Walls"u8, $"{name}", ImGuiComboFlags.None))
+        {
+            if (ImGui.Selectable("Plain##walls"u8, current < 0, ImGuiSelectableFlags.None, default) && current >= 0)
+                InteriorCommands.SetRoomWall(session, id, -1);
+
+            for (var i = 0; i < (interior?.Profiles.Count ?? 0); i++)
+            {
+                if (interior!.Profiles[i].Kind != ProfileKind.Wall)
+                    continue;
+
+                if (ImGui.Selectable($"{interior.Profiles[i].Name}##wall{i}", i == current, ImGuiSelectableFlags.None, default) && i != current)
+                    InteriorCommands.SetRoomWall(session, id, i);
+            }
+
+            if (interior is null || !interior.Profiles.Exists(p => p.Kind == ProfileKind.Wall))
+                ImGui.TextDisabled("No wall profiles yet: make one in Profiles"u8);
+
+            ImGui.EndCombo();
+        }
+
+        if (current >= 0)
+        {
+            ImGui.SameLine();
+
+            if (ImGui.Button("Edit##wallprofile"u8))
+                EditProfileRequest = current;
+        }
     }
 
     private void DrawProperties(DesignSession session, MeshEditState meshEdit)
     {
         if (ImGui.Begin("Properties"u8))
         {
+            // Another kind of object is selected (from the tree or the view): its own properties.
+            if (OtherProperties is not null)
+            {
+                // The interior view locks only the hull's solids.
+                if (Locked)
+                    ImGui.EndDisabled();
+
+                OtherProperties(session);
+
+                if (Locked)
+                    ImGui.BeginDisabled(true);
+
+                ImGui.End();
+                return;
+            }
+
             var id = session.Selection.Primary;
 
             if (!session.TryGetSolid(id, out var solid))
             {
-                ImGui.Text("No solid selected"u8);
+                ImGui.TextDisabled("Nothing selected: pick something in the Objects tree or the view."u8);
                 ImGui.End();
                 return;
             }
@@ -312,6 +363,12 @@ public sealed class DesignerPanels
                     Designer.LayerCommands.SetRole(session, id, (SolidRole)role);
             }
 
+            if (WallGeometry.IsRoom(solid, session.Doc.Meshes))
+                DrawWalls(session, id);
+
+            if (session.Doc.Joints is { Joints.Count: > 0 } joints)
+                DrawMovesWith(session, joints, id);
+
             var material = MaterialSlot(session.Doc, solid.Material);
 
             if (MaterialCombo("Material"u8, ref material))
@@ -345,19 +402,6 @@ public sealed class DesignerPanels
 
             ImGui.Separator();
 
-            if (ImGui.Button("Add/Subtract"u8))
-                HullCommands.ToggleOp(session, id);
-
-            ImGui.SameLine();
-
-            if (ImGui.Button("Duplicate"u8))
-                HullCommands.Duplicate(session, id);
-
-            ImGui.SameLine();
-
-            if (ImGui.Button("Delete"u8))
-                HullCommands.DeleteSelected(session);
-
             if (ImGui.Button("Earlier"u8))
                 HullCommands.Move(session, id, -1);
 
@@ -376,6 +420,27 @@ public sealed class DesignerPanels
         }
 
         ImGui.End();
+    }
+
+    /// <summary>The bar beside the selected solid in the view: duplicate, add/subtract, delete.</summary>
+    public void DrawContext(DesignSession session, MeshEditState meshEdit, OrbitCamera camera, System.Numerics.Vector2 viewport)
+    {
+        if (Locked || meshEdit.Enabled || !session.TryGetSolid(session.Selection.Primary, out var solid))
+            return;
+
+        if (!ContextBar.Begin("solid", camera, new Vector3d(solid.PositionX, solid.PositionY, solid.PositionZ), viewport))
+            return;
+
+        if (ContextBar.Button("Duplicate", "Copy the selected solids (Ctrl+D)"))
+            HullCommands.Duplicate(session, solid.Id);
+
+        if (ContextBar.Button(solid.Op == SolidOp.Subtract ? "Make add" : "Make subtract", "Switch the solid between adding and cutting"))
+            HullCommands.ToggleOp(session, solid.Id);
+
+        if (ContextBar.Button("Delete", "Remove the selected solids (Del)"))
+            HullCommands.DeleteSelected(session);
+
+        ContextBar.End();
     }
 
     private void DrawStats(DesignSession session, DesignStats stats)
@@ -399,7 +464,12 @@ public sealed class DesignerPanels
                 ImGui.Text($"components: {stats.ComponentsKg:F1} kg of parts and pipes");
 
             if (stats.Generated > 0 || stats.Unstuck > 0)
-                ImGui.Text($"brushes: {stats.Generated} pieces, {stats.FlairKg:F0} kg, {stats.Unstuck} points off the hull");
+                ImGui.Text($"brushes and window panes: {stats.Generated} pieces, {stats.FlairKg:F0} kg, {stats.Unstuck} points off the hull");
+
+            ImGui.Text($"hull draw {stats.HullGpuMs:F3} ms gpu");
+
+            if (stats.Projectors > 0)
+                ImGui.Text($"paint and decals: {stats.Projectors} boxes, {stats.ProjectorRefs} cell list entries");
 
             ImGui.Checkbox("Show grid mesh (debug)"u8, ref stats.ShowGrid);
             ImGui.Text($"plan hash {stats.Hash}  undo {session.Undo.UndoCount} redo {session.Undo.RedoCount}");

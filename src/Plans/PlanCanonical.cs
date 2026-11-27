@@ -47,6 +47,45 @@ public static class PlanCanonical
         if (doc.Components is { IsEmpty: true })
             doc.Components = null;
 
+        // Room walls of solids that are gone are dropped; the rest go in solid id order.
+        if (doc.Interior is { RoomWalls.Count: > 0 } walls)
+        {
+            walls.RoomWalls.RemoveAll(w => doc.Solids.IndexOf(w.Solid) < 0);
+            walls.RoomWalls.Sort((a, b) => a.Solid.CompareTo(b.Solid));
+        }
+
+        if (doc.Interior is { IsEmpty: true })
+            doc.Interior = null;
+
+        if (doc.Windows is { IsEmpty: true })
+            doc.Windows = null;
+
+        if (doc.Decals is { IsEmpty: true })
+            doc.Decals = null;
+
+        if (doc.Openings is { IsEmpty: true })
+            doc.Openings = null;
+
+        // Members of solids or joints that are gone are dropped; the rest go in solid id order.
+        if (doc.Joints is { } joints)
+        {
+            joints.Members.RemoveAll(m => doc.Solids.IndexOf(m.Solid) < 0 || joints.IndexOf(m.Joint) < 0);
+            joints.Members.Sort((a, b) => a.Solid.CompareTo(b.Solid));
+
+            if (joints.IsEmpty)
+                doc.Joints = null;
+        }
+
+        // Strokes' own paints for strokes that are gone are dropped; the rest go in stroke id order.
+        if (doc.Paint is { } paint)
+        {
+            paint.Strokes.RemoveAll(s => doc.Brushes is not { } set || set.IndexOfStroke(s.Stroke) < 0);
+            paint.Strokes.Sort((a, b) => a.Stroke.CompareTo(b.Stroke));
+
+            if (paint.IsEmpty)
+                doc.Paint = null;
+        }
+
         // Prefabs no placement uses are dropped.
         var used = new HashSet<ulong>();
 
@@ -58,6 +97,26 @@ public static class PlanCanonical
 
         foreach (var hash in doc.Prefabs.Keys.Where(h => !used.Contains(h)).ToList())
             doc.Prefabs.Remove(hash);
+
+        // A prefab read from an older format re-encodes to new bytes: its key (and the placements') follow them.
+        foreach (var (key, prefab) in doc.Prefabs.ToList())
+        {
+            var hash = PlanFormat.HashBody(prefab).Value;
+
+            if (hash == key)
+                continue;
+
+            doc.Prefabs.Remove(key);
+            doc.Prefabs[hash] = prefab;
+
+            for (var i = 0; i < doc.Components!.Placements.Count; i++)
+            {
+                var placement = doc.Components.Placements[i];
+
+                if (placement.Prefab == key)
+                    doc.Components.Placements[i] = placement with { Prefab = hash };
+            }
+        }
 
         CompactMaterials(doc);
         CompactMeshes(doc);
@@ -232,6 +291,22 @@ public static class PlanCanonical
 
             foreach (var pipe in doc.Components.Pipes)
                 pipe.Material = Keep(pipe.Material);
+        }
+
+        // Hallway (stair) materials too.
+        if (doc.Interior is not null)
+        {
+            foreach (var hallway in doc.Interior.Hallways)
+                hallway.Material = Keep(hallway.Material);
+
+            // Profiles no hallway uses stay (they are the plan's own library); nothing to remap.
+        }
+
+        // Window (pane) materials too.
+        if (doc.Windows is not null)
+        {
+            foreach (var window in doc.Windows.Windows)
+                window.Material = Keep(window.Material);
         }
 
         byte Keep(byte material)

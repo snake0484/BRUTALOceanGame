@@ -1,6 +1,7 @@
 using BrutalGame.Designer.Mesh;
 using BrutalGame.Plans;
 using BrutalGame.Ships;
+using BrutalGame.Ships.Interior;
 
 namespace BrutalGame.Designer;
 
@@ -41,13 +42,40 @@ public static class SampleHulls
         var up = new Vector3d(0, 1, 0);
         var trimMaterial = session.EnsureMaterial(trim);
         
-        BrushCommands.AddStroke(session, rib, [StrokePoint.From(new Vector3d(-5.5, 6.4, 3.5), up), StrokePoint.From(new Vector3d(5.5, 6.4, 3.5), up)], trimMaterial);
+        var taper = BrushCommands.AddStroke(session, rib, [StrokePoint.From(new Vector3d(-5.5, 6.4, 3.5), up), StrokePoint.From(new Vector3d(5.5, 6.4, 3.5), up)], trimMaterial);
+
+        // Paint slots: the hull in satin slate, the tapered rib in orange gloss, white panels for shapes.
+        var hullPaint = PaintCommands.AddSlot(session, new HullPaint { Name = "Slate", Finish = DefId.FromName("finish.powder.satin").Value, Colour = 0xFF5A4A3C });
+        var trimPaint = PaintCommands.AddSlot(session, new HullPaint { Name = "Signal orange", Finish = DefId.FromName("finish.gloss").Value, Colour = 0xFF1E6EF0 });
+        var panels = PaintCommands.AddSlot(session, new HullPaint { Name = "White panels", Finish = DefId.FromName("finish.panels").Value, Colour = 0xFFE6E6E6 });
+        PaintCommands.SetHull(session, hullPaint);
+        PaintCommands.SetStroke(session, taper, trimPaint);
+        DecalCommands.AddDecal(session, new Vector3d(-6.0, 4.0, -1.5), new Vector3d(-1, 0, 0), default, new HullDecal { Shape = DecalShape.Rectangle, Paint = (byte)panels, WidthMm = 4000, HeightMm = 1200 });
+        DecalCommands.AddDecal(session, new Vector3d(0.5, 3.5, -6.0), new Vector3d(0, 0, -1), default, new HullDecal { Shape = DecalShape.Ellipse, Paint = (byte)trimPaint, WidthMm = 2500, HeightMm = 2500 });
+        BrushCommands.SetPointScale(session, taper, 0, 0.3);
+        BrushCommands.SetPointScale(session, taper, 1, 2.0);
         BrushCommands.AddStroke(session, ridge,
             [StrokePoint.From(new Vector3d(6.4, 5.0, -3.5), new Vector3d(1, 0, 0)), StrokePoint.From(new Vector3d(6.4, 5.0, 3.5), new Vector3d(1, 0, 0))], trimMaterial);
         BrushCommands.AddStroke(session, stamp,
             [StrokePoint.From(new Vector3d(-6.4, 4.5, -3.5), new Vector3d(-1, 0, 0)), StrokePoint.From(new Vector3d(-6.4, 4.5, 3.5), new Vector3d(-1, 0, 0))], trimMaterial);
         BrushCommands.AddStroke(session, rib,
             [StrokePoint.From(new Vector3d(-1.0, 5.0, 4.2), up), StrokePoint.From(new Vector3d(0, 5.0, 7.0), up), StrokePoint.From(new Vector3d(1.0, 5.0, 9.8), up)], trimMaterial);
+
+        // Two rows of nut heads along the top's front edge: turned at random, sized a little apart, every other one turned
+        // half round, clear of the ends.
+        var nuts = BrushCommands.AddModel(session, DefId.FromName("model.nut.hex"), 0.3);
+        BrushCommands.EditBrush(session, nuts, b =>
+        {
+            (b.Rows, b.RowSpacing, b.TurnJitter, b.SizeJitter, b.Alternate) = (2, 205, 30, 200, RepeatAlternate.Turn);
+            (b.StartGap, b.EndGap, b.Scale) = (512, 512, 2000);
+        });
+        BrushCommands.AddStroke(session, nuts, [StrokePoint.From(new Vector3d(-5.5, 6.4, -5.0), up), StrokePoint.From(new Vector3d(5.5, 6.4, -5.0), up)], trimMaterial);
+
+        // A band of paint across the top, over the tapered rib, and two decals.
+        var paint = BrushCommands.AddPaint(session, PaintPattern.LineCross, 0xFF1E8CF0, 1.2, 0.2, 0.035);
+        BrushCommands.AddStroke(session, paint, [StrokePoint.From(new Vector3d(-2, 6.4, -2.5), up), StrokePoint.From(new Vector3d(-2, 6.4, 5.0), up)], trimMaterial);
+        DecalCommands.AddDecal(session, new Vector3d(2.5, 6.0, -1.0), up, DefId.FromName("decal.emblem"), new HullDecal { WidthMm = 3000, HeightMm = 3000 });
+        DecalCommands.AddDecal(session, new Vector3d(6.0, 4.0, 0.5), new Vector3d(1, 0, 0), DefId.FromName("decal.roundel"), new HullDecal { WidthMm = 2000, HeightMm = 2000 });
     }
 
     /// <summary>
@@ -120,6 +148,87 @@ public static class SampleHulls
         LayerCommands.AddCut(session, 2, 6 * m);
         var nose = LayerCommands.Sections(session.Doc.Layers!).First(x => x.Section.Z == 1).Section;
         LayerCommands.AssignSection(session, nose, 2);
+    }
+
+    /// <summary>The layered demo hull with a hallway: a level run along the port side, then stairs up across to starboard.</summary>
+    public static void HallwayHull(DesignSession session, DefId armour, DefId alloy, DefId titanium)
+    {
+        LayeredHull(session, armour, alloy, titanium);
+        var id = InteriorCommands.AddHallway(session, new Vector3d(-2.5, 0.9, -4.5), new Vector3d(-2.5, 0.9, 1.5), alloy);
+        InteriorCommands.AddNode(session, id, 1, new Vector3d(1.5, 2.9, 1.5));
+    }
+
+    /// <summary>The box-and-cylinder hull with windows: a rounded one in the port side, a porthole in the front, and one curving over the cylinder's top.</summary>
+    public static void WindowedHull(DesignSession session, DefId hull, DefId trim, DefId glass, DefId alon)
+    {
+        HollowBoxWithCylinder(session, hull, trim);
+        WindowCommands.AddWindow(session, new Vector3d(-6, 3.2, 0), new Vector3d(-1, 0, 0), glass, new Ships.Interior.HullWindow { Shape = Ships.Interior.WindowShape.Rounded, WidthMm = 3000, HeightMm = 1400 });
+        WindowCommands.AddWindow(session, new Vector3d(3.5, 3.5, -4), new Vector3d(0, 0, -1), glass, new Ships.Interior.HullWindow { Shape = Ships.Interior.WindowShape.Circle, WidthMm = 1200, HeightMm = 1200 });
+        WindowCommands.AddWindow(session, new Vector3d(0, 4.5, 7.5), new Vector3d(0, 1, 0), alon, new Ships.Interior.HullWindow { Shape = Ships.Interior.WindowShape.Rectangle, WidthMm = 2200, HeightMm = 2400, DepthMm = 2000 });
+    }
+
+    /// <summary>A solid block (no layers) with the same hallway, so the exact cut and the stairs show in a cutaway.</summary>
+    public static void HallwayBlock(DesignSession session, DefId alloy)
+    {
+        const int m = HullSolid.PositionUnitsPerMetre;
+        const int h = HullSolid.HalfUnitsPerMetre;
+        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 3 * m, 0, 5 * h, 3 * h, 7 * h, SolidRotation.Identity, alloy);
+        var id = InteriorCommands.AddHallway(session, new Vector3d(-2.5, 0.9, -4.5), new Vector3d(-2.5, 0.9, 1.5), alloy);
+        InteriorCommands.AddNode(session, id, 1, new Vector3d(1.5, 2.9, 1.5));
+    }
+
+    /// <summary>
+    /// A block with a turret on a rotor on top (a box and a barrel turning about ship up) and a flap on a hinge across its
+    /// front edge (swinging -60 to 30 degrees).
+    /// </summary>
+    public static void JointsDemo(DesignSession session, DefId alloy)
+    {
+        const int m = HullSolid.PositionUnitsPerMetre;
+        const int h = HullSolid.HalfUnitsPerMetre;
+        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 2 * m, 0, 5 * h, 2 * h, 6 * h, SolidRotation.Identity, alloy);
+        var turret = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, (int)(5.25 * m), -1 * m, 2 * h, (ushort)(1.25 * h), (ushort)(2.5 * h), SolidRotation.Identity, alloy);
+        var barrel = HullCommands.AddSolid(session, SolidShape.Cylinder, SolidOp.Add, 0, (int)(5.5 * m), (int)(-5.5 * m), (ushort)(0.35 * h), 3 * h, (ushort)(0.35 * h), SolidRotation.FromSteps(0, 6, 0), alloy);
+        var flap = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, (int)(3.75 * m), (int)(6.75 * m), (ushort)(4.5 * h), (ushort)(0.25 * h), (ushort)(0.75 * h), SolidRotation.Identity, alloy);
+
+        var rotor = JointCommands.AddJoint(session, JointKind.Rotor, new Vector3d(0, 4, -1), new Vector3d(0, 1, 0), 0);
+        JointCommands.SetJoint(session, rotor, j => j.Speed = 60);
+        JointCommands.SetMember(session, turret, rotor);
+        JointCommands.SetMember(session, barrel, rotor);
+
+        var hinge = JointCommands.AddJoint(session, JointKind.Hinge, new Vector3d(0, 4, 6), new Vector3d(1, 0, 0), 0);
+        JointCommands.SetJoint(session, hinge, j => (j.Min, j.Max, j.Target, j.Speed) = (-600, 300, 0, 400));
+        JointCommands.SetMember(session, flap, hinge);
+    }
+
+    /// <summary>
+    /// A 10 x 4 x 12 m hull with a room inside behind 0.3 m walls: a swing door in its +X wall, a sliding door in its -X
+    /// wall (both sills on the room's floor) and a docking port on its +Z face.
+    /// </summary>
+    public static void DoorsDemo(DesignSession session, DefId alloy)
+    {
+        const int m = HullSolid.PositionUnitsPerMetre;
+        const int h = HullSolid.HalfUnitsPerMetre;
+        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 2 * m, 0, 5 * h, 2 * h, 6 * h, SolidRotation.Identity, alloy);
+        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Subtract, 0, 2 * m, 0, (ushort)(4.7 * h), (ushort)(1.6 * h), (ushort)(5.7 * h), SolidRotation.Identity, alloy);
+        ComponentCommands.PlacePrefab(session, SampleComponents.SwingDoor(alloy), new Vector3d(5, 0.4, 2), OpeningCommands.Facing(new Vector3d(1, 0, 0)));
+        ComponentCommands.PlacePrefab(session, SampleComponents.SlidingDoor(alloy), new Vector3d(-5, 0.4, -2), OpeningCommands.Facing(new Vector3d(-1, 0, 0)));
+        ComponentCommands.PlacePrefab(session, SampleComponents.DockingPort(alloy), new Vector3d(0, 2, 6), OpeningCommands.Facing(new Vector3d(0, 0, 1)));
+    }
+
+    /// <summary>A solid block with a 7 x 3 x 6 m room and a 4 m round room cut out of it, walls coved at the ceiling and chamfered at the floor.</summary>
+    public static void WallRoom(DesignSession session, DefId alloy)
+    {
+        const int m = HullSolid.PositionUnitsPerMetre;
+        const int h = HullSolid.HalfUnitsPerMetre;
+        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 3 * m, 0, 5 * h, 3 * h, 7 * h, SolidRotation.Identity, alloy);
+        var round = HullCommands.AddSolid(session, SolidShape.Cylinder, SolidOp.Subtract, 0, 3 * m, (int)(3.8 * m), 2 * h, (ushort)(1.5 * h), 2 * h, SolidRotation.Identity, alloy);
+        var room = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Subtract, 0, 3 * m, -3 * m, (ushort)(3.5 * h), (ushort)(1.5 * h), 3 * h, SolidRotation.Identity, alloy);
+        var coved = WallGeometry.Preset(WallPreset.Coved, 2.4, 0.6);
+        coved[0] = new ProfilePoint(m / 5, 0);
+        coved.Insert(1, new ProfilePoint(0, m / 5));
+        var wall = InteriorCommands.AddProfile(session, "Coved", coved, kind: ProfileKind.Wall);
+        InteriorCommands.SetRoomWall(session, room, wall);
+        InteriorCommands.SetRoomWall(session, round, wall);
     }
 
     private static int FaceAlong(HullMesh mesh, int axis, int sign)

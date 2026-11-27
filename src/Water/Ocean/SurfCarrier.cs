@@ -5,8 +5,9 @@ namespace BrutalGame.Water.Ocean;
 /// <summary>The surf carrier at a point of a coast map (<see cref="SurfCarrier.At"/>).</summary>
 public struct SurfCarrierPoint
 {
-    /// <summary>Phase wrapped to [-π, π): 0 on a crest.</summary>
+    /// <summary>Phase wrapped to [-π, π): 0 on a crest. <see cref="Turns"/> is what the wrap took off (rad, whole turns).</summary>
     public float Phase;
+    public float Turns;
 
     /// <summary>Unit direction of travel in the window's plane, and the local wavenumber k(h).</summary>
     public float DirX;
@@ -37,6 +38,13 @@ public static class SurfCarrier
     public const float CoherentKh = 0.4f;
     public const float IncoherentKh = 1.2f;
 
+    /// <summary>
+    /// And only near where it breaks: none of it in water deeper than <see cref="FadeDepth"/> × its deep-water height, all
+    /// by <see cref="FormDepth"/> ×. A window with no water that shallow has no carrier, so one never starts at a window's edge.
+    /// </summary>
+    public const float FormDepth = 4f;
+    public const float FadeDepth = 8f;
+
     /// <summary>The carrier's wavenumber is taken at no shallower than this (m).</summary>
     public const float SpentDepthK = 0.3f;
 
@@ -56,11 +64,14 @@ public static class SurfCarrier
     /// <summary>Share of the carrier's energy that is coherent at local k h.</summary>
     public static float Coherence(float kh) => 1f - Smooth((kh - CoherentKh) / (IncoherentKh - CoherentKh));
 
+    /// <summary>Share of the carrier's energy drawn in water this deep (<see cref="FadeDepth"/>).</summary>
+    public static float Shallows(float depth, float deepHeight) => 1f - Smooth((depth - FormDepth * deepHeight) / ((FadeDepth - FormDepth) * MathF.Max(deepHeight, 1e-4f)));
+
     /// <summary>The carrier's height crest to trough before breaking, from its deep-water height and the map's shoaling factor.</summary>
     public static float Unbroken(float deepHeight, float omega, float depth, float shoaling)
     {
         var h = MathF.Max(depth, 0f);
-        return deepHeight * MathF.Sqrt(Coherence(WaveNumber(omega, h) * h)) * shoaling;
+        return deepHeight * MathF.Sqrt(Coherence(WaveNumber(omega, h) * h) * Shallows(h, deepHeight)) * shoaling;
     }
 
     /// <summary>γ h / H unclamped: below 1 the wave is past its breaking limit.</summary>
@@ -73,20 +84,26 @@ public static class SurfCarrier
     /// The carrier at local (x, z) metres of the map, <paramref name="phase0"/> being the map's phase at the time
     /// (<see cref="CoastAtlas.PhaseAt"/>).
     /// </summary>
-    public static SurfCarrierPoint At(CoastAtlas atlas, float x, float z, float phase0)
+    /// <param name="turns">NaN wraps the phase to the nearest crest; a point's <see cref="SurfCarrierPoint.Turns"/> gives the phase against that point's crest, however far off.</param>
+    public static SurfCarrierPoint At(CoastAtlas atlas, float x, float z, float phase0, float turns = float.NaN)
     {
         atlas.Sample(x, z, out var s);
         var carrier = atlas.Key.Carrier;
         var depth = MathF.Max(s.Depth, 0f);
         var length = MathF.Max(MathF.Sqrt(s.DirX * s.DirX + s.DirZ * s.DirZ), 1e-6f);
+        var total = s.Phase + phase0;
+
+        if (float.IsNaN(turns))
+            turns = total - Wrap(total);
 
         return new SurfCarrierPoint
         {
-            Phase = Wrap(s.Phase + phase0),
+            Phase = total - turns,
+            Turns = turns,
             DirX = s.DirX / length,
             DirZ = s.DirZ / length,
             K = WaveNumber(carrier.Omega, MathF.Max(depth, SpentDepthK)),
-            Unbroken = Unbroken(carrier.Height, carrier.Omega, depth, s.Amplitude),
+            Unbroken = Unbroken(atlas.Height, carrier.Omega, depth, s.Amplitude),
             Depth = s.Depth,
             BreakDistance = s.BreakDistance,
             Plunge = s.Plunge,

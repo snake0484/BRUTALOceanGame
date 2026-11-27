@@ -11,8 +11,8 @@ public sealed class Supply
 {
     public uint Pipe;
 
-    /// <summary>The pipe's last node (else its first).</summary>
-    public bool AtEnd;
+    /// <summary>The pipe's open inlet node.</summary>
+    public int Node;
 
     public string Mixture = "mix.methane";
     public double Pressure = 30e5;
@@ -22,8 +22,9 @@ public sealed class Supply
 /// <summary>
 /// A component turned into something that runs: parts, pipes and supplies compiled into a <see cref="FlowNetwork"/>.
 /// Chambers are gases of their inner volume; a nozzle on a chamber's aft port exhausts it; an injector on a chamber's
-/// head port is a one-way orifice from whatever feeds its inlet; a pipe is a gas of its bore volume that bursts above its
-/// Barlow rating; an open pipe end is fed by a supply; an igniter on a chamber's igniter port can spark it. Nothing else
+/// head port is a one-way orifice from whatever feeds its inlet; a pipe (with all its runs and junctions) is one gas of
+/// its bore volume that bursts above its weakest run's Barlow rating; each open inlet is fed by a supply; an igniter on a
+/// chamber's igniter port can spark it. Nothing else
 /// is assumed: whether it burns is the chemistry data's business.
 /// </summary>
 public sealed class ComponentModel
@@ -134,19 +135,26 @@ public sealed class ComponentModel
             var rating = pipe.Rating(yieldMpa(pipe.Material));
             model.PipeRating[pipe.Id] = rating;
 
-            if (pipe.InnerMm == 0 || pipe.InnerMm >= pipe.OuterMm)
+            if (pipe.Runs.Count == 0)
             {
-                model.Issues.Add($"pipe #{pipe.Id}: inner diameter must be below the outer");
+                model.Issues.Add($"pipe #{pipe.Id}: no runs");
                 continue;
             }
 
-            var bore = Math.PI * pipe.InnerMetres * pipe.InnerMetres * 0.25;
-            var gas = new Gas(chemistry, Math.Max(bore * Math.Max(pipe.Length, 0.01), 1e-9));
+            if (pipe.Runs.Any(run => run.InnerMm == 0 || run.InnerMm >= run.OuterMm))
+            {
+                model.Issues.Add($"pipe #{pipe.Id}: a run's inner diameter must be below its outer");
+                continue;
+            }
+
+            // The whole pipe, junctions and all, is one gas; it bursts at its weakest run.
+            var widest = pipe.Runs.Max(run => Math.PI * run.InnerMetres * run.InnerMetres * 0.25);
+            var gas = new Gas(chemistry, Math.Max(pipe.BoreVolume, 1e-9));
 
             if (ambientPa > 0 && air is not null)
                 gas.Fill(air, ambientPa, 288);
 
-            model.PipeGas[pipe.Id] = net.Add($"pipe #{pipe.Id}", gas, rating, bore);
+            model.PipeGas[pipe.Id] = net.Add($"pipe #{pipe.Id}", gas, rating, widest);
         }
 
         foreach (var pipe in data.Pipes)
@@ -154,19 +162,30 @@ public sealed class ComponentModel
             if (!model.PipeGas.TryGetValue(pipe.Id, out var node))
                 continue;
 
-            var bore = Math.PI * pipe.InnerMetres * pipe.InnerMetres * 0.25;
-            var cd = 1.0 / Math.Sqrt(1.0 + 0.02 * 0.5 * Math.Max(pipe.Length, 0.01) / Math.Max(pipe.InnerMetres, 1e-4));
-
-            foreach (var (end, atEnd) in new[] { (pipe.From, false), (pipe.To, true) })
+            // Each end connects through the bore of the run it is on.
+            for (var n = 0; n < pipe.Nodes.Count; n++)
             {
+                var runIndex = pipe.RunAt(n);
+
+                if (runIndex < 0)
+                    continue;
+
+                var run = pipe.Runs[runIndex];
+                var bore = Math.PI * run.InnerMetres * run.InnerMetres * 0.25;
+                var cd = 1.0 / Math.Sqrt(1.0 + 0.02 * 0.5 * Math.Max(pipe.Length, 0.01) / Math.Max(run.InnerMetres, 1e-4));
+                var end = pipe.EndAt(n);
+
                 if (end.IsOpen)
                 {
-                    var supply = supplies.FirstOrDefault(s => s.Pipe == pipe.Id && s.AtEnd == atEnd);
+                    if (pipe.Degree(n) != 1)
+                        continue;
+
+                    var supply = supplies.FirstOrDefault(s => s.Pipe == pipe.Id && s.Node == n);
                     var mixture = supply is null ? null : chemistry.Mixture(supply.Mixture);
 
                     if (supply is null || mixture is null)
                     {
-                        model.Issues.Add($"pipe #{pipe.Id}: open {(atEnd ? "end" : "start")} has no supply");
+                        model.Issues.Add($"pipe #{pipe.Id}: open inlet at node {n} has no supply");
                         continue;
                     }
 
@@ -214,7 +233,7 @@ public sealed class ComponentModel
                         break;
                     }
 
-                    var feed = data.Pipes.FirstOrDefault(pp => (pp.From.Part == p.Id && pp.From.Port == 1) || (pp.To.Part == p.Id && pp.To.Port == 1));
+                    var feed = data.Pipes.FirstOrDefault(pp => pp.NodeOn(p.Id, 1) >= 0);
 
                     if (feed is null || !model.PipeGas.TryGetValue(feed.Id, out var source))
                     {
@@ -258,18 +277,19 @@ public sealed class ComponentModel
     }
 }
 
-/// <summary>Pipe surfaces: each straight length a hollow tube (outer and inner wall, annular ends), a ball at each bend.</summary>
+/// <summary>Pipe surfaces: each run a hollow tube of its own size (outer and inner wall, annular ends), a ball at every bend and junction the size of the widest run there.</summary>
 public static class PipeGeometry
 {
     public static void Surface(PipeRoute pipe, List<SurfacePolygon> output)
     {
-        double ro = pipe.OuterMetres * 0.5, ri = Math.Min(pipe.InnerMetres * 0.5, ro * 0.98);
-
-        for (var i = 1; i < pipe.Nodes.Count; i++)
+        foreach (var run in pipe.Runs)
         {
-            var a = pipe.Node(i - 1);
-            var b = pipe.Node(i);
-            var d = Sub(b, a);
+            if (run.A >= pipe.Nodes.Count || run.B >= pipe.Nodes.Count)
+                continue;
+
+            double ro = run.OuterMetres * 0.5, ri = Math.Min(run.InnerMetres * 0.5, ro * 0.98);
+            var a = pipe.Node(run.A);
+            var d = Sub(pipe.Node(run.B), a);
             var length = d.Length();
 
             if (length < 1e-6)
@@ -282,9 +302,14 @@ public static class PipeGeometry
             PartGeometry.Lathe(profile, m, a, pipe.Material, output);
         }
 
-        // Bends: a ball the pipe's size covers the mitre.
-        for (var i = 1; i + 1 < pipe.Nodes.Count; i++)
+        // Bends and junctions: a ball the size of the widest run there covers the joint.
+        for (var i = 0; i < pipe.Nodes.Count; i++)
         {
+            if (pipe.Degree(i) < 2)
+                continue;
+
+            var ro = pipe.Runs.Where(r => r.A == i || r.B == i).Max(r => r.OuterMetres) * 0.5;
+
             // A semicircle from the bottom pole to the top one, counter-clockwise in (r, y).
             var ball = new List<(double R, double Y)>();
             const int rings = 8;
@@ -299,12 +324,12 @@ public static class PipeGeometry
         }
     }
 
-    /// <summary>Metal volume: π (r_o² − r_i²) × length.</summary>
-    public static double Volume(PipeRoute pipe)
+    /// <summary>Metal volume: π (r_o² − r_i²) × length over every run.</summary>
+    public static double Volume(PipeRoute pipe) => pipe.Runs.Sum(r =>
     {
-        double ro = pipe.OuterMetres * 0.5, ri = pipe.InnerMetres * 0.5;
-        return Math.PI * (ro * ro - ri * ri) * pipe.Length;
-    }
+        double ro = r.OuterMetres * 0.5, ri = r.InnerMetres * 0.5;
+        return Math.PI * (ro * ro - ri * ri) * pipe.RunLength(r);
+    });
 
     /// <summary>A rotation taking local +Y to <paramref name="y"/> (row-major, columns are the images of the local axes).</summary>
     private static double[] Basis(Vector3d y)

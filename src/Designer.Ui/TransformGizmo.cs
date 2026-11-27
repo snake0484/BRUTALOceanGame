@@ -7,9 +7,6 @@ using static BrutalGame.Ships.HullSurface;
 
 namespace BrutalGame.Designer.Ui;
 
-/// <summary>What the viewport gizmo does: move along ship axes, turn on the rotation rings, or resize faces (W, E, R).</summary>
-public enum GizmoMode { Move, Rotate, Scale }
-
 /// <summary>
 /// The rotation rings. A rotation is a 15 degree snap index (yaw, then pitch, then roll), so each ring turns about the
 /// axis whose steps stay on that grid: yaw about ship up, pitch about the yawed sideways axis, roll about the thing's own
@@ -19,6 +16,9 @@ public static class RotationRings
 {
     public const int Segments = 64;
     public const double Step = SolidRotation.DegreesPerStep * Math.PI / 180.0;
+
+    /// <summary>Ring radius over the move arrows' length: the rings sit just outside the arrow tips.</summary>
+    public const double Outside = 1.3;
 
     /// <summary>Ring colours by ring (yaw, pitch, roll), matching the axis they turn about (Y green, X red, Z blue).</summary>
     public static readonly uint[] Colours = [OverlayRenderer.Rgba(90, 220, 90), OverlayRenderer.Rgba(235, 70, 70), OverlayRenderer.Rgba(80, 140, 255)];
@@ -44,11 +44,10 @@ public static class RotationRings
         return new Vector3d(m[2], m[5], m[8]);
     }
 
-    /// <summary>Draws the three rings; returns the ring under the mouse (within a few pixels) or -1.</summary>
+    /// <summary>Draws the three rings; returns the ring under the mouse nearer than <paramref name="best"/> pixels (lowering it) or -1.</summary>
     public static int Draw(OverlayRenderer overlay, Vector3d centre, double radius, uint rotation, int active, int hovered, OrbitCamera camera,
-        in Matrix4x4 viewProj, Vector2 viewport, Vector2 mouse, bool pick, float pixels)
+        in Matrix4x4 viewProj, Vector2 viewport, Vector2 mouse, bool pick, ref float best)
     {
-        var best = pixels;
         var hit = -1;
 
         for (var ring = 0; ring < 3; ring++)
@@ -134,9 +133,10 @@ public static class RotationRings
 }
 
 /// <summary>
-/// The gizmo for things that move and turn but have no size handles (component parts, pipe nodes, placed components):
-/// the kit's <see cref="MoveGizmo"/> arrows, or in rotate mode the three rotation rings. Hover a handle, press and drag.
-/// The caller commits when <see cref="Update"/> reports the drag ended, so a drag is one undo step.
+/// The gizmo for things that move and maybe turn but have no size handles (component parts, pipe and hallway nodes, placed
+/// components): the kit's <see cref="MoveGizmo"/> arrows, and the three rotation rings just outside them for things that
+/// turn. Hover a handle (arrows win over rings), press and drag; while dragging only that handle shows. The caller commits
+/// when <see cref="Update"/> reports the drag ended, so a drag is one undo step.
 /// </summary>
 public sealed class TransformGizmo
 {
@@ -165,27 +165,39 @@ public sealed class TransformGizmo
 
     /// <summary>
     /// Draws the handles at <paramref name="centre"/> and runs the drag. True on the frame a drag ends having changed
-    /// something. <paramref name="rotation"/> is null for things that cannot turn (pipe nodes): rotate mode shows arrows.
+    /// something. <paramref name="rotation"/> is null for things that cannot turn (pipe nodes): no rings.
     /// </summary>
-    public bool Update(Vector3d centre, uint? rotation, GizmoMode mode, OrbitCamera camera, in Matrix4x4 viewProj, Vector2 viewport, Vector2 mouse,
+    public bool Update(Vector3d centre, uint? rotation, OrbitCamera camera, in Matrix4x4 viewProj, Vector2 viewport, Vector2 mouse,
         bool mouseFree, bool down, bool clicked, double step, OverlayRenderer overlay)
     {
-        var turning = _ring >= 0 || (!_move.Dragging && mode == GizmoMode.Rotate && rotation is not null);
+        if (_ring >= 0)
+            return Rings(centre, _startRotation, camera, viewProj, viewport, mouse, false, down, false, overlay);
 
-        if (!turning)
+        var moved = _move.Update(centre, camera, viewProj, viewport, mouse, mouseFree, down, clicked, step, overlay);
+        Offset = _move.Offset;
+
+        if (moved)
         {
-            _hover = -1;
-            var moved = _move.Update(centre, camera, viewProj, viewport, mouse, mouseFree, down, clicked, step, overlay);
-            Offset = _move.Offset;
-
-            if (moved)
-                Turned = false;
-
-            return moved;
+            Turned = false;
+            return true;
         }
 
+        if (_move.Dragging || rotation is null)
+        {
+            _hover = -1;
+            return false;
+        }
+
+        var free = mouseFree && !_move.Hovered;
+        Rings(centre, rotation.Value, camera, viewProj, viewport, mouse, free, down, clicked && free, overlay);
+        return false;
+    }
+
+    private bool Rings(Vector3d centre, uint rotation, OrbitCamera camera, in Matrix4x4 viewProj, Vector2 viewport, Vector2 mouse,
+        bool mouseFree, bool down, bool clicked, OverlayRenderer overlay)
+    {
         overlay.OnTop = true;
-        var changed = Turn(centre, rotation ?? _startRotation, camera, viewProj, viewport, mouse, mouseFree, down, clicked, overlay);
+        var changed = Turn(centre, rotation, camera, viewProj, viewport, mouse, mouseFree, down, clicked, overlay);
         overlay.OnTop = false;
         return changed;
     }
@@ -195,7 +207,8 @@ public sealed class TransformGizmo
     {
         Vector3d eye = camera.Position;
         Vector3d ray = camera.Ray(mouse, viewport);
-        var length = Math.Max(_move.MinLength, camera.Depth(centre) * _move.ScreenFraction);
+        var length = Math.Max(_move.MinLength, camera.Depth(centre) * _move.ScreenFraction) * RotationRings.Outside;
+        var best = HandlePixels;
 
         if (_ring >= 0)
         {
@@ -209,7 +222,7 @@ public sealed class TransformGizmo
 
             var steps = RotationRings.Steps(_angle);
             Rotation = SolidRotation.AddSteps(_startRotation, _ring, steps);
-            RotationRings.Draw(overlay, centre, length, Rotation, _ring, -1, camera, viewProj, viewport, mouse, pick: false, HandlePixels);
+            RotationRings.Draw(overlay, centre, length, Rotation, _ring, -1, camera, viewProj, viewport, mouse, pick: false, ref best);
             RotationRings.Label(mouse, steps);
 
             if (down)
@@ -222,7 +235,7 @@ public sealed class TransformGizmo
 
         Offset = default;
         var lastHover = _hover;
-        _hover = RotationRings.Draw(overlay, centre, length, rotation, -1, lastHover, camera, viewProj, viewport, mouse, mouseFree, HandlePixels);
+        _hover = RotationRings.Draw(overlay, centre, length, rotation, -1, lastHover, camera, viewProj, viewport, mouse, mouseFree, ref best);
 
         if (!mouseFree || !clicked || _hover < 0)
             return false;

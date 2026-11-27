@@ -1,3 +1,4 @@
+using Brutal.GlfwApi;
 using Brutal.ImGuiApi;
 using Brutal.Numerics;
 using BrutalGame.Engine.Time;
@@ -7,13 +8,14 @@ using BrutalGame.Terrain.Runtime.Rendering;
 
 namespace BrutalGame.Debug;
 
-/// <summary>
-/// Streaming and GPU memory readouts for voxel terrain.
-/// </summary>
-public sealed class TerrainPanel(TerrainWorld world, TerrainRenderer renderer, PhysicsWorld physics)
+/// <summary>Voxel terrain: streaming and level of detail (leaves per LOD as a histogram), edits, memory, collision and timings.</summary>
+public sealed class TerrainPanel(TerrainWorld world, TerrainRenderer renderer, PhysicsWorld physics) : DebugPanel("Terrain", GlfwKey.F5, "F5")
 {
+    private const int Lods = 13;
+
+    private readonly float[] _lods = new float[Lods];
+
     public readonly TimingRing UpdateMs = new(256);
-    public bool Open = true;
     public float BrushRadius;
 
     public void Draw()
@@ -21,22 +23,63 @@ public sealed class TerrainPanel(TerrainWorld world, TerrainRenderer renderer, P
         if (!Open)
             return;
 
-        ImGui.SetNextWindowPos(new float2(12f, 420f), ImGuiCond.FirstUseEver);
-
-        if (ImGui.Begin("Terrain"u8, ref Open, ImGuiWindowFlags.AlwaysAutoResize))
+        if (ImGui.Begin(Title, ref Open))
         {
-            ImGui.Text($"chunks loaded {world.LoadedChunks}  meshed {renderer.ChunkCount}  drawn {renderer.DrawnLastFrame}");
-            var lods = world.LeavesPerLod;
-            ImGui.Text($"leaves {world.DesiredLeaves}  select {world.LastSelectMs:F2} ms (worker, {world.LastSelectVisits} nodes, {world.LastSelectClassified} bounded)  speed lod {world.MinLod}");
-            ImGui.Text($"lod 0-6:  {lods[0]} {lods[1]} {lods[2]} {lods[3]} {lods[4]} {lods[5]} {lods[6]}");
-            ImGui.Text($"lod 7-12: {lods[7]} {lods[8]} {lods[9]} {lods[10]} {lods[11]} {lods[12]}");
-            ImGui.Text($"jobs pending {world.PendingJobs}  last batch {world.LastBatchChunks} in {world.LastBatchMs:F1} ms");
-            ImGui.Text($"vertex {renderer.VertexBytesUsed / (1024f * 1024f):F1} MB  index {renderer.IndexBytesUsed / (1024f * 1024f):F1} MB");
-            ImGui.Text($"main-thread update {UpdateMs.Average:F3} ms  max {UpdateMs.Max:F3}");
-            ImGui.Text($"edits {world.EditCount}  dirty {world.DirtyChunks}  brush r {BrushRadius:F1} m  (LMB dig, Ctrl+LMB place, [ ])");
-            ImGui.Text($"collision chunks {world.CollisionBodies}  physics bodies {physics.BodyCount}  step {physics.LastStepMs:F3} ms");
+            if (DebugUi.Section("Streaming"u8))
+                DrawStreaming();
+
+            if (DebugUi.Section("Edits and collision"u8))
+                DrawEdits();
+
+            if (DebugUi.Section("Perf"u8) && DebugUi.Timings("##terrain-perf"u8))
+            {
+                DebugUi.Timing("Main-thread update"u8, UpdateMs);
+                DebugUi.Timing("Cull + draw"u8, renderer.DrawMs);
+                DebugUi.End();
+            }
         }
 
         ImGui.End();
+    }
+
+    private void DrawStreaming()
+    {
+        if (DebugUi.Props("##streaming"u8))
+        {
+            DebugUi.Row("Chunks"u8, $"{world.LoadedChunks} / {renderer.ChunkCount} / {renderer.DrawnLastFrame}");
+            DebugUi.Tip("loaded / meshed / drawn last frame"u8);
+            DebugUi.Row("Leaves"u8, $"{world.DesiredLeaves}  (speed LOD {world.MinLod})");
+            DebugUi.Row("Select"u8, $"{world.LastSelectMs:F2} ms (worker)");
+            DebugUi.Tip($"{world.LastSelectVisits} nodes visited, {world.LastSelectClassified} bounded");
+            DebugUi.Row("Jobs"u8, world.PendingJobs > 0 ? DebugUi.Warn : DebugUi.Good, $"{world.PendingJobs} pending");
+            DebugUi.Row("Last batch"u8, $"{world.LastBatchChunks} chunks in {world.LastBatchMs:F1} ms");
+            DebugUi.Row("GPU memory"u8, $"{renderer.VertexBytesUsed / (1024f * 1024f):F1} + {renderer.IndexBytesUsed / (1024f * 1024f):F1} MB");
+            DebugUi.Tip("vertex + index buffers in use"u8);
+            DebugUi.End();
+        }
+
+        var leaves = world.LeavesPerLod;
+        var max = 1f;
+
+        for (var i = 0; i < Lods; i++)
+        {
+            _lods[i] = leaves[i];
+            max = MathF.Max(max, _lods[i]);
+        }
+
+        ImGui.PlotHistogram("##lods"u8, _lods, 0, "leaves per LOD, 0 to 12"u8, 0f, max, new float2(-1f, DebugUi.Ems(3f)));
+    }
+
+    private void DrawEdits()
+    {
+        if (!DebugUi.Props("##edits"u8))
+            return;
+
+        DebugUi.Row("Edits"u8, $"{world.EditCount}  dirty chunks {world.DirtyChunks}");
+        DebugUi.Row("Brush"u8, $"r {BrushRadius:F1} m");
+        DebugUi.Tip("LMB digs, Ctrl+LMB places, [ and ] size the brush"u8);
+        DebugUi.Row("Collision"u8, $"{world.CollisionBodies} chunk bodies  {physics.BodyCount} physics bodies");
+        DebugUi.Row("Physics step"u8, $"{physics.LastStepMs:F3} ms");
+        DebugUi.End();
     }
 }

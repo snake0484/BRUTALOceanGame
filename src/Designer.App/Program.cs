@@ -40,18 +40,53 @@ for (var i = 0; i < args.Length; i++)
         demo = true;
         DesignerApp.BrushDemo = true;
     }
+    else if (args[i] == "--demo-windows")
+    {
+        demo = true;
+        DesignerApp.WindowDemo = true;
+    }
     else if (args[i] == "--demo-engine")
         DesignerApp.EngineDemo = true;
     else if (args[i] == "--place")
         DesignerApp.PlaceEngine = true;
     else if (args[i] == "--demo-layered")
         demoLayered = true;
+    else if (args[i] == "--demo-doors")
+    {
+        demoLayered = true;
+        DesignerApp.DoorsDemo = true;
+    }
+    else if (args[i] == "--demo-joints")
+    {
+        demoLayered = true;
+        DesignerApp.JointsDemo = true;
+    }
+    else if (args[i] == "--demo-walls")
+    {
+        demoLayered = true;
+        DesignerApp.WallDemo = true;
+    }
+    else if (args[i] is "--demo-hallway" or "--demo-hallway-plain")
+    {
+        DesignerApp.HallwayPlain = args[i] == "--demo-hallway-plain";
+        demoLayered = true;
+        DesignerApp.HallwayDemo = true;
+    }
     else if (args[i] == "--cutaway" && i + 2 < args.Length)
         cutaway = [args[++i], args[++i]];
     else if (args[i] == "--input-script" && i + 1 < args.Length)
         script = args[++i];
     else if (args[i] == "--view" && i + 3 < args.Length)
         view = [double.Parse(args[++i], CultureInfo.InvariantCulture), double.Parse(args[++i], CultureInfo.InvariantCulture), double.Parse(args[++i], CultureInfo.InvariantCulture)];
+    else if (args[i] == "--bench-paint")
+    {
+        demo = true;
+        DesignerApp.BrushDemo = true;
+        DesignerApp.PaintBench = true;
+
+        if (i + 1 < args.Length && int.TryParse(args[i + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var decals))
+            (DesignerApp.BenchDecals, i) = (Math.Clamp(decals, 1, 4000), i + 1);
+    }
     else if (args[i] == "--bench-meshes")
         benchMeshes = true;
     else if (args[i] == "--bench-surface-nets")

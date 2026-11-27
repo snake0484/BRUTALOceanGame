@@ -40,20 +40,24 @@ public sealed class CoastAtlas
 
     public CoastRegionKey Key;
 
+    /// <summary>The carrier's deep-water height the map is drawn with (m): its key's when baked, then the swell's while it stays within the key's tolerance.</summary>
+    public float Height;
+
     /// <summary>The window's corner in its tile's plane (m).</summary>
     public double OriginU;
     public double OriginV;
 
     /// <summary>
     /// The map's phase at <paramref name="time"/> (s), wrapped: the carrier's phase at local (x, z) is the cell's
-    /// spatial phase plus this. The spatial phase is local to the window, so the corner's part is added here in double.
+    /// spatial phase plus this. The spatial phase is local to the window, so the corner's part is added here in double,
+    /// as is <paramref name="shift"/> (rad: <see cref="CoastRegionSet.PhaseAt"/>'s match between sea tiles).
     /// </summary>
-    public float PhaseAt(double time)
+    public float PhaseAt(double time, double shift = 0.0)
     {
         var carrier = Key.Carrier;
         var (sin, cos) = Math.SinCos((double)carrier.Direction);
         var omega = (double)carrier.Omega;
-        var phase = omega * omega / 9.81 * (cos * OriginU + sin * OriginV) - omega * time;
+        var phase = omega * omega / 9.81 * (cos * OriginU + sin * OriginV) - omega * time + shift;
         return (float)(phase - Math.Floor(phase / Math.Tau) * Math.Tau);
     }
 

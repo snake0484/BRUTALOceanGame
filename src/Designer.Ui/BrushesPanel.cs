@@ -1,35 +1,77 @@
 using Brutal.ImGuiApi;
+using Brutal.Numerics;
 using BrutalGame.Plans;
 using BrutalGame.Ships;
+using BrutalGame.Ships.Interior;
 
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>
-/// The Brushes panel: the plan's brushes (stamps made from a solid, swept profiles from presets) and the strokes drawn
-/// with them: small raised detail drawn from its own geometry, counted for mass. Draw a stroke, pick it to edit its brush,
-/// material, offset and size; drag its points in the view.
+/// The Brushes panel: the plan's brushes (stamps made from a solid, sweeps of the plan's brush profiles, each with its line
+/// point and size) and the strokes drawn with them: small raised detail drawn from its own geometry, counted for mass.
+/// Draw a stroke, pick it to edit its brush, material, offset and size; drag its points in the view, and size each one.
 /// </summary>
 public sealed class BrushesPanel
 {
     private const double Units = HullSolid.PositionUnitsPerMetre;
 
-    private static readonly string[] KindNames = ["Stamp", "Sweep"];
+    private static readonly string[] KindNames = ["Stamp", "Sweep", "Paint", "Model"];
+    private static readonly string[] AlternateNames = ["Every copy the same", "Every other mirrored", "Every other turned 180"];
+    private static readonly string[] PatternNames = ["Line cross"];
 
     private readonly HullMaterialCatalog _catalog;
+    private readonly ModelCatalog _models;
+    private int _newModel;
+    private Repeats _repeats;
+    private (int, int) _repeatsFor = (-1, -1);
+
+    /// <summary>A stamp's or model brush's placement as edited (metres, degrees, fractions).</summary>
+    private struct Repeats
+    {
+        public int Rows, TurnJitter, Alternate;
+        public float RowSpacing, SizeJitter, StartGap, EndGap;
+    }
     private int _brush = -1;
     private int _preset;
     private float _width = 0.5f;
     private float _height = 0.25f;
+    private Paint _paint = new() { Colour = new float4(0.9f, 0.16f, 0.16f, 1f), Width = 1f, Spacing = 0.25f, LineWidth = 0.04f };
+    private (int, int) _paintFor = (-1, -1);
+
+    /// <summary>A paint brush's look as edited (colour sRGB 0-1, sizes in metres).</summary>
+    private struct Paint
+    {
+        public int Pattern;
+        public float4 Colour;
+        public float Width, Spacing, LineWidth;
+    }
     private float _spacing = 1f;
     private float _offset;
     private float _scale = 1f;
     private uint _editing;
     private string _message = "";
+    private int _newProfile = -1;
+    private float _brushScale = 1f;
+    private float _lineX;
+    private float _lineY;
+    private (int, int) _scaleFor = (-1, -1);
+    private float _pointScale = 1f;
+    private (uint, int, int) _pointFor;
+    private readonly ProfileEditor _lineEditor = new();
 
-    public BrushesPanel(HullMaterialCatalog catalog) => _catalog = catalog;
+    /// <summary>Set for one frame when a sweep's "Edit" asks the Profiles tab to show its profile.</summary>
+    public int EditProfileRequest { get; private set; } = -1;
+
+    public BrushesPanel(HullMaterialCatalog catalog, ModelCatalog models)
+    {
+        _catalog = catalog;
+        _models = models;
+    }
 
     public void Draw(DesignSession session, StrokeTool tool)
     {
+        EditProfileRequest = -1;
+
         if (tool.FinishRequested)
             Finish(session, tool);
 
@@ -40,7 +82,7 @@ public sealed class BrushesPanel
         {
             var set = session.Doc.Brushes;
             DrawBrushes(session, set, tool);
-            DrawStrokes(session, session.Doc.Brushes, tool);
+            ImGui.TextDisabled("Draw a stroke: right-click empty space in the view > Brush stroke. Strokes are in the object tree."u8);
 
             var message = tool.Message.Length > 0 ? tool.Message : _message;
 
@@ -55,15 +97,22 @@ public sealed class BrushesPanel
     {
         ImGui.SeparatorText("Brushes"u8);
         var count = set?.Brushes.Count ?? 0;
+        var profiles = session.Doc.Interior?.Profiles;
         _brush = Math.Clamp(_brush, -1, count - 1);
 
         if (count == 0)
-            ImGui.TextDisabled("No brushes yet. Make a stamp from a solid, or a swept profile."u8);
+            ImGui.TextDisabled("No brushes yet. Make a stamp from a solid, or a sweep of a brush profile."u8);
 
         for (var i = 0; i < count; i++)
         {
             var b = set!.Brushes[i];
-            var label = b.Kind == BrushKind.Stamp ? $"{i + 1}  Stamp, every {b.Spacing / Units:0.##} m" : $"{i + 1}  Sweep, {b.Profile.Count} corners";
+            var label = b.Kind switch
+            {
+                BrushKind.Stamp => $"{i + 1}  Stamp, every {b.Spacing / Units:0.##} m",
+                BrushKind.Paint => $"{i + 1}  Paint: {PatternNames[Math.Min((int)b.Pattern, PatternNames.Length - 1)]}, {b.Width / Units:0.##} m wide",
+                BrushKind.Model => $"{i + 1}  Model: {ModelName(b.Model)}, every {b.Spacing / Units:0.##} m{(b.Rows > 1 ? $", {b.Rows} rows" : "")}",
+                _ => $"{i + 1}  Sweep: {ProfileName(profiles, b.Outline)}",
+            };
 
             if (ImGui.Selectable($"{label}##brush{i}", i == _brush, ImGuiSelectableFlags.None, default))
             {
@@ -83,6 +132,41 @@ public sealed class BrushesPanel
         }
 
         ImGui.EndDisabled();
+
+        // A model brush: a game model repeated along the stroke.
+        if (_models.All.Count > 0)
+        {
+            _newModel = Math.Clamp(_newModel, 0, _models.All.Count - 1);
+            DesignerStyle.ItemWidth(160f);
+
+            if (ImGui.BeginCombo("##newmodel"u8, $"{_models.All[_newModel].Name}", ImGuiComboFlags.None))
+            {
+                for (var m = 0; m < _models.All.Count; m++)
+                {
+                    if (ImGui.Selectable($"{_models.All[m].Name}##model{m}", m == _newModel, ImGuiSelectableFlags.None, default))
+                        _newModel = m;
+                }
+
+                ImGui.EndCombo();
+            }
+
+            ImGui.SameLine();
+
+            if (ImGui.Button("New model brush"u8))
+                Made(BrushCommands.AddModel(session, _models.All[_newModel].Id, 0.25), tool);
+        }
+
+        // A sweep of a brush profile the plan has, or of a new one from a preset.
+        if (BrushProfiles(profiles).Count > 0)
+        {
+            DesignerStyle.ItemWidth(160f);
+            ProfileCombo("##newsweep"u8, profiles!, ref _newProfile);
+            ImGui.SameLine();
+
+            if (ImGui.Button("New sweep"u8))
+                Made(BrushCommands.AddSweep(session, _newProfile), tool);
+        }
+
         DesignerStyle.ItemWidth(120f);
         Combo("##profile"u8, ref _preset, BrushCommands.PresetNames);
         ImGui.SameLine();
@@ -94,26 +178,52 @@ public sealed class BrushesPanel
         _width = Math.Clamp(_width, 0.05f, 8f);
         _height = Math.Clamp(_height, 0.05f, 8f);
 
-        if (ImGui.Button("New swept profile"u8))
-            Pick(BrushCommands.AddSweep(session, (ProfilePreset)_preset, _width, _height), tool);
+        if (ImGui.Button("New sweep from preset"u8))
+            Made(BrushCommands.AddSweep(session, (ProfilePreset)_preset, _width, _height), tool);
+
+        ImGui.SameLine();
+
+        if (ImGui.Button("New paint brush"u8))
+            Made(BrushCommands.AddPaint(session, (PaintPattern)_paint.Pattern, Pack(_paint.Colour), _paint.Width, _paint.Spacing, _paint.LineWidth), tool);
 
         if (_brush < 0 || set is null)
             return;
 
         var brush = set.Brushes[_brush];
-        ImGui.SameLine();
+        ImGui.SeparatorText($"Brush {_brush + 1}");
 
-        if (brush.Kind == BrushKind.Sweep && ImGui.Button("Apply to brush"u8))
-            BrushCommands.SetProfile(session, _brush, (ProfilePreset)_preset, _width, _height);
-
-        if (brush.Kind == BrushKind.Stamp)
+        if (_scaleFor != (_brush, session.Version))
         {
+            _brushScale = brush.Scale / (float)HullBrush.UnitScale;
+            (_lineX, _lineY) = ((float)(brush.Anchor.X / Units), (float)(brush.Anchor.Y / Units));
+            _scaleFor = (_brush, session.Version);
+        }
+
+        if (brush.Kind == BrushKind.Sweep && profiles is not null)
+            DrawSweep(session, brush, profiles);
+
+        if (brush.Kind == BrushKind.Paint)
+            DrawPaint(session, brush);
+
+        if (brush.Kind is BrushKind.Stamp or BrushKind.Model)
+        {
+            if (brush.Kind == BrushKind.Model)
+                ImGui.Text($"Model: {ModelName(brush.Model)}");
+
             DesignerStyle.ItemWidth(90f);
             ImGui.InputFloat("Spacing"u8, ref _spacing, 0f, 0f, "%.3f m"u8, ImGuiInputTextFlags.None);
 
             if (ImGui.IsItemDeactivatedAfterEdit())
                 BrushCommands.SetSpacing(session, _brush, Math.Max(_spacing, 0.0625f));
+
+            DrawRepeats(session, brush);
         }
+
+        DesignerStyle.ItemWidth(140f);
+        ImGui.SliderFloat("Size##brush"u8, ref _brushScale, 0.05f, 4f, "%.2f x"u8, ImGuiSliderFlags.None);
+
+        if (ImGui.IsItemDeactivatedAfterEdit())
+            BrushCommands.SetScale(session, _brush, _brushScale);
 
         if (ImGui.Button("Delete brush"u8))
         {
@@ -124,10 +234,221 @@ public sealed class BrushesPanel
         }
     }
 
-    private void DrawStrokes(DesignSession session, HullBrushSet? set, StrokeTool tool)
+    /// <summary>A sweep brush: its profile, and where in it the stroke runs (drag the cross, or type it).</summary>
+    private void DrawSweep(DesignSession session, HullBrush brush, List<HullProfile> profiles)
     {
-        ImGui.SeparatorText("Strokes"u8);
-        var canDraw = tool.Brush >= 0 && set is not null && tool.Brush < set.Brushes.Count;
+        var outline = (int)brush.Outline;
+        DesignerStyle.ItemWidth(160f);
+
+        if (ProfileCombo("Profile##sweep"u8, profiles, ref outline) && outline != brush.Outline)
+            BrushCommands.SetOutline(session, _brush, outline);
+
+        ImGui.SameLine();
+
+        if (ImGui.Button("Edit##brushprofile"u8))
+            EditProfileRequest = brush.Outline;
+
+        if (brush.Outline >= profiles.Count)
+            return;
+
+        ImGui.TextDisabled("Line point: where the stroke runs through the outline."u8);
+
+        if (_lineEditor.DrawLinePoint(profiles[brush.Outline].Points, brush.Anchor) is { } at)
+            BrushCommands.SetAnchor(session, _brush, at);
+
+        DesignerStyle.ItemWidth(80f);
+        ImGui.InputFloat("X##line"u8, ref _lineX, 0f, 0f, "%.3f m"u8, ImGuiInputTextFlags.None);
+        var done = ImGui.IsItemDeactivatedAfterEdit();
+        ImGui.SameLine();
+        DesignerStyle.ItemWidth(80f);
+        ImGui.InputFloat("Y##line"u8, ref _lineY, 0f, 0f, "%.3f m"u8, ImGuiInputTextFlags.None);
+        done |= ImGui.IsItemDeactivatedAfterEdit();
+
+        if (done)
+            BrushCommands.SetAnchor(session, _brush, new ProfilePoint((int)Math.Round(_lineX * Units), (int)Math.Round(_lineY * Units)));
+    }
+
+    /// <summary>A paint brush: pattern, colour and opacity, band width, line spacing and width. Paint goes on the hull and the flair under it.</summary>
+    private void DrawPaint(DesignSession session, HullBrush brush)
+    {
+        if (_paintFor != (_brush, session.Version))
+        {
+            _paint = new Paint
+            {
+                Pattern = (int)brush.Pattern,
+                Colour = Unpack(brush.Colour),
+                Width = (float)(brush.Width / Units),
+                Spacing = (float)(brush.Spacing / Units),
+                LineWidth = (float)(brush.LineWidth / Units),
+            };
+            _paintFor = (_brush, session.Version);
+        }
+
+        DesignerStyle.ItemWidth(140f);
+        var changed = Combo("Pattern"u8, ref _paint.Pattern, PatternNames);
+        DesignerStyle.ItemWidth(200f);
+        ImGui.ColorEdit4("Colour##paint"u8, ref _paint.Colour, ImGuiColorEditFlags.None);
+        changed |= ImGui.IsItemDeactivatedAfterEdit();
+        DesignerStyle.ItemWidth(90f);
+        ImGui.InputFloat("Width m##paint"u8, ref _paint.Width, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None);
+        changed |= ImGui.IsItemDeactivatedAfterEdit();
+        DesignerStyle.ItemWidth(90f);
+        ImGui.InputFloat("Line spacing m"u8, ref _paint.Spacing, 0f, 0f, "%.3f"u8, ImGuiInputTextFlags.None);
+        changed |= ImGui.IsItemDeactivatedAfterEdit();
+        ImGui.SameLine();
+        DesignerStyle.ItemWidth(90f);
+        ImGui.InputFloat("Line width m"u8, ref _paint.LineWidth, 0f, 0f, "%.3f"u8, ImGuiInputTextFlags.None);
+        changed |= ImGui.IsItemDeactivatedAfterEdit();
+
+        if (changed)
+            BrushCommands.SetPaint(session, _brush, (PaintPattern)_paint.Pattern, Pack(_paint.Colour), _paint.Width, _paint.Spacing, _paint.LineWidth);
+
+        ImGui.TextDisabled("Paint lies on the hull and the brushes under it; point sizes widen or narrow the band."u8);
+    }
+
+    private static uint Pack(float4 c)
+    {
+        static uint B(float v) => (uint)Math.Round(Math.Clamp(v, 0f, 1f) * 255);
+        return B(c.X) | (B(c.Y) << 8) | (B(c.Z) << 16) | (B(c.W) << 24);
+    }
+
+    private static float4 Unpack(uint c) => new((c & 0xFF) / 255f, ((c >> 8) & 0xFF) / 255f, ((c >> 16) & 0xFF) / 255f, (c >> 24) / 255f);
+
+    private string ModelName(uint model) => _models.IndexOf(new DefId(model)) is var i and >= 0 ? _models.All[i].Name : "missing model";
+
+    /// <summary>A stamp's or model brush's placement: rows across, seeded turn and size jitter, alternate copies, end gaps.</summary>
+    private void DrawRepeats(DesignSession session, HullBrush brush)
+    {
+        if (_repeatsFor != (_brush, session.Version))
+        {
+            _repeats = new Repeats
+            {
+                Rows = brush.Rows,
+                RowSpacing = (float)(brush.RowSpacing / Units),
+                TurnJitter = brush.TurnJitter,
+                SizeJitter = brush.SizeJitter / 1000f,
+                Alternate = (int)brush.Alternate,
+                StartGap = (float)(brush.StartGap / Units),
+                EndGap = (float)(brush.EndGap / Units),
+            };
+            _repeatsFor = (_brush, session.Version);
+        }
+
+        DesignerStyle.ItemWidth(90f);
+        ImGui.SliderInt("Rows"u8, ref _repeats.Rows, 1, HullBrush.MaxRows, "%d"u8, ImGuiSliderFlags.None);
+        var changed = ImGui.IsItemDeactivatedAfterEdit();
+        ImGui.SameLine();
+        DesignerStyle.ItemWidth(90f);
+        ImGui.InputFloat("Row spacing m"u8, ref _repeats.RowSpacing, 0f, 0f, "%.3f"u8, ImGuiInputTextFlags.None);
+        changed |= ImGui.IsItemDeactivatedAfterEdit();
+        DesignerStyle.ItemWidth(140f);
+        ImGui.SliderInt("Random turn"u8, ref _repeats.TurnJitter, 0, HullBrush.MaxTurnJitter, "%d deg"u8, ImGuiSliderFlags.None);
+        changed |= ImGui.IsItemDeactivatedAfterEdit();
+        DesignerStyle.ItemWidth(140f);
+        ImGui.SliderFloat("Random size"u8, ref _repeats.SizeJitter, 0f, HullBrush.MaxSizeJitter / 1000f, "+-%.2f"u8, ImGuiSliderFlags.None);
+        changed |= ImGui.IsItemDeactivatedAfterEdit();
+        DesignerStyle.ItemWidth(200f);
+        changed |= Combo("Alternate"u8, ref _repeats.Alternate, AlternateNames);
+        DesignerStyle.ItemWidth(90f);
+        ImGui.InputFloat("Start gap m"u8, ref _repeats.StartGap, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None);
+        changed |= ImGui.IsItemDeactivatedAfterEdit();
+        ImGui.SameLine();
+        DesignerStyle.ItemWidth(90f);
+        ImGui.InputFloat("End gap m"u8, ref _repeats.EndGap, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None);
+        changed |= ImGui.IsItemDeactivatedAfterEdit();
+
+        if (!changed)
+            return;
+
+        var r = _repeats;
+        static int ToUnits(float metres) => (int)Math.Round(Math.Clamp(metres, 0f, 1000f) * HullSolid.PositionUnitsPerMetre);
+        BrushCommands.EditBrush(session, _brush, b =>
+        {
+            b.Rows = (byte)Math.Clamp(r.Rows, 1, HullBrush.MaxRows);
+            b.RowSpacing = Math.Min(ToUnits(r.RowSpacing), HullBrush.MaxPaintUnits);
+            b.TurnJitter = (byte)Math.Clamp(r.TurnJitter, 0, HullBrush.MaxTurnJitter);
+            b.SizeJitter = (ushort)Math.Clamp((int)Math.Round(r.SizeJitter * 1000), 0, HullBrush.MaxSizeJitter);
+            b.Alternate = (RepeatAlternate)Math.Clamp(r.Alternate, 0, 2);
+            b.StartGap = ToUnits(r.StartGap);
+            b.EndGap = ToUnits(r.EndGap);
+        });
+    }
+
+    private void Made(int index, StrokeTool tool)
+    {
+        _message = index < 0 ? BrushCommands.LastError : "";
+
+        if (index >= 0)
+            Pick(index, tool);
+    }
+
+    private static List<int> BrushProfiles(List<HullProfile>? profiles)
+    {
+        var result = new List<int>();
+
+        for (var i = 0; i < (profiles?.Count ?? 0); i++)
+        {
+            if (profiles![i].Kind == ProfileKind.Brush)
+                result.Add(i);
+        }
+
+        return result;
+    }
+
+    private static string ProfileName(List<HullProfile>? profiles, int index) =>
+        profiles is not null && index < profiles.Count ? profiles[index].Name : "?";
+
+    private static bool ProfileCombo(ReadOnlySpan<byte> label, List<HullProfile> profiles, ref int index)
+    {
+        var brushes = BrushProfiles(profiles);
+
+        if (!brushes.Contains(index))
+            index = brushes.Count > 0 ? brushes[0] : -1;
+
+        var changed = false;
+
+        if (ImGui.BeginCombo(label, $"{ProfileName(profiles, index)}", ImGuiComboFlags.None))
+        {
+            foreach (var i in brushes)
+            {
+                if (ImGui.Selectable($"{profiles[i].Name}##bp{i}", i == index, ImGuiSelectableFlags.None, default) && i != index)
+                {
+                    index = i;
+                    changed = true;
+                }
+            }
+
+            ImGui.EndCombo();
+        }
+
+        return changed;
+    }
+
+    /// <summary>The options a new stroke gets (in the Add dialog): which brush, what material; then Draw, Finish, Cancel.</summary>
+    public void DrawAddStroke(DesignSession session, StrokeTool tool)
+    {
+        var set = session.Doc.Brushes;
+
+        if (set is null || set.Brushes.Count == 0)
+        {
+            ImGui.TextDisabled("No brushes yet: make one in the Brushes tab."u8);
+            return;
+        }
+
+        var names = new string[set.Brushes.Count];
+
+        for (var i = 0; i < names.Length; i++)
+            names[i] = $"{i + 1}  {KindNames[(int)set.Brushes[i].Kind]}";
+
+        var brush = Math.Max(tool.Brush, 0);
+        DesignerStyle.ItemWidth(160f);
+
+        if (Combo("Brush##addstroke"u8, ref brush, names))
+            Pick(brush, tool);
+        else if (tool.Brush < 0)
+            Pick(brush, tool);
+
+        var canDraw = tool.Brush >= 0 && tool.Brush < set.Brushes.Count;
         ImGui.BeginDisabled(!canDraw && !tool.Drawing);
 
         if (!tool.Drawing)
@@ -162,21 +483,32 @@ public sealed class BrushesPanel
 
         if (tool.Drawing)
             ImGui.TextDisabled("Click on the hull to add points. Double click or Enter finishes."u8);
+    }
+
+    /// <summary>A short name for the object tree.</summary>
+    public static string Label(DesignSession session, uint id)
+    {
+        var set = session.Doc.Brushes;
+        var index = set?.IndexOfStroke(id) ?? -1;
+
+        if (index < 0)
+            return $"Stroke #{id}";
+
+        var s = set!.Strokes[index];
+        var kind = s.Brush < set.Brushes.Count ? KindNames[(int)set.Brushes[s.Brush].Kind].ToLowerInvariant() : "?";
+        return $"Stroke, brush {s.Brush + 1} ({kind}), {s.Points.Count} points  #{id}";
+    }
+
+    /// <summary>The selected stroke's properties (in the Properties tab).</summary>
+    public void DrawStrokeProperties(DesignSession session, StrokeTool tool)
+    {
+        if (tool.FinishRequested)
+            Finish(session, tool);
+
+        var set = session.Doc.Brushes;
 
         if (set is null)
             return;
-
-        for (var i = 0; i < set.Strokes.Count; i++)
-        {
-            var s = set.Strokes[i];
-            var name = $"#{s.Id}  brush {s.Brush + 1}, {s.Points.Count} points";
-
-            if (ImGui.Selectable($"{name}##stroke{s.Id}", s.Id == tool.Selected, ImGuiSelectableFlags.None, default))
-            {
-                tool.Selected = s.Id;
-                tool.Drawing = false;
-            }
-        }
 
         var index = set.IndexOfStroke(tool.Selected);
 
@@ -192,7 +524,7 @@ public sealed class BrushesPanel
             _scale = stroke.Scale / (float)HullStroke.UnitScale;
         }
 
-        ImGui.SeparatorText("Selected stroke"u8);
+        ImGui.SeparatorText($"Stroke #{stroke.Id}");
         var brushIndex = (int)stroke.Brush;
         var names = new string[set.Brushes.Count];
 
@@ -216,6 +548,17 @@ public sealed class BrushesPanel
             });
         }
 
+        // A model brush's own paint slot, or the hull's.
+        if (stroke.Brush < set.Brushes.Count && set.Brushes[stroke.Brush].Kind != BrushKind.Paint)
+        {
+            var paint = session.Doc.Paint;
+            var slot = paint?.SlotOf(stroke.Id) ?? -1;
+            DesignerStyle.ItemWidth(200f);
+
+            if (PaintPanel.SlotCombo("Paint##stroke"u8, paint, ref slot, "The hull's paint"))
+                PaintCommands.SetStroke(session, stroke.Id, slot);
+        }
+
         DesignerStyle.ItemWidth(90f);
         ImGui.InputFloat("Offset"u8, ref _offset, 0f, 0f, "%.3f m"u8, ImGuiInputTextFlags.None);
 
@@ -234,6 +577,34 @@ public sealed class BrushesPanel
             BrushCommands.SetStroke(session, stroke.Id, s => s.Scale = scale);
         }
 
+        // Each point's size, blended along the line to the next; the point last grabbed in the view is picked.
+        var point = Math.Clamp(tool.Point, 0, stroke.Points.Count - 1);
+        DesignerStyle.ItemWidth(140f);
+
+        if (ImGui.SliderInt("Point"u8, ref point, 0, stroke.Points.Count - 1, "%d"u8, ImGuiSliderFlags.None))
+            tool.Point = point;
+
+        if (_pointFor != (stroke.Id, point, session.Version))
+        {
+            _pointScale = stroke.Points[point].Scale / (float)HullBrush.UnitScale;
+            _pointFor = (stroke.Id, point, session.Version);
+        }
+
+        DesignerStyle.ItemWidth(140f);
+        ImGui.SliderFloat("Point size"u8, ref _pointScale, 0.05f, 4f, "%.2f x"u8, ImGuiSliderFlags.None);
+
+        if (ImGui.IsItemDeactivatedAfterEdit())
+            BrushCommands.SetPointScale(session, stroke.Id, point, _pointScale);
+
+        ImGui.SameLine();
+
+        if (ImGui.Button("All 1x"u8))
+            BrushCommands.SetStroke(session, stroke.Id, s =>
+            {
+                for (var i = 0; i < s.Points.Count; i++)
+                    s.Points[i] = s.Points[i] with { Scale = HullBrush.UnitScale };
+            });
+
         ImGui.BeginDisabled(stroke.Points.Count <= HullStroke.MinPoints);
 
         if (ImGui.Button("Remove last point"u8))
@@ -248,7 +619,7 @@ public sealed class BrushesPanel
             tool.Selected = 0;
         }
 
-        ImGui.TextDisabled("Drag the white handles along the hull to move points."u8);
+        ImGui.TextDisabled("Drag the white handles along the hull to move points; the one grabbed is the point sized above."u8);
     }
 
     private void Finish(DesignSession session, StrokeTool tool)

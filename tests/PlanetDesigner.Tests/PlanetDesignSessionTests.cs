@@ -77,7 +77,7 @@ public sealed class PlanetDesignSessionTests : IDisposable
         Assert.Equal(session.Layer.Hash(), again.Layer.Hash());
         Assert.Equal(2, again.NextVersion);
 
-        // A site moved after the save carries the new version, so older saves lose player edits in its core (D85).
+        // A site moved after the save carries the new version, so older saves lose player edits in its core (D90).
         again.SetSite(id, double3.Normalize(Spot + new double3(0.002, 0, 0)), 250f, 200f, again.Layer.Sites[0].HeightM);
         Assert.Equal(2, again.Layer.Sites[0].Since);
     }

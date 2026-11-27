@@ -21,7 +21,7 @@ Everything a player can design is a **plan**: a versioned, content-hashed docume
 
 Round 5 decisions (decisions.md):
 - **D9:** plating gives gravity; a **separate inertial dampener** keeps everything inside its bubble at the ship's speed, using exotic matter and energy, up to a rating; beyond it occupants and cargo feel the excess. → "Inertial dampener family".
-- **D10:** both pure 6-DOF with flight assist **and** aerodynamic lift from wing parts in atmosphere. → "Aero: wings, control surfaces and the flight computer".
+- **D10:** both pure 6-DOF with flight assist **and** aerodynamic lift in atmosphere; **D85:** that lift comes from shape (every exposed face), control surfaces are hinged moving parts. → "Aero: wings, control surfaces and the flight computer".
 - **D11:** full mesh editing of hulls (vertex / edge / face), still cuttable. → mesh brushes (ship-hulls.md, "Mesh brushes"), the Mesh editor tool, mesh pieces in construction.
 - **D12/D13:** a deliberate runaway override exists; the reaction chamber is very highly rated and the **entire core can be ejected**. → "Ejectable core assembly and override".
 - **D14:** several warp drives on one ship support each other's bubbles; quality is an average weighted by provided power. → "Linked warp drives".
@@ -132,6 +132,16 @@ Plating and dampening are now **two components**. Plating (`fn.plating`, per roo
 ### Aero: wings, control surfaces and the flight computer (round 5, D10)
 
 Both models run: **6-DOF thrust with flight assist everywhere**, plus **aerodynamic lift and drag in atmosphere**.
+
+**Revised (D85, 2026-11-27; built in the designer):** lift comes from shape. The wing chunks, wing components, airfoil tables and `fn.aero.control` components below are superseded:
+- **Every exposed face** of the exact hull surface feels the air by its angle φ to the flow: a face turned into it takes a pressure `0.8 sin φ`; a face turned away takes a suction `3.2 sin φ` up to 15°, falling over 10° to a wake's `0.35`; every face drags by skin friction `0.005`. A face in the wake of the part upstream takes no pressure; faces that cannot be seen from outside (rooms) do not count. A flat plate so lifts about 4 per radian, stalls near 15° at a lift coefficient near 1.1 and drags 1.15 broadside; a hull gives body lift. No leading-edge suction yet: a plate's lift-to-drag ratio is about 1 / tan α.
+- **Baked, not evaluated:** each moving part (the ship's own, and each joint's) is sampled (about 4096 patches) and its force and moment over dynamic pressure tabulated for 2664 flow directions (5°), in the part's own frame (`src/Ships/Aero`, `AeroTable`, `HullAero`). Per tick a part costs one bilinear table read, turned by its pose. The bake is about 0.4 s per part on one worker, on change only. Parts are baked alone (one does not shadow another).
+- **Control surfaces** are hinge or rotor parts: turning one turns its table. Their motor settings (speed, torque, limits) are the actuator.
+- **Docking (D85):** docked vehicles fly as one; docking or undocking bakes the combined shape again. A vehicle stored inside another does not count.
+- **Designer:** the Aero panel shows lift, drag, side force and moments about the centre of mass at a chosen speed, air density, angle of attack and sideslip; curves over ±30°; stall angle and the stall speed for 1 g; the neutral point (stable behind the centre of mass); each hinge's pitch, yaw and roll authority from limit to limit. Lift, drag and weight are drawn from the centre of mass.
+- Still to do: forces on the ship's body in flight, rotation damping (`ω × r` per part), and the flight computer's control allocation over the parts.
+
+The original round 5 design follows.
 - **Lift sources, from geometry or from part stats:**
   - **Wing chunks** (ship-hulls `ChunkKind.Wing`): any size, modelled with primitives or the mesh editor. The bake measures ≤ 16 spanwise strips (area, chord, quarter-chord point, frame); the chunk's `AeroProfile` picks the airfoil table. Holes re-measure the touched strips.
   - **Wing components** (`fn.aero.wing`, housing ≤ 8 m): catalog or player designs whose stats come from parts: a spar (root bending rating), a skin panel set (area, span), an airfoil preset. Treated as 1–2 strips. The skin set's area and span are validated against the housing's own projected planform (they cannot exceed it), so an 8 m housing cannot declare a 200 m² wing.

@@ -1,3 +1,4 @@
+using BrutalGame.Ships.Interior;
 using static BrutalGame.Ships.HullSurface;
 
 namespace BrutalGame.Ships;
@@ -19,6 +20,9 @@ public sealed class ExpandedHull
 
     /// <summary>The stuck path of each stroke (ship metres), for drawing the line; parallel to the set's strokes.</summary>
     public List<StrokePath> Paths = new();
+
+    /// <summary>Paint strokes' bands, as projector boxes (drawn on the hull and flair, nothing baked).</summary>
+    public List<HullProjector> Projectors = new();
 }
 
 /// <summary>A stroke's points after sticking to the hull, densified along the surface.</summary>
@@ -26,6 +30,9 @@ public sealed class StrokePath
 {
     public readonly List<Vector3d> Points = new();
     public readonly List<Vector3d> Normals = new();
+
+    /// <summary>The design's size at each point (1 = as modelled), blended between the stroke's points.</summary>
+    public readonly List<double> Scales = new();
 
     /// <summary>Index in <see cref="Points"/> of each control point.</summary>
     public readonly List<int> Controls = new();
@@ -36,7 +43,8 @@ public sealed class StrokePath
 /// drawn as they are and counted for mass, never baked into the hull grid. Each control point is stuck to the hull (cast back along its normal from <see cref="Reach"/> out), the
 /// segments between are resampled every <see cref="SampleMetres"/> and stuck too, so the line hugs curved hulls. A stamp
 /// brush places a copy of its mesh every spacing, +Y on the normal and +Z along the line; a sweep brush builds a tube of
-/// its profile along the path (split into pieces within the mesh limits), capped at both ends.
+/// its plan profile along the path, the line through the brush's line point (split into pieces within the mesh limits),
+/// capped at both ends. Sizes multiply: the brush's, the stroke's, and the points' (blended along the line).
 /// </summary>
 public static class StrokeExpansion
 {
@@ -45,9 +53,20 @@ public static class StrokeExpansion
     public const int MaxGenerated = 1024;
     public const int MaxPathPoints = 4096;
     public const uint GeneratedIdBase = 0xF0000000;
+
+    /// <summary>Paint reaches this far out from the hull (over raised flair) and this far in (metres).</summary>
+    public const double PaintAbove = 1.0;
+    public const double PaintBelow = 0.1;
+    public const int MaxProjectors = 4096;
+    private const double MergeCos = 0.9995;
     private const double MinStep = 1e-3;
 
-    public static ExpandedHull Expand(ReadOnlySpan<HullSolid> solids, IReadOnlyList<HullMesh> meshes, HullBrushSet? set)
+    /// <summary>
+    /// <paramref name="profiles"/>: the plan's profiles, which sweep brushes index. <paramref name="strokePaint"/>: a stroke's
+    /// own paint slot by id (-1: it carries the hull's), laid over its flair as fill boxes.
+    /// </summary>
+    public static ExpandedHull Expand(ReadOnlySpan<HullSolid> solids, IReadOnlyList<HullMesh> meshes, HullBrushSet? set, IReadOnlyList<HullProfile>? profiles,
+        Func<uint, int>? strokePaint = null, Func<uint, HullMesh?>? models = null)
     {
         var result = new ExpandedHull { PlanSolids = solids.Length };
         result.Meshes.AddRange(meshes);
@@ -78,13 +97,25 @@ public static class StrokeExpansion
                 Material = stroke.Material,
                 Rotation = SolidRotation.Identity,
             };
-            var scale = stroke.Scale / (double)HullStroke.UnitScale;
+            var scale = brush.Scale / (double)HullBrush.UnitScale * (stroke.Scale / (double)HullBrush.UnitScale);
             var offset = stroke.Offset * HullSolid.MetresPerPositionUnit;
 
+            var slot = strokePaint?.Invoke(stroke.Id) ?? -1;
+
+            var model = brush.Kind == BrushKind.Model ? models?.Invoke(brush.Model) : null;
+
+            if (slot >= 0 && Extent(brush, brush.Kind == BrushKind.Model ? model : brush.Mesh < meshes.Count ? meshes[brush.Mesh] : null, profiles) is { } extent)
+                Fill(path, extent.HalfWidth * scale, extent.Above * scale, offset, (byte)slot, result.Projectors);
+
             if (brush.Kind == BrushKind.Stamp && brush.Mesh < meshes.Count && brush.Spacing >= HullBrush.MinSpacing)
-                Stamps(path, meshes[brush.Mesh], brush.Spacing * HullSolid.MetresPerPositionUnit, scale, offset, s, template, result, generated);
-            else if (brush.Kind == BrushKind.Sweep && brush.Profile.Count >= HullBrush.MinProfilePoints)
-                Sweep(path, brush.Profile, scale, offset, s, template, result, generated);
+                Repeat(surface, path, meshes[brush.Mesh], brush, stroke.Id, scale, offset, s, template, result, generated);
+            else if (brush.Kind == BrushKind.Model && model is not null)
+                Repeat(surface, path, model, brush, stroke.Id, scale, offset, s, template, result, generated);
+            else if (brush.Kind == BrushKind.Paint)
+                Paint(path, brush, scale, offset, result.Projectors);
+            else if (brush.Kind == BrushKind.Sweep && profiles is not null && brush.Outline < profiles.Count
+                && profiles[brush.Outline] is { Kind: ProfileKind.Brush, Points.Count: >= HullBrush.MinProfilePoints and <= HullBrush.MaxProfilePoints } profile)
+                Sweep(path, profile.Points, brush.Anchor, scale, offset, s, template, result, generated);
         }
 
         result.Generated = generated.Count;
@@ -95,15 +126,40 @@ public static class StrokeExpansion
         return result;
     }
 
+    /// <summary>A model brush's flair at size 1 (metres): how far it reaches either side of the line and out of the hull; null for paint.</summary>
+    private static (double HalfWidth, double Above)? Extent(HullBrush brush, HullMesh? mesh, IReadOnlyList<HullProfile>? profiles)
+    {
+        const double k = HullSolid.MetresPerPositionUnit;
+
+        if (brush.Kind is BrushKind.Stamp or BrushKind.Model && mesh is { Vertices.Length: > 0 })
+        {
+            // Rows reach out to either side; jitter may grow a copy.
+            var vertices = mesh.Vertices;
+            var grow = 1.0 + brush.SizeJitter / 1000.0;
+            var reach = vertices.Max(v => Math.Max(Math.Abs(v.X), Math.Abs(v.Z))) * k * grow;
+            return (reach + (Math.Clamp((int)brush.Rows, 1, HullBrush.MaxRows) - 1) * 0.5 * brush.RowSpacing * k, Math.Max(vertices.Max(v => v.Y), 0) * k * grow);
+        }
+
+        if (brush.Kind == BrushKind.Sweep && profiles is not null && brush.Outline < profiles.Count && profiles[brush.Outline].Points.Count > 0)
+        {
+            var points = profiles[brush.Outline].Points;
+            return (points.Max(p => Math.Abs(p.X - brush.Anchor.X)) * k, Math.Max(points.Max(p => p.Y - brush.Anchor.Y), 0) * k);
+        }
+
+        return null;
+    }
+
     /// <summary>The stroke stuck to the hull and resampled along it.</summary>
     public static StrokePath Path(HullSurface surface, HullStroke stroke, ref int unstuck)
     {
         var path = new StrokePath();
         Vector3d prevP = default, prevN = default;
+        var prevS = 1.0;
 
         for (var i = 0; i < stroke.Points.Count; i++)
         {
             var point = stroke.Points[i];
+            var size = point.Scale / (double)HullBrush.UnitScale;
 
             if (!surface.Project(point.Position, point.Normal, Reach, out var p, out var n))
                 unstuck++;
@@ -119,26 +175,28 @@ public static class StrokeExpansion
                     var q = Lerp(prevP, p, f);
                     var qn = Normalise(Lerp(prevN, n, f), n);
                     surface.Project(q, qn, Reach, out q, out qn);
-                    Append(path, q, qn);
+                    Append(path, q, qn, prevS + (size - prevS) * f);
                 }
             }
 
-            Append(path, p, n);
+            Append(path, p, n, size);
             path.Controls.Add(path.Points.Count - 1);
             prevP = p;
             prevN = n;
+            prevS = size;
         }
 
         return path;
     }
 
-    private static void Append(StrokePath path, Vector3d p, Vector3d n)
+    private static void Append(StrokePath path, Vector3d p, Vector3d n, double scale)
     {
         if (path.Points.Count > 0 && Sub(p, path.Points[^1]).Length() < MinStep)
             return;
 
         path.Points.Add(p);
         path.Normals.Add(n);
+        path.Scales.Add(scale);
     }
 
     /// <summary>Frame at a path point: normal up, tangent along the line made square to it, binormal = normal × tangent.</summary>
@@ -157,10 +215,28 @@ public static class StrokeExpansion
         return Sub(b, a);
     }
 
-    private static void Stamps(StrokePath path, HullMesh mesh, double spacing, double scale, double offset, int strokeIndex, HullSolid template, ExpandedHull result, List<HullSolid> output)
+    /// <summary>
+    /// Copies of <paramref name="mesh"/> along the path every spacing, from the start gap to the end gap, in the brush's rows
+    /// across (each row's spot stuck to the hull), +Y on the normal and +Z along the line. Each copy is turned and sized by
+    /// a jitter seeded from the stroke and its place (the same every rebuild, on every peer); every other copy along is
+    /// mirrored across the stroke or turned half round when the brush alternates.
+    /// </summary>
+    private static void Repeat(HullSurface surface, StrokePath path, HullMesh mesh, HullBrush brush, uint strokeId, double scale, double offset, int strokeIndex,
+        HullSolid template, ExpandedHull result, List<HullSolid> output)
     {
-        var next = 0.0;
+        const double k = HullSolid.MetresPerPositionUnit;
+        var spacing = Math.Max(brush.Spacing, HullBrush.MinSpacing) * k;
+        var total = 0.0;
+
+        for (var i = 0; i + 1 < path.Points.Count; i++)
+            total += Sub(path.Points[i + 1], path.Points[i]).Length();
+
+        var end = total - brush.EndGap * k;
+        var mirrored = brush.Alternate == RepeatAlternate.Mirror ? Mirror(mesh) : null;
+        var rows = Math.Clamp((int)brush.Rows, 1, HullBrush.MaxRows);
+        var next = brush.StartGap * k;
         var walked = 0.0;
+        var along = 0;
         var copy = 0;
 
         for (var i = 0; i + 1 < path.Points.Count; i++)
@@ -169,24 +245,162 @@ public static class StrokeExpansion
             var b = path.Points[i + 1];
             var length = Sub(b, a).Length();
 
-            while (next <= walked + length + 1e-9)
+            while (next <= walked + length + 1e-9 && next <= end + 1e-9)
             {
-                if (output.Count >= MaxGenerated)
-                    return;
-
                 var f = length > 0 ? (next - walked) / length : 0.0;
                 var p = Lerp(a, b, f);
                 var n = Normalise(Lerp(path.Normals[i], path.Normals[i + 1], f), path.Normals[i]);
                 var (bx, ny, tz) = Frame(n, Sub(b, a));
-                var placed = Transform(mesh, Add(p, Scale(ny, offset)), bx, ny, tz, scale, out var anchor);
+                var size = scale * (path.Scales[i] + (path.Scales[i + 1] - path.Scales[i]) * f);
+                var odd = (along & 1) == 1;
 
-                if (placed is not null)
-                    Emit(template, anchor, placed, strokeIndex, copy++, result, output);
+                for (var r = 0; r < rows; r++)
+                {
+                    if (output.Count >= MaxGenerated)
+                        return;
 
+                    // The row's spot across the line, stuck to the hull.
+                    var at = p;
+                    var normal = ny;
+
+                    if (rows > 1)
+                    {
+                        var across = (r - (rows - 1) * 0.5) * brush.RowSpacing * k * size;
+                        var q = Add(p, Scale(bx, across));
+
+                        if (surface.Project(q, ny, Reach, out var stuck, out var stuckNormal))
+                            (at, normal) = (stuck, stuckNormal);
+                        else
+                            at = q;
+                    }
+
+                    var (cx, cy, cz) = Frame(normal, tz);
+                    var (turn, grow) = Jitter(strokeId, along, r);
+                    var angle = turn * brush.TurnJitter * Math.PI / 180.0 + (odd && brush.Alternate == RepeatAlternate.Turn ? Math.PI : 0.0);
+                    var (c, s) = (Math.Cos(angle), Math.Sin(angle));
+                    var x = Add(Scale(cx, c), Scale(cz, -s));
+                    var z = Add(Scale(cx, s), Scale(cz, c));
+                    var sized = size * (1.0 + grow * brush.SizeJitter / 1000.0);
+                    var flip = odd && mirrored is not null;
+                    var placed = Transform(flip ? mirrored! : mesh, Add(at, Scale(cy, offset)), flip ? Scale(x, -1) : x, cy, z, sized, out var anchor);
+
+                    if (placed is not null)
+                        Emit(template, anchor, placed, strokeIndex, copy++, result, output);
+                }
+
+                along++;
                 next += spacing;
             }
 
             walked += length;
+        }
+    }
+
+    /// <summary>Two values in -1..1 for a copy (turn, size), hashed from the stroke and the copy's place: deterministic.</summary>
+    private static (double Turn, double Grow) Jitter(uint stroke, int along, int row)
+    {
+        var h = (ulong)stroke * 0x9E3779B97F4A7C15UL ^ (ulong)(uint)along * 0xC2B2AE3D27D4EB4FUL ^ (ulong)(uint)row * 0x165667B19E3779F9UL;
+        h ^= h >> 33;
+        h *= 0xFF51AFD7ED558CCDUL;
+        h ^= h >> 33;
+        h *= 0xC4CEB9FE1A85EC53UL;
+        h ^= h >> 33;
+        return ((h & 0xFFFFF) / (double)0xFFFFF * 2.0 - 1.0, ((h >> 20) & 0xFFFFF) / (double)0xFFFFF * 2.0 - 1.0);
+    }
+
+    /// <summary><paramref name="mesh"/> with every face's corners reversed: placed with its X axis negated it is the mirror image, still wound outward.</summary>
+    private static HullMesh Mirror(HullMesh mesh)
+    {
+        var corners = (ushort[])mesh.Corners.Clone();
+
+        for (var f = 0; f < mesh.FaceCount; f++)
+            Array.Reverse(corners, mesh.FaceStarts[f], mesh.FaceSizes[f]);
+
+        return new HullMesh(mesh.Vertices, mesh.FaceSizes, corners, mesh.Panels, mesh.Creases, mesh.SubdivLevels);
+    }
+
+    /// <summary>A paint stroke's pattern band: <see cref="Band"/> of the brush's width, reaching <see cref="PaintAbove"/> out and <see cref="PaintBelow"/> in.</summary>
+    private static void Paint(StrokePath path, HullBrush brush, double scale, double offset, List<HullProjector> output)
+    {
+        const double k = HullSolid.MetresPerPositionUnit;
+        var template = new HullProjector
+        {
+            Kind = ProjectorKind.Paint,
+            Colour = brush.Colour,
+            Spacing = (float)Math.Max(brush.Spacing * k * scale, 0.01),
+            LineWidth = (float)(brush.LineWidth * k * scale),
+            Pattern = brush.Pattern,
+        };
+        Band(path, brush.Width * k * scale * 0.5, PaintAbove, PaintBelow, false, offset, template, output);
+    }
+
+    /// <summary>
+    /// A stroke's own paint over its flair: <see cref="Band"/> as wide and tall as the flair (sizes following the points),
+    /// a little over, painting whatever way the surface faces.
+    /// </summary>
+    private static void Fill(StrokePath path, double halfWidth, double above, double offset, byte slot, List<HullProjector> output)
+    {
+        const double margin = 0.02;
+        Band(path, halfWidth + margin, above + margin, PaintBelow, true, offset, new HullProjector { Kind = ProjectorKind.Fill, Paint = slot, Colour = 0xFFFFFFFF }, output);
+    }
+
+    /// <summary>
+    /// Boxes along the path, copies of <paramref name="template"/>: one per run of the path that stays straight and level
+    /// (pieces are merged while direction, normal and size hold), <paramref name="halfWidth"/> either side (times the point
+    /// sizes), from <paramref name="below"/> in to <paramref name="above"/> out (times the point sizes when
+    /// <paramref name="sizedDepth"/>), lifted by <paramref name="offset"/>. Each carries the distance along the stroke at
+    /// its centre, so a pattern runs on through the pieces.
+    /// </summary>
+    private static void Band(StrokePath path, double halfWidth, double above, double below, bool sizedDepth, double offset, HullProjector template, List<HullProjector> output)
+    {
+        var walked = 0.0;
+        var start = 0;
+
+        while (start + 1 < path.Points.Count && output.Count < MaxProjectors)
+        {
+            var a = path.Points[start];
+            var along = Sub(path.Points[start + 1], a);
+            var end = start + 1;
+
+            if (along.Length() < 1e-6)
+            {
+                start++;
+                continue;
+            }
+
+            along = Normalise(along, new Vector3d(1, 0, 0));
+
+            // Grow the piece while the path runs on straight with the same normal and size.
+            while (end + 1 < path.Points.Count)
+            {
+                var next = Normalise(Sub(path.Points[end + 1], path.Points[end]), along);
+
+                if (Dot(next, along) < MergeCos || Dot(path.Normals[end + 1], path.Normals[start]) < MergeCos
+                    || Math.Abs(path.Scales[end + 1] - path.Scales[start]) > 1e-3)
+                    break;
+
+                end++;
+            }
+
+            var b = path.Points[end];
+            var length = Sub(b, a).Length();
+            var n = Normalise(Add(path.Normals[start], path.Normals[end]), path.Normals[start]);
+            var (across, normal, tangent) = Frame(n, Sub(b, a));
+            var size = (path.Scales[start] + path.Scales[end]) * 0.5;
+            var half = halfWidth * size;
+            var top = sizedDepth ? above * size : above;
+            var mid = Scale(Add(a, b), 0.5);
+            var box = template;
+            box.Centre = Add(mid, Scale(normal, offset + (top - below) * 0.5));
+            (box.U, box.V, box.N) = (tangent, across, normal);
+            box.HalfU = length * 0.5 + Math.Min(half, length) * 0.5;
+            box.HalfV = half;
+            box.HalfN = (top + below) * 0.5;
+            box.Along = walked + length * 0.5;
+            output.Add(box);
+
+            walked += length;
+            start = end;
         }
     }
 
@@ -214,7 +428,7 @@ public static class StrokeExpansion
         return new HullMesh(vertices, mesh.FaceSizes, mesh.Corners, mesh.Panels, mesh.Creases, mesh.SubdivLevels);
     }
 
-    private static void Sweep(StrokePath path, List<ProfilePoint> profile, double scale, double offset, int strokeIndex, HullSolid template, ExpandedHull result, List<HullSolid> output)
+    private static void Sweep(StrokePath path, List<ProfilePoint> profile, ProfilePoint lineAt, double scale, double offset, int strokeIndex, HullSolid template, ExpandedHull result, List<HullSolid> output)
     {
         // Orient the profile counter-clockwise in (across, out), so faces wind outward.
         var count = profile.Count;
@@ -235,7 +449,7 @@ public static class StrokeExpansion
         for (var j = 0; j < count; j++)
         {
             var p = profile[area > 0 ? j : count - 1 - j];
-            corners[j] = (p.X * HullSolid.MetresPerPositionUnit * scale, p.Y * HullSolid.MetresPerPositionUnit * scale + offset);
+            corners[j] = ((p.X - lineAt.X) * HullSolid.MetresPerPositionUnit * scale, (p.Y - lineAt.Y) * HullSolid.MetresPerPositionUnit * scale);
         }
 
         // Pieces share their boundary ring; each stays within the vertex, face and coordinate limits.
@@ -257,10 +471,11 @@ public static class StrokeExpansion
             {
                 var (bx, ny, _) = Frame(path.Normals[i], Along(path, i));
                 var centre = Sub(path.Points[i], exact);
+                var size = path.Scales[i];
 
                 foreach (var (x, y) in corners)
                 {
-                    var q = Quantise(Add(centre, Add(Scale(bx, x), Scale(ny, y))));
+                    var q = Quantise(Add(centre, Add(Scale(bx, x * size), Scale(ny, y * size + offset))));
 
                     if (Math.Abs(q.X) >= HullMesh.MaxCoordinate || Math.Abs(q.Y) >= HullMesh.MaxCoordinate || Math.Abs(q.Z) >= HullMesh.MaxCoordinate)
                     {

@@ -33,7 +33,7 @@ public sealed class PlanetDesignerOptions
 }
 
 /// <summary>
-/// BRUTALPlanetDesigner (D84, planet-designer-brief.md §6) on the shared DesignKit shell: one body of the fixed test
+/// BRUTALPlanetDesigner (D89, planet-designer-brief.md §6) on the shared DesignKit shell: one body of the fixed test
 /// system with its authored layer open. The body renders as the game draws it (CelestialView's impostor from orbit,
 /// TerrainWorld's octree near the ground), lit by the star; the orbit camera keeps its target on the ground with the
 /// local vertical as up. A committed stroke, site change, undo or redo re-registers the layer and rebuilds the terrain

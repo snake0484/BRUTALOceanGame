@@ -11,6 +11,7 @@ using BrutalGame.Plans;
 using BrutalGame.Ships.Components;
 using BrutalGame.Chemistry;
 using BrutalGame.Ships;
+using BrutalGame.Ships.Interior;
 
 namespace BrutalGame.Designer.App;
 
@@ -20,7 +21,7 @@ namespace BrutalGame.Designer.App;
 /// the viewport tools, drawing the hull. Validation, the plan hash and a new bake start only when the session's version
 /// moves (a commit), never per frame. No Sim, networking or physics.
 /// </summary>
-public sealed class DesignerApp : DesignApp
+public sealed partial class DesignerApp : DesignApp
 {
     private const string Title = "BRUTAL Designer";
 
@@ -33,6 +34,20 @@ public sealed class DesignerApp : DesignApp
     private readonly ChemistryData _chemistry;
     private readonly PrefabLibrary _library;
     private readonly PrefabPanel _prefabPanel;
+    private readonly InteriorPanel _interiorPanel;
+    private readonly WindowsPanel _windowsPanel;
+    private readonly JointsPanel _jointsPanel = new();
+    private readonly OpeningsPanel _openingsPanel = new();
+    private readonly DecalCatalog _decalCatalog;
+    private readonly DecalTextures _decalTextures;
+    private readonly DecalsPanel _decalsPanel;
+    private readonly FinishCatalog _finishCatalog;
+    private readonly FinishTextures _finishTextures;
+    private readonly PaintPanel _paintPanel;
+    private readonly List<HullProjector> _projectors = new();
+    private readonly int _hullScope;
+    private readonly ModelCatalog _models;
+    private readonly ProfilesPanel _profilesPanel;
     private readonly Dictionary<ulong, PrefabShape> _shapes = new();
     private readonly List<Document> _docs = new();
     private readonly List<DocumentTab> _tabs = new();
@@ -54,7 +69,7 @@ public sealed class DesignerApp : DesignApp
 
     private OverlayRenderer _overlay => Overlay;
 
-    protected override bool Busy => _baker.Busy;
+    protected override bool Busy => _baker.Busy || GroupsBusy;
 
     protected override bool CameraHeld => _tool.Dragging;
 
@@ -85,15 +100,30 @@ public sealed class DesignerApp : DesignApp
     {
         _catalog = HullMaterialCatalog.Load(dataFolder);
         _chemistry = ChemistryData.Load(dataFolder);
-        _panels = new DesignerPanels(_catalog);
+        _models = ModelCatalog.Load(dataFolder);
+        _panels = new DesignerPanels(_catalog, _models);
         _library = new PrefabLibrary(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "BRUTALGame", "Components"));
         RefreshLibrary();
         _prefabPanel = new PrefabPanel(_library, Shape);
+        InitPrograms(dataFolder);
+        _interiorPanel = new InteriorPanel(_catalog);
+        _windowsPanel = new WindowsPanel(_catalog);
+        _profilesPanel = new ProfilesPanel(new ProfileLibrary(ProfileLibrary.DefaultFolder));
         _saveOnExit = saveOnExit;
         _baker = new HullBaker(WorkerBudget.Background);
         _surfaceBuilder = new HullSurfaceBuilder(WorkerBudget.Background);
 
-        _hull = new HullRenderer(Renderer);
+        // Decal images are game data only, one texture layer each in catalog order.
+        _decalCatalog = DecalCatalog.Load(dataFolder);
+        _decalTextures = new DecalTextures(Renderer, Enumerable.Range(0, _decalCatalog.All.Count).Select(_decalCatalog.ImagePath).ToList());
+        _decalsPanel = new DecalsPanel(_decalCatalog, _decalTextures.Aspect);
+        // Paint finishes are game data too: two texture arrays, a layer each in catalog order.
+        _finishCatalog = FinishCatalog.Load(dataFolder);
+        _finishTextures = new FinishTextures(Renderer, _finishCatalog);
+        _paintPanel = new PaintPanel(_finishCatalog, new PaintLibrary(PaintLibrary.DefaultFolder));
+        _hull = new HullRenderer(Renderer, _decalTextures, _finishTextures);
+        _hullScope = Renderer.GpuTimer.Supported ? Renderer.GpuTimer.Register("Hull") : -1;
+        _jointsPanel.PartMassKg = id => PartMass(_groups.GroupOfJoint(id)).MassKg;
         _lighting = new SceneLighting
         {
             SunDirection = Vector3.Normalize(new Vector3(0.45f, 0.8f, 0.35f)),
@@ -144,6 +174,12 @@ public sealed class DesignerApp : DesignApp
     {
         Commit();
         PollBake();
+        PollAero();
+        UpdatePose(Math.Clamp(ImGui.GetIO().DeltaTime, 0f, 0.1f));
+        _stats.HullGpuMs = _hullScope >= 0 ? Renderer.GpuTimer.Ring(_hullScope).Average : 0f;
+
+        if (PaintBench)
+            BenchTick();
     }
 
     protected override void OnExit()
@@ -164,13 +200,47 @@ public sealed class DesignerApp : DesignApp
         var copy = doc.Clone();
         PlanCanonical.Canonicalise(copy);
         _stats.Hash = PlanFormat.HashBody(copy);
-        var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), doc.Meshes, doc.Brushes);
+        // Hallways become room cuts and stairs after the plan's solids; their meshes follow the plan's in the table.
+        var hallways = HallwayGeometry.Expand(doc.Interior, doc.Layers is not null, doc.Meshes.Count);
+
+        // Windows stick to the hull: their openings are cuts like the hallways', their panes flair (drawn as built, weighed).
+        var windows = doc.Windows is { IsEmpty: false }
+            ? WindowGeometry.Expand(doc.Windows, new HullSurface(doc.Solids.AsSpan(), doc.Meshes), doc.Layers is not null, doc.Meshes.Count + hallways.Meshes.Count)
+            : new WindowGeometry.Expansion();
+        // Rooms with a wall profile are cut as their walled shape in their box's place.
+        var walls = WallGeometry.Expand(doc.Interior, doc.Solids.AsSpan(), doc.Meshes, doc.Meshes.Count + hallways.Meshes.Count + windows.Meshes.Count);
+        // Openings (doorways, docking ports) cut through what they are set in: a component's own, and each placed component's.
+        var openingSolids = new List<HullSolid>();
+        var openingMeshes = new List<HullMesh>();
+        OpeningCuts(doc, doc.Meshes.Count + hallways.Meshes.Count + windows.Meshes.Count + walls.Meshes.Count, openingSolids, openingMeshes);
+        var meshes = hallways.Meshes.Count + windows.Meshes.Count + walls.Meshes.Count + openingMeshes.Count > 0
+            ? [.. doc.Meshes, .. hallways.Meshes, .. windows.Meshes, .. walls.Meshes, .. openingMeshes]
+            : doc.Meshes;
+        var paint = doc.Paint;
+        _groups = JointGroups.Build(doc);
+        SyncPrograms();
+        var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), meshes, doc.Brushes, doc.Interior?.Profiles, paint is null ? null : id => paint.SlotOf(id), _models.Mesh);
+
+        if (windows.Panes.Count > 0)
+        {
+            expanded.Solids = [.. expanded.Solids, .. windows.Panes];
+            expanded.Generated += windows.Panes.Count;
+        }
+
         var extras = new List<SurfacePolygon>();
-        var solids = new List<HullSolid>(doc.Solids.Count + 16);
+        ClearGroupExtras();
+        var solids = new List<HullSolid>(doc.Solids.Count + hallways.Solids.Count + 16);
         var palette = new List<DefId>(doc.Materials);
 
         foreach (ref readonly var s in doc.Solids.AsSpan())
             solids.Add(s);
+
+        foreach (var (index, room) in walls.Rooms)
+            solids[index] = room;
+
+        solids.AddRange(hallways.Solids);
+        solids.AddRange(windows.Cuts);
+        solids.AddRange(openingSolids);
 
         _stats.ComponentsKg = 0;
 
@@ -210,21 +280,39 @@ public sealed class DesignerApp : DesignApp
                     remap[m] = (byte)Math.Min(at, HullRenderer.PaletteSize - 1);
                 }
 
-                shape.Place(placement, m => m < remap.Length ? remap[m] : (byte)0, extras);
+                // Each of its moving parts (a door's leaf) in the ship's group for it.
+                for (var part = 0; part < shape.Parts.Count; part++)
+                    shape.PlacePart(part, placement, m => m < remap.Length ? remap[m] : (byte)0, ExtrasOf(_groups.PlacementPartGroup(i, part), extras));
                 solids.Add(shape.Cutter(placement, doc.Layers is not null, 0xE0000000u | (uint)i));
                 _stats.ComponentsKg += shape.PartsMassKg;
             }
         }
 
         _panels.Strokes.Expanded = expanded;
+
+        // Paint bands, then decals (later ones on top): drawn by the hull shader, nothing baked.
+        _projectors.Clear();
+        _projectors.AddRange(expanded.Projectors);
+
+        if (doc.Decals is not null)
+        {
+            foreach (var decal in doc.Decals.Decals)
+            {
+                if (decal.Shape != DecalShape.Image)
+                    _projectors.Add(decal.Projector(0));
+                else if (_decalCatalog.IndexOf(new DefId(decal.Asset)) is var layer and >= 0)
+                    _projectors.Add(decal.Projector(layer));
+            }
+        }
+
+        _hull.SetProjectors(_projectors);
+        _hull.SetPaint(paint, id => _finishCatalog.IndexOf(new DefId(id)));
+        (_stats.Projectors, _stats.ProjectorRefs) = (_hull.Projectors, _hull.ProjectorRefs);
         _stats.Generated = expanded.Generated;
         _stats.Unstuck = expanded.Unstuck;
         var densities = _catalog.Densities(doc);
-        _baker.InnerSurfacesOnly = !_stats.ShowGrid;
-        _baker.Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(solids), doc.Meshes, densities, doc.Layers);
-
-        // The drawn surface: exact polygons from the solids plus the brush flair, rebuilt on the job workers.
-        _surfaceBuilder.Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(solids), doc.Meshes, doc.Layers is not null, expanded, extras);
+        // The drawn surface (exact polygons plus the brush flair) and the grid (mass, collision), each moving part on its own.
+        StartBakes(solids, meshes, densities, doc.Layers, expanded, extras);
         _densities = densities;
         _shownGrid = _stats.ShowGrid;
         _surfaceChanged = true;
@@ -253,6 +341,10 @@ public sealed class DesignerApp : DesignApp
         {
             var rocket = SampleComponents.ChemicalRocket(DefId.FromName("mat.part.copper"), DefId.FromName("mat.part.inconel"), DefId.FromName("mat.part.steel"));
             _catalogPrefabs.Add(("Propulsion", rocket));
+            var alloy = DefId.FromName("mat.hull.alloy");
+            _catalogPrefabs.Add(("Doors", SampleComponents.SwingDoor(alloy)));
+            _catalogPrefabs.Add(("Doors", SampleComponents.SlidingDoor(alloy)));
+            _catalogPrefabs.Add(("Docking", SampleComponents.DockingPort(alloy)));
         }
 
         return _catalogPrefabs;
@@ -297,10 +389,14 @@ public sealed class DesignerApp : DesignApp
         _tool.GuideScale = component ? 0.08 : 1.0;
         _meshEdit.Enabled = false;
         _prefabPanel.Selected = 0;
+        _interiorPanel.Reset();
+        _windowsPanel.Reset();
+        _decalsPanel.Reset();
+        _jointsPanel.Reset();
+        _openingsPanel.Reset();
+        _paintPanel.Reset();
+        _profilesPanel.Reset();
         _seenVersion = -1;
-        _panels.PathText = _session.Path.Length > 0 ? _session.Path : component
-            ? Path.Combine(_library.UserFolder, "component." + FilePlanHost.Extension)
-            : Path.Combine(_files.LibraryFolder, "hull." + FilePlanHost.Extension);
         _bar.Show(document.Key);
 
         if (!document.Framed)
@@ -357,13 +453,25 @@ public sealed class DesignerApp : DesignApp
                 bricks.AddRange(_baker.Bricks);
         }
 
-        _hull.Upload(bricks);
+        // The ship's own part is group 0; each joint's moving part follows, tagged with its group.
+        var groups = new List<int>(bricks.Count);
+
+        for (var i = 0; i < bricks.Count; i++)
+            groups.Add(0);
+
+        AddGroupBricks(bricks, groups);
+        _hull.Upload(bricks, groups);
+        _stats.Mass = TotalMass();
+        (_stats.Projectors, _stats.ProjectorRefs) = (_hull.Projectors, _hull.ProjectorRefs);
     }
 
     private void PollBake()
     {
         _baker.Poll();
-        _stats.Baking = _baker.Busy || _surfaceBuilder.Busy;
+        _stats.Baking = _baker.Busy || _surfaceBuilder.Busy || GroupsBusy;
+
+        if (PollGroupBakes())
+            _surfaceChanged = true;
 
         if (_surfaceBuilder.Poll())
         {
@@ -396,7 +504,7 @@ public sealed class DesignerApp : DesignApp
         _uploadedBake = _baker.Version;
         _surfaceChanged = false;
         UploadSurface();
-        _stats.Mass = _baker.Mass;
+        _stats.Mass = TotalMass();
         _stats.Bricks = _baker.Bricks.Count;
         _stats.Triangles = _baker.TriangleCount;
         _stats.BakeMs = _baker.LastBakeMs;
@@ -412,8 +520,8 @@ public sealed class DesignerApp : DesignApp
 
     private void UpdatePalette(IReadOnlyList<DefId> materials)
     {
-        Span<Vector3> colours = stackalloc Vector3[HullRenderer.PaletteSize];
-        colours.Fill(new Vector3(0.6f));
+        Span<Vector4> colours = stackalloc Vector4[HullRenderer.PaletteSize];
+        colours.Fill(new Vector4(0.6f, 0.6f, 0.6f, 1f));
 
         for (var i = 0; i < Math.Min(materials.Count, colours.Length); i++)
         {
@@ -421,7 +529,7 @@ public sealed class DesignerApp : DesignApp
                 continue;
 
             var rgb = material.ColourRgb;
-            colours[i] = new Vector3(Linear((rgb >> 16) & 255), Linear((rgb >> 8) & 255), Linear(rgb & 255));
+            colours[i] = new Vector4(Linear((rgb >> 16) & 255), Linear((rgb >> 8) & 255), Linear(rgb & 255), material.Opacity);
         }
 
         _hull.SetPalette(colours);
@@ -441,27 +549,92 @@ public sealed class DesignerApp : DesignApp
         foreach (var d in _docs)
             _tabs.Add(new DocumentTab(d.Key, d.Title, d.Session.Modified, d.Component is not null));
 
+        _bar.ComponentTab = _active.Component is not null;
         _bar.Draw(_tabs, _active.Key);
     }
 
+    /// <summary>The interior view: the hull see-through and locked, the things inside it (hallways, placements, parts) still editable.</summary>
+    private bool InteriorView => _bar.InteriorView;
+
+    /// <summary>Opacity of the hull in the interior view.</summary>
+    private const float GhostOpacity = 0.18f;
+
     protected override void DrawPanels(ImGuiIOPtr io)
     {
+        if (InteriorView)
+            _meshEdit.Enabled = false;
+
+        // One selection, shown in Properties whatever kind it is.
+        KeepOneSelected();
+        RouteProperties();
+        _interiorPanel.BeginFrame();
+        _panels.Locked = InteriorView;
         _panels.Draw(_session, _stats, _meshEdit);
-        _viewOverlay.Draw(_session, _meshEdit, _camera);
+        DrawTree();
+        _viewOverlay.Draw(_session, _meshEdit, _camera, _panels.Cutaway, editable: !InteriorView);
         var workspace = _active.Component;
-        _tool.Mode = _bar.Mode;
-        _prefabPanel.Mode = _bar.Mode;
+        _prefabPanel.BeginFrame();
+        var viewport = ViewportSize;
+
+        // The right-click menu: on the hull, the selection's actions and "Add here"; on empty space, Add.
+        ContextBar.Track(!io.WantCaptureMouse);
+        PlaceMenu();
 
         if (workspace is not null)
         {
-            workspace.Mode = _bar.Mode;
             workspace.DrawPanels(_session);
+            _programPanel.Draw(_session, _componentProgram is null ? null : _componentRun);
+
+            // Door profiles (a doorway's or port's outline) are made and shaped here too.
+            _profilesPanel.Draw(_session);
         }
         else
         {
-            _prefabPanel.Draw(_session);
+            if (_interiorPanel.EditProfileRequest >= 0)
+                (_profilesPanel.Selected, _profilesPanel.Focus) = (_interiorPanel.EditProfileRequest, true);
+            else if (_panels.EditProfileRequest >= 0)
+                (_profilesPanel.Selected, _profilesPanel.Focus) = (_panels.EditProfileRequest, true);
+
+            _profilesPanel.Draw(_session);
+            _paintPanel.Draw(_session);
+            DrawAero();
         }
+
+        if (ContextBar.BeginShared())
+        {
+            if (_addOnSurface)
+            {
+                if (workspace is not null)
+                {
+                    workspace.DrawContext(_session, _camera, viewport);
+                    _jointsPanel.DrawContext(_session, _camera, viewport);
+                    _openingsPanel.DrawContext(_session, _camera, viewport);
+                }
+                else
+                {
+                    _interiorPanel.DrawContext(_session, _camera, viewport);
+                    _windowsPanel.DrawContext(_session, _camera, viewport);
+                    _decalsPanel.DrawContext(_session, _camera, viewport);
+                    _jointsPanel.DrawContext(_session, _camera, viewport);
+                    _prefabPanel.DrawContext(_session, _camera, viewport);
+                }
+
+                // A picked node, window, placement or part outranks the selected solid.
+                if (!OtherSelected)
+                    _panels.DrawContext(_session, _meshEdit, _camera, viewport);
+            }
+
+            AddMenuItems();
+            ContextBar.EndShared();
+        }
+
+        DrawAddDialog();
     }
+
+    /// <summary>A picked node, window, placement or part: it has the gizmo and the menu, not the selected solid.</summary>
+    private bool OtherSelected => _active.Component is { } workspace
+        ? workspace.SelectedPart != 0 || workspace.SelectedPipe != 0 || _jointsPanel.Selected != 0 || _openingsPanel.Selected != 0
+        : _interiorPanel.Selected != 0 || _panels.Strokes.Selected != 0 || _windowsPanel.Selected != 0 || _decalsPanel.Selected != 0 || _jointsPanel.Selected != 0 || _prefabPanel.Selected != 0;
 
     protected override void AfterPanels(ImGuiIOPtr io)
     {
@@ -472,6 +645,7 @@ public sealed class DesignerApp : DesignApp
             RefreshLibrary();
 
         _active.Component?.Step(Math.Clamp(io.DeltaTime, 0.0, 1.0 / 30.0));
+        HandleAdd();
         HandleFiles();
 
         if (_bar.SelectedKey >= 0 && _docs.Find(d => d.Key == _bar.SelectedKey) is { } picked)
@@ -485,22 +659,104 @@ public sealed class DesignerApp : DesignApp
     {
         var workspace = _active.Component;
         var cut = _panels.Cutaway;
+
+        if (_viewOverlay.PickingCut && PickCut(io, viewport, mouseFree, cut))
+            return;
+
         _hull.SetCutaway(cut.Enabled ? cut.Axis : -1, cut.Offset, cut.Flip);
+
+        if (workspace is null)
+        {
+            _aeroPanel.DrawOverlay(_overlay);
+            OpeningsPanel.DrawPlacedPorts(_session.Doc, _overlay, _camera);
+        }
         var used = !_tool.Dragging && (workspace is not null
             ? workspace.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
-            : _prefabPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay));
+              || _jointsPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay)
+              || _openingsPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay)
+            : _windowsPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
+              || _decalsPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
+              || _jointsPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay)
+              || _interiorPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay)
+              || _prefabPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay));
+        // The interior view leaves the hull alone: no solid picking, gizmos or strokes.
+        if (InteriorView)
+            return;
+
         var strokeUsedMouse = !used && !_tool.Dragging && workspace is null && _panels.Strokes.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay);
+        _tool.Handles = !OtherSelected;
         _tool.Update(_session, _meshEdit, _camera, viewport, viewProj, mouseFree && !strokeUsedMouse && !used, _overlay);
     }
 
-    protected override void RecordScene(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj) =>
+    /// <summary>
+    /// The cutaway's Pick: a click on the hull puts the plane just inside the point clicked (on the cut axis). The ray passes
+    /// through hull already cut away, so it lands on what is shown. Esc or a click off the hull cancels.
+    /// </summary>
+    private bool PickCut(ImGuiIOPtr io, Vector2 viewport, bool mouseFree, Cutaway cut)
+    {
+        if (ImGui.IsKeyPressed(ImGuiKey.Escape, false))
+        {
+            _viewOverlay.PickingCut = false;
+            return true;
+        }
+
+        if (!mouseFree || !ImGui.IsMouseClicked(ImGuiMouseButton.Left, false))
+            return false;
+
+        _viewOverlay.PickingCut = false;
+        var surface = new HullSurface(_session.Doc.Solids.AsSpan(), _session.Doc.Meshes);
+        Vector3d origin = _camera.Position;
+        Vector3d ray = _camera.Ray(new Vector2(io.MousePos.X, io.MousePos.Y), viewport);
+        var sign = cut.Flip ? -1.0 : 1.0;
+
+        for (var hop = 0; hop < 32 && surface.Raycast(origin, ray, 4000, out var t, out _); hop++)
+        {
+            var hit = HullSurface.Add(origin, HullSurface.Scale(ray, t));
+            var along = cut.Axis == 0 ? hit.X : cut.Axis == 1 ? hit.Y : hit.Z;
+
+            if (!cut.Enabled || sign * along <= sign * cut.Offset + 1e-6)
+            {
+                // 1 mm into the hull from the point clicked: a face square to the axis is cut away (showing what is
+                // behind it) rather than sitting exactly on the plane and flickering.
+                along -= sign * 1e-3;
+                cut.Offset = (float)along;
+                cut.Enabled = true;
+                _stats.Message = $"Cut at {along:F2} m";
+                return true;
+            }
+
+            origin = HullSurface.Add(hit, HullSurface.Scale(ray, 1e-3));
+        }
+
+        _stats.Message = "Pick missed the hull";
+        return true;
+    }
+
+    protected override void RecordScene(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj)
+    {
+        if (InteriorView)
+            return;
+
+        if (_hullScope >= 0)
+            Renderer.GpuTimer.Begin(commands, _hullScope);
+
         _hull.Record(commands, frameIndex, extent, viewProj, _camera.Position, _lighting);
+
+        if (_hullScope >= 0)
+            Renderer.GpuTimer.End(commands, _hullScope);
+    }
+
+    protected override void RecordAfterScene(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj)
+    {
+        if (InteriorView)
+            _hull.RecordGhost(commands, frameIndex, extent, viewProj, _camera.Position, _lighting, GhostOpacity);
+        else
+            _hull.RecordGlazing(commands, frameIndex, extent, viewProj, _camera.Position, _lighting);
+    }
 
     private void HandleFiles()
     {
-        var request = _bar.Request != FileRequest.None ? _bar.Request : _panels.Request;
-
-        switch (request)
+        switch (_bar.Request)
         {
             case FileRequest.New:
                 NewDocument(component: false);
@@ -511,37 +767,43 @@ public sealed class DesignerApp : DesignApp
                 _stats.Message = "New component: add parts in the Parts panel";
                 break;
             case FileRequest.Open:
-                if (_files.PickOpen() is { } open)
-                    Open(open);
-                else if (!_files.HasDialogs)
-                    _stats.Message = "No file dialog: type a path and use Load path";
-
-                break;
-            case FileRequest.OpenPath:
-                Open(_panels.PathText);
+                PickAndOpen();
                 break;
             case FileRequest.Save:
-                if (_session.Path.Length > 0)
-                    Save(_session.Path);
-                else
-                    SaveAs();
-
+                SaveCurrent();
                 break;
             case FileRequest.SaveAs:
                 SaveAs();
                 break;
-            case FileRequest.SavePath:
-                Save(_panels.PathText);
-                break;
         }
+    }
+
+    /// <summary>Where the dialogs start for the open tab: components in the prefab library, ships in the plans folder.</summary>
+    private string DialogFolder => _active.Component is not null ? _library.UserFolder : _files.LibraryFolder;
+
+    private void PickAndOpen()
+    {
+        if (_files.PickOpen(DialogFolder) is { } open)
+            Open(open);
+        else if (!_files.HasDialogs)
+            _stats.Message = "File dialogs are unavailable on this system (nfd.dll missing)";
+    }
+
+    /// <summary>Saves to the tab's file; a plan never saved asks where first.</summary>
+    private void SaveCurrent()
+    {
+        if (_session.Path.Length > 0)
+            Save(_session.Path);
+        else
+            SaveAs();
     }
 
     private void SaveAs()
     {
-        if (_files.PickSave(_session.Path) is { } path)
+        if (_files.PickSave(_session.Path, DialogFolder) is { } path)
             Save(path);
         else if (!_files.HasDialogs)
-            _stats.Message = "No file dialog: type a path and use Save path";
+            _stats.Message = "File dialogs are unavailable on this system (nfd.dll missing)";
     }
 
     private void Save(string path)
@@ -553,7 +815,7 @@ public sealed class DesignerApp : DesignApp
 
             if (_session.Doc.Level == PlanLevel.Component)
                 RefreshLibrary();
-            _panels.PathText = path;
+
             _stats.Message = $"Saved {Path.GetFileName(path)} ({hash})";
             Console.WriteLine($"saved {path}: {_session.Doc.Solids.Count} solids, hash {hash}");
         }
@@ -586,13 +848,43 @@ public sealed class DesignerApp : DesignApp
         Console.WriteLine($"opened {path}: {doc.Solids.Count} solids, hash {PlanFormat.HashBody(doc)}");
     }
 
+    /// <summary>--demo-hallway: the layered demo hull with a hallway and a stair run.</summary>
+    public static bool HallwayDemo;
+
+    /// <summary>--demo-hallway-plain: the hallway in a solid block without layers.</summary>
+    public static bool HallwayPlain;
+
+    /// <summary>--demo-walls: a room with a coved wall profile in a solid block.</summary>
+    public static bool WallDemo;
+
+    /// <summary>--demo-joints: a block with a turret on a rotor and a flap on a hinge.</summary>
+    public static bool JointsDemo;
+
+    /// <summary>--demo-doors: a hull with a room, a swing door, a sliding door and a docking port.</summary>
+    public static bool DoorsDemo;
+
     private void DemoLayered()
     {
         var all = _catalog.All;
-        SampleHulls.LayeredHull(_session, all[Math.Min(2, all.Count - 1)].Id, all[0].Id, all[Math.Min(1, all.Count - 1)].Id);
+
+        if (JointsDemo)
+            SampleHulls.JointsDemo(_session, all[0].Id);
+        else if (DoorsDemo)
+            SampleHulls.DoorsDemo(_session, DefId.FromName("mat.hull.alloy"));
+        else if (WallDemo)
+            SampleHulls.WallRoom(_session, all[0].Id);
+        else if (HallwayDemo && HallwayPlain)
+            SampleHulls.HallwayBlock(_session, all[0].Id);
+        else if (HallwayDemo)
+            SampleHulls.HallwayHull(_session, all[Math.Min(2, all.Count - 1)].Id, all[0].Id, all[Math.Min(1, all.Count - 1)].Id);
+        else
+            SampleHulls.LayeredHull(_session, all[Math.Min(2, all.Count - 1)].Id, all[0].Id, all[Math.Min(1, all.Count - 1)].Id);
         _session.MarkSaved("");
         FrameHull();
     }
+
+    /// <summary>--demo-windows: the demo hull with three windows.</summary>
+    public static bool WindowDemo;
 
     /// <summary>--demo-brushes: the demo hull dressed with brush strokes.</summary>
     public static bool BrushDemo;
@@ -606,7 +898,9 @@ public sealed class DesignerApp : DesignApp
     {
         var all = _catalog.All;
 
-        if (BrushDemo)
+        if (WindowDemo)
+            SampleHulls.WindowedHull(_session, all[0].Id, all[Math.Min(2, all.Count - 1)].Id, DefId.FromName("mat.glazing.soda"), DefId.FromName("mat.glazing.alon"));
+        else if (BrushDemo)
             SampleHulls.BrushedHull(_session, all[0].Id, all[Math.Min(2, all.Count - 1)].Id);
         else if (mesh)
             SampleHulls.MeshHull(_session, all[0].Id, all[Math.Min(2, all.Count - 1)].Id);
@@ -656,16 +950,19 @@ public sealed class DesignerApp : DesignApp
         else if (ctrl && key == GlfwKey.N)
             NewDocument(component: false);
         else if (ctrl && key == GlfwKey.O)
-        {
-            if (_files.PickOpen() is { } open)
-                Open(open);
-        }
-        else if (!ctrl && key is GlfwKey.W or GlfwKey.E or GlfwKey.R)
-            _bar.Mode = key == GlfwKey.W ? GizmoMode.Move : key == GlfwKey.E ? GizmoMode.Rotate : GizmoMode.Scale;
+            PickAndOpen();
+        else if (!ctrl && key == GlfwKey.I)
+            _bar.InteriorView = !_bar.InteriorView;
+        else if (!ctrl && key == GlfwKey.P)
+            _bar.PlayJoints = !_bar.PlayJoints;
         else if (key == GlfwKey.Delete && _active.Component is { } component)
         {
-            if (!component.DeleteSelected(_session))
+            if (!component.DeleteSelected(_session) && !InteriorView)
                 HullCommands.DeleteSelected(_session);
+        }
+        else if (InteriorView && (key is GlfwKey.Delete or GlfwKey.Tab or GlfwKey.Number1 or GlfwKey.Number2 or GlfwKey.Number3 || (ctrl && key == GlfwKey.D)))
+        {
+            // The hull is locked in the interior view.
         }
         else if (ctrl && key == GlfwKey.Z)
             _session.UndoLast();
@@ -674,7 +971,7 @@ public sealed class DesignerApp : DesignApp
         else if (ctrl && key == GlfwKey.D && _session.Selection.Primary != 0)
             HullCommands.Duplicate(_session, _session.Selection.Primary);
         else if (ctrl && key == GlfwKey.S)
-            Save(_session.Path.Length > 0 ? _session.Path : _panels.PathText);
+            SaveCurrent();
         else if (key == GlfwKey.Delete)
             HullCommands.DeleteSelected(_session);
         else if (key == GlfwKey.F)
@@ -690,12 +987,18 @@ public sealed class DesignerApp : DesignApp
         _baker.Wait();
         _surfaceBuilder.Wait();
         _surfaceBuilder.Dispose();
+        DisposeGroupBakes();
+        DisposeAero();
         _files.Dispose();
+        _profilesPanel.Dispose();
+        _paintPanel.Dispose();
     }
 
     protected override void DisposeGpu()
     {
         _baker.Dispose();
         _hull.Dispose();
+        _decalTextures.Dispose();
+        _finishTextures.Dispose();
     }
 }

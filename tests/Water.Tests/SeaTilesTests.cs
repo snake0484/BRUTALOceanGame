@@ -189,12 +189,16 @@ public sealed unsafe class SeaTilesTests(ITestOutputHelper output)
         var camera = frame.ToLocal(here * SeaRadius);
         SeaSlots.Build(Tiles, frame, camera.X, camera.Z, 8700.0, out var slots);
 
-        var waves = new GpuWave[OceanSwell.MaxComponents];
-        var phases = new float[OceanSwell.MaxComponents * SeaTiles.MaxBlend];
-        var count = swell.CopyGpuWaves(waves, swell.Time, slots.U[0], slots.V[0]);
+        var waves = new GpuWave[OceanSwell.MaxComponents * SeaTiles.MaxBlend];
+        var ranges = new int[2 * SeaTiles.MaxBlend];
+        var count = 0;
 
         for (var s = 0; s < slots.Count; s++)
-            Assert.Equal(count, swell.CopyGpuPhases(phases, s, SeaTiles.MaxBlend, swell.Time, slots.U[s], slots.V[s]));
+        {
+            ranges[2 * s] = count;
+            count += swell.CopyGpuWaves(waves.AsSpan(count), swell.Time, slots.U[s], slots.V[s]);
+            ranges[2 * s + 1] = count;
+        }
 
         var worstHeight = 0.0;
         var worstPlace = 0.0;
@@ -204,7 +208,7 @@ public sealed unsafe class SeaTilesTests(ITestOutputHelper output)
         {
             // Rest positions within 300 m of the camera, where the short waves are drawn.
             var x0 = new Vector2(i % 20 * 30f - 285f, i / 20 * 30f - 290f);
-            GpuSwell(slots, waves, phases, count, x0, out var height, out var shift, out var used);
+            GpuSwell(slots, waves, ranges, x0, out var height, out var shift, out var used);
             most = Math.Max(most, used);
 
             var rest = frame.SeaPoint(camera.X + x0.X, camera.Z + x0.Y);
@@ -232,7 +236,7 @@ public sealed unsafe class SeaTilesTests(ITestOutputHelper output)
     }
 
     /// <summary>ocean_common.glsl slotWeights + swellAt (no anti-alias filter, cap 1): height and displacement at x0 in the sea frame's plane.</summary>
-    private static void GpuSwell(in SeaSlots slots, GpuWave[] waves, float[] phases, int count, Vector2 x0, out float height, out Vector2 shift, out int used)
+    private static void GpuSwell(in SeaSlots slots, GpuWave[] waves, int[] ranges, Vector2 x0, out float height, out Vector2 shift, out int used)
     {
         var row = Smooth(0.5f + 0.5f * (slots.BandRow.X * x0.X + slots.BandRow.Y * x0.Y + slots.BandRow.Z));
         Span<float> cell =
@@ -263,9 +267,9 @@ public sealed unsafe class SeaTilesTests(ITestOutputHelper output)
             var h = 0f;
             var d = Vector2.Zero;
 
-            for (var i = 0; i < count; i++)
+            for (var i = ranges[2 * s]; i < ranges[2 * s + 1]; i++)
             {
-                var theta = waves[i].Kx * u + waves[i].Kz * v + phases[i * SeaTiles.MaxBlend + s];
+                var theta = waves[i].Kx * u + waves[i].Kz * v + waves[i].Phase;
                 var (sin, cos) = MathF.SinCos(theta);
                 h += waves[i].Amplitude * cos;
                 d -= new Vector2(waves[i].Cx, waves[i].Cz) * sin;

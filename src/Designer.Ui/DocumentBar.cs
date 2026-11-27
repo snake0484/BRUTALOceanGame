@@ -2,11 +2,14 @@ using Brutal.ImGuiApi;
 
 namespace BrutalGame.Designer.Ui;
 
+/// <summary>What the Add menu (a right-click in the view) makes.</summary>
+public enum AddKind { None, Box, Wedge, Cylinder, Hallway, Window, Decal, Stroke, Component, Door, DockingPort, Rotor, Hinge, Slider, Opening, PortFace, Chamber, Nozzle, Injector, Igniter, Pipe }
+
 /// <summary>One open plan as the tab bar shows it. <see cref="Key"/> stays the same while the tab lives.</summary>
 public readonly record struct DocumentTab(int Key, string Title, bool Modified, bool Component);
 
 /// <summary>
-/// The bar across the top: the File menu, the gizmo mode (W move, E rotate, R scale) and a tab per open ship or
+/// The bar across the top: the File menu, the interior view and a tab per open ship or
 /// component. Closing a tab with unsaved changes asks first. The host owns the documents; the bar only reports what the
 /// user picked this frame.
 /// </summary>
@@ -19,7 +22,14 @@ public sealed class DocumentBar
     private int _confirmKey = -1;
     private bool _openConfirm;
 
-    public GizmoMode Mode;
+    /// <summary>The interior view: the hull see-through and locked, so what is inside can be reached and edited.</summary>
+    public bool InteriorView;
+
+    /// <summary>Preview the rotors and hinges moving (P).</summary>
+    public bool PlayJoints;
+
+    /// <summary>The open tab is a component.</summary>
+    public bool ComponentTab;
 
     /// <summary>The File menu's pick this frame.</summary>
     public FileRequest Request { get; private set; }
@@ -64,9 +74,13 @@ public sealed class DocumentBar
         {
             DrawFileMenu(activeKey);
             ImGui.Separator();
-            ModeItem("Move"u8, "W"u8, GizmoMode.Move);
-            ModeItem("Rotate"u8, "E"u8, GizmoMode.Rotate);
-            ModeItem("Scale"u8, "R"u8, GizmoMode.Scale);
+
+            if (ImGui.MenuItem("Interior view"u8, "I"u8, InteriorView))
+                InteriorView = !InteriorView;
+
+            if (ImGui.MenuItem("Play joints"u8, "P"u8, PlayJoints))
+                PlayJoints = !PlayJoints;
+
             ImGui.Separator();
             DrawTabs(activeKey);
             ImGui.EndMainMenuBar();
@@ -103,12 +117,6 @@ public sealed class DocumentBar
             AskClose(activeKey);
 
         ImGui.EndMenu();
-    }
-
-    private void ModeItem(ReadOnlySpan<byte> label, ReadOnlySpan<byte> key, GizmoMode mode)
-    {
-        if (ImGui.MenuItem(label, key, Mode == mode))
-            Mode = mode;
     }
 
     private void DrawTabs(int activeKey)

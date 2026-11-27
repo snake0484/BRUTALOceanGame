@@ -1,0 +1,12 @@
+{
+  "finishes": [
+    { "id": "finish.powder.matte", "name": "Powder coat, matte", "folder": "Metal027", "tileMetres": 1.0, "metalness": 0 },
+    { "id": "finish.powder.satin", "name": "Powder coat, satin", "folder": "Metal028", "tileMetres": 1.0, "metalness": 0 },
+    { "id": "finish.powder.fine", "name": "Powder coat, fine", "folder": "Metal029", "tileMetres": 1.0, "metalness": 0 },
+    { "id": "finish.gloss", "name": "Gloss, crazed", "folder": "Paint004", "tileMetres": 1.0 },
+    { "id": "finish.scratched", "name": "Scratched to bare metal", "folder": "PaintedMetal004", "tileMetres": 1.0 },
+    { "id": "finish.panels", "name": "Panels, scuffed", "folder": "blue_metal_plate", "tileMetres": 2.5 },
+    { "id": "finish.worn", "name": "Worn", "folder": "green_metal_rust", "tileMetres": 1.0 },
+    { "id": "finish.weathered", "name": "Weathered, corrugated", "folder": "rusty_painted_metal", "tileMetres": 2.2 }
+  ]
+}

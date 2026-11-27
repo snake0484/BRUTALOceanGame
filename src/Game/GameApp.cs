@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Brutal.GlfwApi;
+using Brutal.ImGuiApi;
 using Brutal.Numerics;
 using BrutalGame.Debug;
 using BrutalGame.Engine.Jobs;
@@ -35,9 +36,9 @@ public sealed partial class GameApp : IDisposable
     private const double SeaFrameReach = 3072.0;
 
     /// <summary>--surf-beach: in the spawn's bubble (y up, sea level 0, +x out to sea), yaw and pitch in radians.</summary>
-    private static readonly System.Numerics.Vector3 SurfBeachPosition = new(60f, 3f, -40f);
-    private const float SurfBeachYaw = 1.9f;
-    private const float SurfBeachPitch = -0.08f;
+    private static readonly System.Numerics.Vector3 SurfBeachPosition = new(20f, 3f, -60f);
+    private const float SurfBeachYaw = 0.96f;
+    private const float SurfBeachPitch = -0.105f;
     private const double SurfBeachSunElevation = 0.6;
 
     /// <summary>Camera height above the sea (m) below which the sea frame has depth maps, and below which the near window (shore wash) is kept; each is dropped again a little higher.</summary>
@@ -67,8 +68,8 @@ public sealed partial class GameApp : IDisposable
     private readonly Renderer _renderer;
     private readonly ImGuiLayer _imgui;
     private readonly ProfilerPanel _profiler;
+    private readonly DebugShell _debug;
     private readonly SimWorld _sim;
-    private readonly OceanSwell _swell;
     private readonly OceanPanel _oceanPanel;
     private readonly WeatherSystem _weather;
     private readonly WeatherPanel _weatherPanel;
@@ -92,10 +93,13 @@ public sealed partial class GameApp : IDisposable
     private readonly PlanetFlyTest? _planetFly;
     private readonly ShoreFlyTest? _shoreFly;
     private readonly CoastRegionSet _coast;
+    private readonly SwellCarriers _coastCarriers;
     private readonly CoastAtlasGpu _coastGpu;
     private readonly TimingRing _coastMs = new(256);
     private readonly bool _benchFaces;
     private readonly bool _surfBeach;
+    private readonly SurfBeachTest? _surfTest;
+    private long _coastAllocated;
     private readonly OrbitTest? _orbitTest;
     private readonly MoonTest? _moonTest;
     private readonly SeamTest? _seamTest;
@@ -147,14 +151,15 @@ public sealed partial class GameApp : IDisposable
     /// <param name="seamTest">--seam-test: static views of the octree alone over a key clear colour; one captured frame per view counts the pixels showing through it.</param>
     /// <param name="faces">false with --no-faces: the breaking faces over the coast regions are not drawn (A/B).</param>
     /// <param name="benchFaces">--bench-faces: --bench alternates the breaking faces, not the shore wash.</param>
+    /// <param name="surfEdge">--surf-edge: --surf-beach on a beach that lies on a sea tile's row edge, where two tiles' swells meet.</param>
+    /// <param name="surfClimb">--surf-climb: --surf-beach, then the camera climbs to 4 km over the surf and back (SurfBeachTest).</param>
     /// <param name="surfBeach">--surf-beach: the camera stands in the shallows off the spawn's beach, looking along the break (unless --cam places it), under a sun held over the beach.</param>
     /// <param name="menu">Menu mode (no test or bench flag): app states, menus and settings (GameApp.Menu.cs); null runs as before.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false, bool shoreFly = false, bool seamTest = false, Menu.MenuLaunch? menu = null, string? planetKind = null, ulong? kindSeed = null, bool steep = false, bool faces = true, bool benchFaces = false, bool surfBeach = false)
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false, bool shoreFly = false, bool seamTest = false, Menu.MenuLaunch? menu = null, string? planetKind = null, ulong? kindSeed = null, bool steep = false, bool faces = true, bool benchFaces = false, bool surfBeach = false, bool surfClimb = false, bool surfEdge = false)
     {
         _benchFaces = benchFaces;
         _surfBeach = surfBeach;
-        var weatherField = new WeatherField(new WeatherClimate());
-        _sim = new SimWorld(seed: menu?.Seed ?? 1, WorkerBudget.Tick, weatherField, kind: planetKind, kindSeed: kindSeed) { DriveWind = weather, WeatherTimeOffset = weatherOffset * 60.0 };
+        _sim = new SimWorld(seed: menu?.Seed ?? 1, WorkerBudget.Tick, weather, kind: planetKind, kindSeed: kindSeed, edgeSpawn: surfEdge) { WeatherTimeOffset = weatherOffset * 60.0 };
 
         ref readonly var planet = ref _sim.Celestial[_sim.PlanetIndex];
         _planetFrame = planet.Surface;
@@ -193,7 +198,6 @@ public sealed partial class GameApp : IDisposable
         });
         _window.OnKey += OnKey;
 
-        _swell = _sim.Ocean.Swell;
         _renderer = new Renderer(_window, _stats, Validation, vsync: benchSeconds <= 0.0, renderScale);
         _imgui = new ImGuiLayer(_window, _renderer);
 
@@ -204,15 +208,18 @@ public sealed partial class GameApp : IDisposable
             SwellPeriod = swell?[1] ?? 13f,
             SwellDirection = (swell?[2] ?? 0f) * MathF.PI / 180f,
         };
-        _weather = new WeatherSystem(weatherField, _sim.WeatherTime, CameraXZ);
+        _weather = new WeatherSystem(_sim.Weather);
+        _weather.Tick(_sim.WeatherTick, PlanetCamera);
         _sim.SetSwell(wind);
         _oceanFft = new OceanFft(_renderer) { DebugView = foamDebug };
         _depths = new ShoreDepthGrid(_sim.Shore);
         _depthTexture = new ShoreDepthTexture(_renderer);
         _coast = new CoastRegionSet(_sim.Ocean.Tiles, _sim.CoastDepth, WorkerBudget.Side);
+        _coastCarriers = new SwellCarriers(_sim.Ocean.Swells);
         _coastGpu = new CoastAtlasGpu(_renderer);
-        _oceanPanel = new OceanPanel(_sim.Ocean, _oceanFft, _depths, _depthTexture, _coast, _coastGpu) { BreakerFaces = faces };
-        _weatherPanel = new WeatherPanel(_weather.Map) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset };
+        _oceanPanel = new OceanPanel(_sim.Ocean, p => _sim.SetSwell(p), _oceanFft, _depths, _depthTexture, _coast, _coastGpu) { BreakerFaces = faces };
+        _surfTest = surfBeach ? new SurfBeachTest(_sim, _coast, surfClimb) : null;
+        _weatherPanel = new WeatherPanel(_weather.Cache, _sim.Ocean.Swells) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset };
         _instances = new InstanceBuffer(_renderer);
         _terrainRenderer = new TerrainRenderer(_renderer, _instances);
 
@@ -268,6 +275,11 @@ public sealed partial class GameApp : IDisposable
             _weatherPanel.Open = false;
         }
 
+        _profiler.Add("Terrain update", _terrainPanel.UpdateMs);
+        _profiler.Add("Coast update", _coastMs);
+        _profiler.Add("Weather cache tick", _weatherPanel.TickMs);
+        _profiler.Add("Sea tick", _weatherPanel.SeaMs);
+        _debug = new DebugShell(_stats, _window.Size.X, _window.Size.Y, [_profiler, _oceanPanel, _terrainPanel, _weatherPanel]);
         InitMenu(menu); // menu
     }
 
@@ -341,6 +353,12 @@ public sealed partial class GameApp : IDisposable
             terrain &= _terrain.Focus == (_orbitTest is null ? _celestial.FocusTerrainBody : _planetTerrainBody);
             UpdateOctreeCover(terrain, frameSeconds);
             UpdateSea(terrain, terrainCamera, frameSeconds);
+            _surfTest?.Update(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, _sim.RenderTime, WorldReady, _coastAllocated);
+
+            if (_surfTest is { Climbing: true })
+                PlaceCamera(_surfTest.CameraPosition, SurfBeachYaw, _surfTest.CameraPitch);
+
+            _coastAllocated = 0;
             _sections.Terrain = Lap(ref mark);
             UpdateSun(terrainCamera, terrainAxes);
             UpdateWeather();
@@ -370,13 +388,16 @@ public sealed partial class GameApp : IDisposable
                 gpu.Begin(commands, _uploadScope);
                 _terrainRenderer.RecordUploads(commands, _renderer.FrameIndex);
                 _depthTexture.Record(commands, _renderer.FrameIndex, _depths);
+                var coastBytes = GC.GetAllocatedBytesForCurrentThread();
                 _coastGpu.Record(commands, _renderer.FrameIndex, _coast);
+                _coastAllocated += GC.GetAllocatedBytesForCurrentThread() - coastBytes;
                 _celestial.RecordUploads(commands);
                 gpu.End(commands, _uploadScope);
                 _sections.Uploads = Lap(ref mark);
 
                 gpu.Begin(commands, _fftScope);
-                _oceanFft.Record(commands, _renderer.FrameIndex, _swell, renderTime, (float)frameSeconds);
+                var spectrum = _sim.Ocean.Swells.SpectrumAt(PlanetCamera);
+                _oceanFft.Record(commands, _renderer.FrameIndex, spectrum, renderTime, (float)frameSeconds);
                 gpu.End(commands, _fftScope);
 
                 if (ocean)
@@ -395,7 +416,7 @@ public sealed partial class GameApp : IDisposable
                         DepthCellX = _depths.Origin.X,
                         DepthCellZ = _depths.Origin.Z,
                         DepthVersion = _depths.FrameVersion,
-                    }, _coast);
+                    }, spectrum, _coast);
                     _sections.Prepare = Lap(ref mark);
                     gpu.Begin(commands, _oceanComputeScope);
                     _ocean.RecordCompute(commands, _renderer.FrameIndex, (float)frameSeconds, _sim.Clock.TickIndex);
@@ -490,7 +511,7 @@ public sealed partial class GameApp : IDisposable
             SkyZenith = _clearSky.SkyZenith * (0.02f + 0.98f * day),
             SkyHorizon = _clearSky.SkyHorizon * (0.03f + 0.97f * day),
         };
-        _weather.Update(CameraXZ, _ocean, clear, _weatherPanel.DriveSky);
+        _weather.Update(PlanetCamera, _sim.WeatherTick, _ocean, clear, _weatherPanel.DriveSky);
         var horizon = _orbitTest is null ? System.Numerics.Vector3.Lerp(SpaceColour, _ocean.SkyHorizon, Atmosphere) : SpaceColour;
         _renderer.ClearColor = _seamTest is null ? new float4(horizon.X, horizon.Y, horizon.Z, 1f) : SeamTest.Key;
     }
@@ -590,15 +611,22 @@ public sealed partial class GameApp : IDisposable
         return double3.Normalize(up * sin + double3.Normalize(along * 0.8 + _sim.Seaward * 0.6) * cos);
     }
 
+    /// <summary>The swell of the camera's sea tile.</summary>
+    private OceanSwell Swell => _sim.Ocean.Swells.Near(PlanetCamera);
+
+    /// <summary>The camera in the planet's frame; the spawn when it is in another frame.</summary>
+    private double3 PlanetCamera => _camera.Frame == _planetFrame ? _camera.Position : _sim.Bubble.Origin;
+
     /// <summary>
-    /// The coast regions follow the camera and the swell's target carrier (breaking-waves-brief.md): baked on a job,
-    /// faded in and out; none without a sea to draw.
+    /// The coast regions follow the camera, each window its own sea tile's target carrier (breaking-waves-brief.md):
+    /// baked on a job, faded in and out; none without a sea to draw.
     /// </summary>
     private void UpdateCoast(double3 camera, double frameSeconds)
     {
         var start = Stopwatch.GetTimestamp();
-        var carrier = _seaWanted ? CoastCarrier.From(_swell.TargetCarrierDirection, _swell.TargetCarrierOmega, _swell.TargetCarrierHeight) : default;
-        _coast.Update(camera, carrier, _swell.TargetSignificantHeight, (float)frameSeconds);
+        var bytes = GC.GetAllocatedBytesForCurrentThread();
+        _coast.Update(camera, _seaWanted ? _coastCarriers : null, (float)frameSeconds);
+        _coastAllocated += GC.GetAllocatedBytesForCurrentThread() - bytes;
         _coastMs.Record((float)Stopwatch.GetElapsedTime(start).TotalMilliseconds);
     }
 
@@ -783,19 +811,6 @@ public sealed partial class GameApp : IDisposable
         return new System.Numerics.Vector3((float)centre.X, (float)centre.Y, (float)centre.Z);
     }
 
-    /// <summary>The camera in the weather plane (the spawn bubble's); the plane's origin outside the planet's frame.</summary>
-    private System.Numerics.Vector2 CameraXZ
-    {
-        get
-        {
-            if (_camera.Frame != _planetFrame || _orbitTest is not null)
-                return default;
-
-            var local = _sim.Bubble.ToLocal(_camera.Position);
-            return new System.Numerics.Vector2(local.X, local.Z);
-        }
-    }
-
     /// <summary>The camera at a point of the spawn bubble (y up from sea level, +x out to sea), looking along yaw (from +X toward +Z) and pitch.</summary>
     private void PlaceCamera(System.Numerics.Vector3 position, float yaw, float pitch)
     {
@@ -817,14 +832,17 @@ public sealed partial class GameApp : IDisposable
         _sim.DriveWind = _weatherPanel.DriveOcean;
         _sim.WeatherTimeOffset = _weatherPanel.TimeOffset;
 
+        _sim.ViewAnchor = _camera.Frame == _planetFrame ? _camera.Position : null;
+
         var ticks = _sim.Advance(frameSeconds);
         for (var i = 0; i < ticks; i++)
         {
             var tickStart = Stopwatch.GetTimestamp();
-            _weather.Tick(_sim.WeatherTime, CameraXZ);
-            _weatherPanel.TickMs.Record((float)Stopwatch.GetElapsedTime(tickStart).TotalMilliseconds);
+            _weather.Tick(_sim.WeatherTick, PlanetCamera);
+            _weatherPanel.TickMs.Record(_weather.LastTickMs);
 
             _sim.Tick();
+            _weatherPanel.SeaMs.Record(_sim.LastSwellMs);
             _oceanPanel.PrepareMs.Record(_sim.LastSwellMs);
             _stats.Tick.Record((float)Stopwatch.GetElapsedTime(tickStart).TotalMilliseconds);
         }
@@ -862,12 +880,19 @@ public sealed partial class GameApp : IDisposable
     {
         var uiStart = Stopwatch.GetTimestamp();
         _imgui.NewFrame();
-        _profiler.Draw();
-        _renderer.PipelineStats.Enabled = _profiler.Open && _profiler.PipelineStatsOn;
-        _terrainRenderer.StatsEnabled = _profiler.Open || _terrainPanel.Open || _orbitTest is not null || _moonTest is not null;
-        _oceanPanel.Draw();
-        _terrainPanel.Draw();
-        _weatherPanel.Draw(CameraXZ);
+        var debug = _debug.Begin(ImGui.GetIO().DisplaySize.Y, _window.ContentScale.X);
+
+        if (debug)
+        {
+            _profiler.Draw();
+            _oceanPanel.Draw();
+            _terrainPanel.Draw();
+            _weatherPanel.Draw(PlanetCamera, _sim.WeatherTick);
+            _debug.End();
+        }
+
+        _renderer.PipelineStats.Enabled = debug && _profiler.Open && _profiler.PipelineStatsOn;
+        _terrainRenderer.StatsEnabled = (debug && (_profiler.Open || _terrainPanel.Open)) || _orbitTest is not null || _moonTest is not null;
         DrawMenu(); // menu
         _imgui.EndFrame();
         _stats.Ui.Record((float)Stopwatch.GetElapsedTime(uiStart).TotalMilliseconds);
@@ -878,15 +903,10 @@ public sealed partial class GameApp : IDisposable
         if (action != GlfwKeyAction.Press || MenuKey(key)) // menu: Escape pauses, resumes and goes back
             return;
 
-        if (key == GlfwKey.F3)
-            _profiler.Open = !_profiler.Open;
-        else if (key == GlfwKey.F4)
-            _oceanPanel.Open = !_oceanPanel.Open;
-        else if (key == GlfwKey.F5)
-            _terrainPanel.Open = !_terrainPanel.Open;
-        else if (key == GlfwKey.F6)
-            _weatherPanel.Open = !_weatherPanel.Open;
-        else if (key == GlfwKey.Escape && !_imgui.WantCaptureKeyboard)
+        if (_debug.OnKey(key))
+            return;
+
+        if (key == GlfwKey.Escape && !_imgui.WantCaptureKeyboard)
             window.ShouldClose = true;
     }
 

@@ -1,5 +1,6 @@
 using BrutalGame.Ships;
 using BrutalGame.Ships.Components;
+using BrutalGame.Ships.Interior;
 
 namespace BrutalGame.Plans;
 
@@ -50,6 +51,28 @@ public enum IssueCode : ushort
     PlacementPrefab,
     PrefabLevel,
     ComponentSize,
+    HallwayCount,
+    HallwayShape,
+    HallwayFloor,
+    HallwayTooSmall,
+    HallwayMaterial,
+    HallwayShaft,
+    WindowCount,
+    WindowShape,
+    WindowMaterial,
+    WallShape,
+    RoomWall,
+    DecalCount,
+    DecalShape,
+    PaintSlots,
+    PaintRef,
+    JointCount,
+    JointShape,
+    JointMember,
+    OpeningCount,
+    OpeningShape,
+    ProgramShape,
+    ProgramCall,
 }
 
 public readonly record struct ValidationIssue(Severity Severity, IssueCode Code, ElementRef Element, int Value);
@@ -105,19 +128,33 @@ public static class PlanValidator
         {
             var brush = set.Brushes[i];
 
-            if (brush.Kind == BrushKind.Stamp)
+            if (brush.Kind is BrushKind.Stamp or BrushKind.Model)
             {
-                if (brush.Mesh >= doc.Meshes.Count)
+                if (brush.Kind == BrushKind.Stamp ? brush.Mesh >= doc.Meshes.Count : brush.Model == 0)
                     log.Add(Severity.Error, IssueCode.BrushMesh, default, i);
+
+                if (brush.Rows is 0 or > HullBrush.MaxRows || brush.TurnJitter > HullBrush.MaxTurnJitter || brush.SizeJitter > HullBrush.MaxSizeJitter
+                    || !Enum.IsDefined(brush.Alternate) || brush.RowSpacing is < 0 or > HullBrush.MaxPaintUnits
+                    || brush.StartGap is < 0 or > HullBrush.MaxPaintUnits * 64 || brush.EndGap is < 0 or > HullBrush.MaxPaintUnits * 64)
+                    log.Add(Severity.Error, IssueCode.BrushSpacing, default, i);
 
                 if (brush.Spacing < HullBrush.MinSpacing || brush.Spacing * HullSolid.MetresPerPositionUnit > PlanLimits.MaxReachMetres)
                     log.Add(Severity.Error, IssueCode.BrushSpacing, default, i);
             }
-            else if (brush.Kind != BrushKind.Sweep || brush.Profile.Count is < HullBrush.MinProfilePoints or > HullBrush.MaxProfilePoints
-                || brush.Profile.Any(p => Math.Abs(p.X) > HullBrush.MaxProfileUnits || Math.Abs(p.Y) > HullBrush.MaxProfileUnits) || ProfileArea(brush.Profile) == 0)
+            else if (brush.Kind == BrushKind.Paint)
+            {
+                if (!Enum.IsDefined(brush.Pattern) || brush.Width is < HullBrush.MinPaintUnits or > HullBrush.MaxPaintUnits
+                    || brush.LineWidth is < HullBrush.MinPaintUnits or > HullBrush.MaxPaintUnits || brush.Spacing is < HullBrush.MinPaintUnits or > HullBrush.MaxPaintUnits)
+                    log.Add(Severity.Error, IssueCode.BrushProfile, default, i);
+            }
+            else if (brush.Kind != BrushKind.Sweep || !IsBrushProfile(doc, brush.Outline)
+                || Math.Abs(brush.Anchor.X) > HullBrush.MaxProfileUnits || Math.Abs(brush.Anchor.Y) > HullBrush.MaxProfileUnits)
             {
                 log.Add(Severity.Error, IssueCode.BrushProfile, default, i);
             }
+
+            if (brush.Scale is < HullBrush.MinScale or > HullBrush.MaxScale)
+                log.Add(Severity.Error, IssueCode.BrushProfile, default, i);
         }
 
         foreach (var stroke in set.Strokes)
@@ -129,13 +166,22 @@ public static class PlanValidator
 
             if (stroke.Points.Count is < HullStroke.MinPoints or > HullStroke.MaxPoints
                 || stroke.Scale is < 100 or > 10000 || Math.Abs(stroke.Offset * HullSolid.MetresPerPositionUnit) > 16.0
-                || stroke.Points.Any(p => (p.NX == 0 && p.NY == 0 && p.NZ == 0) || p.Position.Length() > PlanLimits.MaxReachMetres))
+                || stroke.Points.Any(p => (p.NX == 0 && p.NY == 0 && p.NZ == 0) || p.Position.Length() > PlanLimits.MaxReachMetres || p.Scale is < HullBrush.MinScale or > HullBrush.MaxScale))
                 log.Add(Severity.Error, IssueCode.StrokeShape, element, stroke.Points.Count);
 
             if (stroke.Material >= doc.Materials.Count)
                 log.Add(Severity.Error, IssueCode.StrokeMaterial, element, stroke.Material);
         }
     }
+
+    /// <summary>Plan profile <paramref name="index"/> is a brush outline a sweep can use: 3-16 corners in range, enclosing some area.</summary>
+    public static bool IsBrushProfile(PlanDocument doc, int index) =>
+        doc.Interior is { } interior && index < interior.Profiles.Count && interior.Profiles[index] is { Kind: ProfileKind.Brush } profile
+        && IsBrushOutline(profile.Points);
+
+    public static bool IsBrushOutline(List<ProfilePoint> points) =>
+        points.Count is >= HullBrush.MinProfilePoints and <= HullBrush.MaxProfilePoints && ProfileArea(points) != 0
+        && !points.Any(p => Math.Abs(p.X) > HullBrush.MaxProfileUnits || Math.Abs(p.Y) > HullBrush.MaxProfileUnits);
 
     /// <summary>Parts, pipes and placements: counts, positive sizes, materials, pipe ends on real ports, placed prefabs present.</summary>
     private static void ValidateComponents(PlanDocument doc, ValidationLog log)
@@ -177,12 +223,13 @@ public static class PlanValidator
         {
             var element = new ElementRef(ElementKind.Route, pipe.Id);
 
-            if (pipe.Nodes.Count is < 2 or > PipeRoute.MaxNodes || pipe.InnerMm == 0 || pipe.InnerMm >= pipe.OuterMm)
+            if (pipe.Nodes.Count is < 2 or > PipeRoute.MaxNodes || pipe.Runs.Count is 0 or > PipeRoute.MaxRuns
+                || pipe.Runs.Any(run => run.A == run.B || run.A >= pipe.Nodes.Count || run.B >= pipe.Nodes.Count || run.InnerMm == 0 || run.InnerMm >= run.OuterMm))
                 log.Add(Severity.Error, IssueCode.PipeShape, element, pipe.Nodes.Count);
 
-            foreach (var end in new[] { pipe.From, pipe.To })
+            foreach (var (node, end) in pipe.Ports)
             {
-                if (!end.IsOpen && (!parts.TryGetValue(end.Part, out var part) || end.Port >= PartGeometry.Ports(part).Length))
+                if (node >= pipe.Nodes.Count || end.IsOpen || !parts.TryGetValue(end.Part, out var part) || end.Port >= PartGeometry.Ports(part).Length)
                     log.Add(Severity.Error, IssueCode.PipeEnd, element, (int)end.Part);
             }
 
@@ -194,6 +241,276 @@ public static class PlanValidator
         {
             if (!doc.Prefabs.ContainsKey(placement.Prefab) || !SolidRotation.IsValid(placement.Rotation))
                 log.Add(Severity.Error, IssueCode.PlacementPrefab, new ElementRef(ElementKind.Placement, placement.Id), 0);
+        }
+    }
+
+    /// <summary>
+    /// Hallways: counts, a real path and outline, the floor at Y = 0, the humanoid clearance (0.8 × 1.9 m; the value is
+    /// the clear width in mm), the stair material, and a Warning per run too steep for stairs (ladders are not built yet).
+    /// </summary>
+    private static void ValidateInterior(PlanDocument doc, ValidationLog log)
+    {
+        var interior = doc.Interior;
+
+        if (interior is null)
+            return;
+
+        if (interior.Hallways.Count > HullInterior.MaxHallways || interior.Profiles.Count > HullInterior.MaxProfiles)
+            log.Add(Severity.Error, IssueCode.HallwayCount, default, interior.Hallways.Count);
+
+        // Profiles: a real outline in range with its floor at Y = 0 (a wall: see WallGeometry.IsValid). The value is the profile's index.
+        var badProfiles = new HashSet<int>();
+
+        for (var i = 0; i < interior.Profiles.Count; i++)
+        {
+            var points = interior.Profiles[i].Points;
+
+            if (interior.Profiles[i].Kind == ProfileKind.Wall)
+            {
+                if (!WallGeometry.IsValid(points))
+                {
+                    log.Add(Severity.Error, IssueCode.WallShape, default, i);
+                    badProfiles.Add(i);
+                }
+
+                continue;
+            }
+
+            // Brush outlines are checked with the brushes that use them.
+            if (interior.Profiles[i].Kind == ProfileKind.Brush)
+                continue;
+
+            if (points.Count is < HullProfile.MinPoints or > HullProfile.MaxPoints || HallwayGeometry.Area2(points) == 0
+                || points.Any(p => Math.Abs(p.X) > HullProfile.MaxUnits || Math.Abs(p.Y) > HullProfile.MaxUnits))
+            {
+                log.Add(Severity.Error, IssueCode.HallwayShape, default, i);
+                badProfiles.Add(i);
+            }
+            else if (points.Min(p => p.Y) != 0)
+            {
+                log.Add(Severity.Warning, IssueCode.HallwayFloor, default, i);
+            }
+        }
+
+        foreach (var hallway in interior.Hallways)
+        {
+            var element = new ElementRef(ElementKind.Route, hallway.Id);
+
+            if (hallway.Nodes.Count is < 2 or > HullHallway.MaxNodes || hallway.Runs.Count is 0 or > HullHallway.MaxRuns
+                || hallway.Runs.Any(r => r.A == r.B || r.A >= hallway.Nodes.Count || r.B >= hallway.Nodes.Count)
+                || hallway.Profile >= interior.Profiles.Count || badProfiles.Contains(hallway.Profile) || interior.Profiles[hallway.Profile].Kind != ProfileKind.Hallway
+                || Enumerable.Range(0, hallway.Nodes.Count).Any(i => hallway.Node(i).Length() > PlanLimits.MaxReachMetres)
+                || !SolidRotation.IsValid(hallway.Gravity))
+            {
+                log.Add(Severity.Error, IssueCode.HallwayShape, element, hallway.Nodes.Count);
+                continue;
+            }
+
+            var clearance = HallwayGeometry.Measure(interior.Profiles[hallway.Profile].Points);
+
+            if (!clearance.Fits)
+                log.Add(Severity.Error, IssueCode.HallwayTooSmall, element, (int)Math.Round(clearance.Width * 1000));
+
+            if (hallway.Material >= doc.Materials.Count)
+                log.Add(Severity.Error, IssueCode.HallwayMaterial, element, hallway.Material);
+
+            var down = HallwayGeometry.Down(hallway.Gravity);
+
+            for (var r = 0; r < hallway.Runs.Count; r++)
+            {
+                var (a, b) = hallway.Runs[r];
+
+                if (HallwayGeometry.Kind(HallwayGeometry.Slope(hallway.Node(a), hallway.Node(b), down)) == RunKind.Shaft)
+                    log.Add(Severity.Warning, IssueCode.HallwayShaft, element, r);
+            }
+        }
+
+        // Room walls: one per solid, a box room using a good wall profile. The value is the profile index.
+        if (interior.RoomWalls.Count > HullInterior.MaxRoomWalls)
+            log.Add(Severity.Error, IssueCode.RoomWall, default, interior.RoomWalls.Count);
+
+        var seen = new HashSet<uint>();
+
+        foreach (var wall in interior.RoomWalls)
+        {
+            var element = new ElementRef(ElementKind.Solid, wall.Solid);
+            var index = doc.Solids.IndexOf(wall.Solid);
+
+            if (!seen.Add(wall.Solid) || index < 0 || !WallGeometry.IsRoom(doc.Solids[index], doc.Meshes)
+                || wall.Profile >= interior.Profiles.Count || interior.Profiles[wall.Profile].Kind != ProfileKind.Wall || badProfiles.Contains(wall.Profile))
+                log.Add(Severity.Error, IssueCode.RoomWall, element, wall.Profile);
+        }
+    }
+
+    /// <summary>
+    /// Joints: count; each a known kind, a valid axis, within reach, a parent that exists and at most three deep (no loops),
+    /// a torque in range and, for a hinge, limits that hold its target; each member a solid that exists, once, of a joint
+    /// that exists.
+    /// </summary>
+    private static void ValidateJoints(PlanDocument doc, ValidationLog log)
+    {
+        if (doc.Joints is not { } set)
+            return;
+
+        if (set.Joints.Count > HullJointSet.MaxJoints)
+            log.Add(Severity.Error, IssueCode.JointCount, default, set.Joints.Count);
+
+        foreach (var j in set.Joints)
+        {
+            var element = new ElementRef(ElementKind.Placement, j.Id);
+            var depth = set.Depth(j.Id);
+
+            if (!Enum.IsDefined(j.Kind) || !SolidRotation.IsValid(j.Rotation) || j.Pivot.Length() > PlanLimits.MaxReachMetres
+                || depth is 0 or > HullJointSet.MaxDepth || j.TorqueNm > HullJoint.MaxTorqueNm
+                || (j.Kind == JointKind.Hinge && (j.Min < -1800 || j.Max > 1800))
+                || (j.Limited && (j.Min > j.Max || j.Target < j.Min || j.Target > j.Max)))
+                log.Add(Severity.Error, IssueCode.JointShape, element, depth);
+        }
+
+        var seen = new HashSet<uint>();
+
+        foreach (var (solid, joint) in set.Members)
+        {
+            if (!seen.Add(solid) || doc.Solids.IndexOf(solid) < 0 || set.IndexOf(joint) < 0)
+                log.Add(Severity.Error, IssueCode.JointMember, new ElementRef(ElementKind.Solid, solid), (int)joint);
+        }
+    }
+
+    /// <summary>
+    /// A programme: a valid interface; at most 64 nodes of known kinds, unique ids, each naming a call or state the interface
+    /// has and leading only to nodes that exist (an error, value: the node id); poses of states and joints that exist, a
+    /// joint's pose within its limits. A call with no node is a warning (value: the call's index): it does nothing.
+    /// </summary>
+    private static void ValidateProgram(PlanDocument doc, ValidationLog log)
+    {
+        if (doc.Program is not { } program)
+            return;
+
+        var face = program.Interface;
+
+        if (!Ships.Logic.ComponentInterface.IsValid(face) || program.Nodes.Count > Ships.Logic.HullProgram.MaxNodes || program.Poses.Count > Ships.Logic.HullProgram.MaxPoses)
+        {
+            log.Add(Severity.Error, IssueCode.ProgramShape, default, 0);
+            return;
+        }
+
+        var ids = new HashSet<ushort>();
+
+        foreach (var n in program.Nodes)
+        {
+            var named = n.Kind switch
+            {
+                Ships.Logic.NodeKind.OnCall => n.A < face.Calls.Count,
+                Ships.Logic.NodeKind.SetState or Ships.Logic.NodeKind.IfState or Ships.Logic.NodeKind.StateIs => n.A < face.States.Count,
+                Ships.Logic.NodeKind.JointAt => doc.Joints?.IndexOf(n.Joint) >= 0,
+                _ => true,
+            };
+
+            // Flow leads to flow nodes; a condition link leads to a condition.
+            bool Flow(ushort to) => to == 0 || (program.IndexOf(to) is var i and >= 0 && !program.Nodes[i].IsCondition);
+            var condition = n.In == 0 || (program.IndexOf(n.In) is var c and >= 0 && program.Nodes[c].IsCondition && n.TakesCondition);
+
+            if (n.Id == 0 || !ids.Add(n.Id) || !Enum.IsDefined(n.Kind) || !named || (n.Kind != Ships.Logic.NodeKind.JointAt && n.B < 0)
+                || !Flow(n.Out0) || !Flow(n.Out1) || !condition)
+                log.Add(Severity.Error, IssueCode.ProgramShape, default, n.Id);
+        }
+
+        var joints = doc.Joints;
+
+        foreach (var p in program.Poses)
+        {
+            var at = joints?.IndexOf(p.Joint) ?? -1;
+
+            if (p.State >= face.States.Count || at < 0 || (joints!.Joints[at].Limited && (p.Value < joints.Joints[at].Min || p.Value > joints.Joints[at].Max)))
+                log.Add(Severity.Error, IssueCode.ProgramShape, default, p.State);
+        }
+
+        for (var c = 0; c < face.Calls.Count; c++)
+        {
+            if (!program.Nodes.Exists(n => n.Kind == Ships.Logic.NodeKind.OnCall && n.A == c))
+                log.Add(Severity.Warning, IssueCode.ProgramCall, default, c);
+        }
+    }
+
+    /// <summary>Openings: count; each a known kind on a door profile of the plan, a valid rotation, within reach, a depth of 1 mm to 8 m.</summary>
+    private static void ValidateOpenings(PlanDocument doc, ValidationLog log)
+    {
+        if (doc.Openings is not { } set)
+            return;
+
+        if (set.Openings.Count > HullOpeningSet.MaxOpenings)
+            log.Add(Severity.Error, IssueCode.OpeningCount, default, set.Openings.Count);
+
+        var profiles = doc.Interior?.Profiles;
+
+        foreach (var o in set.Openings)
+        {
+            if (!Enum.IsDefined(o.Kind) || profiles is null || o.Profile >= profiles.Count || profiles[o.Profile].Kind != ProfileKind.Door
+                || !SolidRotation.IsValid(o.Rotation) || o.Origin.Length() > PlanLimits.MaxReachMetres || o.DepthMm is 0 or > HullOpening.MaxDepthMm)
+                log.Add(Severity.Error, IssueCode.OpeningShape, new ElementRef(ElementKind.Placement, o.Id), o.Profile);
+        }
+    }
+
+    /// <summary>Paints: slot count, each naming a finish; the hull's slot and strokes' slots in range, each stroke there.</summary>
+    private static void ValidatePaint(PlanDocument doc, ValidationLog log)
+    {
+        if (doc.Paint is not { } paint)
+            return;
+
+        if (paint.Slots.Count > HullPaintSet.MaxSlots || paint.Slots.Exists(s => s.Finish == 0))
+            log.Add(Severity.Error, IssueCode.PaintSlots, default, paint.Slots.Count);
+
+        if (paint.Hull != HullPaintSet.None && paint.Hull >= paint.Slots.Count)
+            log.Add(Severity.Error, IssueCode.PaintRef, default, paint.Hull);
+
+        foreach (var (stroke, slot) in paint.Strokes)
+        {
+            if (slot >= paint.Slots.Count || doc.Brushes is not { } set || set.IndexOfStroke(stroke) < 0)
+                log.Add(Severity.Error, IssueCode.PaintRef, new ElementRef(ElementKind.Solid, stroke), slot);
+        }
+    }
+
+    /// <summary>Decals: count, a real normal, sizes in range, an image named, within reach.</summary>
+    private static void ValidateDecals(PlanDocument doc, ValidationLog log)
+    {
+        if (doc.Decals is not { } set)
+            return;
+
+        if (set.Decals.Count > HullDecalSet.MaxDecals)
+            log.Add(Severity.Error, IssueCode.DecalCount, default, set.Decals.Count);
+
+        foreach (var d in set.Decals)
+        {
+            if ((d.NX == 0 && d.NY == 0 && d.NZ == 0) || d.Roll >= 24 || !Enum.IsDefined(d.Shape)
+                || (d.Shape == DecalShape.Image ? d.Asset == 0 : d.Paint >= (doc.Paint?.Slots.Count ?? 0)) || d.Position.Length() > PlanLimits.MaxReachMetres
+                || d.WidthMm is < HullDecal.MinSizeMm or > HullDecal.MaxSizeMm || d.HeightMm is < HullDecal.MinSizeMm or > HullDecal.MaxSizeMm
+                || d.DepthMm is < HullDecal.MinSizeMm or > HullDecal.MaxSizeMm)
+                log.Add(Severity.Error, IssueCode.DecalShape, new ElementRef(ElementKind.Placement, d.Id), d.WidthMm);
+        }
+    }
+
+    /// <summary>Windows: count, a real outward normal, sizes in range (0.1-16 m across, pane at least 5 mm, cut at most 8 m deep), within reach, the pane material.</summary>
+    private static void ValidateWindows(PlanDocument doc, ValidationLog log)
+    {
+        var windows = doc.Windows;
+
+        if (windows is null)
+            return;
+
+        if (windows.Windows.Count > HullWindowSet.MaxWindows)
+            log.Add(Severity.Error, IssueCode.WindowCount, default, windows.Windows.Count);
+
+        foreach (var w in windows.Windows)
+        {
+            var element = new ElementRef(ElementKind.Placement, w.Id);
+
+            if ((w.NX == 0 && w.NY == 0 && w.NZ == 0) || !Enum.IsDefined(w.Shape) || w.Roll >= 24
+                || w.WidthMm is < HullWindow.MinSizeMm or > HullWindow.MaxSizeMm || w.HeightMm is < HullWindow.MinSizeMm or > HullWindow.MaxSizeMm
+                || w.ThicknessMm < HullWindow.MinThicknessMm || w.DepthMm > HullWindow.MaxDepthMm || w.Position.Length() > PlanLimits.MaxReachMetres)
+                log.Add(Severity.Error, IssueCode.WindowShape, element, w.WidthMm);
+
+            if (w.Material >= doc.Materials.Count)
+                log.Add(Severity.Error, IssueCode.WindowMaterial, element, w.Material);
         }
     }
 
@@ -301,7 +618,14 @@ public static class PlanValidator
 
         ValidateLayers(doc, log);
         ValidateBrushes(doc, log);
+        ValidateDecals(doc, log);
+        ValidatePaint(doc, log);
+        ValidateJoints(doc, log);
+        ValidateOpenings(doc, log);
+        ValidateProgram(doc, log);
         ValidateComponents(doc, log);
+        ValidateInterior(doc, log);
+        ValidateWindows(doc, log);
         var ids = new HashSet<uint>(solids.Length);
         var inBounds = true;
         var anyAdd = false;

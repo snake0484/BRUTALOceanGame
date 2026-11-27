@@ -268,7 +268,7 @@ public sealed class AuthoredLayerTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>D85: a player's edits inside the core of a site newer than their save are dropped; everything else replays.</summary>
+    /// <summary>D90: a player's edits inside the core of a site newer than their save are dropped; everything else replays.</summary>
     [Fact]
     public void UpgradeDropsPlayerEditsOnlyInNewerSiteCores()
     {

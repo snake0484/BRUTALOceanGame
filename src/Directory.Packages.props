@@ -14,6 +14,7 @@
     <PackageVersion Include="Ahwoo.BRUTAL.Numerics" Version="2026.10.1" />
     <PackageVersion Include="Ahwoo.BRUTAL.RakNet" Version="2026.10.2" />
     <PackageVersion Include="Ahwoo.BRUTAL.ShaderC" Version="2026.10.2" />
+    <PackageVersion Include="Ahwoo.BRUTAL.Stb" Version="2026.10.2" />
     <PackageVersion Include="Ahwoo.BRUTAL.Vulkan" Version="2026.10.2" />
     <PackageVersion Include="Ahwoo.BRUTAL.Vulkan.Abstractions" Version="2026.10.2" />
     <PackageVersion Include="Ahwoo.BRUTAL.Vulkan.Vma" Version="2026.10.2" />

@@ -24,8 +24,8 @@ public class ComponentTests
         var data = doc.Components!;
         var supplies = new List<Supply>
         {
-            new() { Pipe = data.Pipes[0].Id, AtEnd = true, Mixture = "mix.methane", Pressure = supplyPa },
-            new() { Pipe = data.Pipes[1].Id, AtEnd = true, Mixture = "mix.oxygen", Pressure = supplyPa },
+            new() { Pipe = data.Pipes[0].Id, Node = data.Pipes[0].OpenEnds().Single(), Mixture = "mix.methane", Pressure = supplyPa },
+            new() { Pipe = data.Pipes[1].Id, Node = data.Pipes[1].OpenEnds().Single(), Mixture = "mix.oxygen", Pressure = supplyPa },
         };
         return ComponentModel.Compile(data, Chemistry, m => Yield(doc, m), supplies, ambient);
     }
@@ -38,8 +38,8 @@ public class ComponentTests
 
         // Nozzle, two injectors and the igniter each meet the chamber.
         Assert.Equal(4, links.Count);
-        Assert.All(doc.Components!.Pipes, p => Assert.False(p.From.IsOpen));
-        Assert.All(doc.Components.Pipes, p => Assert.True(p.To.IsOpen));
+        Assert.All(doc.Components!.Pipes, p => Assert.False(p.EndAt(0).IsOpen));
+        Assert.All(doc.Components.Pipes, p => Assert.Single(p.OpenEnds()));
 
         var log = new ValidationLog();
         PlanValidator.Validate(doc, log, Catalog);
@@ -140,7 +140,7 @@ public class ComponentTests
     {
         var rocket = Rocket();
         var bytes = PlanFormat.Encode(rocket);
-        Assert.Equal(PlanFormat.ComponentFormat, bytes[4]);
+        Assert.Equal(PlanFormat.RouteFormat, bytes[4]);
         Assert.Equal((byte)PlanLevel.Component, bytes[6]);
         Assert.True(PlanFormat.TryDecode(bytes, out var loaded, out var error), error.ToString());
         Assert.Equal(PlanFormat.EncodeBody(rocket), PlanFormat.EncodeBody(loaded));

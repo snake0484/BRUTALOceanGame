@@ -65,7 +65,6 @@ public sealed class MenuUi
     private readonly ISaveCatalog _saves;
     private readonly ISessionLauncher _sessions;
     private readonly DesignerLauncher _designer;
-    private readonly ImInputString _seed = new(24, "1"u8);
     private readonly ImInputString _address = new(64, DefaultAddress);
     private readonly ImInputString _joinPort = new(8, DefaultPort);
     private readonly ImInputString _hostPort = new(8, DefaultPort);
@@ -393,15 +392,10 @@ public sealed class MenuUi
     private void DrawNewGame()
     {
         Heading("New Game"u8);
-        Caption("World seed"u8);
-        ImGui.SetNextItemWidth(_style.Px(FieldWidth));
-        var entered = ImGui.InputText("##seed"u8, _seed, ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll);
-        Hint("Digits are the seed itself. Other text is hashed. Blank picks one at random."u8);
-        Gap(18f);
         FocusFirst();
 
-        if (Item("Start"u8) || entered)
-            StartNewGame(MenuLaunch.ParseSeed(_seed.ToString()));
+        if (Item("Start"u8))
+            StartNewGame(MenuLaunch.DefaultSeed);
 
         if (Item("Back"u8))
             Go(Screen.Root);
@@ -474,7 +468,7 @@ public sealed class MenuUi
             return;
         }
 
-        var result = host ? _sessions.Host(MenuLaunch.ParseSeed(_seed.ToString()), port) : _sessions.Join(_address.ToString(), port);
+        var result = host ? _sessions.Host(MenuLaunch.DefaultSeed, port) : _sessions.Join(_address.ToString(), port);
         _message = result.Message;
 
         if (result.Started)
@@ -615,7 +609,7 @@ public sealed class MenuUi
 
     private void DrawLoading(in MenuWorld world)
     {
-        Title("Loading"u8, $"World seed {world.Seed}");
+        Title("Loading"u8, "Building the world."u8);
         var draw = ImGui.GetWindowDrawList();
         var start = ImGui.GetCursorScreenPos();
         var width = _style.Px(ColumnWidth);

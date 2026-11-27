@@ -27,7 +27,8 @@ public sealed unsafe class OceanRenderer : IDisposable
     public const int Levels = 17;
     public const int HalfCells = 48;
     public const float BaseSpacing = 0.25f;
-    public const int MaxWaves = OceanSwell.MaxComponents;
+    /// <summary>Wave components across the four tile slots (ocean_common.glsl MAX_WAVES): a steady swell has ~150, one blending twice that.</summary>
+    public const int MaxWaves = 1536;
 
     /// <summary>Distance (m) from the camera within which waves are drawn: the wave levels' corner.</summary>
     public const float WaveReach = 1.4142135f * HalfCells * BaseSpacing * (1 << (WaveLevels - 1));
@@ -119,8 +120,6 @@ public sealed unsafe class OceanRenderer : IDisposable
         public Vector4 DepthFar;
         public Vector4 DepthWrap;
         public Vector4 DepthValid;
-        public Vector4 Carrier;
-        public Vector4 Shore;
         public Vector4 Planet;
         public Vector4 BandRow;
         public Vector4 BandSouth;
@@ -128,7 +127,10 @@ public sealed unsafe class OceanRenderer : IDisposable
         public fixed float SlotToTile[4 * SeaTiles.MaxBlend];
         public fixed float SlotFromTile[4 * SeaTiles.MaxBlend];
         public fixed float SlotSide[4 * SeaTiles.MaxBlend];
+        public fixed float SlotCarrier[4 * SeaTiles.MaxBlend];
+        public fixed float SlotShore[4 * SeaTiles.MaxBlend];
         public fixed float Coast[CoastFloats * CoastRegionSet.Capacity];
+        public fixed int SlotWaves[4 * SeaTiles.MaxBlend];
         public int WaveCount;
         public int SlotCount;
         public float DebugView;
@@ -267,10 +269,7 @@ public sealed unsafe class OceanRenderer : IDisposable
     /// <summary>std140 starts the wave array on a 16-byte boundary after the header.</summary>
     private static int WavesOffset => (sizeof(FrameHeader) + 15) & ~15;
 
-    /// <summary>One vec4 per wave after the waves: its phase in each slot's tile plane.</summary>
-    private static int PhasesOffset => WavesOffset + MaxWaves * sizeof(GpuWave);
-
-    private static int FrameBufferSize => PhasesOffset + MaxWaves * sizeof(Vector4);
+    private static int FrameBufferSize => WavesOffset + MaxWaves * sizeof(GpuWave);
 
     private static int Align(int value) => (value + UniformAlignment - 1) / UniformAlignment * UniformAlignment;
 
@@ -596,13 +595,17 @@ public sealed unsafe class OceanRenderer : IDisposable
     /// tiles, depth maps) is rebased in double here.
     /// </summary>
     /// <param name="coast">The coast regions whose breaking faces are drawn (uploaded by <see cref="CoastAtlasGpu.Record"/>); null draws none.</param>
-    public void Prepare(int frameIndex, OceanSurface sea, in SeaFrame frame, double renderTime, in View view, CoastRegionSet? coast = null)
+    /// <param name="spectrum">The FFT detail's spectrum about the camera (<see cref="SeaSwells.SpectrumAt"/>).</param>
+    public void Prepare(int frameIndex, OceanSurface sea, in SeaFrame frame, double renderTime, in View view, in SpectrumState spectrum, CoastRegionSet? coast = null)
     {
-        var swell = sea.Swell;
+        SeaSlots.Build(sea.Tiles, frame, view.Camera.X, view.Camera.Z, WaveReach, out var slots);
         var block = (byte*)_buffer.Mapped + _frameOffsets[frameIndex];
         var header = (FrameHeader*)block;
         var waves = new Span<GpuWave>(block + WavesOffset, MaxWaves);
-        var phases = new Span<float>(block + PhasesOffset, MaxWaves * SeaTiles.MaxBlend);
+        var tallest = 0f;
+
+        for (var s = 0; s < slots.Count; s++)
+            tallest = MathF.Max(tallest, sea.Swells.For(slots.Tile[s])?.SignificantWaveHeight ?? 0f);
         var camera = view.Camera;
         var height = (float)camera.Y;
         _camera = camera;
@@ -613,37 +616,42 @@ public sealed unsafe class OceanRenderer : IDisposable
         ExtractFrustum(header->ViewProj);
 
         // Vertical cull range: the tallest swell crests and troughs.
-        _cullReach = 2f * swell.SignificantWaveHeight + 4f;
-        _firstLevel = FirstLevel((float)(camera.Y + frame.Drop(camera.X, camera.Z)));
+        _cullReach = 2f * tallest + 4f;
+        var altitude = (float)(camera.Y + frame.Drop(camera.X, camera.Z));
+        _firstLevel = FirstLevel(altitude);
 
-        header->Planet = new Vector4((float)camera.X, (float)camera.Z, 0f, (float)frame.SeaRadius);
         header->CameraPos = new Vector4(0f, height, 0f, (float)(renderTime % TimeWrap));
         header->SunDir = new Vector4(SunDirection, SunIntensity);
-        header->SkyZenith = new Vector4(SkyZenith, Glitter(swell.GpuSpectrum.Params.WindSpeed));
+        header->SkyZenith = new Vector4(SkyZenith, Glitter(spectrum.Params.WindSpeed));
         header->SkyHorizon = new Vector4(SkyHorizon, FogDensity * FogFade);
         header->WaterDeep = new Vector4(WaterDeep, Opacity);
         header->WaterScatter = new Vector4(WaterScatter, 0f);
         header->CascadeL = _fft.CascadeSizes;
-        header->CascadeKLo = OceanFft.BandLow(swell.GpuSpectrum.Params.MinWavelength) with { W = _fft.FoamStrength };
+        header->CascadeKLo = OceanFft.BandLow(spectrum.Params.MinWavelength) with { W = _fft.FoamStrength };
         (header->CascadeAnchorX, header->CascadeAnchorZ) = CascadeAnchors(header->CascadeL, view.DetailX, view.DetailZ);
         header->DepthRect = view.DepthNear;
         header->DepthFar = view.DepthFar;
         header->DepthValid = view.DepthValid;
-        header->DepthWrap = new Vector4(view.DepthCellX & (SurfFoamResolution - 1), view.DepthCellZ & (SurfFoamResolution - 1), 0f, 0f);
+        var primary = sea.Swells.For(slots.Tile[slots.Primary]);
+        header->DepthWrap = new Vector4(view.DepthCellX & (SurfFoamResolution - 1), view.DepthCellZ & (SurfFoamResolution - 1), FaceSpacing(altitude), primary?.SignificantWaveHeight ?? 0f);
         _foamOn = view.DepthNear.Z > 0f;
         (_depthCellX, _depthCellZ, _depthVersion) = (view.DepthCellX, view.DepthCellZ, view.DepthVersion);
 
-        // The sea tiles round the camera: one wave set, a phase per tile slot, and each slot's plane map.
-        SeaSlots.Build(sea.Tiles, frame, camera.X, camera.Z, WaveReach, out var slots);
+        // The sea tiles round the camera: each slot's tile's own waves, phased at the camera in its plane, and its plane map.
         header->SlotCount = slots.Count;
         header->BandRow = slots.BandRow;
         header->BandSouth = slots.BandSouth;
         header->BandNorth = slots.BandNorth;
-        header->WaveCount = swell.CopyGpuWaves(waves, renderTime, slots.U[0], slots.V[0]);
+        var count = 0;
 
         for (var s = 0; s < slots.Count; s++)
         {
-            swell.CopyGpuPhases(phases, s, SeaTiles.MaxBlend, renderTime, slots.U[s], slots.V[s]);
+            header->SlotWaves[4 * s] = count;
+
+            if (sea.Swells.For(slots.Tile[s]) is { } own)
+                count += own.CopyGpuWaves(waves[count..], renderTime, slots.U[s], slots.V[s]);
+
+            header->SlotWaves[4 * s + 1] = count;
 
             for (var k = 0; k < 4; k++)
             {
@@ -653,14 +661,32 @@ public sealed unsafe class OceanRenderer : IDisposable
             }
         }
 
-        // The surf carrier is the camera's tile's; its direction k·(T x) = (Tᵀ k)·x in the frame's plane.
-        var p = slots.Primary;
-        var shore = swell.GpuShore(ShoreWash);
-        header->Carrier = swell.GpuCarrier(renderTime, slots.U[p], slots.V[p]);
-        header->Shore = new Vector4(
-            slots.ToTile[4 * p] * shore.X + slots.ToTile[4 * p + 2] * shore.Y,
-            slots.ToTile[4 * p + 1] * shore.X + slots.ToTile[4 * p + 3] * shore.Y,
-            shore.Z, shore.W);
+        header->WaveCount = count;
+
+        // Each slot's surf carrier for the shore wash is its tile's; its direction k·(T x) = (Tᵀ k)·x in the frame's plane.
+        var breaker = 0f;
+
+        for (var s = 0; s < slots.Count; s++)
+        {
+            var carrier = default(Vector4);
+            var shore = default(Vector4);
+
+            if (sea.Swells.For(slots.Tile[s]) is { } own)
+            {
+                carrier = own.GpuCarrier(renderTime, slots.U[s], slots.V[s]);
+                var open = own.GpuShore(ShoreWash);
+                shore = new Vector4(
+                    slots.ToTile[4 * s] * open.X + slots.ToTile[4 * s + 2] * open.Y,
+                    slots.ToTile[4 * s + 1] * open.X + slots.ToTile[4 * s + 3] * open.Y,
+                    open.Z, open.W);
+                breaker = MathF.Max(breaker, open.Z);
+            }
+
+            ((Vector4*)header->SlotCarrier)[s] = carrier;
+            ((Vector4*)header->SlotShore)[s] = shore;
+        }
+
+        header->Planet = new Vector4((float)camera.X, (float)camera.Z, breaker, (float)frame.SeaRadius);
         header->DebugView = _fft.DebugView ? 1f : 0f;
         header->CoastCount = BreakerFaces && coast is not null ? PlaceCoast(header->Coast, coast, slots, renderTime) : 0;
         CoastDrawn = header->CoastCount;
@@ -668,12 +694,12 @@ public sealed unsafe class OceanRenderer : IDisposable
 
         if (CoastDrawn > 0)
         {
-            _cullReach += FaceCullHeight * coast!.Carrier.Height;
+            _cullReach += FaceCullHeight * coast!.DrawnHeight;
             _cullMargin += FaceCullMargin;
         }
     }
 
-    /// <summary>A shoaled, held breaker stands at most about this � the carrier's deep-water height over the sea.</summary>
+    /// <summary>A shoaled, held breaker stands at most about this × the carrier's deep-water height over the sea.</summary>
     private const float FaceCullHeight = 3f;
 
     /// <summary>
@@ -696,14 +722,34 @@ public sealed unsafe class OceanRenderer : IDisposable
             var to = (Vector4*)(block + CoastFloats * count++);
             to[0] = placement.CellX with { W = placement.Slot };
             to[1] = placement.CellZ with { W = slot };
-            to[2] = new Vector4(coast.Atlas(slot).PhaseAt(renderTime), carrier.Omega, carrier.Height, region.Weight);
+            var atlas = coast.Atlas(slot);
+            to[2] = new Vector4(coast.PhaseAt(slot, renderTime), carrier.Omega, atlas.Height, region.Weight);
         }
 
         return count;
     }
 
+    /// <summary>The finest level's spacing (m) without <see cref="FirstLevel"/>'s steps: the breaking faces are filtered at it.</summary>
+    public static float FaceSpacing(float altitude) => MathF.Max(altitude, 0f) * FinestCell;
+
+    /// <summary>The effective spacing (m) of the grid drawn a horizontal distance from a camera at an altitude: its level's, morphing to the next's (ocean.vert).</summary>
+    public static float GridSpacing(float altitude, float distance)
+    {
+        var level = FirstLevel(altitude);
+        var spacing = BaseSpacing * (1 << level);
+
+        while (distance > HalfCells * spacing && level < WaveLevels - 1)
+        {
+            spacing *= 2f;
+            level++;
+        }
+
+        var morph = Math.Clamp((distance / (HalfCells * spacing) - MorphStart) / (MorphEnd - MorphStart), 0f, 1f);
+        return spacing * (1f + morph);
+    }
+
     /// <summary>The finest level drawn from <paramref name="altitude"/> (m above the sea): cells of about <see cref="FinestCell"/> of it.</summary>
-    private static int FirstLevel(float altitude) =>
+    public static int FirstLevel(float altitude) =>
         Math.Clamp((int)MathF.Floor(MathF.Log2(MathF.Max(altitude * FinestCell / BaseSpacing, 1f))), 0, Levels - 2);
 
     /// <summary>

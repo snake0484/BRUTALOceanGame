@@ -1,0 +1,6 @@
+{
+  "decals": [
+    { "id": "decal.emblem", "name": "Emblem", "image": "emblem.png" },
+    { "id": "decal.roundel", "name": "Roundel", "image": "roundel.png" }
+  ]
+}

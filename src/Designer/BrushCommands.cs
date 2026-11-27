@@ -1,4 +1,6 @@
+using BrutalGame.Plans;
 using BrutalGame.Ships;
+using BrutalGame.Ships.Interior;
 
 namespace BrutalGame.Designer;
 
@@ -7,7 +9,8 @@ public enum ProfilePreset : byte { Rib, HalfRound, Ridge }
 
 /// <summary>
 /// Brush and stroke commands, each one undo group. The brush set is replaced whole on every edit (a
-/// <see cref="OpKind.SetBrushes"/> op holding before and after copies), so undo restores it exactly.
+/// <see cref="OpKind.SetBrushes"/> op holding before and after copies), so undo restores it exactly. Sweep outlines are
+/// the plan's brush profiles (the Profiles tab); each sweep brush says where in its outline the stroke runs and how big.
 /// </summary>
 public static class BrushCommands
 {
@@ -55,16 +58,34 @@ public static class BrushCommands
         return points;
     }
 
-    /// <summary>A new swept-profile brush; returns its index.</summary>
+    /// <summary>A new brush profile from a preset and a sweep brush using it; returns the brush index, or -1.</summary>
     public static int AddSweep(DesignSession session, ProfilePreset preset, double width, double height)
     {
         var index = -1;
+        session.Edit(s =>
+        {
+            var name = $"{PresetNames[(int)preset]} {width:0.##} x {height:0.##} m";
+            var profile = InteriorCommands.AddProfile(s, name, Profile(preset, width, height), kind: ProfileKind.Brush);
+
+            if (profile < 0)
+                LastError = InteriorCommands.LastError;
+            else
+                index = AddSweep(s, profile);
+        });
+        return index;
+    }
+
+    /// <summary>A new sweep brush using plan brush profile <paramref name="profile"/>, the stroke through its origin; returns its index, or -1.</summary>
+    public static int AddSweep(DesignSession session, int profile)
+    {
+        if (!IsBrushProfile(session, profile))
+            return Fail("Pick a brush profile (made in the Profiles tab)");
+
+        var index = -1;
         Change(session, set =>
         {
-            var brush = new HullBrush { Kind = BrushKind.Sweep };
-            brush.Profile.AddRange(Profile(preset, width, height));
             index = set.Brushes.Count;
-            set.Brushes.Add(brush);
+            set.Brushes.Add(new HullBrush { Kind = BrushKind.Sweep, Outline = (byte)profile });
         });
         return index;
     }
@@ -102,12 +123,97 @@ public static class BrushCommands
         return index;
     }
 
-    public static bool SetProfile(DesignSession session, int index, ProfilePreset preset, double width, double height) =>
+    /// <summary>A new paint brush: a band <paramref name="width"/> metres wide of <paramref name="pattern"/> in <paramref name="colour"/> (sRGB bytes, alpha high); returns its index.</summary>
+    public static int AddPaint(DesignSession session, PaintPattern pattern, uint colour, double width, double spacing, double lineWidth)
+    {
+        var index = -1;
+        Change(session, set =>
+        {
+            index = set.Brushes.Count;
+            set.Brushes.Add(new HullBrush
+            {
+                Kind = BrushKind.Paint,
+                Pattern = pattern,
+                Colour = colour,
+                Width = PaintUnits(width),
+                Spacing = PaintUnits(spacing),
+                LineWidth = PaintUnits(lineWidth),
+            });
+        });
+        return index;
+    }
+
+    /// <summary>A new model brush repeating game model <paramref name="model"/> every <paramref name="spacing"/> metres; returns its index.</summary>
+    public static int AddModel(DesignSession session, DefId model, double spacing)
+    {
+        var index = -1;
+        Change(session, set =>
+        {
+            index = set.Brushes.Count;
+            set.Brushes.Add(new HullBrush { Kind = BrushKind.Model, Model = model.Value, Spacing = Math.Max(Metres(spacing), HullBrush.MinSpacing) });
+        });
+        return index;
+    }
+
+    /// <summary>One edit to brush <paramref name="index"/> (placement options, model, ...), one undo group.</summary>
+    public static bool EditBrush(DesignSession session, int index, Action<HullBrush> edit) => ChangeBrush(session, index, edit);
+
+    /// <summary>Paint brush <paramref name="index"/>'s look: pattern, colour, band width, line spacing and width (metres).</summary>
+    public static bool SetPaint(DesignSession session, int index, PaintPattern pattern, uint colour, double width, double spacing, double lineWidth) =>
         ChangeBrush(session, index, b =>
         {
-            b.Profile.Clear();
-            b.Profile.AddRange(Profile(preset, width, height));
+            b.Pattern = pattern;
+            b.Colour = colour;
+            b.Width = PaintUnits(width);
+            b.Spacing = PaintUnits(spacing);
+            b.LineWidth = PaintUnits(lineWidth);
         });
+
+    private static int PaintUnits(double metres) => Math.Clamp(Metres(metres), HullBrush.MinPaintUnits, HullBrush.MaxPaintUnits);
+
+    /// <summary>Sweep brush <paramref name="index"/> sweeps plan brush profile <paramref name="profile"/> instead.</summary>
+    public static bool SetOutline(DesignSession session, int index, int profile) =>
+        IsBrushProfile(session, profile) && ChangeBrush(session, index, b => b.Outline = (byte)profile);
+
+    /// <summary>Where in its outline the stroke runs (1/1024 m, profile coordinates).</summary>
+    public static bool SetAnchor(DesignSession session, int index, ProfilePoint anchor) =>
+        ChangeBrush(session, index, b => b.Anchor = new ProfilePoint(
+            Math.Clamp(anchor.X, -HullBrush.MaxProfileUnits, HullBrush.MaxProfileUnits),
+            Math.Clamp(anchor.Y, -HullBrush.MaxProfileUnits, HullBrush.MaxProfileUnits)));
+
+    /// <summary>The brush's size (1 = as modelled), 0.05 to 10.</summary>
+    public static bool SetScale(DesignSession session, int index, double scale) =>
+        ChangeBrush(session, index, b => b.Scale = Size(scale));
+
+    /// <summary>The size at point <paramref name="point"/> of a stroke (1 = as modelled), blended to its neighbours.</summary>
+    public static bool SetPointScale(DesignSession session, uint stroke, int point, double scale) =>
+        SetStroke(session, stroke, s =>
+        {
+            if (point >= 0 && point < s.Points.Count)
+                s.Points[point] = s.Points[point] with { Scale = Size(scale) };
+        });
+
+    /// <summary>Plan profile <paramref name="profile"/> is going: sweeps after it move down one (none use it).</summary>
+    internal static void ProfileRemoved(DesignSession session, int profile)
+    {
+        if (session.Doc.Brushes is not { } set || !set.Brushes.Exists(b => b.Kind == BrushKind.Sweep && b.Outline > profile))
+            return;
+
+        Change(session, s =>
+        {
+            foreach (var b in s.Brushes)
+            {
+                if (b.Kind == BrushKind.Sweep && b.Outline > profile)
+                    b.Outline--;
+            }
+        });
+    }
+
+    public static ushort Size(double scale) =>
+        (ushort)Math.Clamp((int)Math.Round(scale * HullBrush.UnitScale), HullBrush.MinScale, HullBrush.MaxScale);
+
+    private static bool IsBrushProfile(DesignSession session, int profile) =>
+        profile >= 0 && session.Doc.Interior is { } interior && profile < interior.Profiles.Count && interior.Profiles[profile].Kind == ProfileKind.Brush;
 
     public static bool SetSpacing(DesignSession session, int index, double metres) =>
         ChangeBrush(session, index, b => b.Spacing = Math.Max(Metres(metres), HullBrush.MinSpacing));

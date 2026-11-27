@@ -1,5 +1,6 @@
 using BrutalGame.Ships;
 using BrutalGame.Ships.Components;
+using BrutalGame.Ships.Interior;
 
 namespace BrutalGame.Plans;
 
@@ -100,6 +101,27 @@ public sealed class PlanDocument
     /// <summary>Parts and pipes (a component plan) and placed component prefabs (a ship plan); null when there are none.</summary>
     public ComponentData? Components;
 
+    /// <summary>Interior spaces (hallways); null when there are none.</summary>
+    public HullInterior? Interior;
+
+    /// <summary>Windows on the hull; null when there are none.</summary>
+    public HullWindowSet? Windows;
+
+    /// <summary>Decals on the hull; null when there are none.</summary>
+    public HullDecalSet? Decals;
+
+    /// <summary>Paint slots, the hull's base paint and brush strokes' own paints; null when there are none.</summary>
+    public HullPaintSet? Paint;
+
+    /// <summary>Rotors and hinges and the solids that move with them; null when there are none.</summary>
+    public HullJointSet? Joints;
+
+    /// <summary>Doorways and docking port faces (a component's); null when there are none.</summary>
+    public HullOpeningSet? Openings;
+
+    /// <summary>The component's programme: the interface it implements, its node graph, its states' poses; null when none.</summary>
+    public Ships.Logic.HullProgram? Program;
+
     /// <summary>
     /// The component prefabs this plan places, by plan hash, carried inside it so a file or a network send is complete.
     /// Each is a component-level plan, never edited from here (a new design is a new hash).
@@ -140,6 +162,36 @@ public sealed class PlanDocument
             foreach (var p in Components.Placements)
                 Meta.NextId = Math.Max(Meta.NextId, p.Id + 1);
         }
+
+        if (Interior is not null)
+        {
+            foreach (var h in Interior.Hallways)
+                Meta.NextId = Math.Max(Meta.NextId, h.Id + 1);
+        }
+
+        if (Windows is not null)
+        {
+            foreach (var w in Windows.Windows)
+                Meta.NextId = Math.Max(Meta.NextId, w.Id + 1);
+        }
+
+        if (Decals is not null)
+        {
+            foreach (var d in Decals.Decals)
+                Meta.NextId = Math.Max(Meta.NextId, d.Id + 1);
+        }
+
+        if (Joints is not null)
+        {
+            foreach (var j in Joints.Joints)
+                Meta.NextId = Math.Max(Meta.NextId, j.Id + 1);
+        }
+
+        if (Openings is not null)
+        {
+            foreach (var o in Openings.Openings)
+                Meta.NextId = Math.Max(Meta.NextId, o.Id + 1);
+        }
     }
 
     public PlanDocument Clone()
@@ -159,6 +211,13 @@ public sealed class PlanDocument
         copy.Layers = Layers?.Clone();
         copy.Brushes = Brushes?.Clone();
         copy.Components = Components?.Clone();
+        copy.Interior = Interior?.Clone();
+        copy.Windows = Windows?.Clone();
+        copy.Decals = Decals?.Clone();
+        copy.Paint = Paint?.Clone();
+        copy.Joints = Joints?.Clone();
+        copy.Openings = Openings?.Clone();
+        copy.Program = Program?.Clone();
 
         // Prefabs are never edited in place: sharing them is safe.
         foreach (var (hash, prefab) in Prefabs)

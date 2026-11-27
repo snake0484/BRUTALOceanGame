@@ -3,7 +3,11 @@ using System.Text.Json;
 namespace BrutalGame.Plans;
 
 /// <summary>A hull material from data: density (kg/m³, a structural composite, not solid metal) and a display colour.</summary>
-public sealed record HullMaterial(DefId Id, string Key, string Name, int DensityKgM3, uint ColourRgb, int YieldMpa = 0);
+/// <param name="Opacity">1 for opaque; below 1 a see-through material (glazing), drawn blended at this opacity.</param>
+public sealed record HullMaterial(DefId Id, string Key, string Name, int DensityKgM3, uint ColourRgb, int YieldMpa = 0, float Opacity = 1f)
+{
+    public bool Transparent => Opacity < 1f;
+}
 
 /// <summary>Hull materials loaded from <c>data/materials/hull.json</c>; no content in code.</summary>
 public sealed class HullMaterialCatalog
@@ -36,7 +40,8 @@ public sealed class HullMaterialCatalog
                 throw new InvalidDataException($"material {key}: density {density} kg/m³ out of range");
 
             var yield = entry.TryGetProperty("yieldMpa", out var y) ? y.GetInt32() : 0;
-            var material = new HullMaterial(DefId.FromName(key), key, name, density, colour, yield);
+            var opacity = entry.TryGetProperty("opacity", out var o) ? Math.Clamp(o.GetSingle(), 0.02f, 1f) : 1f;
+            var material = new HullMaterial(DefId.FromName(key), key, name, density, colour, yield, opacity);
 
             if (!catalog._byId.TryAdd(material.Id, material))
                 throw new InvalidDataException($"material {key}: id hash collides with {catalog._byId[material.Id].Key}");

@@ -16,7 +16,7 @@ public sealed record AuthoredMapBinding(AuthoredMap Map, AuthoredMapMode Mode);
 /// <summary>
 /// A site stamp (planet-designer-brief.md §2): ground inside <see cref="CoreM"/> of the site's direction is set to
 /// <see cref="HeightM"/>, eased back to the generated ground over <see cref="BlendM"/>. <see cref="Since"/> is the
-/// content version that added or last moved it (D85: player edits in its core from older saves are dropped).
+/// content version that added or last moved it (D90: player edits in its core from older saves are dropped).
 /// </summary>
 public record struct AuthoredSite(string Id, long X, long Y, long Z, float CoreM, float BlendM, float HeightM, int Since)
 {
@@ -31,7 +31,7 @@ public record struct AuthoredSite(string Id, long X, long Y, long Z, float CoreM
 public record struct AuthoredMarker(string Id, string Type, string Name, string? Site);
 
 /// <summary>
-/// One body's authored layer (D83, D85): what we change by hand on top of the seeded layout, shipped in
+/// One body's authored layer (D83, D90): what we change by hand on top of the seeded layout, shipped in
 /// <c>data/planets/&lt;body&gt;/</c>. It applies only to the body it was made on (seed, kind and kind seed must match)
 /// and is part of the planet function, so every LOD, the impostor and every peer see it. Player edits are a separate
 /// layer and never live here.
@@ -289,7 +289,7 @@ public sealed class AuthoredLayer
     }
 
     /// <summary>
-    /// D85 on loading a save made on <paramref name="savedVersion"/>: keeps the player's ops that are not inside the
+    /// D90 on loading a save made on <paramref name="savedVersion"/>: keeps the player's ops that are not inside the
     /// core of a site newer than the save, in order. Returns how many were kept.
     /// </summary>
     public int KeepPlayerEdits(ReadOnlySpan<EditOp> ops, int savedVersion, Span<EditOp> kept)

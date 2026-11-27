@@ -34,58 +34,77 @@ public static class PlanetSpawn
     {
         var (east0, north0) = Basis(spinAxis);
 
-        if (!surface.HasSea)
-        {
-            coast = Direction(spinAxis, east0, north0, StartLatitude, 0.0);
-            seaward = Tangent(east0, coast);
-            return;
-        }
-
-        var sea = surface.SeaHeight;
-        var radius = surface.Radius;
-
-        for (var offset = 0.0; offset <= MaxLatitudeOffset; offset += RowStep)
+        for (var offset = 0.0; offset <= MaxLatitudeOffset && surface.HasSea; offset += RowStep)
         {
             for (var side = 0; side < 2; side++)
             {
-                if (offset == 0.0 && side == 1)
-                    continue;
-
-                var latitude = StartLatitude + (side == 0 ? offset : -offset);
-                var rowRadius = radius * Math.Cos(latitude * Math.PI / 180.0);
-                var steps = (int)(2.0 * Math.PI * rowRadius / ScanStep);
-                var lonStep = 360.0 / steps;
-                var previous = Height(surface, Direction(spinAxis, east0, north0, latitude, 0.0), ScanLod);
-
-                for (var i = 1; i <= steps; i++)
-                {
-                    var d = Direction(spinAxis, east0, north0, latitude, i * lonStep);
-                    var h = Height(surface, d, ScanLod);
-                    var wasSea = previous < sea;
-                    previous = h;
-
-                    if (!wasSea || h < sea)
-                        continue;
-
-                    var west = Direction(spinAxis, east0, north0, latitude, (i - 1) * lonStep);
-                    var shore = Refine(surface, west, d, sea);
-                    var inland = double3.Normalize(d - west);
-                    var probe = double3.Normalize(shore + inland * (InlandProbe / radius));
-                    var rise = Height(surface, probe, 0) - sea;
-                    var offshore = double3.Normalize(shore - inland * (OffshoreProbe / radius));
-
-                    if (rise < MinRise || rise > MaxRise || sea - Height(surface, offshore, 0) < MinOffshoreDepth)
-                        continue;
-
-                    coast = shore;
-                    seaward = Tangent(-inland, shore);
+                if ((offset != 0.0 || side == 0) && ScanRow(surface, spinAxis, StartLatitude + (side == 0 ? offset : -offset), out coast, out seaward))
                     return;
-                }
             }
         }
 
         coast = Direction(spinAxis, east0, north0, StartLatitude, 0.0);
         seaward = Tangent(east0, coast);
+    }
+
+    /// <summary>
+    /// The same beach, found on the first of <paramref name="latitudes"/> (degrees) that has one: the waterline then lies
+    /// on that parallel (--surf-edge puts it on a sea tile's row edge). False where none has a beach.
+    /// </summary>
+    public static bool FindCoast(PlanetSurface surface, double3 spinAxis, ReadOnlySpan<double> latitudes, out double3 coast, out double3 seaward)
+    {
+        coast = seaward = default;
+
+        if (!surface.HasSea)
+            return false;
+
+        foreach (var latitude in latitudes)
+        {
+            if (ScanRow(surface, spinAxis, latitude, out coast, out seaward))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>Scans eastward along the parallel at <paramref name="latitude"/> (degrees) for the first beach.</summary>
+    private static bool ScanRow(PlanetSurface surface, double3 spinAxis, double latitude, out double3 coast, out double3 seaward)
+    {
+        var (east0, north0) = Basis(spinAxis);
+        var sea = surface.SeaHeight;
+        var radius = surface.Radius;
+        var rowRadius = radius * Math.Cos(latitude * Math.PI / 180.0);
+        var steps = (int)(2.0 * Math.PI * rowRadius / ScanStep);
+        var lonStep = 360.0 / steps;
+        var previous = Height(surface, Direction(spinAxis, east0, north0, latitude, 0.0), ScanLod);
+
+        for (var i = 1; i <= steps; i++)
+        {
+            var d = Direction(spinAxis, east0, north0, latitude, i * lonStep);
+            var h = Height(surface, d, ScanLod);
+            var wasSea = previous < sea;
+            previous = h;
+
+            if (!wasSea || h < sea)
+                continue;
+
+            var west = Direction(spinAxis, east0, north0, latitude, (i - 1) * lonStep);
+            var shore = Refine(surface, west, d, sea);
+            var inland = double3.Normalize(d - west);
+            var probe = double3.Normalize(shore + inland * (InlandProbe / radius));
+            var rise = Height(surface, probe, 0) - sea;
+            var offshore = double3.Normalize(shore - inland * (OffshoreProbe / radius));
+
+            if (rise < MinRise || rise > MaxRise || sea - Height(surface, offshore, 0) < MinOffshoreDepth)
+                continue;
+
+            coast = shore;
+            seaward = Tangent(-inland, shore);
+            return true;
+        }
+
+        coast = seaward = default;
+        return false;
     }
 
     private static float Height(PlanetSurface surface, double3 d, int lod) => surface.Height(d.X, d.Y, d.Z, lod);

@@ -4,6 +4,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Ahwoo.BRUTAL.ImGui" />
+    <PackageReference Include="Ahwoo.BRUTAL.Stb" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Designer\Designer.csproj" />

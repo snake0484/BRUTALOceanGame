@@ -1,0 +1,5 @@
+{
+  "name": "Door",
+  "calls": [ "Open", "Close", "Lock", "Unlock" ],
+  "states": [ "Closed", "Opening", "Open", "Closing", "Locked", "Blocked" ]
+}

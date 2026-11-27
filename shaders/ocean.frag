@@ -15,6 +15,7 @@ layout(location = 4) in float vShoreDamp; // OceanPoint.shore
 layout(location = 5) in float vSurfFoam;   // whitewater left behind by the surf
 layout(location = 6) in float vSwashEdge;  // 1 at the edge of a swash sheet, 0 half a metre behind it
 layout(location = 7) in float vBreakFoam;  // whitewater of the breaking face
+layout(location = 8) in vec2 vCoast;       // x = the share of the breaking faces the grid draws here, y > 0 near a coast region
 
 // Thin water is see-through (docs/shore-wash.md): the terrain shows through it, darkened as wet
 // sand is, under the sky's reflection, and the water's own colour takes over as it deepens, so the shallows read as depth
@@ -83,8 +84,12 @@ void main()
     float coverage = max(0.6 * vSurfFoam, edgeFoam);
     float surf = foamLace(vRestXZ, coverage, 0.0);
 
-    // A breaking face's whitewater churns: fresh lace, denser than what the swash leaves.
+    // A breaking face's whitewater churns: fresh lace, denser than what the swash leaves. Where the grid is too coarse
+    // to draw the faces the surf zone is their whitewater averaged over a wave (coastBand), taking over as they fade.
     float breaking = BREAK_FOAM * clamp(vBreakFoam, 0.0, 1.0);
+    if (vCoast.y > 0.0 && vCoast.x < 0.999)
+        breaking = max(breaking, FAR_FOAM * (1.0 - vCoast.x) * coastBand(vRestXZ));
+
     surf = max(surf, foamLace(vRestXZ, breaking, 1.0));
     coverage = max(coverage, breaking);
     float foam = clamp(max(foamLace(vRestXZ, whitecap, 0.5), surf), 0.0, 1.0);

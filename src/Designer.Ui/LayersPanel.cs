@@ -17,7 +17,7 @@ public sealed class Cutaway
 /// <summary>
 /// The layered hull panel: turn layering on, edit depth stacks (material and millimetres per layer, outside first),
 /// pick the stacks for unassigned sections, rooms and components, add and move section cuts, assign stacks per section,
-/// and the cutaway view. Every edit is one undo step.
+/// (the cutaway bar is in the view). Every edit is one undo step.
 /// </summary>
 public sealed class LayersPanel
 {
@@ -57,7 +57,6 @@ public sealed class LayersPanel
                     _message = LayerCommands.LastError;
             }
 
-            DrawCutaway();
 
             if (_message.Length > 0)
                 ImGui.TextWrapped($"{_message}");
@@ -176,28 +175,6 @@ public sealed class LayersPanel
 
             ImGui.PopID();
         }
-    }
-
-    private void DrawCutaway()
-    {
-        if (!ImGui.CollapsingHeader("Cutaway"u8, ImGuiTreeNodeFlags.DefaultOpen))
-            return;
-
-        ImGui.Checkbox("Cut view"u8, ref Cutaway.Enabled);
-        ImGui.SameLine();
-
-        for (var axis = 0; axis < 3; axis++)
-        {
-            ImGui.SameLine();
-
-            if (ImGui.RadioButton($"{AxisNames[axis]}##cut", Cutaway.Axis == axis))
-                Cutaway.Axis = axis;
-        }
-
-        ImGui.SameLine();
-        ImGui.Checkbox("Flip"u8, ref Cutaway.Flip);
-        DesignerStyle.ItemWidth(260f);
-        ImGui.SliderFloat("##offset"u8, ref Cutaway.Offset, -60f, 60f, "%.2f m"u8, ImGuiSliderFlags.None);
     }
 
     private static void StackCombo(DesignSession session, HullLayering layers, ReadOnlySpan<byte> label, int which, int current)

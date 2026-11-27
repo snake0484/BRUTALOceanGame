@@ -106,6 +106,9 @@ public static class BreakerFace
     private const float StandAmount = 0.55f;
     private const float BreakSteep = 0.85f;
     private const float ThrowFoamHeight = 0.6f;
+
+    /// <summary>A throwing crest's whitewater comes on over this share of its width behind the crest: it stepped at the crest line, a pop at every point each crest passed.</summary>
+    private const float ThrowBlend = 0.5f;
     private const float SpillTip = 0.5f;
 
     /// <summary>Extra crest height a breaking wave adds, as a share of its capped height; a broken wave's lift as a share of γ h.</summary>
@@ -120,15 +123,27 @@ public static class BreakerFace
     private const float MinHeight = 1e-3f;
 
     /// <summary>
+    /// On a grid of a given spacing (the GPU's clipmap): the face fades out between these spacings (m) whatever its
+    /// wavelength, the carrier where its wavelength is under 2 to 4 cells, and what rides the crest is at least
+    /// <see cref="MinCells"/> cells wide.
+    /// </summary>
+    public const float FadeSpacing = 16f;
+    public const float MaxSpacing = 32f;
+    private const float MinCells = 1.5f;
+
+    /// <summary>
     /// The face at local (x, z) metres of <paramref name="atlas"/>, whose phase at the time is <paramref name="phase0"/>
     /// (<see cref="CoastAtlas.PhaseAt"/>). Unweighted: the caller fades it by <see cref="CoastWindow.Weight"/>.
     /// </summary>
-    public static void Apply(CoastAtlas atlas, float x, float z, float phase0, out FacePoint p)
+    /// <param name="spacing">The spacing (m) of the grid it is drawn on, as the GPU filters it (<see cref="Resolved"/>); 0 for the face itself.</param>
+    public static void Apply(CoastAtlas atlas, float x, float z, float phase0, out FacePoint p, float spacing = 0f)
     {
         p = default;
         var here = SurfCarrier.At(atlas, x, z, phase0);
+        var resolved = Resolved(MathF.Tau / here.K, spacing);
+        var narrowest = MinCells * spacing;
 
-        if (here.Unbroken < MinHeight)
+        if (here.Unbroken < MinHeight || resolved <= 0f)
             return;
 
         // The carrier at this point: bound harmonics (1, s, s²), all in phase at the crest.
@@ -147,15 +162,17 @@ public static class BreakerFace
         var slopeX = slope * here.DirX;
         var slopeZ = slope * here.DirZ;
 
-        // Two Newton steps to the crest: the second takes the first's error from centimetres to under a millimetre.
+        // Two Newton steps to the crest: the second takes the first's error from centimetres to under a millimetre. The
+        // phase along the way is taken against this point's crest: wrapped afresh, a step that overshot where the water
+        // shoals fast would land on the next crest and the face would jump.
         var step = here.Phase / here.K;
         var gx = x - here.DirX * step;
         var gz = z - here.DirZ * step;
-        var crest = SurfCarrier.At(atlas, gx, gz, phase0);
+        var crest = SurfCarrier.At(atlas, gx, gz, phase0, here.Turns);
         step = crest.Phase / crest.K;
         gx -= crest.DirX * step;
         gz -= crest.DirZ * step;
-        crest = SurfCarrier.At(atlas, gx, gz, phase0);
+        crest = SurfCarrier.At(atlas, gx, gz, phase0, here.Turns);
 
         var sn = (x - gx) * crest.DirX + (z - gz) * crest.DirZ + crest.Phase / crest.K;
         var wavelength = MathF.Tau / crest.K;
@@ -173,7 +190,7 @@ public static class BreakerFace
             var dwindow = -MathF.Sign(here.Phase) * 6f * tw * (1f - tw) / (fadeEnd - fadeStart) * here.K / crest.K;
 
             var amount = state.Steep;
-            var width = sn < 0f ? BackWidth * wavelength : MathF.Max(float.Lerp(BackWidth, FrontWidth, amount) * wavelength, MinFront);
+            var width = MathF.Max(sn < 0f ? BackWidth * wavelength : MathF.Max(float.Lerp(BackWidth, FrontWidth, amount) * wavelength, MinFront), narrowest);
             var e = MathF.Exp(-(sn * sn) / (width * width));
             var wet = SmoothStep(0f, LiftDryDepth, here.Depth);
             var lift = state.Amplitude * e * window * wet;
@@ -224,18 +241,29 @@ public static class BreakerFace
             // Whitewater: ahead of a throwing crest where it lands; a spilling crest's tumbling down its front; then,
             // once it has collapsed, a roller on the front trailing foam behind it.
             var whiteFront = Math.Clamp(WhiteFront * state.Height, WhiteFrontMin, WhiteFrontMax);
-            var whiteWidth = sn < 0f ? WhiteBack * whiteFront : whiteFront;
+            var whiteWidth = MathF.Max(sn < 0f ? WhiteBack * whiteFront : whiteFront, narrowest);
             var ew = MathF.Exp(-(sn * sn) / (whiteWidth * whiteWidth));
-            var throwing = SmoothStep(0.6f, 1f, state.Curl) * (sn > 0f ? 0.6f * ew : 0.15f * ew * ew * ew) * SmoothStep(0f, ThrowFoamHeight, state.Height);
+            var thrown = float.Lerp(0.15f * ew * ew * ew, 0.6f * ew, SmoothStep(-ThrowBlend * whiteWidth, 0f, sn));
+            var throwing = SmoothStep(0.6f, 1f, state.Curl) * thrown * SmoothStep(0f, ThrowFoamHeight, state.Height);
             var spilling = state.Spill * (sn > 0f ? ew : ew * ew);
             var roller = state.Broken * (sn > 0f ? ew : MathF.Max(ew, RollerTrail * MathF.Exp(sn / MathF.Max(RollerTail * state.Height, RollerTailMin))));
             p.Foam = MathF.Max(MathF.Max(throwing, spilling), roller) * window * SmoothStep(0f, WhiteDryDepth, here.Depth);
         }
 
-        p.Height = eta;
-        p.SlopeX = slopeX;
-        p.SlopeZ = slopeZ;
+        p.Height = eta * resolved;
+        p.SlopeX = slopeX * resolved;
+        p.SlopeZ = slopeZ * resolved;
+        p.Dx *= resolved;
+        p.Dz *= resolved;
+        p.DxX *= resolved;
+        p.DzZ *= resolved;
+        p.DxZ *= resolved;
+        p.Foam *= resolved;
     }
+
+    /// <summary>The share of a face of this wavelength a grid of this spacing draws (ocean_breaker.glsl breakerFace).</summary>
+    public static float Resolved(float wavelength, float spacing) =>
+        spacing <= 0f ? 1f : SmoothStep(2f * spacing, 4f * spacing, wavelength) * (1f - SmoothStep(FadeSpacing, MaxSpacing, spacing));
 
     /// <summary>
     /// The surf state of the crest at a carrier point. The break has memory: its clock (the map's break distance) stands

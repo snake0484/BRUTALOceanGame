@@ -201,6 +201,49 @@ public class MeshTests
     }
 
     [Fact]
+    public void Mirror_OfAMeshWithNoSeam_SplitsTheFacesAcrossTheMiddle()
+    {
+        // A plain box has no vertices at X = 0: its top, bottom, front and back faces cross the plane.
+        var box = Box();
+        var mirrored = Run(box, MeshOps.MirrorX);
+
+        AssertValid(mirrored);
+        Assert.Equal(Volume(box), Volume(mirrored), 6);
+        Assert.Contains(mirrored.Vertices, v => v.X == 0);
+        var xs = mirrored.Vertices.Select(v => v.X).Order().ToArray();
+        Assert.Equal(xs, xs.Select(x => -x).Order().ToArray());
+    }
+
+    [Fact]
+    public void MirroredDrag_KeepsTheSeamJoined()
+    {
+        var mirrored = Run(Run(Box(), x => MeshOps.Knife(x, 0, 0)), MeshOps.MirrorX);
+        var top = mirrored.Vertices.Max(v => v.Y);
+        var seam = Enumerable.Range(0, mirrored.Vertices.Length).Where(i => mirrored.Vertices[i].X == 0 && mirrored.Vertices[i].Y == top).ToArray();
+        Assert.NotEmpty(seam);
+
+        // Dragged along X and up: the seam vertices only rise, and the mesh stays closed.
+        var b = new MeshBuilder(mirrored);
+        MeshOps.TranslateMirrored(b, seam, M / 2, M / 4, 0);
+        Assert.True(MeshOps.MirrorX(b));
+        var raised = b.Build();
+        AssertValid(raised);
+        Assert.Contains(raised.Vertices, v => v.X == 0 && v.Y == top + M / 4);
+        Assert.DoesNotContain(raised.Vertices, v => v.Y == top + M / 4 && v.X != 0);
+
+        // A vertex picked on the -X side moves; its +X twin follows mirrored.
+        var left = Array.FindIndex(raised.Vertices, v => v.X < 0);
+        var p = raised.Vertices[left];
+        b = new MeshBuilder(raised);
+        MeshOps.TranslateMirrored(b, [left], -M / 4, 0, 0);
+        Assert.True(MeshOps.MirrorX(b));
+        var pulled = b.Build();
+        AssertValid(pulled);
+        Assert.Contains(pulled.Vertices, v => v == new MeshVertex(p.X - M / 4, p.Y, p.Z));
+        Assert.Contains(pulled.Vertices, v => v == new MeshVertex(-p.X + M / 4, p.Y, p.Z));
+    }
+
+    [Fact]
     public void Validator_RefusesBrokenMeshes()
     {
         var b = new MeshBuilder(Box());

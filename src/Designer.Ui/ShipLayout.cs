@@ -1,8 +1,8 @@
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>
-/// The ship designer's default docked layout: tools and solids (with components) on the left; properties, mesh, hull
-/// layers, brushes, parts and test bench as tabs top right; stats bottom right; the middle is the 3D view.
+/// The ship designer's default docked layout: tools, and the object tree with profiles, on the left; properties, mesh,
+/// hull layers, brushes, paint, parts and test bench as tabs top right; stats bottom right; the middle is the 3D view.
 /// </summary>
 public static class ShipLayout
 {
@@ -10,6 +10,9 @@ public static class ShipLayout
 
     /// <summary>The top-right dock node the edit panels share.</summary>
     public const uint EditDock = 0x00000005;
+
+    /// <summary>The lower-left dock node: the object tree and Profiles.</summary>
+    public const uint InteriorDock = 0x00000008;
 
     public static string Seed(int w, int h)
     {
@@ -20,10 +23,10 @@ public static class ShipLayout
             [Window][Designer]
             DockId=0x00000007,0
 
-            [Window][Solids]
+            [Window][Objects]
             DockId=0x00000008,0
 
-            [Window][Components]
+            [Window][Profiles]
             DockId=0x00000008,1
 
             [Window][Properties]
@@ -38,11 +41,17 @@ public static class ShipLayout
             [Window][Brushes]
             DockId=0x00000005,3
 
-            [Window][Parts]
+            [Window][Paint]
             DockId=0x00000005,4
 
-            [Window][Test bench]
+            [Window][Parts]
             DockId=0x00000005,5
+
+            [Window][Test bench]
+            DockId=0x00000005,6
+
+            [Window][Aero]
+            DockId=0x00000005,7
 
             [Window][Stats]
             DockId=0x00000006,0

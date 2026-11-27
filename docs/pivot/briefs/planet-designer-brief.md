@@ -74,7 +74,7 @@ The authored ops are part of the program, so everything that evaluates the progr
 
 (a) format, loader, compiler support, empty layer bit-exact. (b) one `amplitude` or `height` map and `flatten` sites end to end, tests: bounds hold (10⁴ samples per LOD), determinism, scalar == SIMD, seams on a site across a cube edge, ns per point per LOD. (c) the tool: view, paint, place and move a site, undo, save. (d) the game loads `data/planets/<body>/` and shows it orbit to ground. One commit each.
 
-## 8. Answers (2026-11-27, D84, D85)
+## 8. Answers (2026-11-27, D89, D90)
 
 1. Settlements: site + marker now. Buildings later, from a structure/city editor like the ship editor.
 2. Tool: standalone `BRUTALPlanetDesigner`.
