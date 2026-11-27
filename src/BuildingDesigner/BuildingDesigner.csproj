@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>BrutalGame.BuildingDesigner</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Buildings\Buildings.csproj" />
+    <ProjectReference Include="..\Designer\Designer.csproj" />
+  </ItemGroup>
+</Project>

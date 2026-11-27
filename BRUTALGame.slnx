@@ -1,5 +1,8 @@
 ﻿<Solution>
   <Folder Name="/src/">
+    <Project Path="src/BuildingDesigner/BuildingDesigner.csproj" />
+    <Project Path="src/BuildingDesigner.App/BuildingDesigner.App.csproj" />
+    <Project Path="src/Buildings/Buildings.csproj" />
     <Project Path="src/Chemistry/Chemistry.csproj" />
     <Project Path="src/Crafting/Crafting.csproj" />
     <Project Path="src/Debug/Debug.csproj" />
@@ -25,6 +28,7 @@
     <Project Path="src/Weather/Weather.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/BuildingDesigner.Tests/BuildingDesigner.Tests.csproj" />
     <Project Path="tests/Chemistry.Tests/Chemistry.Tests.csproj" />
     <Project Path="tests/Crafting.Tests/Crafting.Tests.csproj" />
     <Project Path="tests/Designer.Tests/Designer.Tests.csproj" />
