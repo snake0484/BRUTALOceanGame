@@ -202,6 +202,40 @@ public sealed class SeaSwellsTests(ITestOutputHelper output)
         Assert.Equal(0, allocated);
     }
 
+    private (int Changes, int Rebakes, int MaxSpeed) Timeline(SimWorld sim, long from, long to, bool print)
+    {
+        var swells = new SeaSwells(1, sim.Ocean.Tiles, Dt, sim.SeaWinds);
+        swells.SetBase(new SwellParams { SwellHeight = 1.2f, SwellPeriod = 13f }, driven: true);
+        var anchor = sim.Bubble.Origin;
+        var baked = default(BrutalGame.Water.Coast.CoastCarrier);
+        var (changes, rebakes, maxSpeed) = (0, 0, 0);
+        var last = default(SeaWindKey);
+
+        for (var epoch = from; epoch <= to; epoch++)
+        {
+            swells.Tick(epoch * SeaWind.EpochTicks, [anchor]);
+            var swell = swells.For(sim.SpawnTile)!;
+            var key = sim.SeaWinds.At(sim.SpawnTile, epoch);
+            var carrier = BrutalGame.Water.Coast.CoastCarrier.From(swell.TargetCarrierDirection, swell.TargetCarrierOmega, swell.TargetCarrierHeight);
+            var rebake = epoch == from || !BrutalGame.Water.Coast.CoastRegionSet.Keeps(baked, carrier);
+            changes += key != last && epoch > from ? 1 : 0;
+            maxSpeed = Math.Max(maxSpeed, key.Speed);
+
+            if (rebake)
+            {
+                rebakes += epoch > from ? 1 : 0;
+                baked = carrier;
+            }
+
+            if (print && (key != last || rebake))
+                output.WriteLine($"{epoch,5} min: wind {key.Speed,2} m/s {key.Direction * 10,3} deg  Hs {swell.TargetSignificantHeight:F2} m  carrier T {(carrier.Calm ? 0f : MathF.Tau / carrier.Omega):F2} s H {carrier.Height:F2} m dir {carrier.Direction * 180f / MathF.PI:F0}{(rebake ? "  REBAKE" : "")}");
+
+            last = key;
+        }
+
+        return (changes, rebakes, maxSpeed);
+    }
+
     private static double SampleNs(OceanSurface surface, double3 p, long tick)
     {
         var sink = 0f;
@@ -233,4 +267,46 @@ public sealed class SeaSwellsTests(ITestOutputHelper output)
 
         return max;
     }
+
+    /// <summary>
+    /// The game's spawn tile (seed 1, the default groundswell) through the weather: its key, the carrier the coast
+    /// regions are baked for, and how often that carrier passes the rebake tolerance (CoastRegionSet.Keeps): over the
+    /// first twelve hours, and minute by minute through the week's strongest wind there.
+    /// </summary>
+    [Fact]
+    [Trait("Category", "Perf")]
+    public void SpawnTile_StormTimeline()
+    {
+        using var sim = new SimWorld(seed: 1, workerThreads: 1, weather: true);
+        var (changes, rebakes, maxSpeed) = Timeline(sim, 1, 720, print: false);
+        output.WriteLine($"first 12 h: {changes} key changes, {rebakes} rebakes, top wind {maxSpeed} m/s");
+        var top = (Speed: 0, Epoch: 0L);
+
+        for (var epoch = 0L; epoch < 7 * 1440; epoch++)
+        {
+            var speed = sim.SeaWinds.At(sim.SpawnTile, epoch).Speed;
+
+            if (speed > top.Speed)
+                top = (speed, epoch);
+        }
+
+        output.WriteLine($"spawn tile over a week: top {top.Speed} m/s at {top.Epoch} min");
+        (changes, rebakes, maxSpeed) = Timeline(sim, top.Epoch - 90, top.Epoch + 60, print: true);
+        output.WriteLine($"through it: {changes} key changes, {rebakes} rebakes");
+
+        var histogram = new int[40];
+        var peak = new System.Numerics.Vector2[40];
+
+        for (var tile = 0; tile < sim.Ocean.Tiles.Count; tile += 7)
+        {
+            for (var epoch = 0L; epoch < 720; epoch += 10)
+            {
+                var mean = sim.SeaWinds.Mean(tile, epoch * SeaWind.EpochTicks).Length();
+                histogram[Math.Min((int)mean, 39)]++;
+            }
+        }
+
+        output.WriteLine($"tile-mean wind over 12 h, every 7th tile every 10 min: {string.Join(" ", histogram.Select((n, i) => n > 0 ? $"{i}:{n}" : "").Where(t => t.Length > 0))}");
+    }
 }
+

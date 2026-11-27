@@ -13,7 +13,10 @@ namespace BrutalGame;
 /// they jump or kick. It follows the same points tick by tick through the regions' load and, after turning the swell,
 /// through their rebake and cross-fade, then logs the bakes every <see cref="BakeLogSeconds"/>. With --surf-climb it
 /// instead takes the camera from <see cref="ClimbLow"/> to <see cref="ClimbHigh"/> over the surf and back, judging the
-/// face as the grid under it draws it. The window stays open for captures.
+/// face as the grid under it draws it. With the weather driving the sea it does not turn the swell: it keeps following the
+/// points through every rebake the weather causes (a storm moving the carrier past the tolerance), logging each one and,
+/// every <see cref="BakeLogSeconds"/>, the spawn tile's wind, the carrier and the rebakes so far. The swell under the
+/// points is judged tick by tick alongside the face. The window stays open for captures.
 /// </summary>
 public sealed class SurfBeachTest
 {
@@ -51,6 +54,7 @@ public sealed class SurfBeachTest
         Turning,
         Done,
         Climbing,
+        Weather,
     }
 
     private readonly SimWorld _sim;
@@ -76,6 +80,14 @@ public sealed class SurfBeachTest
     private int _frameCount;
     private double _settledAt;
     private bool _watching;
+    private readonly float[] _swell0 = new float[Watched];
+    private readonly float[] _swell1 = new float[Watched];
+    private float _swellKick;
+    private float _swellStep;
+    private CoastCarrier _weatherCarrier;
+    private int _weatherRebakes;
+    private bool _weatherPending;
+    private double _weatherFrom;
 
     public SurfBeachTest(SimWorld sim, CoastRegionSet coast, bool climb)
     {
@@ -108,6 +120,13 @@ public sealed class SurfBeachTest
                 _bakeMs[_bakeCount] = _coast.LastBakeMs;
                 _depthMs[_bakeCount++] = _coast.LastBakeDepthMs;
             }
+        }
+
+        if (_stage == Stage.Weather)
+        {
+            Watch(renderTime);
+            FollowWeather(time);
+            return;
         }
 
         if (_stage == Stage.Done)
@@ -163,6 +182,15 @@ public sealed class SurfBeachTest
             Log.Info($"climb starts at {time:F1} s: {ClimbLow:F0} m to {ClimbHigh:F0} m and back, {ClimbSeconds:F0} s each way, over {ClimbPoints} points across the surf");
             ClimbStability(renderTime);
         }
+        else if (_stage == Stage.Settled && _sim.DriveWind)
+        {
+            _frames = default;
+            (_swellKick, _swellStep) = (0f, 0f);
+            _weatherCarrier = _coast.Carrier;
+            _bakesLogged = time;
+            _stage = Stage.Weather;
+            Log.Info($"weather drives the sea: following the points through its rebakes; spawn tile wind {_sim.SpawnWind.Speed} m/s");
+        }
         else if (_stage == Stage.Settled && time - _settledAt > TurnAfterSeconds)
         {
             var swell = _sim.Ocean.Swells.Base;
@@ -186,6 +214,52 @@ public sealed class SurfBeachTest
             _stage = Stage.Done;
         }
     }
+
+    /// <summary>A rebake starts when the carrier the regions are baked for moves, and ends once every drawn region has it and nothing fades.</summary>
+    private void FollowWeather(double time)
+    {
+        var carrier = _coast.Carrier;
+
+        if (carrier != _weatherCarrier)
+        {
+            Log.Info($"at {time:F0} s (weather {_sim.WeatherTime / 60.0:F1} min): carrier {Describe(_weatherCarrier)} -> {Describe(carrier)}; spawn tile wind {_sim.SpawnWind.Speed} m/s {_sim.SpawnWind.Direction * 10} deg");
+
+            if (!_weatherPending)
+            {
+                _weatherPending = true;
+                _weatherFrom = time;
+                _frames = default;
+                (_swellKick, _swellStep) = (0f, 0f);
+            }
+
+            _weatherCarrier = carrier;
+            _weatherRebakes++;
+        }
+
+        if (_weatherPending && _coast.Settled && SameCarrier())
+        {
+            _weatherPending = false;
+            Log.Info($"rebake settled after {time - _weatherFrom:F1} s, tick by tick at {Watched} points: face {_frames}; swell height step max {_swellStep:F4} m, second difference max {_swellKick:F4} m");
+            _frames = default;
+            (_swellKick, _swellStep) = (0f, 0f);
+        }
+
+        if (time - _bakesLogged >= BakeLogSeconds)
+        {
+            _bakesLogged = time;
+            var swell = _sim.Ocean.Swells.Near(_sim.Bubble.Origin);
+            Log.Info($"at {time:F0} s (weather {_sim.WeatherTime / 60.0:F1} min): spawn tile wind {_sim.SpawnWind.Speed} m/s, Hs {swell.SignificantWaveHeight:F2} m; carrier {Describe(carrier)}; {_weatherRebakes} weather rebakes, {_coast.Bakes} bakes; main thread allocated {_allocated} bytes in {_frameCount} frames");
+
+            if (!_weatherPending)
+            {
+                Log.Info($"steady since last: face {_frames}; swell height step max {_swellStep:F4} m, second difference max {_swellKick:F4} m");
+                _frames = default;
+                (_swellKick, _swellStep) = (0f, 0f);
+            }
+        }
+    }
+
+    private static string Describe(CoastCarrier c) => c.Calm ? "calm" : $"T {MathF.Tau / c.Omega:F2} s H {c.Height:F2} m dir {c.Direction * 180f / MathF.PI:F0}";
 
     private static float ClimbAltitude(double t) => ClimbLow * MathF.Pow(ClimbHigh / ClimbLow, (float)(t < 1.0 ? t : 2.0 - t));
 
@@ -362,6 +436,7 @@ public sealed class SurfBeachTest
         {
             _watch[i] = Sea(20f + 25f * i, 15f * i);
             _coast.Sample(_watch[i], renderTime, out _last[i]);
+            _swell0[i] = _swell1[i] = float.NaN;
         }
 
         _watching = true;
@@ -385,10 +460,23 @@ public sealed class SurfBeachTest
                     _frames.Kick(_first[i], _last[i], face);
 
                 (_first[i], _last[i]) = (_last[i], face);
+                SwellStep(i, _sim.Ocean.SampleHeight(_watch[i] * _sim.Ocean.Tiles.SeaRadius, (long)Math.Round(_watchNext / dt)));
             }
 
             _watched++;
         }
+    }
+
+    /// <summary>The open swell (OceanSurface, what buoyancy reads) at a watched point: its largest step and second difference.</summary>
+    private void SwellStep(int i, float h)
+    {
+        if (!float.IsNaN(_swell1[i]))
+            _swellStep = MathF.Max(_swellStep, MathF.Abs(h - _swell1[i]));
+
+        if (!float.IsNaN(_swell0[i]))
+            _swellKick = MathF.Max(_swellKick, MathF.Abs(h - 2f * _swell1[i] + _swell0[i]));
+
+        (_swell0[i], _swell1[i]) = (_swell1[i], h);
     }
 
     /// <summary>Logs the carrier's state every <see cref="ProfileStep"/> out to sea, and takes the rest points across the surf zone for <see cref="Stability"/>.</summary>

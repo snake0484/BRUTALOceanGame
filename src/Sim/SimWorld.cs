@@ -290,11 +290,17 @@ public sealed class SimWorld : IDisposable
         return blend.Tile[0];
     }
 
+    /// <summary>
+    /// Weather systems' size on the rocky planets against the island's: 45–65 km storms, so one covers a good part of a
+    /// 64 km sea tile and its sea builds (a tile takes the mean wind over its area; island-sized storms never showed).
+    /// </summary>
+    public const float WeatherSizeScale = 4f;
+
     /// <summary>The planet's climate: its own seed from the body's, its radius, day and axis.</summary>
     private static PlanetClimate Climate(in CelestialBody body, ulong bodySeed, double tickSeconds)
     {
         var day = body.DayTicks > 0 ? body.DayTicks * tickSeconds : 1e9;
-        return PlanetClimate.Rocky(bodySeed ^ WeatherSalt, body.Radius, day, body.SpinAxis);
+        return PlanetClimate.Rocky(bodySeed ^ WeatherSalt, body.Radius, day, body.SpinAxis) with { SizeScale = WeatherSizeScale };
     }
 
     private const ulong WeatherSalt = 0x2545F4914F6CDD1DUL;
