@@ -32,6 +32,12 @@ public sealed class JointGroups
     /// <summary>The joints in group order (group k is <c>Joints[k - 1]</c>).</summary>
     public readonly List<HullJoint> Joints = new();
 
+    /// <summary>
+    /// Where each group comes from (group order, group 0 first): the plan's own (placement -1, its group) or a placed
+    /// component's (its placement index, the group in the component), so a component's programme drives its parts.
+    /// </summary>
+    public readonly List<(int Placement, int Group)> Sources = new() { (-1, 0) };
+
     public int Count => Joints.Count + 1;
 
     /// <summary>The group of joint <paramref name="joint"/> (0: the ship's own).</summary>
@@ -57,6 +63,9 @@ public sealed class JointGroups
         if (doc.Joints is { } set)
         {
             groups.Joints.AddRange(set.Joints);
+
+            for (var g = 1; g <= set.Joints.Count; g++)
+                groups.Sources.Add((-1, g));
 
             foreach (var (solid, joint) in set.Members)
                 groups._solidGroup[solid] = groups.GroupOfJoint(joint);
@@ -122,6 +131,7 @@ public sealed class JointGroups
             joint.Rotation = rotation;
             joint.Parent = source.Parent == 0 ? mountJoint : PlacedJointId(index, inner.GroupOfJoint(source.Parent));
             Joints.Add(joint);
+            Sources.Add((index, k));
             _placementParts[(index, k)] = Joints.Count;
         }
     }

@@ -84,6 +84,49 @@ public static class JointCommands
         return true;
     }
 
+    /// <summary>
+    /// Mounts joint <paramref name="id"/> on joint <paramref name="parent"/>'s moving part (0: on the ship). Refused when the
+    /// parent is the joint itself or mounted on it (a loop), or the joint and those on it would nest more than
+    /// <see cref="HullJointSet.MaxDepth"/> deep.
+    /// </summary>
+    public static bool SetParent(DesignSession session, uint id, uint parent)
+    {
+        if (session.Doc.Joints is not { } set || set.IndexOf(id) < 0 || (parent != 0 && set.IndexOf(parent) < 0))
+            return false;
+
+        for (var at = parent; at != 0; at = set.Joints[set.IndexOf(at)].Parent)
+        {
+            if (at == id)
+            {
+                LastError = "A joint cannot be mounted on its own moving part";
+                return false;
+            }
+        }
+
+        if ((parent == 0 ? 0 : set.Depth(parent)) + Height(set, id) > HullJointSet.MaxDepth)
+        {
+            LastError = $"Joints nest at most {HullJointSet.MaxDepth} deep";
+            return false;
+        }
+
+        Change(session, data => data.Joints[data.IndexOf(id)].Parent = parent);
+        return true;
+    }
+
+    /// <summary>How many joints deep the chain from <paramref name="id"/> down through those mounted on it goes (1: none on it).</summary>
+    private static int Height(HullJointSet set, uint id, int guard = 0)
+    {
+        var most = 0;
+
+        foreach (var j in set.Joints)
+        {
+            if (j.Parent == id && guard < HullJointSet.MaxJoints)
+                most = Math.Max(most, Height(set, j.Id, guard + 1));
+        }
+
+        return most + 1;
+    }
+
     /// <summary>Solid <paramref name="solid"/> moves with joint <paramref name="joint"/> (0: it is the ship's own again).</summary>
     public static bool SetMember(DesignSession session, uint solid, uint joint)
     {

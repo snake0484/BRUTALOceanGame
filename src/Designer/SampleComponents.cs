@@ -1,6 +1,7 @@
 using BrutalGame.Plans;
 using BrutalGame.Ships;
 using BrutalGame.Ships.Components;
+using BrutalGame.Ships.Logic;
 
 namespace BrutalGame.Designer;
 
@@ -41,7 +42,8 @@ public static class SampleComponents
 
     /// <summary>
     /// A swinging door: a 2.4 x 2.4 x 0.2 m frame with a 1 x 2.1 m doorway (its sill at the origin, through along +Z) and a
-    /// 5 cm leaf on a hinge at the doorway's left side, opening 90 degrees.
+    /// 5 cm leaf on a hinge at the doorway's left side, opening 90 degrees. It implements Door with the standard sequence
+    /// (Locked looks like Closed: it has no bolt).
     /// </summary>
     public static PlanDocument SwingDoor(DefId alloy)
     {
@@ -50,20 +52,46 @@ public static class SampleComponents
         var hinge = JointCommands.AddJoint(session, JointKind.Hinge, new Vector3d(-0.5, 0, 0), new Vector3d(0, 1, 0), 0);
         JointCommands.SetJoint(session, hinge, j => (j.Min, j.Max, j.Target, j.Speed) = (0, 900, 0, 450));
         JointCommands.SetMember(session, leaf, hinge);
+        DoorProgramme(session);
         session.Doc.FixNextId();
         return session.Doc;
     }
 
-    /// <summary>A sliding door: a 3.2 m wide frame the 1 x 2.1 m leaf slides into, 1.05 m along +X.</summary>
+    /// <summary>
+    /// A sliding door: a 3.2 m wide frame the 1 x 2.1 m leaf slides into, 1.05 m along +X, and a lock bolt in the frame
+    /// at the leaf's opening edge that slides 80 mm across it. It implements Door with the standard sequence: Close slides
+    /// it shut (stopping and opening again if something is in the way), then shoots the bolt; a locked door ignores Open.
+    /// </summary>
     public static PlanDocument SlidingDoor(DefId alloy)
     {
+        const int m = HullSolid.PositionUnitsPerMetre;
+        const int h = HullSolid.HalfUnitsPerMetre;
         var session = Door("Sliding door, 1 x 2.1 m", alloy, 1.6);
         var leaf = Leaf(session, alloy);
         var slider = JointCommands.AddJoint(session, JointKind.Slider, default, new Vector3d(1, 0, 0), 0);
         JointCommands.SetJoint(session, slider, j => (j.Min, j.Max, j.Target, j.Speed) = (0, 1050, 0, 800));
         JointCommands.SetMember(session, leaf, slider);
+
+        var bolt = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, (int)(0.56 * m), 1 * m, 0, (ushort)(0.04 * h), (ushort)(0.1 * h), (ushort)(0.03 * h), SolidRotation.Identity, alloy);
+        var boltSlider = JointCommands.AddJoint(session, JointKind.Slider, new Vector3d(0.56, 1, 0), new Vector3d(-1, 0, 0), 0);
+        JointCommands.SetJoint(session, boltSlider, j => (j.Min, j.Max, j.Target, j.Speed) = (0, 80, 0, 200));
+        JointCommands.SetMember(session, bolt, boltSlider);
+
+        DoorProgramme(session);
+        var states = InterfaceLibrary.Door.States;
+
+        for (var s = 0; s < states.Count; s++)
+            ProgramCommands.SetPose(session, s, boltSlider, states[s] == "Blocked" ? null : states[s] == "Locked" ? (short)80 : (short)0);
+
         session.Doc.FixNextId();
         return session.Doc;
+    }
+
+    /// <summary>Implements Door (default poses: open at the upper limits, otherwise the lower) with the standard door sequence.</summary>
+    private static void DoorProgramme(DesignSession session)
+    {
+        ProgramCommands.Implement(session, InterfaceLibrary.Door);
+        ProgramCommands.Set(session, p => ProgramCommands.StandardDoor(p, session.Doc.Joints?.Joints ?? []));
     }
 
     /// <summary>

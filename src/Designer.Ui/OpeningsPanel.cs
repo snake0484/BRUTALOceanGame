@@ -118,7 +118,8 @@ public sealed class OpeningsPanel
         }
 
         var origin = o.Origin;
-        ImGui.TextDisabled($"Sill {origin.X:F2}, {origin.Y:F2}, {origin.Z:F2} m (arrows move it, rings turn it in the view)");
+        var node = Middle(session.Doc, o);
+        ImGui.TextDisabled($"Bottom middle {node.X:F2}, {node.Y:F2}, {node.Z:F2} m (arrows move it, rings turn it about there)");
 
         if (o.Kind == OpeningKind.DockingPort && current is not null)
             PortNotes(current);
@@ -156,23 +157,31 @@ public sealed class OpeningsPanel
         ContextBar.End();
     }
 
-    /// <summary>The middle of an opening's outline (its sill raised by half its height).</summary>
-    private static Vector3d Middle(PlanDocument doc, HullOpening o)
-    {
-        var ring = OpeningGeometry.Outline(o, doc.Interior?.Profiles);
+    /// <summary>An opening's node point in its plan (see <see cref="NodePoint"/>).</summary>
+    private static Vector3d Middle(PlanDocument doc, HullOpening o) => NodePoint(o, doc.Interior?.Profiles);
 
-        if (ring.Length == 0)
+    /// <summary>
+    /// An opening's node point, where it is drawn, picked, moved and turned: the middle of its outline's bottom line (for a
+    /// profile centred on X = 0 with its sill on Y = 0, the stored origin itself).
+    /// </summary>
+    public static Vector3d NodePoint(HullOpening o, IReadOnlyList<HullProfile>? profiles)
+    {
+        if (profiles is null || o.Profile >= profiles.Count || profiles[o.Profile] is not { Kind: ProfileKind.Door, Points.Count: > 0 } profile)
             return o.Origin;
 
-        Vector3d sum = default;
+        int minX = int.MaxValue, maxX = int.MinValue, minY = int.MaxValue;
 
-        foreach (var p in ring)
-            sum = Add(sum, p);
+        foreach (var p in profile.Points)
+            (minX, maxX, minY) = (Math.Min(minX, p.X), Math.Max(maxX, p.X), Math.Min(minY, p.Y));
 
-        return Scale(sum, 1.0 / ring.Length);
+        Span<double> m = stackalloc double[9];
+        SolidRotation.Matrix(o.Rotation, m);
+        double x = (minX + maxX) * 0.5 * HullSolid.MetresPerPositionUnit, y = minY * HullSolid.MetresPerPositionUnit;
+        var origin = o.Origin;
+        return new Vector3d(origin.X + m[0] * x + m[1] * y, origin.Y + m[3] * x + m[4] * y, origin.Z + m[6] * x + m[7] * y);
     }
 
-    /// <summary>Draws every opening, picks one by its middle, runs the gizmo on the selected one. True when it used the mouse.</summary>
+    /// <summary>Draws every opening, picks one by its node point (bottom middle), runs the gizmo on the selected one. True when it used the mouse.</summary>
     public bool Update(DesignSession session, OrbitCamera camera, Vector2 viewport, in Matrix4x4 viewProj, bool mouseFree, double step, OverlayRenderer overlay)
     {
         var set = session.Doc.Openings;
@@ -194,7 +203,7 @@ public sealed class OpeningsPanel
             var ring = OpeningGeometry.Outline(o, session.Doc.Interior?.Profiles);
             Span<double> m = stackalloc double[9];
             SolidRotation.Matrix(o.Rotation, m);
-            Marker(overlay, ring, new Vector3d(m[2], m[5], m[8]), o.Id == Selected ? SelectedColour : o.Kind == OpeningKind.Door ? DoorColour : PortColour, camera);
+            Marker(overlay, ring, Middle(session.Doc, o), new Vector3d(m[2], m[5], m[8]), o.Id == Selected ? SelectedColour : o.Kind == OpeningKind.Door ? DoorColour : PortColour, camera);
 
             if (camera.Project(Middle(session.Doc, o), viewProj, viewport, out var pixel) && Vector2.Distance(pixel, mouse) < best)
                 (best, hover) = (Vector2.Distance(pixel, mouse), o.Id);
@@ -206,12 +215,23 @@ public sealed class OpeningsPanel
         {
             var o = set.Openings[index];
 
-            if (_gizmo.Update(o.Origin, o.Rotation, camera, viewProj, viewport, mouse, mouseFree, io.MouseDown[0], clicked, step, overlay))
+            // The gizmo sits on the outline's bottom middle (the point drawn and picked), and turns it about there.
+            var middle = Middle(session.Doc, o);
+
+            if (_gizmo.Update(middle, o.Rotation, camera, viewProj, viewport, mouse, mouseFree, io.MouseDown[0], clicked, step, overlay))
             {
                 if (_gizmo.Turned)
                 {
                     var rotation = _gizmo.Rotation;
-                    OpeningCommands.SetOpening(session, o.Id, x => x.Rotation = rotation);
+                    Span<double> before = stackalloc double[9];
+                    Span<double> after = stackalloc double[9];
+                    SolidRotation.Matrix(o.Rotation, before);
+                    SolidRotation.Matrix(rotation, after);
+                    var d = Sub(o.Origin, middle);
+                    var local = new Vector3d(before[0] * d.X + before[3] * d.Y + before[6] * d.Z, before[1] * d.X + before[4] * d.Y + before[7] * d.Z, before[2] * d.X + before[5] * d.Y + before[8] * d.Z);
+                    var origin = Add(middle, new Vector3d(after[0] * local.X + after[1] * local.Y + after[2] * local.Z, after[3] * local.X + after[4] * local.Y + after[5] * local.Z, after[6] * local.X + after[7] * local.Y + after[8] * local.Z));
+                    var q = ComponentCommands.Quantise(origin);
+                    OpeningCommands.SetOpening(session, o.Id, x => (x.Rotation, x.X, x.Y, x.Z) = (rotation, q.Item1, q.Item2, q.Item3));
                 }
                 else
                 {
@@ -266,7 +286,8 @@ public sealed class OpeningsPanel
                 var normal = Turn(m, new Vector3d(f[2], f[5], f[8]));
                 surface ??= new HullSurface(doc.Solids.AsSpan(), doc.Meshes);
                 var blocked = PortBlocked(surface, ring, normal);
-                Marker(overlay, ring, normal, blocked ? BlockedColour : PortColour, camera);
+                var node = Add(placement.Position, Turn(m, NodePoint(o, prefab.Interior?.Profiles)));
+                Marker(overlay, ring, node, normal, blocked ? BlockedColour : PortColour, camera);
             }
         }
     }
@@ -289,18 +310,12 @@ public sealed class OpeningsPanel
     private static Vector3d Turn(ReadOnlySpan<double> m, Vector3d p) =>
         new(m[0] * p.X + m[1] * p.Y + m[2] * p.Z, m[3] * p.X + m[4] * p.Y + m[5] * p.Z, m[6] * p.X + m[7] * p.Y + m[8] * p.Z);
 
-    /// <summary>The outline and an arrow out through it.</summary>
-    private static void Marker(OverlayRenderer overlay, Vector3d[] ring, Vector3d through, uint colour, OrbitCamera camera)
+    /// <summary>The outline, its node point, and an arrow out through it from there.</summary>
+    private static void Marker(OverlayRenderer overlay, Vector3d[] ring, Vector3d middle, Vector3d through, uint colour, OrbitCamera camera)
     {
         if (ring.Length == 0)
             return;
 
-        Vector3d sum = default;
-
-        foreach (var p in ring)
-            sum = Add(sum, p);
-
-        var middle = Scale(sum, 1.0 / ring.Length);
         var size = Math.Clamp(camera.Depth(middle) * 0.04, 0.2, 5.0);
         overlay.OnTop = true;
 

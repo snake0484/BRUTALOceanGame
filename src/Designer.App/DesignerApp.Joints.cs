@@ -237,6 +237,9 @@ public sealed partial class DesignerApp
         for (var g = 1; g < count; g++)
             _poseAngles[g] = JointPose.Angle(_groups.Joints[g - 1], _jointSeconds);
 
+        // Parts a programme drives stand where its state puts them.
+        StepPrograms(dt);
+        ProgramAngles(_poseAngles, count);
         JointPose.Transforms(_groups, _poseAngles, _poseRotations, _poseTranslations);
         _hull.SetPose(_poseRotations, _poseTranslations);
     }

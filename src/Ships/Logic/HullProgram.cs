@@ -52,17 +52,23 @@ public sealed class ComponentInterface
 
 /// <summary>
 /// A programme's nodes. Flow runs from a node's outputs (<see cref="ProgramNode.Out0"/>, and <see cref="ProgramNode.Out1"/>
-/// for a branch) to the nodes they point at.
+/// for a branch) to the nodes they point at. Conditions are nodes too, with no flow: a flow node that tests one points at
+/// it with <see cref="ProgramNode.In"/>.
 /// <list type="bullet">
 /// <item><see cref="OnCall"/>: where a call (A) starts; out 0.</item>
 /// <item><see cref="SetState"/>: enters state A, its joints moving from where they are to that state's pose; out 0.</item>
-/// <item><see cref="WaitArrived"/>: waits until the state's joints reach their pose (out 0), or something is in the way while they move (out 1).</item>
+/// <item><see cref="WaitUntil"/>: waits until its condition holds (out 0), or B ticks pass first (out 1, timed out: a
+/// part that never got there was stopped by something; B = 0 waits for ever).</item>
 /// <item><see cref="Wait"/>: waits B ticks; out 0.</item>
+/// <item><see cref="If"/>: out 0 when its condition holds, else out 1.</item>
 /// <item><see cref="IfState"/>: out 0 when the state is A, else out 1.</item>
-/// <item><see cref="IfBlocked"/>: out 0 when something is in the way now, else out 1.</item>
+/// <item>Conditions: <see cref="StateIs"/> (the state is A), <see cref="JointAt"/> (joint <see cref="ProgramNode.Joint"/>
+/// is within A stored units of B), <see cref="InPose"/> (every joint the state names has reached its pose).</item>
+/// <item>Older nodes, still run but no longer offered: <see cref="WaitArrived"/> (in pose, or out 1 when its parts were
+/// stopped) and <see cref="IfBlocked"/> (out 0 while the parts are obstructed).</item>
 /// </list>
 /// </summary>
-public enum NodeKind : byte { OnCall, SetState, WaitArrived, Wait, IfState, IfBlocked }
+public enum NodeKind : byte { OnCall, SetState, WaitArrived, Wait, IfState, IfBlocked, WaitUntil, If, StateIs, JointAt, InPose }
 
 public struct ProgramNode
 {
@@ -72,18 +78,26 @@ public struct ProgramNode
     /// <summary>Where it sits in the editor (pixels at zoom 1).</summary>
     public short X, Y;
 
-    /// <summary>The call or state it names (an index into the interface's).</summary>
+    /// <summary>The call or state it names (an index into the interface's); a <see cref="NodeKind.JointAt"/>'s tolerance.</summary>
     public byte A;
 
-    /// <summary>Wait: ticks (60 a second).</summary>
+    /// <summary>Wait and Wait until: ticks (60 a second); a <see cref="NodeKind.JointAt"/>'s position (stored units).</summary>
     public short B;
 
     /// <summary>The nodes its outputs lead to (0: nothing; the programme stops there).</summary>
     public ushort Out0, Out1;
 
-    public readonly bool Branches => Kind is NodeKind.WaitArrived or NodeKind.IfState or NodeKind.IfBlocked;
+    /// <summary>The condition a Wait until or If tests (a condition node's id; 0: none, never holds).</summary>
+    public ushort In;
 
-    public readonly bool HasInput => Kind != NodeKind.OnCall;
+    /// <summary>The joint a <see cref="NodeKind.JointAt"/> reads.</summary>
+    public uint Joint;
+
+    public readonly bool IsCondition => Kind is NodeKind.StateIs or NodeKind.JointAt or NodeKind.InPose;
+
+    public readonly bool TakesCondition => Kind is NodeKind.WaitUntil or NodeKind.If;
+
+    public readonly bool HasInput => Kind != NodeKind.OnCall && !IsCondition;
 }
 
 /// <summary>Where joint <see cref="Joint"/> stands in state <see cref="State"/> (its stored units: 0.1 degree, or mm for a slider).</summary>
@@ -131,21 +145,24 @@ public sealed class HullProgram
         return copy;
     }
 
+    /// <summary>Bytes of a node: plan format 15's (no condition fields), and 16's.</summary>
+    public const int NarrowNodeBytes = 14, NodeBytes = 20;
+
     /// <summary>
     /// <c>name, u8 call count, calls, u8 state count, states</c> (each a u8-length UTF-8 string), <c>u8 node count</c>, per
-    /// node <c>u16 id, u8 kind, i16 x, y, u8 a, i16 b, u16 out0, out1</c> (14 B), <c>u8 pose count</c>, per pose
-    /// <c>u8 state, u32 joint, i16 value</c> (7 B).
+    /// node <c>u16 id, u8 kind, i16 x, y, u8 a, i16 b, u16 out0, out1, in, u32 joint</c> (20 B; plan format 15 stopped at
+    /// out1, 14 B), <c>u8 pose count</c>, per pose <c>u8 state, u32 joint, i16 value</c> (7 B).
     /// </summary>
     public byte[] ToBytes()
     {
-        var b = new List<byte>(64 + Nodes.Count * 14 + Poses.Count * 7);
+        var b = new List<byte>(64 + Nodes.Count * NodeBytes + Poses.Count * 7);
         Text(b, Interface.Name);
         b.Add((byte)Interface.Calls.Count);
         Interface.Calls.ForEach(c => Text(b, c));
         b.Add((byte)Interface.States.Count);
         Interface.States.ForEach(s => Text(b, s));
         b.Add((byte)Nodes.Count);
-        Span<byte> n = stackalloc byte[14];
+        Span<byte> n = stackalloc byte[NodeBytes];
 
         foreach (var node in Nodes)
         {
@@ -157,6 +174,8 @@ public sealed class HullProgram
             BinaryPrimitives.WriteInt16LittleEndian(n[8..], node.B);
             BinaryPrimitives.WriteUInt16LittleEndian(n[10..], node.Out0);
             BinaryPrimitives.WriteUInt16LittleEndian(n[12..], node.Out1);
+            BinaryPrimitives.WriteUInt16LittleEndian(n[14..], node.In);
+            BinaryPrimitives.WriteUInt32LittleEndian(n[16..], node.Joint);
             b.AddRange(n);
         }
 
@@ -174,8 +193,10 @@ public sealed class HullProgram
         return b.ToArray();
     }
 
-    public static HullProgram? Read(ReadOnlySpan<byte> s, out int consumed)
+    /// <summary>A programme from its bytes; <paramref name="narrow"/> for plan format 15's nodes.</summary>
+    public static HullProgram? Read(ReadOnlySpan<byte> s, out int consumed, bool narrow = false)
     {
+        var size = narrow ? NarrowNodeBytes : NodeBytes;
         consumed = 0;
         var o = 0;
         var program = new HullProgram();
@@ -185,14 +206,14 @@ public sealed class HullProgram
 
         program.Interface.Name = name;
 
-        if (s.Length < o + 1 || s[o] > MaxNodes || s.Length < o + 1 + s[o] * 14 + 1)
+        if (s.Length < o + 1 || s[o] > MaxNodes || s.Length < o + 1 + s[o] * size + 1)
             return null;
 
         int nodes = s[o++];
 
-        for (var i = 0; i < nodes; i++, o += 14)
+        for (var i = 0; i < nodes; i++, o += size)
         {
-            var n = s.Slice(o, 14);
+            var n = s.Slice(o, size);
             program.Nodes.Add(new ProgramNode
             {
                 Id = BinaryPrimitives.ReadUInt16LittleEndian(n),
@@ -203,6 +224,8 @@ public sealed class HullProgram
                 B = BinaryPrimitives.ReadInt16LittleEndian(n[8..]),
                 Out0 = BinaryPrimitives.ReadUInt16LittleEndian(n[10..]),
                 Out1 = BinaryPrimitives.ReadUInt16LittleEndian(n[12..]),
+                In = narrow ? (ushort)0 : BinaryPrimitives.ReadUInt16LittleEndian(n[14..]),
+                Joint = narrow ? 0 : BinaryPrimitives.ReadUInt32LittleEndian(n[16..]),
             });
         }
 
