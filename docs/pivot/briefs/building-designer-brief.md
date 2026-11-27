@@ -34,11 +34,7 @@ A placement puts the building's frame on its site: origin at `pos`, up = radial,
 
 ## 4. App or mode
 
-**Recommendation: its own app, `BRUTALBuildingDesigner`** (`src/BuildingDesigner`, `src/BuildingDesigner.App`, `runBuildingDesigner.bat`, tests in `tests/BuildingDesigner.Tests`), referencing the ship designer's libraries without changing them.
-
-- For: the ship designer session is actively changing `DesignerApp` and `DesignerPanels`; a mode would edit both and conflict often. The scene differs (ground plane, pad, sun, 10-200 m scale, floors). The planet designer set the precedent of a standalone tool per job.
-- Against: the ship app's hull pipeline orchestration (bake, exact surface, upload, validate on commit, about 300 lines in `DesignerApp`) is duplicated in a smaller form until lifted, and ship features reach buildings only when the building app wires them in.
-- A mode of BRUTALDesigner (a third tab kind beside Ship and Component) gets every tool on day one with no duplication, at the price of edits in the busiest files of another session. Question 4.
+**A Building tab of BRUTALDesigner** (revised 2026-11-27: slice 1 first shipped as its own app; the user asked to merge it). File > New building or Open building opens a tab beside Ship and Component tabs, with every ship tool (windows, interiors, joints, components, paint, brushes) on day one and no duplicated hull pipeline. The cost is small hooks in `DesignerApp` and `DesignerPanels`, files another session changes often: the building code sits in its own partial, `DesignerApp.Buildings.cs`, so merges touch only a few lines.
 
 ## 5. Sharing code without breaking the ship designer
 
@@ -49,21 +45,21 @@ A placement puts the building's frame on its site: origin at `pos`, up = radial,
 | `Designer` | `DesignSession` (`EditSession<PlanOp, PlanDocument>`), `PlanOp`, `HullCommands`, `Snap`, `Symmetry`, `WindowCommands`, `InteriorCommands`, picking |
 | `Designer.Ui` | `HullRenderer`, `ViewportTool` (outlines, move gizmo, resize handles, picking), `TransformGizmo` rings, `ObjectTree`, `BrushesPanel`, `WindowsPanel`, `InteriorPanel` |
 
-**Lift later:** the hull pipeline in `DesignerApp` (bake + surface builder + upload + validation + stats) into a `HullView` in `Designer.Ui`. Done in one commit at a quiet point of the ship session, with its OK, both apps switched together. Until then the building app keeps its own small copy and never renames or moves a ship type.
+**Building-only code:** `src/Buildings` (headless, Plans only): `BuildingInfo`, `BuildingFile` (`.bbld`), `SettlementFile` (`.bset`), `BuildingCheck`. `src/Designer/Buildings`: `BuildingSession`, which adopts a tab's `DesignSession` and keeps `BuildingInfo` on its history, so Ctrl+Z and the Designer panel's Undo walk both in order. `DesignerApp.Buildings.cs`: ground grid and pad drawn with `OverlayRenderer`, the Building panel (pad, foundation, ground checks, building hash), `.bbld` save and load, `--demo-building`. Tests in `tests/Designer.Tests/BuildingTests.cs`.
 
-**Building-only code:** `src/BuildingDesigner` (headless): `BuildingInfo`, `BuildingFile` (`.bbld`), `BuildingSession`, which wraps a `DesignSession` for the plan plus a small log for `BuildingInfo` edits, with one history so Ctrl+Z walks both in order. App: ground grid and pad drawn with `OverlayRenderer`, a Building panel (pad, foundation, floors), save and load.
+**Designer.Ui hooks (additive):** `Workspace.Building`, the panel's `UndoHook`/`RedoHook`, File menu New building and Open building, a "Building:" tab prefix.
 
 **DesignKit:** no change expected for slice 1. Anything needed goes in additively and is listed in the report. The planet branch's `OrbitCamera.Up` and `DesignApp.RecordBeforeScene` are not on `space-pivot`; this tool does not need them (+Y up).
 
 ## 6. Slice 1 (after the answers)
 
-App on DesignKit with the shared style, camera, gizmos and undo; ground plane and site pad; add, move, scale, subtract solids with the ship designer's tools (a door opening and a window are subtract solids, or the window tool); pad and foundation in a Building panel; save and load `.bbld`; headless tests for `BuildingInfo`, the file round trip (bytes and hash stable) and undo across plan and info edits; `runBuildingDesigner.bat`; a scripted check (`--input-script`) building walls, floor, roof, door and window, saving, reloading, undoing. Not in slice 1: placement on a planet, game loading, collision, floors as navigation, entrances as air portals.
+Building tab in BRUTALDesigner (first built as its own app on DesignKit, then merged) with the shared style, camera, gizmos and undo; ground plane and site pad; add, move, scale, subtract solids with the ship designer's tools (a door opening and a window are subtract solids, or the window tool); pad and foundation in a Building panel; save and load `.bbld`; headless tests for `BuildingInfo`, the file round trip (bytes and hash stable) and undo across plan and info edits; `runBuildingDesigner.bat`; a scripted check (`--input-script`) building walls, floor, roof, door and window, saving, reloading, undoing. Not in slice 1: placement on a planet, game loading, collision, floors as navigation, entrances as air portals.
 
-## 7. Questions for the user (answered 2026-11-27: 1 anchored grids, 2 settlement files too, 3 shells first, 4 own app; 5 and 6 still open, recommendations stand until answered)
+## 7. Questions for the user (answered 2026-11-27: 1 anchored grids, 2 settlement files too, 3 shells first, 4 own app, revised to a tab of BRUTALDesigner; 5 and 6 still open, recommendations stand until answered)
 
 1. **Static or anchored?** Are buildings static scenery (cheap: a static mesh, never changes) or grids anchored to the ground like stations (damageable, holes and splits, players can build bases with the same tool)? Recommendation: anchored grids, the station runtime reused; authored ones are protected by law (secure zones), not by physics.
 2. **One building per file, or settlements?** Recommendation: one building per `.bbld`; a settlement is a list of placements in the planet layer, and a settlement prefab (a saved group of placements) can come later.
 3. **Interiors from the start?** Shells with door and window openings first, or walkable floors, rooms and air in slice 1? Recommendation: shells and openings now, floors and rooms next slice.
-4. **Own app or a mode of BRUTALDesigner?** Recommendation in section 4: own app.
+4. **Own app or a mode of BRUTALDesigner?** Answered own app, then revised by the user: a Building tab of BRUTALDesigner (section 4).
 5. **Do players use it?** Is the building designer bundled for players (like D69 for ships, with plans, cost and construction), or our authoring tool only for now?
 6. **Who sizes the ground?** Does a building's pad write its own site stamp into the planet layer (a rotated rectangle sized from the footprint), or is the site placed first in the planet designer and the building must fit it? Recommendation: the building's pad drives the stamp, so the ground always fits.
