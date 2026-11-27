@@ -354,6 +354,10 @@ Carry-overs:
 - **Coast.** Between the waterline and the inland clamp's start (continent 0-0.06) hills can dig below sea level, as v1's detail did: lagoons near coasts. The sim tests now search for open seabed instead of assuming the v1 shelf 16 km out.
 - Contact sheets (orbit, 60 km, 8 km, 1.2 km, 60 m): the scratchpad's `kinds/<kind>_sheet.png`. Risers over 76 deg mesh as a one-voxel staircase until `undercut` (K2).
 
+### Carry-overs from the planet designer (2026-11-27)
+
+- **A Jolt-free planet view library** is the clean long-term fix for planet tabs being authoring-only. It would hold `TerrainWorld` (collision behind an interface, the Jolt adapter staying in `Terrain.Runtime`), the terrain and body renderers, `CelestialView` fed from Frames and Terrain data instead of `SimWorld`, and the fixed-system setup. With it, Designer.App could show planets without Game, Sim or Physics. Do it when players need to see planets in the designer, or when someone is already refactoring that code.
+
 ## Open questions
 
 Decisions so far are logged in [decisions.md](decisions.md) (D9-D74) and in the Decided table above. Remaining open questions live in each doc's own list; the index after item 34 says where.
