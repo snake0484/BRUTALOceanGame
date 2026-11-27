@@ -62,6 +62,39 @@ public static class MeshOps
     }
 
     /// <summary>
+    /// Moves vertices of a mesh kept symmetric across local X = 0 (live mirror; run <see cref="MirrorX"/> after). Seam
+    /// vertices (X = 0) stay on the plane, moving only in Y and Z, so the halves stay joined; a +X vertex stops at the
+    /// plane rather than crossing it; a -X vertex moves its +X twin by the mirrored delta (the -X half is rebuilt from
+    /// the +X one). A vertex picked on both sides moves once.
+    /// </summary>
+    public static void TranslateMirrored(MeshBuilder b, IEnumerable<int> vertices, int dx, int dy, int dz)
+    {
+        var at = new Dictionary<MeshVertex, int>(b.Vertices.Count);
+
+        for (var i = 0; i < b.Vertices.Count; i++)
+            at.TryAdd(b.Vertices[i], i);
+
+        var moved = new HashSet<int>();
+
+        foreach (var v in vertices)
+        {
+            var p = b.Vertices[v];
+            var target = v;
+            var sx = 1;
+
+            if (p.X < 0 && at.TryGetValue(new MeshVertex(-p.X, p.Y, p.Z), out var twin))
+                (target, sx) = (twin, -1);
+
+            if (!moved.Add(target))
+                continue;
+
+            var q = b.Vertices[target];
+            var x = q.X == 0 ? 0 : q.X > 0 ? Math.Max(0, q.X + sx * dx) : q.X + sx * dx;
+            b.Vertices[target] = new MeshVertex(x, q.Y + dy, q.Z + dz);
+        }
+    }
+
+    /// <summary>
     /// Region extrude: the selected faces move out by <paramref name="distance"/> (1/1024 m) along their vertices' mean
     /// face normal; a quad wall joins every boundary edge of the region to its copy.
     /// </summary>

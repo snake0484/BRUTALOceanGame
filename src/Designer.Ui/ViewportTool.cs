@@ -455,10 +455,17 @@ public sealed class ViewportTool
             var ly = Snap((_matrix[1] * d.X + _matrix[4] * d.Y + _matrix[7] * d.Z) * delta);
             var lz = Snap((_matrix[2] * d.X + _matrix[5] * d.Y + _matrix[8] * d.Z) * delta);
             var builder = new MeshBuilder(mesh);
-            MeshOps.Translate(builder, _dragVertices!, lx, ly, lz);
 
             if (edit.Mirror)
+            {
+                // Seam vertices stay on the mirror plane, so the halves stay joined.
+                MeshOps.TranslateMirrored(builder, _dragVertices!, lx, ly, lz);
                 MeshOps.MirrorX(builder);
+            }
+            else
+            {
+                MeshOps.Translate(builder, _dragVertices!, lx, ly, lz);
+            }
 
             _previewMesh = builder.Build();
         }
