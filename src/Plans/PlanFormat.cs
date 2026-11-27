@@ -69,7 +69,8 @@ public enum PlanFormatError
 /// profiles) points sweep brushes at the plan's profiles with a line point and size, and sizes every stroke point; the
 /// inline outlines of older sweeps become plan brush profiles on load; it also adds flag 16 and the
 /// <see cref="HullDecalSet"/> block after the windows. Format 11 (paints) gives decals a shape and paint slot and adds flag
-/// 32 and the <see cref="HullPaintSet"/> block (slots, the hull's paint, strokes' own paints) after the decals.
+/// 32 and the <see cref="HullPaintSet"/> block (slots, the hull's paint, strokes' own paints) after the decals. Format 12
+/// (model brushes) adds the game model and the repeat options to each brush.
 /// </summary>
 public static class PlanFormat
 {
@@ -84,12 +85,14 @@ public static class PlanFormat
     public const ushort WallFormat = 9;
     public const ushort BrushProfileFormat = 10;
     public const ushort PaintFormat = 11;
+    public const ushort RepeatFormat = 12;
 
     /// <summary>The newest format this build writes; bodies up to it can be read.</summary>
-    public const ushort Newest = PaintFormat;
+    public const ushort Newest = RepeatFormat;
 
     public static ushort FormatOf(PlanDocument doc) =>
-        doc.Paint is { IsEmpty: false } || doc.Decals is { HasShapes: true } || doc.Prefabs.Values.Any(p => FormatOf(p) >= PaintFormat) ? PaintFormat
+        doc.Brushes is { NeedsRepeats: true } || doc.Prefabs.Values.Any(p => FormatOf(p) >= RepeatFormat) ? RepeatFormat
+        : doc.Paint is { IsEmpty: false } || doc.Decals is { HasShapes: true } || doc.Prefabs.Values.Any(p => FormatOf(p) >= PaintFormat) ? PaintFormat
         : doc.Brushes is { NeedsProfiles: true } || doc.Decals is { IsEmpty: false } || doc.Prefabs.Values.Any(p => FormatOf(p) >= BrushProfileFormat) ? BrushProfileFormat
         : doc.Interior is { HasKinds: true } || doc.Prefabs.Values.Any(p => FormatOf(p) >= WallFormat) ? WallFormat
         : doc.Interior is { IsEmpty: false } || doc.Components is { Pipes.Count: > 0 } || doc.Prefabs.Values.Any(p => FormatOf(p) >= RouteFormat) ? RouteFormat
@@ -115,7 +118,7 @@ public static class PlanFormat
 
         var format = FormatOf(doc);
         var layers = doc.Layers?.ToBytes() ?? [];
-        var brushes = format >= BrushFormat && doc.Brushes is { IsEmpty: false } ? doc.Brushes.ToBytes(format >= BrushProfileFormat) : [];
+        var brushes = format >= BrushFormat && doc.Brushes is { IsEmpty: false } ? doc.Brushes.ToBytes(format >= RepeatFormat ? BrushLayout.Repeats : format >= BrushProfileFormat ? BrushLayout.Profiles : BrushLayout.Inline) : [];
         var interior = format >= InteriorFormat && doc.Interior is { IsEmpty: false } ? doc.Interior.ToBytes(format >= WallFormat) : [];
         var windows = format >= WindowFormat && doc.Windows is { IsEmpty: false } ? doc.Windows.ToBytes() : [];
         var decals = format >= BrushProfileFormat && doc.Decals is { IsEmpty: false } ? doc.Decals.ToBytes(format >= PaintFormat) : [];
@@ -285,7 +288,7 @@ public static class PlanFormat
         if (header.Magic != PlanHeader.MagicValue)
             return PlanFormatError.BadMagic;
 
-        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat or InteriorFormat or WindowFormat or RouteFormat or WallFormat or BrushProfileFormat or PaintFormat))
+        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat or InteriorFormat or WindowFormat or RouteFormat or WallFormat or BrushProfileFormat or PaintFormat or RepeatFormat))
             return PlanFormatError.UnsupportedFormat;
 
         if (header.Level is not (PlanLevel.Ship or PlanLevel.HullChunk or PlanLevel.Component))
@@ -501,7 +504,7 @@ public static class PlanFormat
 
         if (hasBrushes)
         {
-            doc.Brushes = r.Brushes(format >= BrushProfileFormat ? BrushLayout.Profiles : BrushLayout.Inline, inline);
+            doc.Brushes = r.Brushes(format >= RepeatFormat ? BrushLayout.Repeats : format >= BrushProfileFormat ? BrushLayout.Profiles : BrushLayout.Inline, inline);
 
             if (doc.Brushes is null)
                 return false;

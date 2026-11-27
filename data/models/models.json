@@ -1,0 +1,5 @@
+{
+  "models": [
+    { "id": "model.nut.hex", "name": "Hex nut head", "mesh": "nut_hex.json" }
+  ]
+}

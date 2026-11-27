@@ -1,3 +1,4 @@
+using BrutalGame.Plans;
 using BrutalGame.Ships;
 using BrutalGame.Ships.Interior;
 
@@ -141,6 +142,21 @@ public static class BrushCommands
         });
         return index;
     }
+
+    /// <summary>A new model brush repeating game model <paramref name="model"/> every <paramref name="spacing"/> metres; returns its index.</summary>
+    public static int AddModel(DesignSession session, DefId model, double spacing)
+    {
+        var index = -1;
+        Change(session, set =>
+        {
+            index = set.Brushes.Count;
+            set.Brushes.Add(new HullBrush { Kind = BrushKind.Model, Model = model.Value, Spacing = Math.Max(Metres(spacing), HullBrush.MinSpacing) });
+        });
+        return index;
+    }
+
+    /// <summary>One edit to brush <paramref name="index"/> (placement options, model, ...), one undo group.</summary>
+    public static bool EditBrush(DesignSession session, int index, Action<HullBrush> edit) => ChangeBrush(session, index, edit);
 
     /// <summary>Paint brush <paramref name="index"/>'s look: pattern, colour, band width, line spacing and width (metres).</summary>
     public static bool SetPaint(DesignSession session, int index, PaintPattern pattern, uint colour, double width, double spacing, double lineWidth) =>

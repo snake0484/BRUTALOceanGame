@@ -53,6 +53,13 @@ outline the stroke runs; the cross in the Brushes panel, or typed) and its **siz
 stroke **point has a size**, blended along the line to the next, so a stroke can taper or swell. Sizes multiply: brush x
 stroke x point. Older plans' inline outlines become plan brush profiles on load, the line at their origin as before.
 
+**Model brushes and repeats (2026-11-27, BODY format 12):** a **model** brush repeats a game model along a stroke
+(`data/models/models.json`, each a mesh JSON in 1/1024 m, +Y out of the hull, +Z along the stroke; players pick only from
+game data, mods add more; the first is a low-poly hex nut head 0.1 m across flats). Stamps and models share the repeat
+options: **rows** across the stroke (each row's spot stuck to the hull), **random turn and size** seeded from the stroke
+and the copy's place (the same every rebuild, on every peer), **alternate** (every other copy mirrored across the stroke
+or turned half round) and **start and end gaps**. Plans with plain stamps keep their format.
+
 **Paint and decals (2026-11-27, BODY format 10):** drawn only, never baked, massed or collided. Both are projector boxes
 (`HullProjector`) the hull shader colours the surface with, hull and flair alike, where the surface faces along the box's
 axis. A **paint** brush (pattern: line cross; colour with opacity, band width, line spacing and width) turns a stroke into

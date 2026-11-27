@@ -61,6 +61,16 @@ public static class SampleHulls
         BrushCommands.AddStroke(session, rib,
             [StrokePoint.From(new Vector3d(-1.0, 5.0, 4.2), up), StrokePoint.From(new Vector3d(0, 5.0, 7.0), up), StrokePoint.From(new Vector3d(1.0, 5.0, 9.8), up)], trimMaterial);
 
+        // Two rows of nut heads along the top's front edge: turned at random, sized a little apart, every other one turned
+        // half round, clear of the ends.
+        var nuts = BrushCommands.AddModel(session, DefId.FromName("model.nut.hex"), 0.3);
+        BrushCommands.EditBrush(session, nuts, b =>
+        {
+            (b.Rows, b.RowSpacing, b.TurnJitter, b.SizeJitter, b.Alternate) = (2, 205, 30, 200, RepeatAlternate.Turn);
+            (b.StartGap, b.EndGap, b.Scale) = (512, 512, 2000);
+        });
+        BrushCommands.AddStroke(session, nuts, [StrokePoint.From(new Vector3d(-5.5, 6.4, -5.0), up), StrokePoint.From(new Vector3d(5.5, 6.4, -5.0), up)], trimMaterial);
+
         // A band of paint across the top, over the tapered rib, and two decals.
         var paint = BrushCommands.AddPaint(session, PaintPattern.LineCross, 0xFF1E8CF0, 1.2, 0.2, 0.035);
         BrushCommands.AddStroke(session, paint, [StrokePoint.From(new Vector3d(-2, 6.4, -2.5), up), StrokePoint.From(new Vector3d(-2, 6.4, 5.0), up)], trimMaterial);

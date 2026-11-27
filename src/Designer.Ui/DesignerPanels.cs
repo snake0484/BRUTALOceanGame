@@ -85,11 +85,11 @@ public sealed class DesignerPanels
         public bool Interior;
     }
 
-    public DesignerPanels(HullMaterialCatalog catalog)
+    public DesignerPanels(HullMaterialCatalog catalog, ModelCatalog models)
     {
         _catalog = catalog;
         _layersPanel = new LayersPanel(catalog);
-        _brushesPanel = new BrushesPanel(catalog);
+        _brushesPanel = new BrushesPanel(catalog, models);
     }
 
     /// <summary>What the open tab is (the host sets it); a ship shows hull layers and brushes.</summary>

@@ -121,10 +121,15 @@ public static class PlanValidator
         {
             var brush = set.Brushes[i];
 
-            if (brush.Kind == BrushKind.Stamp)
+            if (brush.Kind is BrushKind.Stamp or BrushKind.Model)
             {
-                if (brush.Mesh >= doc.Meshes.Count)
+                if (brush.Kind == BrushKind.Stamp ? brush.Mesh >= doc.Meshes.Count : brush.Model == 0)
                     log.Add(Severity.Error, IssueCode.BrushMesh, default, i);
+
+                if (brush.Rows is 0 or > HullBrush.MaxRows || brush.TurnJitter > HullBrush.MaxTurnJitter || brush.SizeJitter > HullBrush.MaxSizeJitter
+                    || !Enum.IsDefined(brush.Alternate) || brush.RowSpacing is < 0 or > HullBrush.MaxPaintUnits
+                    || brush.StartGap is < 0 or > HullBrush.MaxPaintUnits * 64 || brush.EndGap is < 0 or > HullBrush.MaxPaintUnits * 64)
+                    log.Add(Severity.Error, IssueCode.BrushSpacing, default, i);
 
                 if (brush.Spacing < HullBrush.MinSpacing || brush.Spacing * HullSolid.MetresPerPositionUnit > PlanLimits.MaxReachMetres)
                     log.Add(Severity.Error, IssueCode.BrushSpacing, default, i);

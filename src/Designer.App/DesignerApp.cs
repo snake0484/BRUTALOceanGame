@@ -44,6 +44,7 @@ public sealed partial class DesignerApp : DesignApp
     private readonly PaintPanel _paintPanel;
     private readonly List<HullProjector> _projectors = new();
     private readonly int _hullScope;
+    private readonly ModelCatalog _models;
     private readonly ProfilesPanel _profilesPanel;
     private readonly Dictionary<ulong, PrefabShape> _shapes = new();
     private readonly List<Document> _docs = new();
@@ -97,7 +98,8 @@ public sealed partial class DesignerApp : DesignApp
     {
         _catalog = HullMaterialCatalog.Load(dataFolder);
         _chemistry = ChemistryData.Load(dataFolder);
-        _panels = new DesignerPanels(_catalog);
+        _models = ModelCatalog.Load(dataFolder);
+        _panels = new DesignerPanels(_catalog, _models);
         _library = new PrefabLibrary(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "BRUTALGame", "Components"));
         RefreshLibrary();
         _prefabPanel = new PrefabPanel(_library, Shape);
@@ -203,7 +205,7 @@ public sealed partial class DesignerApp : DesignApp
         var walls = WallGeometry.Expand(doc.Interior, doc.Solids.AsSpan(), doc.Meshes, doc.Meshes.Count + hallways.Meshes.Count + windows.Meshes.Count);
         var meshes = hallways.Meshes.Count + windows.Meshes.Count + walls.Meshes.Count > 0 ? [.. doc.Meshes, .. hallways.Meshes, .. windows.Meshes, .. walls.Meshes] : doc.Meshes;
         var paint = doc.Paint;
-        var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), meshes, doc.Brushes, doc.Interior?.Profiles, paint is null ? null : id => paint.SlotOf(id));
+        var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), meshes, doc.Brushes, doc.Interior?.Profiles, paint is null ? null : id => paint.SlotOf(id), _models.Mesh);
 
         if (windows.Panes.Count > 0)
         {
