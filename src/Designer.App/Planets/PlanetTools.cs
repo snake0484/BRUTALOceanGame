@@ -46,6 +46,7 @@ public sealed class PlanetTools
     private double3 _lastDab;
     private string? _selected;
     private bool _dragging;
+    private double3 _grab;
     private double3 _dragTo;
     private int _markerType;
 
@@ -122,8 +123,12 @@ public sealed class PlanetTools
             {
                 _dragging = false;
 
-                if (Site(_selected!) is { } site && double3.Dot(_dragTo, double3.Normalize(site.Position)) < 1.0 - 1e-14)
-                    _session.SetSite(site.Id, _dragTo, site.CoreM, site.BlendM, _session.SiteHeight(_dragTo));
+                // A click selects; only a drag moves, by how far the cursor went (the site does not jump to the cursor).
+                if (Site(_selected!) is { } site && double3.Dot(_dragTo, _grab) < 1.0 - 1e-14)
+                {
+                    var to = double3.Normalize(double3.Normalize(site.Position) + _dragTo - _grab);
+                    _session.SetSite(site.Id, to, site.CoreM, site.BlendM, _session.SiteHeight(to));
+                }
             }
 
             return;
@@ -138,7 +143,7 @@ public sealed class PlanetTools
         {
             if ((double3.Normalize(s.Position) - d).Length() * radius < s.CoreM)
             {
-                (_selected, _dragging, _dragTo) = (s.Id, true, d);
+                (_selected, _dragging, _grab, _dragTo) = (s.Id, true, d, d);
                 return;
             }
         }
@@ -312,7 +317,7 @@ public sealed class PlanetTools
 
         foreach (var s in _session.Layer.Sites)
         {
-            var d = _dragging && s.Id == _selected ? _dragTo : double3.Normalize(s.Position);
+            var d = _dragging && s.Id == _selected ? double3.Normalize(double3.Normalize(s.Position) + _dragTo - _grab) : double3.Normalize(s.Position);
             Ring(overlay, surface, d, s.CoreM, width, s.Id == _selected ? SelectedColour : CoreColour);
             Ring(overlay, surface, d, s.CoreM + s.BlendM, width * 0.6, BlendColour);
 

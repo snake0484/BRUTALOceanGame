@@ -77,7 +77,7 @@ The authored ops are part of the program, so everything that evaluates the progr
 ## 8. Answers (2026-11-27, D89, D90)
 
 1. Settlements: site + marker now. Buildings later, from a structure/city editor like the ship editor.
-2. Tool: standalone `BRUTALPlanetDesigner`.
+2. Tool: standalone `BRUTALPlanetDesigner`. Revised the same day: a planet tab in BRUTALDesigner (one app for every designer).
 3. Bodies: the test system with fixed seeds in `data/systems/test.json`; planet `home`, moon `home-moon`.
 4. Upgrade overlaps: the authored site wins. On loading a save made on an older version, player edits inside the core of a site whose `since` is newer than the save are dropped; everywhere else the edit log replays unchanged.
 5. Slice 1 channel: a `height` map (our call; `amplitude` follows).
