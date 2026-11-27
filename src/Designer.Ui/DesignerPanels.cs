@@ -29,6 +29,9 @@ public sealed class DesignStats
 
     /// <summary>Paint and decal boxes the hull shader tests, and how many brick-list entries point at them (each a test per fragment of that brick).</summary>
     public int Projectors, ProjectorRefs;
+
+    /// <summary>The hull draw's GPU time (opaque pass, averaged over the timer's ring).</summary>
+    public float HullGpuMs;
     public int Unstuck;
     public float SurfaceMs;
     public int SurfacePieces;
@@ -424,6 +427,8 @@ public sealed class DesignerPanels
 
             if (stats.Generated > 0 || stats.Unstuck > 0)
                 ImGui.Text($"brushes and window panes: {stats.Generated} pieces, {stats.FlairKg:F0} kg, {stats.Unstuck} points off the hull");
+
+            ImGui.Text($"hull draw {stats.HullGpuMs:F3} ms gpu");
 
             if (stats.Projectors > 0)
                 ImGui.Text($"paint and decals: {stats.Projectors} boxes, {stats.ProjectorRefs} brick refs");

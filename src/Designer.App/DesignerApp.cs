@@ -21,7 +21,7 @@ namespace BrutalGame.Designer.App;
 /// the viewport tools, drawing the hull. Validation, the plan hash and a new bake start only when the session's version
 /// moves (a commit), never per frame. No Sim, networking or physics.
 /// </summary>
-public sealed class DesignerApp : DesignApp
+public sealed partial class DesignerApp : DesignApp
 {
     private const string Title = "BRUTAL Designer";
 
@@ -43,6 +43,7 @@ public sealed class DesignerApp : DesignApp
     private readonly FinishTextures _finishTextures;
     private readonly PaintPanel _paintPanel;
     private readonly List<HullProjector> _projectors = new();
+    private readonly int _hullScope;
     private readonly ProfilesPanel _profilesPanel;
     private readonly Dictionary<ulong, PrefabShape> _shapes = new();
     private readonly List<Document> _docs = new();
@@ -116,6 +117,7 @@ public sealed class DesignerApp : DesignApp
         _finishTextures = new FinishTextures(Renderer, _finishCatalog);
         _paintPanel = new PaintPanel(_finishCatalog, new PaintLibrary(PaintLibrary.DefaultFolder));
         _hull = new HullRenderer(Renderer, _decalTextures, _finishTextures);
+        _hullScope = Renderer.GpuTimer.Supported ? Renderer.GpuTimer.Register("Hull") : -1;
         _lighting = new SceneLighting
         {
             SunDirection = Vector3.Normalize(new Vector3(0.45f, 0.8f, 0.35f)),
@@ -166,6 +168,10 @@ public sealed class DesignerApp : DesignApp
     {
         Commit();
         PollBake();
+        _stats.HullGpuMs = _hullScope >= 0 ? Renderer.GpuTimer.Ring(_hullScope).Average : 0f;
+
+        if (PaintBench)
+            BenchTick();
     }
 
     protected override void OnExit()
@@ -692,8 +698,16 @@ public sealed class DesignerApp : DesignApp
 
     protected override void RecordScene(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj)
     {
-        if (!InteriorView)
-            _hull.Record(commands, frameIndex, extent, viewProj, _camera.Position, _lighting);
+        if (InteriorView)
+            return;
+
+        if (_hullScope >= 0)
+            Renderer.GpuTimer.Begin(commands, _hullScope);
+
+        _hull.Record(commands, frameIndex, extent, viewProj, _camera.Position, _lighting);
+
+        if (_hullScope >= 0)
+            Renderer.GpuTimer.End(commands, _hullScope);
     }
 
     protected override void RecordAfterScene(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj)

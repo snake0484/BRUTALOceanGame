@@ -68,6 +68,12 @@ for (var i = 0; i < args.Length; i++)
         script = args[++i];
     else if (args[i] == "--view" && i + 3 < args.Length)
         view = [double.Parse(args[++i], CultureInfo.InvariantCulture), double.Parse(args[++i], CultureInfo.InvariantCulture), double.Parse(args[++i], CultureInfo.InvariantCulture)];
+    else if (args[i] == "--bench-paint")
+    {
+        demo = true;
+        DesignerApp.BrushDemo = true;
+        DesignerApp.PaintBench = true;
+    }
     else if (args[i] == "--bench-meshes")
         benchMeshes = true;
     else if (args[i] == "--bench-surface-nets")
