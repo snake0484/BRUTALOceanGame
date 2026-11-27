@@ -1,5 +1,6 @@
 using BrutalGame.Ships;
 using BrutalGame.Ships.Components;
+using BrutalGame.Ships.Interior;
 
 namespace BrutalGame.Plans;
 
@@ -50,6 +51,12 @@ public enum IssueCode : ushort
     PlacementPrefab,
     PrefabLevel,
     ComponentSize,
+    HallwayCount,
+    HallwayShape,
+    HallwayFloor,
+    HallwayTooSmall,
+    HallwayMaterial,
+    HallwayShaft,
 }
 
 public readonly record struct ValidationIssue(Severity Severity, IssueCode Code, ElementRef Element, int Value);
@@ -197,6 +204,54 @@ public static class PlanValidator
         }
     }
 
+    /// <summary>
+    /// Hallways: counts, a real path and outline, the floor at Y = 0, the humanoid clearance (0.8 × 1.9 m; the value is
+    /// the clear width in mm), the stair material, and a Warning per run too steep for stairs (ladders are not built yet).
+    /// </summary>
+    private static void ValidateInterior(PlanDocument doc, ValidationLog log)
+    {
+        var interior = doc.Interior;
+
+        if (interior is null)
+            return;
+
+        if (interior.Hallways.Count > HullInterior.MaxHallways)
+            log.Add(Severity.Error, IssueCode.HallwayCount, default, interior.Hallways.Count);
+
+        foreach (var hallway in interior.Hallways)
+        {
+            var element = new ElementRef(ElementKind.Route, hallway.Id);
+
+            if (hallway.Nodes.Count is < HullHallway.MinNodes or > HullHallway.MaxNodes || hallway.Profile.Count is < HullHallway.MinProfilePoints or > HullHallway.MaxProfilePoints
+                || hallway.Profile.Any(p => Math.Abs(p.X) > HullHallway.MaxProfileUnits || Math.Abs(p.Y) > HullHallway.MaxProfileUnits) || HallwayGeometry.Area2(hallway.Profile) == 0
+                || Enumerable.Range(0, hallway.Nodes.Count).Any(i => hallway.Node(i).Length() > PlanLimits.MaxReachMetres)
+                || !SolidRotation.IsValid(hallway.Gravity))
+            {
+                log.Add(Severity.Error, IssueCode.HallwayShape, element, hallway.Nodes.Count);
+                continue;
+            }
+
+            if (hallway.Profile.Min(p => p.Y) != 0)
+                log.Add(Severity.Warning, IssueCode.HallwayFloor, element, hallway.Profile.Min(p => p.Y));
+
+            var clearance = HallwayGeometry.Measure(hallway.Profile);
+
+            if (!clearance.Fits)
+                log.Add(Severity.Error, IssueCode.HallwayTooSmall, element, (int)Math.Round(clearance.Width * 1000));
+
+            if (hallway.Material >= doc.Materials.Count)
+                log.Add(Severity.Error, IssueCode.HallwayMaterial, element, hallway.Material);
+
+            var down = HallwayGeometry.Down(hallway.Gravity);
+
+            for (var s = 0; s + 1 < hallway.Nodes.Count; s++)
+            {
+                if (HallwayGeometry.Kind(HallwayGeometry.Slope(hallway.Node(s), hallway.Node(s + 1), down)) == RunKind.Shaft)
+                    log.Add(Severity.Warning, IssueCode.HallwayShaft, element, s);
+            }
+        }
+    }
+
     private static long ProfileArea(List<ProfilePoint> profile)
     {
         var area = 0L;
@@ -302,6 +357,7 @@ public static class PlanValidator
         ValidateLayers(doc, log);
         ValidateBrushes(doc, log);
         ValidateComponents(doc, log);
+        ValidateInterior(doc, log);
         var ids = new HashSet<uint>(solids.Length);
         var inBounds = true;
         var anyAdd = false;

@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using BrutalGame.Ships;
 using BrutalGame.Ships.Components;
+using BrutalGame.Ships.Interior;
 
 namespace BrutalGame.Plans;
 
@@ -59,7 +60,9 @@ public enum PlanFormatError
 /// Format 2 appends the mesh table: <c>u32 meshCount</c>, then each <see cref="HullMesh"/>'s canonical bytes. Format 3
 /// (layered hulls) writes the mesh table even when empty, then the <see cref="HullLayering"/> block. Each plan is written
 /// in the oldest format that holds it, so older plans keep their bytes and hashes. Format 4 (brushes) writes the mesh
-/// table, <c>u8 layered</c> and the layering block when set, then the <see cref="HullBrushSet"/> block.
+/// table, <c>u8 layered</c> and the layering block when set, then the <see cref="HullBrushSet"/> block. Format 5 (components)
+/// writes <c>u8 flags</c> (1 layered, 2 brushes), those blocks, then the component block and the prefabs. Format 6
+/// (interiors) adds flag 4 and the <see cref="HullInterior"/> block between the brushes and the components.
 /// </summary>
 public static class PlanFormat
 {
@@ -68,9 +71,11 @@ public static class PlanFormat
     public const ushort LayerFormat = 3;
     public const ushort BrushFormat = 4;
     public const ushort ComponentFormat = 5;
+    public const ushort InteriorFormat = 6;
 
     public static ushort FormatOf(PlanDocument doc) =>
-        doc.Components is { IsEmpty: false } || doc.Prefabs.Count > 0 ? ComponentFormat
+        doc.Interior is { IsEmpty: false } ? InteriorFormat
+        : doc.Components is { IsEmpty: false } || doc.Prefabs.Count > 0 ? ComponentFormat
         : doc.Brushes is { IsEmpty: false } ? BrushFormat : doc.Layers is not null ? LayerFormat : doc.Meshes.Count > 0 ? MeshFormat : Format;
     public const uint BodyTag = 'B' | ('O' << 8) | ('D' << 16) | ((uint)'Y' << 24);
     public const uint MetaTag = 'M' | ('E' << 8) | ('T' << 16) | ((uint)'A' << 24);
@@ -92,9 +97,10 @@ public static class PlanFormat
         var format = FormatOf(doc);
         var layers = doc.Layers?.ToBytes() ?? [];
         var brushes = format >= BrushFormat && doc.Brushes is { IsEmpty: false } ? doc.Brushes.ToBytes() : [];
-        var components = format == ComponentFormat ? ComponentBlock(doc) : [];
+        var interior = format == InteriorFormat ? doc.Interior!.ToBytes() : [];
+        var components = format >= ComponentFormat ? ComponentBlock(doc) : [];
         var bytes = new byte[BodyFixedBytes + doc.Materials.Count * 4 + n * HullSolid.SizeInBytes + (format >= MeshFormat ? 4 + meshBytes : 0)
-            + (format >= BrushFormat ? 1 : 0) + layers.Length + brushes.Length + components.Length];
+            + (format >= BrushFormat ? 1 : 0) + layers.Length + brushes.Length + interior.Length + components.Length];
         var w = new Writer(bytes);
 
         w.U8((byte)doc.Class);
@@ -158,11 +164,12 @@ public static class PlanFormat
 
         if (format == BrushFormat)
             w.U8(doc.Layers is not null ? (byte)1 : (byte)0);
-        else if (format == ComponentFormat)
-            w.U8((byte)((doc.Layers is not null ? 1 : 0) | (brushes.Length > 0 ? 2 : 0)));
+        else if (format >= ComponentFormat)
+            w.U8((byte)((doc.Layers is not null ? 1 : 0) | (brushes.Length > 0 ? 2 : 0) | (interior.Length > 0 ? 4 : 0)));
 
         w.Bytes(layers);
         w.Bytes(brushes);
+        w.Bytes(interior);
         w.Bytes(components);
         return bytes;
     }
@@ -253,7 +260,7 @@ public static class PlanFormat
         if (header.Magic != PlanHeader.MagicValue)
             return PlanFormatError.BadMagic;
 
-        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat))
+        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat or InteriorFormat))
             return PlanFormatError.UnsupportedFormat;
 
         if (header.Level is not (PlanLevel.Ship or PlanLevel.HullChunk or PlanLevel.Component))
@@ -432,6 +439,7 @@ public static class PlanFormat
 
         var layered = format == LayerFormat;
         var hasBrushes = format == BrushFormat;
+        var hasInterior = false;
 
         if (format == BrushFormat)
         {
@@ -440,13 +448,14 @@ public static class PlanFormat
 
             layered = flag == 1;
         }
-        else if (format == ComponentFormat)
+        else if (format >= ComponentFormat)
         {
-            if (!r.U8(out var flags) || flags > 3)
+            if (!r.U8(out var flags) || flags > (format == InteriorFormat ? 7 : 3))
                 return false;
 
             layered = (flags & 1) != 0;
             hasBrushes = (flags & 2) != 0;
+            hasInterior = (flags & 4) != 0;
         }
 
         if (layered)
@@ -465,7 +474,15 @@ public static class PlanFormat
                 return false;
         }
 
-        if (format == ComponentFormat)
+        if (hasInterior)
+        {
+            doc.Interior = r.Interior();
+
+            if (doc.Interior is null)
+                return false;
+        }
+
+        if (format >= ComponentFormat)
         {
             doc.Components = r.Components();
 
@@ -474,7 +491,7 @@ public static class PlanFormat
 
             for (var i = 0; i < prefabs; i++)
             {
-                if (!r.U16(out var prefabFormat) || !r.U32(out var length) || length > r.Remaining || prefabFormat > ComponentFormat)
+                if (!r.U16(out var prefabFormat) || !r.U32(out var length) || length > r.Remaining || prefabFormat > InteriorFormat)
                     return false;
 
                 var body = r.Take((int)length);
@@ -660,6 +677,13 @@ public static class PlanFormat
             var bytes = _bytes.Slice(_offset, length).ToArray();
             _offset += length;
             return bytes;
+        }
+
+        public HullInterior? Interior()
+        {
+            var interior = HullInterior.Read(_bytes[_offset..], out var consumed);
+            _offset += consumed;
+            return interior;
         }
 
         public HullBrushSet? Brushes()

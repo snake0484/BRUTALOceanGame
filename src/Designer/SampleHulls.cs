@@ -122,6 +122,24 @@ public static class SampleHulls
         LayerCommands.AssignSection(session, nose, 2);
     }
 
+    /// <summary>The layered demo hull with a hallway: a level run along the port side, then stairs up across to starboard.</summary>
+    public static void HallwayHull(DesignSession session, DefId armour, DefId alloy, DefId titanium)
+    {
+        LayeredHull(session, armour, alloy, titanium);
+        var id = InteriorCommands.AddHallway(session, new Vector3d(-2.5, 0.9, -4.5), new Vector3d(-2.5, 0.9, 1.5), alloy);
+        InteriorCommands.SetHallway(session, id, h => h.Nodes.Add(ComponentCommands.Quantise(new Vector3d(1.5, 2.9, 1.5))));
+    }
+
+    /// <summary>A solid block (no layers) with the same hallway, so the exact cut and the stairs show in a cutaway.</summary>
+    public static void HallwayBlock(DesignSession session, DefId alloy)
+    {
+        const int m = HullSolid.PositionUnitsPerMetre;
+        const int h = HullSolid.HalfUnitsPerMetre;
+        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 3 * m, 0, 5 * h, 3 * h, 7 * h, SolidRotation.Identity, alloy);
+        var id = InteriorCommands.AddHallway(session, new Vector3d(-2.5, 0.9, -4.5), new Vector3d(-2.5, 0.9, 1.5), alloy);
+        InteriorCommands.SetHallway(session, id, hall => hall.Nodes.Add(ComponentCommands.Quantise(new Vector3d(1.5, 2.9, 1.5))));
+    }
+
     private static int FaceAlong(HullMesh mesh, int axis, int sign)
     {
         var b = new MeshBuilder(mesh);

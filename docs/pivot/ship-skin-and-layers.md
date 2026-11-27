@@ -46,6 +46,32 @@ CSG ray against the solids, then resamples between them every 0.25 m), and its p
 Strokes only add; they are drawn from their own geometry and counted for mass (volume x material density), never baked
 into the grid or collision. Plan BODY format 4 stores the brushes and strokes.
 
+## Interior spaces: hallways (2026-11-27)
+
+User direction: hallways are like pipes, a route of nodes with an area that must fit humanoids, and an adjustable
+profile; any angle, each hallway with its own gravity (a ship may have several), stairs where expected; cut as a room.
+
+- **Data** (`Ships/Interior`, plan BODY format 6, flag 4 after the brushes): per hallway an id, nodes (1/1024 m), a
+  closed profile (X across, Y up from the floor, 3-32 points), a gravity rotation (15° snap; down = it applied to -Y)
+  and a stair material.
+- **Clearance:** a person needs 0.8 m wide by 1.9 m tall clear above the floor; every further 0.8 m of clear width lets
+  one more pass at once. Measured on the profile as the widest span round the floor's middle that stays clear up to
+  1.9 m (2 mm slack for the grid). Too small is a plan Error.
+- **Runs:** each run's floor is level side to side against its gravity. Up to 20° it is a ramp; to 50° it gets stairs
+  (risers about 0.18 m, one convex block per step); steeper is a shaft (a plan Warning: ladders and zero-g crawlways are
+  not built yet). A run along gravity keeps the gravity frame's front as the profile's up.
+- **Expansion** (`HallwayGeometry.Expand`, deterministic): each run is a closed prism of the profile, mitred at the nodes
+  (sharp turns of more than 120° are not mitred), split every 128 m for the mesh limits. Cuts are Room-role solids on a
+  layered hull (own wall stack) and Subtract otherwise; stairs come after every cut (Panel role on a layered hull, so the
+  room cut does not remove them). Their meshes follow the plan's in the mesh table; they feed the bake and the exact
+  surface like plan solids.
+- **Designer:** the Interior panel (ship tabs) lists hallways; New hallway drops a level 4 m run at the camera target
+  with a 1.2 × 2.2 m rounded profile. The profile editor takes presets (rectangle, rounded, octagon, arch at a width
+  and height), then drag points (0.05 m snap), double-click an edge to add one, right-click to remove; it shows one
+  0.8 × 1.9 m lane per person abreast. Gravity: yaw, pitch, roll steps, or select a node and turn the rings (E). Nodes
+  move with the arrows (W); each run reads level, ramp, stairs or shaft. `--demo-hallway` (layered hull) and
+  `--demo-hallway-plain` (solid block) show one.
+
 ## Limits of this slice
 
 - Depth comes from the solids' combined distance field: where two skin solids only touch (not overlap), a thin
@@ -56,3 +82,5 @@ into the grid or collision. Plan BODY format 4 stores the brushes and strokes.
 - On a layered hull the exact skin and the grid's inner surfaces meet at rooms that cross the skin: the opening is
   exact, its walls are grid.
 - Strokes are not mirrored by the mirror modes yet.
+- Hallways: no ladders or zero-g crawlways for shafts yet; doors and hatches where a hallway meets a room are the next
+  step; the room graph (atmosphere, crew nav) does not read hallways yet.

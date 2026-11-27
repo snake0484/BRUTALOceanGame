@@ -47,6 +47,9 @@ public static class PlanCanonical
         if (doc.Components is { IsEmpty: true })
             doc.Components = null;
 
+        if (doc.Interior is { IsEmpty: true })
+            doc.Interior = null;
+
         // Prefabs no placement uses are dropped.
         var used = new HashSet<ulong>();
 
@@ -232,6 +235,13 @@ public static class PlanCanonical
 
             foreach (var pipe in doc.Components.Pipes)
                 pipe.Material = Keep(pipe.Material);
+        }
+
+        // Hallway (stair) materials too.
+        if (doc.Interior is not null)
+        {
+            foreach (var hallway in doc.Interior.Hallways)
+                hallway.Material = Keep(hallway.Material);
         }
 
         byte Keep(byte material)

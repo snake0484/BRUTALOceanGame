@@ -46,6 +46,12 @@ for (var i = 0; i < args.Length; i++)
         DesignerApp.PlaceEngine = true;
     else if (args[i] == "--demo-layered")
         demoLayered = true;
+    else if (args[i] is "--demo-hallway" or "--demo-hallway-plain")
+    {
+        DesignerApp.HallwayPlain = args[i] == "--demo-hallway-plain";
+        demoLayered = true;
+        DesignerApp.HallwayDemo = true;
+    }
     else if (args[i] == "--cutaway" && i + 2 < args.Length)
         cutaway = [args[++i], args[++i]];
     else if (args[i] == "--input-script" && i + 1 < args.Length)

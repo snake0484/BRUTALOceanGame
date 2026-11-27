@@ -11,6 +11,7 @@ using BrutalGame.Plans;
 using BrutalGame.Ships.Components;
 using BrutalGame.Chemistry;
 using BrutalGame.Ships;
+using BrutalGame.Ships.Interior;
 
 namespace BrutalGame.Designer.App;
 
@@ -33,6 +34,7 @@ public sealed class DesignerApp : DesignApp
     private readonly ChemistryData _chemistry;
     private readonly PrefabLibrary _library;
     private readonly PrefabPanel _prefabPanel;
+    private readonly InteriorPanel _interiorPanel;
     private readonly Dictionary<ulong, PrefabShape> _shapes = new();
     private readonly List<Document> _docs = new();
     private readonly List<DocumentTab> _tabs = new();
@@ -89,6 +91,7 @@ public sealed class DesignerApp : DesignApp
         _library = new PrefabLibrary(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "BRUTALGame", "Components"));
         RefreshLibrary();
         _prefabPanel = new PrefabPanel(_library, Shape);
+        _interiorPanel = new InteriorPanel(_catalog);
         _saveOnExit = saveOnExit;
         _baker = new HullBaker(WorkerBudget.Background);
         _surfaceBuilder = new HullSurfaceBuilder(WorkerBudget.Background);
@@ -164,13 +167,18 @@ public sealed class DesignerApp : DesignApp
         var copy = doc.Clone();
         PlanCanonical.Canonicalise(copy);
         _stats.Hash = PlanFormat.HashBody(copy);
-        var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), doc.Meshes, doc.Brushes);
+        // Hallways become room cuts and stairs after the plan's solids; their meshes follow the plan's in the table.
+        var hallways = HallwayGeometry.Expand(doc.Interior, doc.Layers is not null, doc.Meshes.Count);
+        var meshes = hallways.Meshes.Count > 0 ? [.. doc.Meshes, .. hallways.Meshes] : doc.Meshes;
+        var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), meshes, doc.Brushes);
         var extras = new List<SurfacePolygon>();
-        var solids = new List<HullSolid>(doc.Solids.Count + 16);
+        var solids = new List<HullSolid>(doc.Solids.Count + hallways.Solids.Count + 16);
         var palette = new List<DefId>(doc.Materials);
 
         foreach (ref readonly var s in doc.Solids.AsSpan())
             solids.Add(s);
+
+        solids.AddRange(hallways.Solids);
 
         _stats.ComponentsKg = 0;
 
@@ -221,10 +229,10 @@ public sealed class DesignerApp : DesignApp
         _stats.Unstuck = expanded.Unstuck;
         var densities = _catalog.Densities(doc);
         _baker.InnerSurfacesOnly = !_stats.ShowGrid;
-        _baker.Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(solids), doc.Meshes, densities, doc.Layers);
+        _baker.Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(solids), meshes, densities, doc.Layers);
 
         // The drawn surface: exact polygons from the solids plus the brush flair, rebuilt on the job workers.
-        _surfaceBuilder.Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(solids), doc.Meshes, doc.Layers is not null, expanded, extras);
+        _surfaceBuilder.Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(solids), meshes, doc.Layers is not null, expanded, extras);
         _densities = densities;
         _shownGrid = _stats.ShowGrid;
         _surfaceChanged = true;
@@ -297,6 +305,7 @@ public sealed class DesignerApp : DesignApp
         _tool.GuideScale = component ? 0.08 : 1.0;
         _meshEdit.Enabled = false;
         _prefabPanel.Selected = 0;
+        _interiorPanel.Reset();
         _seenVersion = -1;
         _bar.Show(document.Key);
 
@@ -457,6 +466,8 @@ public sealed class DesignerApp : DesignApp
         else
         {
             _prefabPanel.Draw(_session);
+            _interiorPanel.Mode = _bar.Mode;
+            _interiorPanel.Draw(_session, _panels.PlaceAt);
         }
     }
 
@@ -485,7 +496,8 @@ public sealed class DesignerApp : DesignApp
         _hull.SetCutaway(cut.Enabled ? cut.Axis : -1, cut.Offset, cut.Flip);
         var used = !_tool.Dragging && (workspace is not null
             ? workspace.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
-            : _prefabPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay));
+            : _interiorPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay)
+              || _prefabPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay));
         var strokeUsedMouse = !used && !_tool.Dragging && workspace is null && _panels.Strokes.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay);
         _tool.Update(_session, _meshEdit, _camera, viewport, viewProj, mouseFree && !strokeUsedMouse && !used, _overlay);
     }
@@ -587,10 +599,22 @@ public sealed class DesignerApp : DesignApp
         Console.WriteLine($"opened {path}: {doc.Solids.Count} solids, hash {PlanFormat.HashBody(doc)}");
     }
 
+    /// <summary>--demo-hallway: the layered demo hull with a hallway and a stair run.</summary>
+    public static bool HallwayDemo;
+
+    /// <summary>--demo-hallway-plain: the hallway in a solid block without layers.</summary>
+    public static bool HallwayPlain;
+
     private void DemoLayered()
     {
         var all = _catalog.All;
-        SampleHulls.LayeredHull(_session, all[Math.Min(2, all.Count - 1)].Id, all[0].Id, all[Math.Min(1, all.Count - 1)].Id);
+
+        if (HallwayDemo && HallwayPlain)
+            SampleHulls.HallwayBlock(_session, all[0].Id);
+        else if (HallwayDemo)
+            SampleHulls.HallwayHull(_session, all[Math.Min(2, all.Count - 1)].Id, all[0].Id, all[Math.Min(1, all.Count - 1)].Id);
+        else
+            SampleHulls.LayeredHull(_session, all[Math.Min(2, all.Count - 1)].Id, all[0].Id, all[Math.Min(1, all.Count - 1)].Id);
         _session.MarkSaved("");
         FrameHull();
     }
