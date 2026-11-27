@@ -51,6 +51,9 @@ public sealed class OceanSwell
     private WaveSet _to = new();
     private WaveSet _spare = new();
     private SwellParams _pending;
+    private ulong _pendingSeed;
+    private ulong _spareSeed;
+    private bool _spareReady;
     private bool _hasPending;
     private bool _hasWind;
     private bool _blending;
@@ -74,8 +77,8 @@ public sealed class OceanSwell
 
     private float _carrierOmega;
     private float _carrierDirection;
-    private double _carrierPhase;
-    private double _groupPhase;
+    private double _carrierGap;
+    private double _groupGap;
     private float _breakerHeight;
     private double _spreadNormFor = double.NaN;
     private double _spreadNorm;
@@ -122,11 +125,17 @@ public sealed class OceanSwell
     /// <summary>
     /// Queues a wind change. The spectrum crossfades over <see cref="BlendSeconds"/>; never snaps.
     /// </summary>
-    public void SetWind(in SwellParams wind)
+    public void SetWind(in SwellParams wind) => SetWind(wind, SplitMix64.Mix(_seed, _generation++), Time);
+
+    /// <summary>
+    /// A wind change whose components are drawn from <paramref name="setSeed"/> and whose blend began at
+    /// <paramref name="blendStart"/> (s; at most <see cref="Time"/>), so a swell made late agrees with one that saw it.
+    /// </summary>
+    public void SetWind(in SwellParams wind, ulong setSeed, double blendStart)
     {
         if (!_hasWind)
         {
-            _to.Build(wind, SplitMix64.Mix(_seed, _generation++));
+            _to.Build(wind, setSeed);
             _hasWind = true;
             PrepareTarget();
             Prepare();
@@ -136,35 +145,96 @@ public sealed class OceanSwell
         if (_blending)
         {
             _pending = wind;
+            _pendingSeed = setSeed;
             _hasPending = true;
             return;
         }
 
-        StartBlend(wind);
+        StartBlend(wind, setSeed, blendStart);
         Prepare();
     }
 
-    private void StartBlend(in SwellParams wind)
+    /// <summary>Forgets every wind: the next <see cref="SetWind(in SwellParams)"/> is the first.</summary>
+    public void Reset()
     {
-        (_from, _to, _spare) = (_to, _spare, _from);
-        _to.Build(wind, SplitMix64.Mix(_seed, _generation++));
-        _blendStart = Time;
-        _blending = true;
+        _hasWind = false;
+        _blending = false;
+        _hasPending = false;
+        _spareReady = false;
+        _generation = 0;
+        _to.Build(new SwellParams { WindSpeed = 0f }, 0UL);
         PrepareTarget();
+        Prepare();
     }
 
     /// <summary>
-    /// Advances to simulation time and caches per-component phase. O(components), no allocation. The surf carrier's
-    /// phases integrate the last tick's ω, so a wind change bends their rate instead of jumping them.
+    /// Builds the set a coming <see cref="SetWind(in SwellParams, ulong, double)"/> with this seed and wind will blend to,
+    /// ahead of it (off the tick that takes it up). The seed must stand for the wind.
     /// </summary>
+    public void Prebuild(in SwellParams wind, ulong setSeed)
+    {
+        _spare.Build(wind, setSeed);
+        _spareSeed = setSeed;
+        _spareReady = true;
+    }
+
+    private void StartBlend(in SwellParams wind, ulong setSeed, double blendStart)
+    {
+        (_from, _to, _spare) = (_to, _spare, _from);
+
+        if (!_spareReady || _spareSeed != setSeed)
+            _to.Build(wind, setSeed);
+
+        _spareReady = false;
+        _blendStart = blendStart;
+        _blending = true;
+        PrepareTarget();
+        _carrierGap = Gap(_from.CarrierOmega, _to.CarrierOmega);
+        _groupGap = Gap(GroupOmega(_from), GroupOmega(_to));
+    }
+
+    /// <summary>
+    /// What the phase integrated over the blend misses the new set's −ω t by at the blend's end, wrapped to ±π: the
+    /// integral runs −ω_from τ − (ω_to − ω_from) B / 2 over the blend's B seconds.
+    /// </summary>
+    private double Gap(double from, double to)
+    {
+        var gap = -(to - from) * (_blendStart + 0.5 * BlendSeconds);
+        return gap - Math.Round(gap / Math.Tau) * Math.Tau;
+    }
+
+    /// <summary>Advances to simulation time and caches per-component phase. O(components), no allocation.</summary>
     public void SetTime(double time)
     {
-        var dt = time - Time;
-        _carrierPhase = Wrap(_carrierPhase - _carrierOmega * dt);
-        _groupPhase = Wrap(_groupPhase - _carrierOmega * GroupRatio * dt);
         Time = time;
         Prepare();
     }
+
+    /// <summary>
+    /// The surf carrier's phase (or its set group's) at <paramref name="time"/>, in closed form so it is a function of
+    /// the time and the two sets alone: −ω t of the set in force. Across a blend it integrates ω lerped on the components'
+    /// smoothstep s (as the integrated phase did), plus s × the gap left at the end (<see cref="Gap"/>), so the phase never
+    /// jumps and the crests run at most 1.5 π / <see cref="BlendSeconds"/> rad/s off the lerped ω meanwhile.
+    /// </summary>
+    private double CarrierPhase(double time, bool group)
+    {
+        var to = group ? GroupOmega(_to) : _to.CarrierOmega;
+
+        if (!_blending || BlendSeconds <= 0.0 || time >= _blendStart + BlendSeconds)
+            return Wrap(-to * time);
+
+        var from = group ? GroupOmega(_from) : _from.CarrierOmega;
+
+        if (time <= _blendStart)
+            return Wrap(-from * time);
+
+        var x = (time - _blendStart) / BlendSeconds;
+        var s = x * x * (3.0 - 2.0 * x);
+        var integral = BlendSeconds * x * x * x * (1.0 - 0.5 * x);
+        return Wrap(-from * time - (to - from) * integral + (group ? _groupGap : _carrierGap) * s);
+    }
+
+    private static double GroupOmega(WaveSet set) => set.CarrierOmega * SetRatio(set);
 
     private static double Wrap(double phase) => phase - Math.Floor(phase / Math.Tau) * Math.Tau;
 
@@ -182,7 +252,7 @@ public sealed class OceanSwell
                 if (_hasPending)
                 {
                     _hasPending = false;
-                    StartBlend(_pending);
+                    StartBlend(_pending, _pendingSeed, Time);
                     weight = 0.0;
                 }
             }
@@ -301,9 +371,8 @@ public sealed class OceanSwell
     {
         var (dirZ, dirX) = MathF.SinCos(DominantDirection);
         var spatial = _carrierOmega * _carrierOmega / 9.81f * (dirX * originX + dirZ * originZ);
-        var dt = renderTime - Time;
-        var phase = Wrap(_carrierPhase - _carrierOmega * dt + spatial);
-        var group = Wrap(_groupPhase - _carrierOmega * GroupRatio * dt + GroupRatio * spatial);
+        var phase = Wrap(CarrierPhase(renderTime, group: false) + spatial);
+        var group = Wrap(CarrierPhase(renderTime, group: true) + GroupRatio * spatial);
         return new System.Numerics.Vector4(_carrierOmega, (float)phase, GroupRatio, (float)group);
     }
 

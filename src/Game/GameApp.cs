@@ -68,7 +68,6 @@ public sealed partial class GameApp : IDisposable
     private readonly ImGuiLayer _imgui;
     private readonly ProfilerPanel _profiler;
     private readonly SimWorld _sim;
-    private readonly OceanSwell _swell;
     private readonly OceanPanel _oceanPanel;
     private readonly WeatherSystem _weather;
     private readonly WeatherPanel _weatherPanel;
@@ -196,7 +195,6 @@ public sealed partial class GameApp : IDisposable
         });
         _window.OnKey += OnKey;
 
-        _swell = _sim.Ocean.Swell;
         _renderer = new Renderer(_window, _stats, Validation, vsync: benchSeconds <= 0.0, renderScale);
         _imgui = new ImGuiLayer(_window, _renderer);
 
@@ -214,7 +212,7 @@ public sealed partial class GameApp : IDisposable
         _depthTexture = new ShoreDepthTexture(_renderer);
         _coast = new CoastRegionSet(_sim.Ocean.Tiles, _sim.CoastDepth, WorkerBudget.Side);
         _coastGpu = new CoastAtlasGpu(_renderer);
-        _oceanPanel = new OceanPanel(_sim.Ocean, _oceanFft, _depths, _depthTexture, _coast, _coastGpu) { BreakerFaces = faces };
+        _oceanPanel = new OceanPanel(_sim.Ocean, p => _sim.SetSwell(p), _oceanFft, _depths, _depthTexture, _coast, _coastGpu) { BreakerFaces = faces };
         _surfTest = surfBeach ? new SurfBeachTest(_sim, _coast, surfClimb) : null;
         _weatherPanel = new WeatherPanel(_weather.Map) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset };
         _instances = new InstanceBuffer(_renderer);
@@ -388,7 +386,7 @@ public sealed partial class GameApp : IDisposable
                 _sections.Uploads = Lap(ref mark);
 
                 gpu.Begin(commands, _fftScope);
-                _oceanFft.Record(commands, _renderer.FrameIndex, _swell, renderTime, (float)frameSeconds);
+                _oceanFft.Record(commands, _renderer.FrameIndex, Swell, renderTime, (float)frameSeconds);
                 gpu.End(commands, _fftScope);
 
                 if (ocean)
@@ -606,12 +604,15 @@ public sealed partial class GameApp : IDisposable
     /// The coast regions follow the camera and the swell's target carrier (breaking-waves-brief.md): baked on a job,
     /// faded in and out; none without a sea to draw.
     /// </summary>
+    /// <summary>The swell of the camera's sea tile.</summary>
+    private OceanSwell Swell => _sim.Ocean.Swells.Near(_camera.Position);
+
     private void UpdateCoast(double3 camera, double frameSeconds)
     {
         var start = Stopwatch.GetTimestamp();
         var bytes = GC.GetAllocatedBytesForCurrentThread();
-        var carrier = _seaWanted ? CoastCarrier.From(_swell.TargetCarrierDirection, _swell.TargetCarrierOmega, _swell.TargetCarrierHeight) : default;
-        _coast.Update(camera, carrier, _swell.TargetSignificantHeight, (float)frameSeconds);
+        var carrier = _seaWanted ? CoastCarrier.From(Swell.TargetCarrierDirection, Swell.TargetCarrierOmega, Swell.TargetCarrierHeight) : default;
+        _coast.Update(camera, carrier, Swell.TargetSignificantHeight, (float)frameSeconds);
         _coastAllocated += GC.GetAllocatedBytesForCurrentThread() - bytes;
         _coastMs.Record((float)Stopwatch.GetElapsedTime(start).TotalMilliseconds);
     }
@@ -830,6 +831,8 @@ public sealed partial class GameApp : IDisposable
     {
         _sim.DriveWind = _weatherPanel.DriveOcean;
         _sim.WeatherTimeOffset = _weatherPanel.TimeOffset;
+
+        _sim.ViewAnchor = _camera.Position;
 
         var ticks = _sim.Advance(frameSeconds);
         for (var i = 0; i < ticks; i++)

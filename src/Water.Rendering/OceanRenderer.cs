@@ -598,7 +598,8 @@ public sealed unsafe class OceanRenderer : IDisposable
     /// <param name="coast">The coast regions whose breaking faces are drawn (uploaded by <see cref="CoastAtlasGpu.Record"/>); null draws none.</param>
     public void Prepare(int frameIndex, OceanSurface sea, in SeaFrame frame, double renderTime, in View view, CoastRegionSet? coast = null)
     {
-        var swell = sea.Swell;
+        SeaSlots.Build(sea.Tiles, frame, view.Camera.X, view.Camera.Z, WaveReach, out var slots);
+        var swell = sea.Swells.For(slots.Tile[slots.Primary]) ?? sea.Swells.Uniform;
         var block = (byte*)_buffer.Mapped + _frameOffsets[frameIndex];
         var header = (FrameHeader*)block;
         var waves = new Span<GpuWave>(block + WavesOffset, MaxWaves);
@@ -635,7 +636,6 @@ public sealed unsafe class OceanRenderer : IDisposable
         (_depthCellX, _depthCellZ, _depthVersion) = (view.DepthCellX, view.DepthCellZ, view.DepthVersion);
 
         // The sea tiles round the camera: one wave set, a phase per tile slot, and each slot's plane map.
-        SeaSlots.Build(sea.Tiles, frame, camera.X, camera.Z, WaveReach, out var slots);
         header->SlotCount = slots.Count;
         header->BandRow = slots.BandRow;
         header->BandSouth = slots.BandSouth;

@@ -165,7 +165,7 @@ public sealed class SurfBeachTest
         }
         else if (_stage == Stage.Settled && time - _settledAt > TurnAfterSeconds)
         {
-            var swell = _sim.Ocean.Swell.Wind;
+            var swell = _sim.Ocean.Swells.Base;
             swell.SwellDirection += TurnRadians;
             swell.WindDirection += TurnRadians;
             _sim.SetSwell(swell);
@@ -395,7 +395,7 @@ public sealed class SurfBeachTest
     private void Profile(double time)
     {
         var carrier = _coast.Carrier;
-        Log.Info($"carrier: period {MathF.Tau / carrier.Omega:F1} s, deep-water height {carrier.Height:F2} m, direction {carrier.Direction * 180f / MathF.PI:F0} degrees (tile east toward south); Hs {_sim.Ocean.Swell.SignificantWaveHeight:F2} m");
+        Log.Info($"carrier: period {MathF.Tau / carrier.Omega:F1} s, deep-water height {carrier.Height:F2} m, direction {carrier.Direction * 180f / MathF.PI:F0} degrees (tile east toward south); Hs {_sim.Ocean.Swells.Near(_sim.Bubble.Origin).SignificantWaveHeight:F2} m");
         var line = "";
         var outer = 0f;
 

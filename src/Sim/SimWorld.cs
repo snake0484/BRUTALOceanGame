@@ -70,11 +70,18 @@ public sealed class SimWorld : IDisposable
     /// <summary>The sea tile at the spawn.</summary>
     public readonly int SpawnTile;
 
-    /// <summary>Follow the weather's sea wind (off pins the swell to <see cref="SetSwell"/>'s wind everywhere).</summary>
-    public bool DriveWind;
+    /// <summary>
+    /// Where the host is looking from (planet frame), kept live on the sea with the bubble and the entities near sea level:
+    /// the client's camera. Null for none.
+    /// </summary>
+    public double3? ViewAnchor;
+
+    /// <summary>Entities this far (m) above or below the sea sphere keep its tiles live.</summary>
+    public const double AnchorAltitude = 10_000.0;
 
     private SwellParams _swell = new();
-    private SeaWindKey? _sent;
+    private bool _driveWind;
+    private double3[] _anchors;
     private readonly List<EditCommand> _pending = new(64);
     private FixedClock _clock = new(TickRate);
 
@@ -91,7 +98,8 @@ public sealed class SimWorld : IDisposable
     public SimWorld(ulong seed, int workerThreads, bool weather = false, int entityCapacity = EntityTable.DefaultCapacity, string? kind = null, ulong? kindSeed = null)
     {
         Seed = seed;
-        DriveWind = weather;
+        _driveWind = weather;
+        _anchors = new double3[entityCapacity + 2];
         Physics = new PhysicsWorld(workerThreads: workerThreads);
         Frames = new FrameTree();
         Celestial = CelestialSystem.CreateTest(Frames, seed, _clock.TickSeconds);
@@ -114,10 +122,11 @@ public sealed class SimWorld : IDisposable
         var tiles = new SeaTiles(level, body.SpinAxis);
         var depth = new PlanetShoreDepth(Shore);
         CoastDepth = depth;
-        Ocean = new OceanSurface(new OceanSwell(seed), tiles, _clock.TickSeconds, depth);
         SpawnTile = TileAt(tiles, coast);
         Weather = new SphereWeatherField(Climate(body, PlanetParams.BodySeed(seed, PlanetIndex), _clock.TickSeconds), _clock.TickSeconds);
         SeaWinds = new SeaWindSchedule(Weather, tiles);
+        Ocean = new OceanSurface(new SeaSwells(seed, tiles, _clock.TickSeconds, SeaWinds), _clock.TickSeconds, depth);
+        SetSwell(_swell);
         UpdateRenderPoses();
     }
 
@@ -137,8 +146,22 @@ public sealed class SimWorld : IDisposable
     /// <summary>Edits dropped unlogged because every voxel they reach is protected shore, seabed or dig floor (D30).</summary>
     public int RefusedEdits { get; private set; }
 
-    /// <summary>The spawn tile's sea wind this epoch, as last sent to the swell; null while pinned.</summary>
-    public SeaWindKey? SpawnWind => _sent;
+    /// <summary>The spawn tile's sea wind this epoch (reads the weather: debug and tests).</summary>
+    public SeaWindKey SpawnWind => SeaWinds.At(SpawnTile, SeaWind.Epoch(_clock.TickIndex));
+
+    /// <summary>Each sea tile follows its weather (off pins the swell to <see cref="SetSwell"/>'s wind everywhere).</summary>
+    public bool DriveWind
+    {
+        get => _driveWind;
+        set
+        {
+            if (value == _driveWind)
+                return;
+
+            _driveWind = value;
+            SetSwell(_swell);
+        }
+    }
 
     /// <summary>Debug offset (s) of weather time from sim time, whole ticks.</summary>
     public double WeatherTimeOffset
@@ -174,15 +197,8 @@ public sealed class SimWorld : IDisposable
     public void SetSwell(in SwellParams swell)
     {
         _swell = swell;
-        _sent = null;
-
-        if (!DriveWind)
-        {
-            Ocean.Swell.SetWind(swell);
-            return;
-        }
-
-        UpdateWind(force: true);
+        Ocean.Swells.SetBase(swell, _driveWind);
+        TickSea(_clock.TickIndex);
     }
 
     /// <summary>Queues a brush edit, stamped with the next tick to run; it is checked and applied at that tick's start.</summary>
@@ -196,18 +212,38 @@ public sealed class SimWorld : IDisposable
     public void Tick()
     {
         ApplyEdits();
-        UpdateWind(force: false);
         Celestial.Update(_clock.TickIndex + 1);
 
         var dt = _clock.TickSeconds;
         StepEntities(dt);
         Physics.Step((float)dt);
-
-        var start = Stopwatch.GetTimestamp();
-        Ocean.Swell.SetTime((_clock.TickIndex + 1) * dt);
-        LastSwellMs = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+        TickSea(_clock.TickIndex + 1);
 
         _clock.TickIndex++;
+    }
+
+    /// <summary>The sea's swells to <paramref name="tick"/>, live round the bubble, the view and the entities near sea level.</summary>
+    private void TickSea(long tick)
+    {
+        var count = 0;
+        _anchors[count++] = Bubble.Origin;
+
+        if (ViewAnchor is { } view)
+            _anchors[count++] = view;
+
+        var surface = Celestial[PlanetIndex].Surface;
+        var radius = Ocean.Tiles.SeaRadius;
+
+        foreach (var index in Entities.Alive)
+        {
+            ref readonly var placement = ref Entities.Placement[index];
+
+            if (placement.Frame == surface && Math.Abs(placement.Position.Length() - radius) < AnchorAltitude)
+                _anchors[count++] = placement.Position;
+        }
+
+        Ocean.Swells.Tick(tick, _anchors.AsSpan(0, count));
+        LastSwellMs = Ocean.Swells.LastTickMs;
     }
 
     private void ApplyEdits()
@@ -246,29 +282,6 @@ public sealed class SimWorld : IDisposable
             if (entities.Kind[index] == EntityKind.Probe && placement.Mode == PlacementMode.Simulated)
                 ProbeMotion.Step(ref placement, entities.Input[index], dt);
         }
-    }
-
-    /// <summary>At each epoch's first tick the spawn tile's sea wind is sampled and sent to the swell if its key moved.</summary>
-    private void UpdateWind(bool force)
-    {
-        if (!DriveWind)
-        {
-            if (_sent is not null)
-                SetSwell(_swell);
-
-            return;
-        }
-
-        if (!force && _sent is not null && _clock.TickIndex % SeaWind.EpochTicks != 0)
-            return;
-
-        var key = SeaWinds.At(SpawnTile, SeaWind.Epoch(_clock.TickIndex));
-
-        if (_sent == key)
-            return;
-
-        _sent = key;
-        Ocean.Swell.SetWind(_swell with { WindSpeed = key.WindSpeed, WindDirection = key.Speed > 0 ? key.WindDirection : _swell.WindDirection });
     }
 
     private static unsafe int TileAt(SeaTiles tiles, double3 dir)

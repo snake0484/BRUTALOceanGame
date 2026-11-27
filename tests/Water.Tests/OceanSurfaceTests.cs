@@ -206,7 +206,7 @@ public sealed unsafe class OceanSurfaceTests(ITestOutputHelper output)
             for (var i = 0; i < 2000; i++)
                 sink += surface.Sample(Offset(at, i % 40 * 3.0 - 60.0, i / 40 * 3.0 - 75.0), Tick).Height;
 
-            output.WriteLine($"{name}: {timer.Elapsed.TotalNanoseconds / 2000:F0} ns per sample ({surface.Swell.ComponentCount} components)");
+            output.WriteLine($"{name}: {timer.Elapsed.TotalNanoseconds / 2000:F0} ns per sample ({surface.Swells.Uniform.ComponentCount} components)");
         }
 
         Assert.True(float.IsFinite(sink));

@@ -165,7 +165,7 @@ public class SimBoundaryTests(Xunit.Abstractions.ITestOutputHelper output)
 
         Assert.Equal(60, sim.Clock.TickIndex);
         Assert.Equal(1.0, sim.Clock.SimTime, 9);
-        Assert.Equal(sim.Clock.SimTime, sim.Ocean.Swell.Time, 9); // swell, physics and frames all describe the step's end
+        Assert.Equal(sim.Clock.SimTime, sim.Ocean.Swells.Time, 9); // swell, physics and frames all describe the step's end
         Assert.True(sim.Physics.GetPosition(ball).Y < 50f - 4f);
         Assert.True(float.IsFinite(sim.Ocean.SampleHeight(sim.Bubble.ToPlanet(new Vector3(300f, 0f, 0f)), sim.Clock.TickIndex)));
     }
@@ -188,11 +188,11 @@ public class SimBoundaryTests(Xunit.Abstractions.ITestOutputHelper output)
             Assert.Equal(sent, a.SpawnWind);
         }
 
+        var spawn = a.Ocean.Swells.For(a.SpawnTile)!;
         Assert.Equal(a.SpawnWind, b.SpawnWind);
-        Assert.Equal(a.Ocean.Swell.Wind, b.Ocean.Swell.Wind);
-        Assert.NotNull(sent);
-        Assert.True(sent.Value.Speed > 0);
-        Assert.Equal(sent.Value.WindSpeed, a.Ocean.Swell.Wind.WindSpeed);
+        Assert.Equal(spawn.Wind, b.Ocean.Swells.For(b.SpawnTile)!.Wind);
+        Assert.True(sent.Speed > 0);
+        Assert.Equal(sent.WindSpeed, spawn.Wind.WindSpeed);
         var offshore = a.Bubble.ToPlanet(new Vector3(400f, 0f, -400f));
         Assert.Equal(a.Ocean.SampleHeight(offshore, a.Clock.TickIndex), b.Ocean.SampleHeight(offshore, b.Clock.TickIndex));
         Assert.NotEqual(0f, a.Ocean.SampleHeight(offshore, a.Clock.TickIndex));
