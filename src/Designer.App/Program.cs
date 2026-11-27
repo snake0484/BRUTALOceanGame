@@ -73,6 +73,9 @@ for (var i = 0; i < args.Length; i++)
         demo = true;
         DesignerApp.BrushDemo = true;
         DesignerApp.PaintBench = true;
+
+        if (i + 1 < args.Length && int.TryParse(args[i + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var decals))
+            (DesignerApp.BenchDecals, i) = (Math.Clamp(decals, 1, 4000), i + 1);
     }
     else if (args[i] == "--bench-meshes")
         benchMeshes = true;

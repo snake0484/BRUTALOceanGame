@@ -7,18 +7,20 @@ namespace BrutalGame.Designer.App;
 /// <summary>
 /// <c>--bench-paint</c>: the brushes demo from a fixed view, cycled through paint loads in ABAB order (two rounds), the hull
 /// draw's GPU time averaged per state after a warm-up, then printed and closed. States: material colours with no decals;
-/// the hull's base paint; base paint and 100 decals (images and paint shapes) spread over the hull; base paint and 100
-/// decals stacked on one spot (every fragment there tests and lays all of them).
+/// the hull's base paint; base paint and N decals (images and paint shapes, 100 unless given) spread over the hull; base
+/// paint and N decals stacked on one spot (every fragment there tests and lays all of them).
 /// </summary>
 public sealed partial class DesignerApp
 {
     private const int BenchWarmFrames = 90;
     private const int BenchFrames = 360;
-    private const int BenchDecals = 100;
-    private static readonly string[] BenchStates = ["materials, no decals", "base paint", "base paint + 100 decals spread", "base paint + 100 decals stacked"];
+    private static string[] BenchStates => ["materials, no decals", "base paint", $"base paint + {BenchDecals} decals spread", $"base paint + {BenchDecals} decals stacked"];
 
-    /// <summary>--bench-paint.</summary>
+    /// <summary>--bench-paint [decals].</summary>
     public static bool PaintBench;
+
+    /// <summary>How many decals the decal states lay (100 unless given).</summary>
+    public static int BenchDecals = 100;
 
     private int _benchStep = -1;
     private int _benchFrame;
@@ -98,7 +100,7 @@ public sealed partial class DesignerApp
         });
     }
 
-    /// <summary>100 decals cast onto the hull from around it (seeded): images and paint shapes, 1-2 m; or all on one spot.</summary>
+    /// <summary>N decals cast onto the hull from around it (seeded): images and paint shapes, 1-2 m; or all on one spot.</summary>
     private HullDecalSet BenchDecalSet(bool stacked)
     {
         var doc = _session.Doc;
