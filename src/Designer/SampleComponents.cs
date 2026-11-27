@@ -52,6 +52,9 @@ public static class SampleComponents
         var hinge = JointCommands.AddJoint(session, JointKind.Hinge, new Vector3d(-0.5, 0, 0), new Vector3d(0, 1, 0), 0);
         JointCommands.SetJoint(session, hinge, j => (j.Min, j.Max, j.Target, j.Speed) = (0, 900, 0, 450));
         JointCommands.SetMember(session, leaf, hinge);
+        CoreCommands.Add(session, CoreIds.RotaryMotor, hinge, new Vector3d(-0.5, 2.2, 0), new Vector3d(0, 1, 0));
+        CoreCommands.Add(session, CoreIds.LimitSwitch, hinge, new Vector3d(-0.45, 2.15, 0), new Vector3d(0, 0, 1), 0);
+        CoreCommands.Add(session, CoreIds.LimitSwitch, hinge, new Vector3d(-0.45, 2.15, 0.1), new Vector3d(1, 0, 0), 900);
         DoorProgramme(session);
         session.Doc.FixNextId();
         return session.Doc;
@@ -61,6 +64,8 @@ public static class SampleComponents
     /// A sliding door: a 3.2 m wide frame the 1 x 2.1 m leaf slides into, 1.05 m along +X, and a lock bolt in the frame
     /// at the leaf's opening edge that slides 80 mm across it. It implements Door with the standard sequence: Close slides
     /// it shut (stopping and opening again if something is in the way), then shoots the bolt; a locked door ignores Open.
+    /// Its leaf is driven by a linear motor and the bolt by a solenoid; limit switches at the leaf's two ends tell the
+    /// programme it got there.
     /// </summary>
     public static PlanDocument SlidingDoor(DefId alloy)
     {
@@ -76,6 +81,10 @@ public static class SampleComponents
         var boltSlider = JointCommands.AddJoint(session, JointKind.Slider, new Vector3d(0.56, 1, 0), new Vector3d(-1, 0, 0), 0);
         JointCommands.SetJoint(session, boltSlider, j => (j.Min, j.Max, j.Target, j.Speed) = (0, 80, 0, 200));
         JointCommands.SetMember(session, bolt, boltSlider);
+        CoreCommands.Add(session, CoreIds.LinearMotor, slider, new Vector3d(0.6, 2.25, 0), new Vector3d(0, 1, 0));
+        CoreCommands.Add(session, CoreIds.SolenoidBolt, boltSlider, new Vector3d(0.6, 1, 0), new Vector3d(-1, 0, 0));
+        CoreCommands.Add(session, CoreIds.LimitSwitch, slider, new Vector3d(0.5, 2.15, 0), new Vector3d(-1, 0, 0), 0);
+        CoreCommands.Add(session, CoreIds.LimitSwitch, slider, new Vector3d(1.55, 2.15, 0), new Vector3d(1, 0, 0), 1050);
 
         DoorProgramme(session);
         var states = InterfaceLibrary.Door.States;
@@ -91,7 +100,27 @@ public static class SampleComponents
     private static void DoorProgramme(DesignSession session)
     {
         ProgramCommands.Implement(session, InterfaceLibrary.Door);
-        ProgramCommands.Set(session, p => ProgramCommands.StandardDoor(p, session.Doc.Joints?.Joints ?? []));
+        ProgramCommands.Set(session, p => ProgramCommands.StandardDoor(p, session.Doc.Joints?.Joints ?? [], session.Doc.Cores));
+    }
+
+    /// <summary>
+    /// A proximity lamp: a 0.3 x 0.3 x 0.1 m housing on the surface at the origin facing +Z, a proximity sensor and a lamp
+    /// on its face. It implements Lamp: on Auto (and at start) it lights while something is within the sensor's range.
+    /// </summary>
+    public static PlanDocument ProximityLamp(DefId alloy)
+    {
+        const int m = HullSolid.PositionUnitsPerMetre;
+        const int h = HullSolid.HalfUnitsPerMetre;
+        var session = new DesignSession();
+        session.Doc.Level = PlanLevel.Component;
+        session.Doc.Meta.Name = "Proximity lamp";
+        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 0, (int)(0.05 * m), (ushort)(0.15 * h), (ushort)(0.15 * h), (ushort)(0.05 * h), SolidRotation.Identity, alloy);
+        var sensor = CoreCommands.Add(session, CoreIds.Proximity, 0, new Vector3d(0, -0.08, 0.1), new Vector3d(0, 0, 1));
+        var lamp = CoreCommands.Add(session, CoreIds.Lamp, 0, new Vector3d(0, 0.05, 0.1), new Vector3d(0, 0, 1));
+        ProgramCommands.Implement(session, InterfaceLibrary.Lamp);
+        ProgramCommands.Set(session, p => ProgramCommands.LampSequence(p, sensor, lamp));
+        session.Doc.FixNextId();
+        return session.Doc;
     }
 
     /// <summary>

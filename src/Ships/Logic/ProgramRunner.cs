@@ -2,19 +2,25 @@ namespace BrutalGame.Ships.Logic;
 
 /// <summary>
 /// One placed component's programme state. The part a renderer needs is the <b>state record</b>: <see cref="State"/>, the
-/// tick it was <see cref="Entered"/>, where each joint <see cref="Start"/>ed from then, and whether it is
-/// <see cref="Held"/> (stopped where it was by something in its way). From it every joint's position at any tick is
-/// closed form (<see cref="ProgramRunner.Position"/>), so a client, a far ship or a save draws the component without
-/// running its graph; only a new state record goes on the wire. The rest is the running sequence, server-side only.
+/// tick it was <see cref="Entered"/>, where each joint <see cref="Start"/>ed from then and is driven to (<see cref="Target"/>,
+/// its motor's input), whether it is <see cref="Held"/> (stopped where it was by something in its way, or no power), and
+/// the other effectors' <see cref="Inputs"/> (a light's On). From it every joint's position at any tick is closed form
+/// (<see cref="ProgramRunner.Position"/>), so a client, a far ship or a save draws the component without running its
+/// graph; only a new state record goes on the wire. The rest (the running sequence, the sensors' <see cref="Signals"/>)
+/// is server-side only.
 /// </summary>
 public sealed class ProgramInstance
 {
     public const int MaxJoints = 16;
+    public const int MaxSignals = 128;
+    public const int MaxInputs = 32;
 
     public byte State;
     public long Entered;
     public bool Held;
     public readonly short[] Start = new short[MaxJoints];
+    public readonly short[] Target = new short[MaxJoints];
+    public readonly short[] Inputs = new short[MaxInputs];
 
     /// <summary>The node the running sequence is at (0: idle) and, in a Wait or Wait until, the tick it ends.</summary>
     public ushort Node;
@@ -26,20 +32,42 @@ public sealed class ProgramInstance
     /// it only by what it can see: a part that does not reach its position in time, so a Wait until times out.
     /// </summary>
     public bool Obstructed;
+
+    /// <summary>No power: sensors read nothing (their signals go dead), motors stop, lights go out.</summary>
+    public bool Unpowered;
+
+    /// <summary>The component's cores (built per plan version) and what its sensors look at; null: no cores.</summary>
+    public CoreLayout? Cores;
+    public ISensorWorld? World;
+
+    /// <summary>Every core's signals in counts of their steps (<see cref="CoreLayout"/> places them), and which are live (have a reading, or a value set).</summary>
+    public readonly int[] Signals = new int[MaxSignals];
+    public readonly ulong[] Live = new ulong[MaxSignals / 64];
+
+    public bool IsLive(int signal) => (Live[signal >> 6] & (1UL << (signal & 63))) != 0;
+
+    public void SetLive(int signal, bool live)
+    {
+        if (live)
+            Live[signal >> 6] |= 1UL << (signal & 63);
+        else
+            Live[signal >> 6] &= ~(1UL << (signal & 63));
+    }
 }
 
 /// <summary>
-/// Runs component programmes, deterministically, on the integer tick (60 a second): a call starts its sequence at the
-/// call's node (replacing any running one); each tick the sequence runs through instant nodes until it waits, at most
-/// <see cref="MaxStepsPerTick"/> nodes, so a loop cannot hang a tick. Joints move at their own speed toward the current
-/// state's pose, unless something stops them. No allocation.
+/// Runs component programmes, deterministically, on the integer tick (60 a second). Each tick: an obstruction or power
+/// loss stops the motors; sensors due on this tick take their readings (D88: quantized to their step, at their rate);
+/// the running sequence runs through instant nodes until it waits, at most <see cref="MaxStepsPerTick"/>, so a loop
+/// cannot hang a tick; then the effectors report what they did. A call starts its sequence (replacing any running one).
+/// Joints move at their own speed toward their targets. No allocation.
 /// </summary>
 public static class ProgramRunner
 {
     public const int TicksPerSecond = 60;
     public const int MaxStepsPerTick = 32;
 
-    /// <summary>At rest in the first state, every joint at its pose there (its target where the state names none).</summary>
+    /// <summary>At rest in the first state, every joint at its pose there (its target where the state names none); then the start sequence, if any.</summary>
     public static void Reset(HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, long tick)
     {
         instance.State = 0;
@@ -47,9 +75,21 @@ public static class ProgramRunner
         instance.Held = false;
         instance.Node = 0;
         instance.WaitUntil = 0;
+        Array.Clear(instance.Inputs);
+        Array.Clear(instance.Signals);
+        Array.Clear(instance.Live);
 
         for (var j = 0; j < joints.Count && j < ProgramInstance.MaxJoints; j++)
-            instance.Start[j] = program.PoseOf(0, joints[j].Id, out var v) ? v : joints[j].Target;
+            instance.Start[j] = instance.Target[j] = program.PoseOf(0, joints[j].Id, out var v) ? v : joints[j].Target;
+
+        foreach (var n in program.Nodes)
+        {
+            if (n.Kind == NodeKind.OnStart)
+            {
+                instance.Node = n.Out0;
+                break;
+            }
+        }
     }
 
     /// <summary>Starts call <paramref name="call"/>'s sequence; false when the programme has no node for it.</summary>
@@ -72,33 +112,44 @@ public static class ProgramRunner
     public static double Position(HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, int j, long tick)
     {
         var start = instance.Start[j];
+        var target = instance.Target[j];
 
-        if (instance.Held || !program.PoseOf(instance.State, joints[j].Id, out var target))
+        if (instance.Held)
             return start;
 
         var travel = Speed(joints[j]) * Math.Max(0, tick - instance.Entered) / TicksPerSecond;
         return target >= start ? Math.Min(target, start + travel) : Math.Max(target, start - travel);
     }
 
-    /// <summary>Whether every joint the state names has reached its pose (a held state never gets there).</summary>
+    /// <summary>Whether every joint has reached its target (a held record never gets there).</summary>
     public static bool Arrived(HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, long tick)
     {
         for (var j = 0; j < joints.Count && j < ProgramInstance.MaxJoints; j++)
         {
-            if (program.PoseOf(instance.State, joints[j].Id, out var target) && Math.Abs(Position(program, joints, instance, j, tick) - target) > 1e-9)
+            if (Math.Abs(Position(program, joints, instance, j, tick) - instance.Target[j]) > 1e-9)
                 return false;
         }
 
         return true;
     }
 
-    /// <summary>Enters <paramref name="state"/> at <paramref name="tick"/>: its joints set off from where they are now.</summary>
+    /// <summary>Enters <paramref name="state"/> at <paramref name="tick"/>: its joints set off from where they are now to its pose (a joint it does not name holds).</summary>
     public static void Enter(HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, int state, long tick)
+    {
+        Rebase(program, joints, instance, tick);
+
+        for (var j = 0; j < joints.Count && j < ProgramInstance.MaxJoints; j++)
+            instance.Target[j] = program.PoseOf(state, joints[j].Id, out var v) ? v : instance.Start[j];
+
+        instance.State = (byte)state;
+    }
+
+    /// <summary>Every joint starts again from where it is now (targets kept), so one can change without the others jumping.</summary>
+    public static void Rebase(HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, long tick)
     {
         for (var j = 0; j < joints.Count && j < ProgramInstance.MaxJoints; j++)
             instance.Start[j] = (short)Math.Round(Position(program, joints, instance, j, tick));
 
-        instance.State = (byte)state;
         instance.Entered = tick;
         instance.Held = false;
     }
@@ -127,28 +178,56 @@ public static class ProgramRunner
                 }
 
                 return false;
+            case NodeKind.SignalIs:
+                return SignalHolds(instance, c);
             default:
                 return false;
         }
     }
 
-    /// <summary>One tick: an obstruction stops parts on their way, then the running sequence. True when the state record changed (what a server would send).</summary>
+    /// <summary>One tick. True when the state record changed (what a server would send).</summary>
     public static bool Step(HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, long tick)
     {
         var changed = false;
+        var stopped = instance.Obstructed || (instance.Unpowered && instance.Cores is { HasMotors: true });
 
-        // Stopped where they are by whatever is in the way; when it clears, the motors drive them on from there.
-        if (instance.Obstructed && !instance.Held && !Arrived(program, joints, instance, tick))
+        // Stopped where they are by whatever is in the way (or no power); when it clears, the motors drive them on from there.
+        if (stopped && !instance.Held && !Arrived(program, joints, instance, tick))
         {
-            Enter(program, joints, instance, instance.State, tick);
+            Rebase(program, joints, instance, tick);
             instance.Held = true;
             changed = true;
         }
-        else if (!instance.Obstructed && instance.Held)
+        else if (!stopped && instance.Held)
         {
-            Enter(program, joints, instance, instance.State, tick);
+            Rebase(program, joints, instance, tick);
             changed = true;
         }
+
+        if (instance.Cores is { } cores)
+            Sense(cores, program, joints, instance, tick);
+
+        changed |= Run(program, joints, instance, tick, stopped);
+
+        if (instance.Cores is { } after)
+            Report(after, program, joints, instance, tick);
+
+        return changed;
+    }
+
+    /// <summary>A joint's speed in stored units per second (a rotor's 0.1 rpm as 0.1 degree a second).</summary>
+    public static double Speed(HullJoint joint) => Math.Abs(joint.Kind == JointKind.Rotor ? joint.Speed * 6.0 : joint.Speed);
+
+    /// <summary>A joint's stored units in its signals' unit: mm on a slider, degrees otherwise.</summary>
+    public static double JointUnit(HullJoint joint) => joint.Kind == JointKind.Slider ? 1.0 : 0.1;
+
+    /// <summary>Counts of <paramref name="step"/> nearest <paramref name="value"/>.</summary>
+    public static int Quantise(double value, double step) => (int)Math.Clamp(Math.Round(value / step), int.MinValue, int.MaxValue);
+
+    /// <summary>The running sequence: instant nodes until one waits.</summary>
+    private static bool Run(HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, long tick, bool stopped)
+    {
+        var changed = false;
 
         for (var steps = 0; instance.Node != 0 && steps < MaxStepsPerTick; steps++)
         {
@@ -165,6 +244,7 @@ public static class ProgramRunner
             switch (node.Kind)
             {
                 case NodeKind.OnCall:
+                case NodeKind.OnStart:
                     instance.Node = node.Out0;
                     break;
                 case NodeKind.SetState:
@@ -172,9 +252,13 @@ public static class ProgramRunner
                     instance.Node = node.Out0;
                     changed = true;
 
-                    if (instance.Obstructed && !Arrived(program, joints, instance, tick))
+                    if (stopped && !Arrived(program, joints, instance, tick))
                         instance.Held = true;
 
+                    break;
+                case NodeKind.SetInput:
+                    changed |= SetInput(program, joints, instance, node, tick, stopped);
+                    instance.Node = node.Out0;
                     break;
                 case NodeKind.WaitUntil:
                     if (instance.WaitUntil == 0)
@@ -228,6 +312,163 @@ public static class ProgramRunner
         return changed;
     }
 
-    /// <summary>A joint's speed in stored units per second (a rotor's 0.1 rpm as 0.1 degree a second).</summary>
-    public static double Speed(HullJoint joint) => Math.Abs(joint.Kind == JointKind.Rotor ? joint.Speed * 6.0 : joint.Speed);
+    /// <summary>Sensors due on this tick read the world (one with no reading yet reads at once; unpowered, their signals go dead).</summary>
+    private static void Sense(CoreLayout cores, HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, long tick)
+    {
+        for (var i = 0; i < cores.Entries.Count; i++)
+        {
+            var e = cores.Entries[i];
+
+            if (!e.Def.IsSensor)
+                continue;
+
+            var signals = e.Def.Signals;
+
+            if (instance.Unpowered)
+            {
+                for (var s = 0; s < signals.Count; s++)
+                {
+                    instance.Signals[e.SignalBase + s] = 0;
+                    instance.SetLive(e.SignalBase + s, false);
+                }
+
+                continue;
+            }
+
+            if ((tick - e.Phase) % e.Period != 0 && instance.IsLive(e.SignalBase))
+                continue;
+
+            switch (e.Def.Kind)
+            {
+                case CoreKind.JointPosition:
+                    Write(instance, e.SignalBase, Quantise(Position(program, joints, instance, e.Joint, tick) * JointUnit(joints[e.Joint]), signals[0].Step), signals[0]);
+                    break;
+                case CoreKind.JointLimit:
+                    Write(instance, e.SignalBase, Math.Abs(Position(program, joints, instance, e.Joint, tick) - e.At) <= e.Def.Tolerance ? 1 : 0, signals[0]);
+                    break;
+                case CoreKind.Proximity:
+                    var range = e.Def.Range;
+                    var d = instance.World?.Nearest(e.Position, e.Normal, e.Def.HalfAngleDeg * Math.PI / 180.0, range) ?? double.PositiveInfinity;
+                    var seen = d <= range;
+                    Write(instance, e.SignalBase, seen ? 1 : 0, signals[0]);
+                    Write(instance, e.SignalBase + 1, Quantise(seen ? d : range, signals[1].Step), signals[1]);
+                    break;
+            }
+        }
+    }
+
+    /// <summary>The effectors report: their inputs as set, and what they did (unpowered, what they did is dead).</summary>
+    private static void Report(CoreLayout cores, HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, long tick)
+    {
+        var powered = !instance.Unpowered;
+
+        for (var i = 0; i < cores.Entries.Count; i++)
+        {
+            var e = cores.Entries[i];
+            var signals = e.Def.Signals;
+
+            switch (e.Def.Kind)
+            {
+                case CoreKind.JointMotor:
+                    var target = instance.Target[e.Joint];
+                    var away = Math.Abs(Position(program, joints, instance, e.Joint, tick) - target) > 1e-9;
+                    Write(instance, e.SignalBase, Quantise(target * JointUnit(joints[e.Joint]), signals[0].Step), signals[0]);
+                    Flag(instance, e.SignalBase + 1, away && !instance.Held, powered);
+                    Flag(instance, e.SignalBase + 2, away && instance.Held, powered);
+                    break;
+                case CoreKind.Light:
+                    var on = instance.Inputs[e.InputBase];
+                    var brightness = instance.Inputs[e.InputBase + 1];
+                    Write(instance, e.SignalBase, on, signals[0]);
+                    Write(instance, e.SignalBase + 1, brightness, signals[1]);
+                    Flag(instance, e.SignalBase + 2, on > 0 && brightness > 0, powered);
+                    break;
+            }
+        }
+    }
+
+    /// <summary>Sets an effector's input: a motor's Target moves its joint's target (the others start again from where they are); other inputs go in the record. True when the record changed.</summary>
+    private static bool SetInput(HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance instance, in ProgramNode node, long tick, bool stopped)
+    {
+        if (instance.Cores is not { } cores || cores.IndexOf(node.Joint) is not (>= 0 and var at))
+            return false;
+
+        var e = cores.Entries[at];
+        var input = -1;
+        var k = 0;
+
+        for (var s = 0; s < e.Def.Signals.Count; s++)
+        {
+            if (!e.Def.Signals[s].Input)
+                continue;
+
+            if (k == node.A)
+            {
+                input = s;
+                break;
+            }
+
+            k++;
+        }
+
+        if (input < 0)
+            return false;
+
+        var signal = e.Def.Signals[input];
+        var counts = (short)Math.Clamp((int)node.B, signal.MinCount, signal.MaxCount);
+
+        if (e.Def.Kind == CoreKind.JointMotor)
+        {
+            var joint = joints[e.Joint];
+            var stored = (short)Math.Round(counts * signal.Step / JointUnit(joint));
+
+            if (joint.Limited)
+                stored = Math.Clamp(stored, joint.Min, joint.Max);
+
+            Rebase(program, joints, instance, tick);
+            instance.Target[e.Joint] = stored;
+            instance.Held = stopped && !Arrived(program, joints, instance, tick);
+            return true;
+        }
+
+        var changed = instance.Inputs[e.InputBase + k] != counts;
+        instance.Inputs[e.InputBase + k] = counts;
+        return changed;
+    }
+
+    private static bool SignalHolds(ProgramInstance instance, in ProgramNode c)
+    {
+        if (instance.Cores is not { } cores || cores.IndexOf(c.Joint) is not (>= 0 and var at))
+            return false;
+
+        var e = cores.Entries[at];
+        var s = c.A & 15;
+
+        if (s >= e.Def.Signals.Count || !instance.IsLive(e.SignalBase + s))
+            return false;
+
+        var v = instance.Signals[e.SignalBase + s];
+        return (Compare)(c.A >> 4) switch
+        {
+            Compare.Equal => v == c.B,
+            Compare.NotEqual => v != c.B,
+            Compare.Less => v < c.B,
+            Compare.Greater => v > c.B,
+            Compare.LessOrEqual => v <= c.B,
+            Compare.GreaterOrEqual => v >= c.B,
+            _ => false,
+        };
+    }
+
+    private static void Write(ProgramInstance instance, int signal, int counts, CoreSignal def)
+    {
+        instance.Signals[signal] = Math.Clamp(counts, def.MinCount, def.MaxCount);
+        instance.SetLive(signal, true);
+    }
+
+    private static void Flag(ProgramInstance instance, int signal, bool value, bool live)
+    {
+        instance.Signals[signal] = value ? 1 : 0;
+        instance.SetLive(signal, live);
+    }
 }

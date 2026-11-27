@@ -16,7 +16,7 @@ public class DoorTests
     {
         var door = SampleComponents.SwingDoor(Alloy);
 
-        Assert.Equal(PlanFormat.ConditionFormat, PlanFormat.FormatOf(door));   // it carries the Door programme too
+        Assert.Equal(PlanFormat.CoreFormat, PlanFormat.FormatOf(door));   // it carries the Door programme and its motors and switches too
         Assert.True(PlanFormat.TryDecode(PlanFormat.Encode(door), out var back, out var error), error.ToString());
         Assert.Equal(PlanFormat.HashBody(door), PlanFormat.HashBody(back));
         var opening = Assert.Single(back.Openings!.Openings);

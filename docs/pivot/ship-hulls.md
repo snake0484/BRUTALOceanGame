@@ -311,6 +311,20 @@ public sealed class HullDeformation
 - **Catalog doors** implement Door with the standard sequence; the sliding door has an 80 mm lock bolt on a second slider, out only in Locked.
 - **Not yet:** the game's sweep that jams parts, wiring calls to data inputs (consoles, buttons), outputs on data cables.
 
+### Effectors and sensors (designer, 2026-11-27, D88)
+
+- **Cores are catalog data** (`CoreDef`, `src/Ships/Logic/Cores.cs`; `data/sensors/*.json`, `data/effectors/*.json`): a kind (code) and its numbers (data): signals in the kind's order, each with a unit, step and range; update rate, power draw, declared tick cost; a proximity sensor's range and cone, a limit switch's tolerance. Players place catalog cores; they never make new kinds.
+- **Kinds:** sensors `JointPosition` (encoders: basic 5-unit steps at 10 Hz, precision 0.1 at 60 Hz), `JointLimit` (pressed within tolerance of its trip position), `Proximity` (Detected, Range: basic 4 m in 0.5 m steps at 10 Hz, lidar 12 m in 0.05 m at 30 Hz); effectors `JointMotor` (Target in; Moving, Jammed out: linear, rotary, solenoid bolt) and `Light` (On, Brightness in; Lit out).
+- **In a component** (`HullCoreSet`, plan format 17, flag 2 of the second flags byte): up to 32 cores, each a def key, the joint it reads or drives, a limit switch's trip position, and a point and facing in the component.
+- **Values are counts of the signal's step**, quantized at the sensor's rate, no noise: deterministic, so server and clients agree. Sensors sample when `(tick - phase) % period == 0`, phase spread by core id. Joint signals use the joint's unit (mm, or degrees).
+- **Runner:** each tick an obstruction or no power stops the motors, due sensors read, the sequence runs, effectors report. A joint's motor drives it to `Target`: a state's pose sets the targets, and a `Set input` node sets one directly (the others rebase, so none jumps). The record gains `Target` per joint and the other effectors' `Inputs` (a light's On), so clients still draw from it alone. No power: sensors and what effectors report go dead, motors stop. Joints without a motor still move as before (plans made before cores).
+- **Nodes:** `On start` (runs at rest, so a component can follow its sensors on its own), `Set input` (core, input, value), condition `Signal is` (core, signal, compare, value; a dead signal never holds).
+- **Catalog doors:** a motor on the leaf, a solenoid on the sliding door's bolt, limit switches at both ends; the standard sequence waits on the switches (no switch: on the joint, as before). **Proximity lamp:** a sensor and a lamp; Auto lights it while something is in range, On and Off override.
+- **Bench** (Programme panel): add or remove cores, pick joints and trip positions; a power switch and a test object at a distance in front of every sensor; every signal live, the cores' power and declared cost.
+- **Cost:** a sliding door with 4 cores, 283 ns a tick measured (160 declared for its cores); no allocation per tick.
+- **Reach:** a programme reads only cores its own component has; across components goes through data cables (D71, not yet). Docking carries nothing; transfer between craft through aligned pipe ports or a hose between ports (later).
+- **Not yet:** data cables between components, consoles, damage degrading cores, the game's world query for proximity, thrusters, pumps, valves, the tractor and the long-range sensors.
+
 ### Collision (Jolt)
 
 **Constraints found:**

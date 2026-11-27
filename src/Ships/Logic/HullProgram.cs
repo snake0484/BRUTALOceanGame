@@ -64,11 +64,19 @@ public sealed class ComponentInterface
 /// <item><see cref="IfState"/>: out 0 when the state is A, else out 1.</item>
 /// <item>Conditions: <see cref="StateIs"/> (the state is A), <see cref="JointAt"/> (joint <see cref="ProgramNode.Joint"/>
 /// is within A stored units of B), <see cref="InPose"/> (every joint the state names has reached its pose).</item>
+/// <item><see cref="OnStart"/>: where the programme starts when the component starts (at rest, or powered up); out 0.</item>
+/// <item><see cref="SetInput"/>: sets input A of core <see cref="ProgramNode.Joint"/> to B counts of its step (an
+/// effector's: a motor's Target, a light's On); out 0.</item>
+/// <item>Condition <see cref="SignalIs"/>: signal (A &amp; 15) of core <see cref="ProgramNode.Joint"/> compared (A &gt;&gt; 4, a
+/// <see cref="Compare"/>) with B counts; a dead signal (no power, no reading yet) never holds.</item>
 /// <item>Older nodes, still run but no longer offered: <see cref="WaitArrived"/> (in pose, or out 1 when its parts were
 /// stopped) and <see cref="IfBlocked"/> (out 0 while the parts are obstructed).</item>
 /// </list>
 /// </summary>
-public enum NodeKind : byte { OnCall, SetState, WaitArrived, Wait, IfState, IfBlocked, WaitUntil, If, StateIs, JointAt, InPose }
+public enum NodeKind : byte { OnCall, SetState, WaitArrived, Wait, IfState, IfBlocked, WaitUntil, If, StateIs, JointAt, InPose, OnStart, SetInput, SignalIs }
+
+/// <summary>A <see cref="NodeKind.SignalIs"/> comparison.</summary>
+public enum Compare : byte { Equal, NotEqual, Less, Greater, LessOrEqual, GreaterOrEqual }
 
 public struct ProgramNode
 {
@@ -90,14 +98,17 @@ public struct ProgramNode
     /// <summary>The condition a Wait until or If tests (a condition node's id; 0: none, never holds).</summary>
     public ushort In;
 
-    /// <summary>The joint a <see cref="NodeKind.JointAt"/> reads.</summary>
+    /// <summary>The joint a <see cref="NodeKind.JointAt"/> reads; the core a <see cref="NodeKind.SetInput"/> or <see cref="NodeKind.SignalIs"/> names.</summary>
     public uint Joint;
 
-    public readonly bool IsCondition => Kind is NodeKind.StateIs or NodeKind.JointAt or NodeKind.InPose;
+    public readonly bool IsCondition => Kind is NodeKind.StateIs or NodeKind.JointAt or NodeKind.InPose or NodeKind.SignalIs;
+
+    /// <summary>Whether a programme with it needs plan format 17 (cores).</summary>
+    public readonly bool NeedsCores => Kind is NodeKind.OnStart or NodeKind.SetInput or NodeKind.SignalIs;
 
     public readonly bool TakesCondition => Kind is NodeKind.WaitUntil or NodeKind.If;
 
-    public readonly bool HasInput => Kind != NodeKind.OnCall && !IsCondition;
+    public readonly bool HasInput => Kind is not (NodeKind.OnCall or NodeKind.OnStart) && !IsCondition;
 }
 
 /// <summary>Where joint <see cref="Joint"/> stands in state <see cref="State"/> (its stored units: 0.1 degree, or mm for a slider).</summary>
@@ -117,7 +128,17 @@ public sealed class HullProgram
     public readonly List<ProgramNode> Nodes = new();
     public readonly List<StatePose> Poses = new();
 
-    public int IndexOf(ushort node) => Nodes.FindIndex(n => n.Id == node);
+    /// <summary>Node <paramref name="node"/>'s index, or -1 (a loop: the runner calls it every step, so no closure).</summary>
+    public int IndexOf(ushort node)
+    {
+        for (var i = 0; i < Nodes.Count; i++)
+        {
+            if (Nodes[i].Id == node)
+                return i;
+        }
+
+        return -1;
+    }
 
     public ushort NextNodeId() => (ushort)(Nodes.Count == 0 ? 1 : Nodes.Max(n => n.Id) + 1);
 

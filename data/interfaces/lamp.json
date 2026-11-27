@@ -1,0 +1,13 @@
+{
+  "name": "Lamp",
+  "calls": [
+    "Auto",
+    "On",
+    "Off"
+  ],
+  "states": [
+    "Auto",
+    "On",
+    "Off"
+  ]
+}

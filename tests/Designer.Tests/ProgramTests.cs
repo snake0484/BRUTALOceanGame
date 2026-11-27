@@ -10,6 +10,7 @@ public class ProgramTests
     private static readonly string DataFolder = Path.Combine(AppContext.BaseDirectory, "data");
     private static readonly HullMaterialCatalog Catalog = HullMaterialCatalog.Load(DataFolder);
     private static readonly DefId Alloy = DefId.FromName("mat.hull.alloy");
+    private static readonly CoreCatalog Cores = CoreCatalog.Load(DataFolder);
 
     // Door states and calls by index.
     private const int Closed = 0, Opening = 1, Open = 2, Closing = 3, Locked = 4;
@@ -20,7 +21,7 @@ public class ProgramTests
     {
         var door = SampleComponents.SlidingDoor(Alloy);
 
-        Assert.Equal(PlanFormat.ConditionFormat, PlanFormat.FormatOf(door));
+        Assert.Equal(PlanFormat.CoreFormat, PlanFormat.FormatOf(door));
         Assert.True(PlanFormat.TryDecode(PlanFormat.Encode(door), out var back, out var error), error.ToString());
         Assert.Equal(PlanFormat.HashBody(door), PlanFormat.HashBody(back));
         Assert.Equal(door.Program!.Interface.Key, back.Program!.Interface.Key);
@@ -55,7 +56,7 @@ public class ProgramTests
         var door = SampleComponents.SlidingDoor(Alloy);
         var program = door.Program!;
         var joints = door.Joints!.Joints;
-        var run = new ProgramInstance();
+        var run = Rig(door);
         ProgramRunner.Reset(program, joints, run, 0);
         Assert.Equal(Closed, run.State);
 
@@ -94,7 +95,7 @@ public class ProgramTests
     private static (HullProgram Program, List<HullJoint> Joints, ProgramInstance Run) ClosingDoor()
     {
         var door = SampleComponents.SlidingDoor(Alloy);
-        var run = new ProgramInstance();
+        var run = Rig(door);
         ProgramRunner.Reset(door.Program!, door.Joints!.Joints, run, 0);
         ProgramRunner.Call(door.Program!, run, CallOpen);
         Steps(door.Program!, door.Joints.Joints, run, 1, 120);
@@ -154,14 +155,15 @@ public class ProgramTests
         var door = SampleComponents.SlidingDoor(Alloy);
         var program = door.Program!;
         var joints = door.Joints!.Joints;
-        var run = new ProgramInstance();
+        var run = Rig(door);
         ProgramRunner.Reset(program, joints, run, 0);
         ProgramRunner.Call(program, run, CallOpen);
         Steps(program, joints, run, 1, 50);
 
-        // What a client gets: the state, the tick it was entered, where the joints started, held or not. No graph.
+        // What a client gets: the state, the tick it was entered, where the joints started and are driven to, held or not. No graph.
         var copy = new ProgramInstance { State = run.State, Entered = run.Entered, Held = run.Held };
         run.Start.CopyTo(copy.Start, 0);
+        run.Target.CopyTo(copy.Target, 0);
 
         for (var tick = 50L; tick < 120; tick++)
         {
@@ -195,8 +197,13 @@ public class ProgramTests
 
         Assert.Equal(3, waits.Count);
         Assert.All(waits, w => Assert.Equal(149, w.B));
-        Assert.All(waits, w => Assert.Equal(NodeKind.JointAt, program.Nodes[program.IndexOf(w.In)].Kind));
-        Assert.All(waits, w => Assert.Equal(leaf.Id, program.Nodes[program.IndexOf(w.In)].Joint));
+        Assert.All(waits, w => Assert.Equal(NodeKind.SignalIs, program.Nodes[program.IndexOf(w.In)].Kind));
+        Assert.All(waits, w => Assert.Equal(leaf.Id, door.Cores!.Cores[door.Cores.IndexOf(program.Nodes[program.IndexOf(w.In)].Joint)].Joint));
+
+        // With no limit switches it tests the joint itself.
+        var bare = program.Clone();
+        Assert.True(ProgramCommands.StandardDoor(bare, door.Joints.Joints));
+        Assert.All(bare.Nodes.Where(n => n.Kind == NodeKind.WaitUntil), w => Assert.Equal(NodeKind.JointAt, bare.Nodes[bare.IndexOf(w.In)].Kind));
         Assert.DoesNotContain(program.Nodes, n => n.Kind is NodeKind.WaitArrived or NodeKind.IfBlocked);
 
         // Laid out with room: no two nodes overlap.
@@ -228,6 +235,9 @@ public class ProgramTests
         Assert.Equal(narrow.Count, consumed);
         Assert.Equal(old.Nodes, back!.Nodes);
     }
+
+    /// <summary>A run of <paramref name="door"/> with its cores laid out (its waits read its limit switches).</summary>
+    private static ProgramInstance Rig(PlanDocument door) => new() { Cores = CoreLayout.Build(door.Cores, Cores, door.Joints!.Joints) };
 
     private static void Steps(HullProgram program, IReadOnlyList<HullJoint> joints, ProgramInstance run, long from, long to)
     {
