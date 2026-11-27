@@ -95,7 +95,8 @@ public sealed class SimWorld : IDisposable
 
     /// <param name="kind">Debug override of the terrain planet's and the moons' kind (--planet-kind), with its own seed for the kind's parameter ranges.</param>
     /// <param name="weather">The weather drives the sea's wind (<see cref="DriveWind"/>).</param>
-    public SimWorld(ulong seed, int workerThreads, bool weather = false, int entityCapacity = EntityTable.DefaultCapacity, string? kind = null, ulong? kindSeed = null)
+    /// <param name="edgeSpawn">--surf-edge: the spawn's beach lies on a sea tile's row edge (<see cref="EdgeLatitudes"/>), where two tiles' swells meet.</param>
+    public SimWorld(ulong seed, int workerThreads, bool weather = false, int entityCapacity = EntityTable.DefaultCapacity, string? kind = null, ulong? kindSeed = null, bool edgeSpawn = false)
     {
         Seed = seed;
         _driveWind = weather;
@@ -113,7 +114,11 @@ public sealed class SimWorld : IDisposable
         for (var i = 0; i < Celestial.Count; i++)
             BodyParams[i] = i == PlanetIndex ? Planet : RockyParams(Celestial, seed, i, kind, kindSeed);
 
-        PlanetSpawn.FindCoast(Generator.Surface, body.SpinAxis, out var coast, out Seaward);
+        var coast = default(double3);
+
+        if (!edgeSpawn || !PlanetSpawn.FindCoast(Generator.Surface, body.SpinAxis, EdgeLatitudes(new SeaTiles(Planet.SeaRadius, body.SpinAxis)), out coast, out Seaward))
+            PlanetSpawn.FindCoast(Generator.Surface, body.SpinAxis, out coast, out Seaward);
+
         var level = Planet.HasSea ? Planet.SeaRadius : Planet.Radius + Generator.Surface.Height(coast.X, coast.Y, coast.Z);
         Bubble = PhysicsBubble.At(coast * level, Seaward);
         Physics.SetBubble(Bubble, SceneGravity(body, Bubble.Origin));
@@ -131,6 +136,23 @@ public sealed class SimWorld : IDisposable
     }
 
     public ulong Seed { get; }
+
+    /// <summary>The sea tiles' row edges (degrees of latitude) within 25° of 30° north or south, nearest 30° first.</summary>
+    public static double[] EdgeLatitudes(SeaTiles tiles)
+    {
+        var edges = new List<double>();
+
+        for (var row = 1; row < tiles.Rows; row++)
+        {
+            var latitude = tiles.RowEdge(row) * 180.0 / Math.PI;
+
+            if (Math.Abs(Math.Abs(latitude) - 30.0) <= 25.0)
+                edges.Add(latitude);
+        }
+
+        edges.Sort((a, b) => (Math.Abs(Math.Abs(a) - 30.0), a < 0).CompareTo((Math.Abs(Math.Abs(b) - 30.0), b < 0)));
+        return edges.ToArray();
+    }
 
     public ref readonly FixedClock Clock => ref _clock;
 

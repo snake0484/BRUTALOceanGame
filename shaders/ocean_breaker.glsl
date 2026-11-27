@@ -453,7 +453,7 @@ float coastBand(vec2 x0)
 
 // swashSheet's bores on the regions' carriers (ocean_common.glsl): each region over the shoreline point runs the swash
 // on its own phase there, by its weight; weight is their sum, the open carrier's share being the rest.
-float coastSwash(SwashBeach b, vec2 shore, out float front, out float edge, out float weight)
+float coastSwash(SwashBeach b, vec2 shore, vec2 grad, out float front, out float edge, out float weight)
 {
     float sheet = 0.0;
     front = 0.0;
@@ -473,6 +473,7 @@ float coastSwash(SwashBeach b, vec2 shore, out float front, out float edge, out 
         vec2 f = clamp(c - 0.5, vec2(0.0), vec2(COAST_CELLS - 1.001));
         float runFront;
         float runEdge;
+        swashCarrier(b, int(frame.coast[r].cellX.w), shore, grad);
         float run = swashRun(b, coastSpatialPhase(frame.coast[r].cellZ.w, f) + wave.x, max(wave.y, 1e-3), runFront, runEdge);
         w = min(w, 1.0 - weight);
         sheet += w * run;

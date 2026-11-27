@@ -236,6 +236,71 @@ public sealed class SeaSwellsTests(ITestOutputHelper output)
         return (changes, rebakes, maxSpeed);
     }
 
+    /// <summary>
+    /// --surf-edge's beach lies on a sea tile row edge, in both tiles' hand-over band. Over a week of its weather: how often
+    /// the two tiles' coast carriers differ in frequency or direction (their maps then cross-fade across the band rather
+    /// than match), and the first stretch where they differ in frequency and one of them rebakes (the in-game run).
+    /// </summary>
+    [Fact]
+    public unsafe void EdgeSpawn_TwoTiles()
+    {
+        using var sim = new SimWorld(seed: 1, workerThreads: 1, weather: true, edgeSpawn: true);
+        var dir = double3.Normalize(sim.Bubble.Origin);
+        sim.Ocean.Tiles.Hand(dir, out var hand);
+        sim.Ocean.Tiles.Locate(dir, out var blend);
+        var latitude = Math.Asin(double3.Dot(dir, double3.Normalize(sim.Celestial[sim.PlanetIndex].SpinAxis))) * 180.0 / Math.PI;
+        var shares = "";
+
+        for (var k = 0; k < hand.Count; k++)
+            shares += $" {hand.Tile[k]}: {hand.Weight[k]:F3}";
+
+        output.WriteLine($"spawn at {latitude:F4} deg, tile {sim.SpawnTile}; hand{shares}");
+        Assert.Equal(2, blend.Count);
+        Assert.True(hand.Weight[0] is > 0.2f and < 0.8f, "the beach is not in the hand-over band");
+        var (a, b) = (blend.Tile[0], blend.Tile[1]);
+
+        var swells = new SeaSwells(1, sim.Ocean.Tiles, Dt, sim.SeaWinds);
+        swells.SetBase(new SwellParams { SwellHeight = 1.2f, SwellPeriod = 13f }, driven: true);
+        var anchor = sim.Bubble.Origin;
+        var (bakedA, bakedB) = (default(BrutalGame.Water.Coast.CoastCarrier), default(BrutalGame.Water.Coast.CoastCarrier));
+        var (sameWave, otherOmega, otherDirection, rebakes) = (0, 0, 0, 0);
+        var found = -1L;
+        const long week = 7 * 1440;
+
+        static BrutalGame.Water.Coast.CoastCarrier Of(OceanSwell swell) =>
+            BrutalGame.Water.Coast.CoastCarrier.From(swell.TargetCarrierDirection, swell.TargetCarrierOmega, swell.TargetCarrierHeight);
+
+        for (var epoch = 0L; epoch < week; epoch++)
+        {
+            swells.Tick(epoch * SeaWind.EpochTicks + SeaWind.EpochTicks - 1, [anchor]);
+            var (ca, cb) = (Of(swells.For(a)!), Of(swells.For(b)!));
+            var rebake = !BrutalGame.Water.Coast.CoastRegionSet.Keeps(bakedA, ca) | !BrutalGame.Water.Coast.CoastRegionSet.Keeps(bakedB, cb);
+            bakedA = BrutalGame.Water.Coast.CoastRegionSet.Keeps(bakedA, ca) ? bakedA : ca;
+            bakedB = BrutalGame.Water.Coast.CoastRegionSet.Keeps(bakedB, cb) ? bakedB : cb;
+            rebakes += rebake && epoch > 0 ? 1 : 0;
+
+            if (bakedA.OmegaStep != bakedB.OmegaStep)
+                otherOmega++;
+            else if (bakedA.DirectionStep != bakedB.DirectionStep)
+                otherDirection++;
+            else
+                sameWave++;
+
+            if (found < 0 && epoch > 30 && rebake && bakedA.OmegaStep != bakedB.OmegaStep)
+                found = epoch;
+        }
+
+        output.WriteLine($"over a week, per minute: same wave {sameWave}, other frequency {otherOmega}, same frequency other direction {otherDirection}; {rebakes} minutes with a rebake");
+        output.WriteLine($"first rebake while the tiles' frequencies differ: {found} min");
+
+        for (var epoch = Math.Max(found - 10, 0); found >= 0 && epoch <= found + 20; epoch++)
+        {
+            swells.Tick(epoch * SeaWind.EpochTicks + SeaWind.EpochTicks - 1, [anchor]);
+            var (ca, cb) = (Of(swells.For(a)!), Of(swells.For(b)!));
+            output.WriteLine($"{epoch,5} min: tile {a} wind {sim.SeaWinds.At(a, epoch).Speed,2} m/s T {MathF.Tau / ca.Omega:F2} s H {ca.Height:F2} m dir {ca.Direction * 180f / MathF.PI:F0}; tile {b} wind {sim.SeaWinds.At(b, epoch).Speed,2} m/s T {MathF.Tau / cb.Omega:F2} s H {cb.Height:F2} m dir {cb.Direction * 180f / MathF.PI:F0}");
+        }
+    }
+
     private static double SampleNs(OceanSurface surface, double3 p, long tick)
     {
         var sink = 0f;

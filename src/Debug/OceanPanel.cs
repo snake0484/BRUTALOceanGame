@@ -173,8 +173,9 @@ public sealed class OceanPanel
     {
         ImGui.SeparatorText("Breaking waves"u8);
         ImGui.Checkbox("Breaker faces"u8, ref BreakerFaces);
-        var carrier = _coast.Carrier;
-        ImGui.Text($"carrier T {(carrier.Calm ? 0f : MathF.Tau / carrier.Omega),5:F1} s  H0 {carrier.Height,5:F2} m  dir {carrier.Direction * 180f / MathF.PI,5:F0} deg");
+        var tile = _surface.Swells.TileAt(Probe);
+        var carrier = _coast.BakedFor(tile);
+        ImGui.Text($"tile {tile} carrier T {(carrier.Calm ? 0f : MathF.Tau / carrier.Omega),5:F1} s  H0 {carrier.Height,5:F2} m  dir {carrier.Direction * 180f / MathF.PI,5:F0} deg");
         ImGui.Text($"regions {_coast.Drawn} / {CoastRegionSet.Capacity}  {(_coast.Settled ? "settled" : "working")}  {CoastRegionSet.ResidentBytes / 1048576f:F1} + {CoastAtlasGpu.Bytes / 1048576f:F1} MB");
         ImGui.Text($"bakes {_coast.Bakes}  last {_coast.LastBakeMs,5:F1} ms (depth {_coast.LastBakeDepthMs,5:F1})  probes {_coast.Probes}");
         ImGui.Text($"uploads {_coastGpu.Uploads}  last {_coastGpu.LastUploadMs,6:F3} ms");

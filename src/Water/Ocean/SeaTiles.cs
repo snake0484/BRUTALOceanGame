@@ -240,7 +240,7 @@ public sealed unsafe class SeaTiles
     }
 
     /// <summary>The latitude (rad) of the edge between row − 1 and row, and how many cells a row has.</summary>
-    internal double RowEdge(int row) => row * _rowAngle - 0.5 * Math.PI;
+    public double RowEdge(int row) => row * _rowAngle - 0.5 * Math.PI;
 
     internal int Cells(int row) => _cells[row];
 
