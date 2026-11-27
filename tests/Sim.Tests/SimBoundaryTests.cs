@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Xml.Linq;
 using Brutal.Numerics;
 using BrutalGame.Terrain;
+using BrutalGame.Water.Coast;
 using BrutalGame.Water.Ocean;
 using BrutalGame.Weather;
 
@@ -260,6 +261,42 @@ public class SimBoundaryTests
         Assert.True(depth.Depth(Dir(sim, 200f)) > 0f, "out to sea is water");
         Assert.True(depth.Depth(Dir(sim, -400f)) < -3f, "inland is dry land");
         Assert.True(sim.Physics.Gravity.Y < -9.7f && MathF.Abs(sim.Physics.Gravity.X) < 0.1f && MathF.Abs(sim.Physics.Gravity.Z) < 0.1f);
+    }
+
+    /// <summary>The coast maps' depth (breaking-waves-brief.md step 1) is sea level less the generated ground along the direction, sampled through a coast window on the spawn's sea tile.</summary>
+    [Fact]
+    public void CoastDepth_MatchesTheGeneratedGround()
+    {
+        using var sim = new SimWorld(seed: 1, workerThreads: 1);
+        var surface = sim.Generator.Surface;
+        var tiles = sim.Ocean.Tiles;
+        var spawn = double3.Normalize(sim.Bubble.Origin);
+        tiles.Locate(spawn, out var blend);
+        int tile;
+
+        unsafe
+        {
+            tile = blend.Tile[0];
+        }
+
+        tiles.Plane(tile, spawn, out var u, out var v);
+        var window = new CoastWindow(tiles, tile, CoastWindow.Index(u), CoastWindow.Index(v));
+        const int n = 16;
+        var depth = new float[n * n];
+        window.FillDepth(sim.CoastDepth, depth, 0.0, 0.0, CoastWindow.Size / n, n, 0, n);
+        var wet = 0;
+
+        for (var z = 0; z < n; z++)
+        {
+            for (var x = 0; x < n; x++)
+            {
+                var d = window.Direction((x + 0.5) * CoastWindow.Size / n, (z + 0.5) * CoastWindow.Size / n);
+                Assert.Equal(surface.SeaHeight - surface.Height(d.X, d.Y, d.Z), depth[x + z * n]);
+                wet += depth[x + z * n] > 0f ? 1 : 0;
+            }
+        }
+
+        Assert.InRange(wet, 1, n * n - 1);
     }
 
     /// <summary>

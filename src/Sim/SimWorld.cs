@@ -4,6 +4,7 @@ using BrutalGame.Frames;
 using BrutalGame.Physics;
 using BrutalGame.Sim.Entities;
 using BrutalGame.Terrain;
+using BrutalGame.Water.Coast;
 using BrutalGame.Water.Ocean;
 using BrutalGame.Weather;
 
@@ -34,6 +35,9 @@ public sealed class SimWorld : IDisposable
 
     /// <summary>The planet's water depth for the ocean: generated ground plus the edits that reach the sea.</summary>
     public readonly PlanetShore Shore;
+
+    /// <summary>The generated seabed the coast maps are baked from (shores are fixed: no edits).</summary>
+    public readonly ICoastDepth CoastDepth;
 
     /// <summary>The planet the terrain is on: its index in <see cref="Celestial"/>, params and generator.</summary>
     public readonly int PlanetIndex;
@@ -106,7 +110,9 @@ public sealed class SimWorld : IDisposable
 
         Shore = new PlanetShore(Generator.Surface);
         var tiles = new SeaTiles(level, body.SpinAxis);
-        Ocean = new OceanSurface(new OceanSwell(seed), tiles, _clock.TickSeconds, new PlanetShoreDepth(Shore));
+        var depth = new PlanetShoreDepth(Shore);
+        CoastDepth = depth;
+        Ocean = new OceanSurface(new OceanSwell(seed), tiles, _clock.TickSeconds, depth);
         UpdateRenderPoses();
 
         if (weather is not null)
