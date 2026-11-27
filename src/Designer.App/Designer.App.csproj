@@ -1,12 +1,12 @@
 <Project>
   <!--
-    Authoring (planet tabs, D89): our own tools, never in the app players get. On by default in Debug, off otherwise;
-    runDesigner.bat builds with -p:Authoring=true. An authoring build adds the game-view references and keeps its own
-    obj and bin, so the shipping restore graph (obj/project.assets.json, which DesignerBoundaryTests reads) never has them.
+    Authoring (planet tabs, D89): our own tools, never in the app players get. Off unless asked for, in every
+    configuration, so the solution build is the shipping graph and writes the restore DesignerBoundaryTests reads
+    (obj/project.assets.json). runDesigner.bat and scripts/check-authoring.ps1 build with -p:Authoring=true; an
+    authoring build adds the game-view references and keeps its own obj and bin (obj/authoring, bin/authoring).
   -->
   <PropertyGroup>
     <Configuration Condition="'$(Configuration)' == ''">Debug</Configuration>
-    <Authoring Condition="'$(Authoring)' == '' and '$(Configuration)' == 'Debug'">true</Authoring>
     <Authoring Condition="'$(Authoring)' == ''">false</Authoring>
     <BaseIntermediateOutputPath Condition="'$(Authoring)' == 'true'">obj\authoring\</BaseIntermediateOutputPath>
     <BaseOutputPath Condition="'$(Authoring)' == 'true'">bin\authoring\</BaseOutputPath>
