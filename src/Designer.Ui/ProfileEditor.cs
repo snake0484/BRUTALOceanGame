@@ -9,8 +9,10 @@ namespace BrutalGame.Designer.Ui;
 /// The 2D editor for a profile: drag points (0.05 m snap), double-click an edge to add one, right-click a point to remove
 /// it. A hallway shows the floor, a 0.5 m grid and one 0.8 × 1.9 m lane per person who fits abreast (red when not even one
 /// does). A wall is an open line drawn as the right half of a hallway: the room's side on the right, the room to the left;
-/// its points stay off the far side of the wall and never go down. A drag is a live copy, handed back once when the mouse
-/// is released (one undo step).
+/// its points stay off the far side of the wall and never go down. A brush outline is closed like a hallway's, at most 16
+/// points, the line Y = 0 being the hull surface when the stroke runs through the origin. A drag is a live copy, handed
+/// back once when the mouse is released (one undo step). <see cref="DrawLinePoint"/> shows an outline with a sweep
+/// brush's line point to drag.
 /// </summary>
 public sealed class ProfileEditor
 {
@@ -27,10 +29,13 @@ public sealed class ProfileEditor
     private static readonly ImColor8 PersonLine = new(110, 220, 120, 200);
     private static readonly ImColor8 TooSmall = new(255, 90, 80, 220);
     private static readonly ImColor8 WallSide = new(255, 255, 255, 140);
+    private static readonly ImColor8 LineMark = new(255, 200, 80, 255);
 
     private List<ProfilePoint>? _draft;
     private int _dragPoint = -1;
     private int _owner = -1;
+    private bool _lineDrag;
+    private ProfilePoint _lineDraft;
 
     /// <summary>The outline being shown: the live copy while dragging.</summary>
     public IReadOnlyList<ProfilePoint> Shown(int owner, IReadOnlyList<ProfilePoint> profile) => _owner == owner && _draft is not null ? _draft : profile;
@@ -40,6 +45,7 @@ public sealed class ProfileEditor
     {
         var wall = kind == ProfileKind.Wall;
         var least = wall ? HullProfile.MinWallPoints : HullProfile.MinPoints;
+        var most = kind == ProfileKind.Brush ? HullBrush.MaxProfilePoints : HullProfile.MaxPoints;
         var edges = wall ? stored.Count - 1 : stored.Count;
         double Sx(ProfilePoint p) => (wall ? -p.X : p.X) / Units;
 
@@ -92,7 +98,7 @@ public sealed class ProfileEditor
         // People abreast: one 0.8 × 1.9 lane each, centred on the floor; a red one when not even one fits.
         var (lo, hi) = HallwayGeometry.FloorSpan(profile);
         var mid = (lo + hi) * 0.5;
-        var people = wall ? 0 : Math.Max(clear.People, 1);
+        var people = kind == ProfileKind.Hallway ? Math.Max(clear.People, 1) : 0;
 
         for (var i = 0; i < people; i++)
         {
@@ -173,7 +179,7 @@ public sealed class ProfileEditor
             return fewer;
         }
 
-        if (hovered && hot < 0 && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left) && profile.Count < HullProfile.MaxPoints)
+        if (hovered && hot < 0 && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left) && profile.Count < most)
         {
             // The nearest edge gets a new point under the mouse.
             var edge = -1;
@@ -206,6 +212,69 @@ public sealed class ProfileEditor
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// <paramref name="outline"/> drawn small with <paramref name="at"/>, where the stroke runs through it, as a cross to
+    /// drag (0.01 m snap). Returns the new point once the drag ends, or null.
+    /// </summary>
+    public ProfilePoint? DrawLinePoint(IReadOnlyList<ProfilePoint> outline, ProfilePoint at)
+    {
+        var shown = _lineDrag ? _lineDraft : at;
+        var size = new float2(Px(220f), Px(140f));
+        var origin = ImGui.GetCursorScreenPos();
+        ImGui.InvisibleButton("##linepoint"u8, size, ImGuiButtonFlags.MouseButtonLeft);
+        var hovered = ImGui.IsItemHovered();
+        var list = ImGui.GetWindowDrawList();
+        list.AddRectFilled(origin, new float2(origin.X + size.X, origin.Y + size.Y), new ImColor8(0, 0, 0, 90));
+
+        double x0 = shown.X / Units, x1 = x0, y0 = shown.Y / Units, y1 = y0;
+
+        foreach (var p in outline)
+        {
+            (x0, x1) = (Math.Min(x0, p.X / Units), Math.Max(x1, p.X / Units));
+            (y0, y1) = (Math.Min(y0, p.Y / Units), Math.Max(y1, p.Y / Units));
+        }
+
+        var margin = Math.Max(Math.Max(x1 - x0, y1 - y0) * 0.15, 0.05);
+        (x0, x1, y0, y1) = (x0 - margin, x1 + margin, y0 - margin, y1 + margin);
+        var scale = Math.Min(size.X / (x1 - x0), size.Y / (y1 - y0));
+        var cx = (x0 + x1) * 0.5;
+        var cy = (y0 + y1) * 0.5;
+        float2 ToScreen(double x, double y) => new((float)(origin.X + size.X * 0.5 + (x - cx) * scale), (float)(origin.Y + size.Y * 0.5 - (y - cy) * scale));
+
+        for (var j = 0; j < outline.Count; j++)
+        {
+            var a = outline[j];
+            var b = outline[(j + 1) % outline.Count];
+            list.AddLine(ToScreen(a.X / Units, a.Y / Units), ToScreen(b.X / Units, b.Y / Units), OutlineColour, 1.5f);
+        }
+
+        // The hull surface runs through the line point, square to the stroke.
+        var mark = ToScreen(shown.X / Units, shown.Y / Units);
+        list.AddLine(new float2(origin.X, mark.Y), new float2(origin.X + size.X, mark.Y), FloorLine, 1f);
+        var r = Px(6f);
+        list.AddLine(new float2(mark.X - r, mark.Y), new float2(mark.X + r, mark.Y), LineMark, 2f);
+        list.AddLine(new float2(mark.X, mark.Y - r), new float2(mark.X, mark.Y + r), LineMark, 2f);
+
+        var mouse = ImGui.GetIO().MousePos;
+
+        if (!_lineDrag && hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Left, false))
+            (_lineDrag, _lineDraft) = (true, at);
+
+        if (!_lineDrag)
+            return null;
+
+        const double snap = 0.01;
+        var wx = cx + (mouse.X - origin.X - size.X * 0.5) / scale;
+        var wy = cy - (mouse.Y - origin.Y - size.Y * 0.5) / scale;
+        _lineDraft = new ProfilePoint((int)Math.Round(Math.Round(wx / snap) * snap * Units), (int)Math.Round(Math.Round(wy / snap) * snap * Units));
+
+        if (ImGui.IsMouseDown(ImGuiMouseButton.Left))
+            return null;
+
+        _lineDrag = false;
+        return _lineDraft;
     }
 
     /// <summary>A wall point under the mouse: off the far side of the wall, the first on the floor, between its neighbours' heights.</summary>

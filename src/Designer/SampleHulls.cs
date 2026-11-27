@@ -42,7 +42,9 @@ public static class SampleHulls
         var up = new Vector3d(0, 1, 0);
         var trimMaterial = session.EnsureMaterial(trim);
         
-        BrushCommands.AddStroke(session, rib, [StrokePoint.From(new Vector3d(-5.5, 6.4, 3.5), up), StrokePoint.From(new Vector3d(5.5, 6.4, 3.5), up)], trimMaterial);
+        var taper = BrushCommands.AddStroke(session, rib, [StrokePoint.From(new Vector3d(-5.5, 6.4, 3.5), up), StrokePoint.From(new Vector3d(5.5, 6.4, 3.5), up)], trimMaterial);
+        BrushCommands.SetPointScale(session, taper, 0, 0.3);
+        BrushCommands.SetPointScale(session, taper, 1, 2.0);
         BrushCommands.AddStroke(session, ridge,
             [StrokePoint.From(new Vector3d(6.4, 5.0, -3.5), new Vector3d(1, 0, 0)), StrokePoint.From(new Vector3d(6.4, 5.0, 3.5), new Vector3d(1, 0, 0))], trimMaterial);
         BrushCommands.AddStroke(session, stamp,

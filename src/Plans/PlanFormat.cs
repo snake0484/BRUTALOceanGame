@@ -65,7 +65,9 @@ public enum PlanFormatError
 /// (interiors) adds flag 4 and the <see cref="HullInterior"/> block between the brushes and the components; format 7
 /// (windows) adds flag 8 and the <see cref="HullWindowSet"/> block after the interior. Format 8 (route networks) writes
 /// pipes and hallways as node networks with junctions and the plan's profile list; older formats are converted on load.
-/// Format 9 (wall profiles) adds each profile's kind and the rooms' wall profiles to the interior block.
+/// Format 9 (wall profiles) adds each profile's kind and the rooms' wall profiles to the interior block. Format 10 (brush
+/// profiles) points sweep brushes at the plan's profiles with a line point and size, and sizes every stroke point; the
+/// inline outlines of older sweeps become plan brush profiles on load.
 /// </summary>
 public static class PlanFormat
 {
@@ -78,12 +80,14 @@ public static class PlanFormat
     public const ushort WindowFormat = 7;
     public const ushort RouteFormat = 8;
     public const ushort WallFormat = 9;
+    public const ushort BrushProfileFormat = 10;
 
     /// <summary>The newest format this build writes; bodies up to it can be read.</summary>
-    public const ushort Newest = WallFormat;
+    public const ushort Newest = BrushProfileFormat;
 
     public static ushort FormatOf(PlanDocument doc) =>
-        doc.Interior is { HasWalls: true } || doc.Prefabs.Values.Any(p => FormatOf(p) >= WallFormat) ? WallFormat
+        doc.Brushes is { NeedsProfiles: true } || doc.Prefabs.Values.Any(p => FormatOf(p) >= BrushProfileFormat) ? BrushProfileFormat
+        : doc.Interior is { HasKinds: true } || doc.Prefabs.Values.Any(p => FormatOf(p) >= WallFormat) ? WallFormat
         : doc.Interior is { IsEmpty: false } || doc.Components is { Pipes.Count: > 0 } || doc.Prefabs.Values.Any(p => FormatOf(p) >= RouteFormat) ? RouteFormat
         : doc.Windows is { IsEmpty: false } ? WindowFormat
         : doc.Components is { IsEmpty: false } || doc.Prefabs.Count > 0 ? ComponentFormat
@@ -107,7 +111,7 @@ public static class PlanFormat
 
         var format = FormatOf(doc);
         var layers = doc.Layers?.ToBytes() ?? [];
-        var brushes = format >= BrushFormat && doc.Brushes is { IsEmpty: false } ? doc.Brushes.ToBytes() : [];
+        var brushes = format >= BrushFormat && doc.Brushes is { IsEmpty: false } ? doc.Brushes.ToBytes(format >= BrushProfileFormat) : [];
         var interior = format >= InteriorFormat && doc.Interior is { IsEmpty: false } ? doc.Interior.ToBytes(format >= WallFormat) : [];
         var windows = format >= WindowFormat && doc.Windows is { IsEmpty: false } ? doc.Windows.ToBytes() : [];
         var components = format >= ComponentFormat ? ComponentBlock(doc) : [];
@@ -273,7 +277,7 @@ public static class PlanFormat
         if (header.Magic != PlanHeader.MagicValue)
             return PlanFormatError.BadMagic;
 
-        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat or InteriorFormat or WindowFormat or RouteFormat or WallFormat))
+        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat or InteriorFormat or WindowFormat or RouteFormat or WallFormat or BrushProfileFormat))
             return PlanFormatError.UnsupportedFormat;
 
         if (header.Level is not (PlanLevel.Ship or PlanLevel.HullChunk or PlanLevel.Component))
@@ -481,9 +485,11 @@ public static class PlanFormat
                 return false;
         }
 
+        var inline = new List<(int Brush, List<ProfilePoint> Points)>();
+
         if (hasBrushes)
         {
-            doc.Brushes = r.Brushes();
+            doc.Brushes = r.Brushes(format >= BrushProfileFormat ? BrushLayout.Profiles : BrushLayout.Inline, inline);
 
             if (doc.Brushes is null)
                 return false;
@@ -496,6 +502,9 @@ public static class PlanFormat
             if (doc.Interior is null)
                 return false;
         }
+
+        if (inline.Count > 0 && !AdoptInlineOutlines(doc, inline))
+            return false;
 
         if (hasWindows)
         {
@@ -531,6 +540,33 @@ public static class PlanFormat
         }
 
         return r.Remaining == 0;
+    }
+
+    /// <summary>Formats 4-9: each sweep's inline outline becomes a plan brush profile (the same outline shared), the line at its origin.</summary>
+    private static bool AdoptInlineOutlines(PlanDocument doc, List<(int Brush, List<ProfilePoint> Points)> inline)
+    {
+        doc.Interior ??= new HullInterior();
+        var profiles = doc.Interior.Profiles;
+
+        foreach (var (brush, points) in inline)
+        {
+            var index = profiles.FindIndex(p => p.Kind == ProfileKind.Brush && p.Points.SequenceEqual(points));
+
+            if (index < 0)
+            {
+                if (profiles.Count >= HullInterior.MaxProfiles)
+                    return false;
+
+                index = profiles.Count;
+                var profile = new HullProfile { Name = $"Brush {brush + 1}", Kind = ProfileKind.Brush };
+                profile.Points.AddRange(points);
+                profiles.Add(profile);
+            }
+
+            doc.Brushes!.Brushes[brush].Outline = (byte)index;
+        }
+
+        return true;
     }
 
     private static void WriteDeltas(ref Writer w, ReadOnlySpan<HullSolid> solids, int axis)
@@ -716,9 +752,9 @@ public static class PlanFormat
             return interior;
         }
 
-        public HullBrushSet? Brushes()
+        public HullBrushSet? Brushes(BrushLayout layout, List<(int Brush, List<ProfilePoint> Points)> inline)
         {
-            var set = HullBrushSet.Read(_bytes[_offset..], out var consumed);
+            var set = HullBrushSet.Read(_bytes[_offset..], out var consumed, layout, inline);
             _offset += consumed;
             return set;
         }

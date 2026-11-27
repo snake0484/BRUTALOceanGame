@@ -6,7 +6,7 @@ using static BrutalGame.Ships.HullSurface;
 namespace BrutalGame.Designer;
 
 /// <summary>
-/// Hallway, profile and room wall edits, each one undo group that swaps the plan's interior for an edited copy (the old one is never
+/// Hallway, profile (hallway, wall and brush) and room wall edits, each one undo group that swaps the plan's interior for an edited copy (the old one is never
 /// touched). Profiles are the plan's own copies: changing one reshapes every hallway that uses it; the library on disk
 /// reaches a plan only through an import or a deliberate reimport.
 /// </summary>
@@ -155,7 +155,7 @@ public static class InteriorCommands
         Change(session, (_, data) =>
         {
             var profile = new HullProfile { Name = name, Source = source, Kind = kind };
-            profile.Points.AddRange(Floored(points));
+            profile.Points.AddRange(Floored(points, kind));
             data.Profiles.Add(profile);
         });
         return index;
@@ -170,7 +170,7 @@ public static class InteriorCommands
         Change(session, (_, data) =>
         {
             data.Profiles[profile].Points.Clear();
-            data.Profiles[profile].Points.AddRange(Floored(points));
+            data.Profiles[profile].Points.AddRange(Floored(points, data.Profiles[profile].Kind));
         });
         return true;
     }
@@ -202,6 +202,19 @@ public static class InteriorCommands
             return false;
         }
 
+        if (session.Doc.Brushes is { } set && set.Brushes.Exists(b => b.Kind == BrushKind.Sweep && b.Outline == profile))
+        {
+            LastError = "Brushes use this profile: give them another first";
+            return false;
+        }
+
+        session.Edit(s => RemoveUnused(s, profile));
+        return true;
+    }
+
+    private static void RemoveUnused(DesignSession session, int profile)
+    {
+        BrushCommands.ProfileRemoved(session, profile);
         Change(session, (_, data) =>
         {
             data.Profiles.RemoveAt(profile);
@@ -218,7 +231,6 @@ public static class InteriorCommands
                     data.RoomWalls[i] = data.RoomWalls[i] with { Profile = (byte)(data.RoomWalls[i].Profile - 1) };
             }
         });
-        return true;
     }
 
     /// <summary>Room solid <paramref name="solid"/> (and its mirror partners) uses wall profile <paramref name="profile"/>; -1: plain box walls again.</summary>
@@ -275,6 +287,15 @@ public static class InteriorCommands
 
     private static bool Check(IReadOnlyList<ProfilePoint> points, ProfileKind kind)
     {
+        if (kind == ProfileKind.Brush)
+        {
+            if (PlanValidator.IsBrushOutline(points.ToList()))
+                return true;
+
+            LastError = $"A brush profile needs {HullBrush.MinProfilePoints} to {HullBrush.MaxProfilePoints} points enclosing some area";
+            return false;
+        }
+
         if (kind == ProfileKind.Wall)
         {
             if (WallGeometry.IsValid(points))
@@ -293,8 +314,12 @@ public static class InteriorCommands
         return true;
     }
 
-    private static IEnumerable<ProfilePoint> Floored(IReadOnlyList<ProfilePoint> points)
+    /// <summary>Hallway outlines keep their floor at Y = 0 (a wall starts there already; a brush's outline sits where it is drawn).</summary>
+    private static IEnumerable<ProfilePoint> Floored(IReadOnlyList<ProfilePoint> points, ProfileKind kind)
     {
+        if (kind != ProfileKind.Hallway)
+            return points;
+
         var floor = points.Min(p => p.Y);
         return points.Select(p => p with { Y = p.Y - floor });
     }

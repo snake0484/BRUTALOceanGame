@@ -181,7 +181,7 @@ public sealed class DesignerApp : DesignApp
         // Rooms with a wall profile are cut as their walled shape in their box's place.
         var walls = WallGeometry.Expand(doc.Interior, doc.Solids.AsSpan(), doc.Meshes, doc.Meshes.Count + hallways.Meshes.Count + windows.Meshes.Count);
         var meshes = hallways.Meshes.Count + windows.Meshes.Count + walls.Meshes.Count > 0 ? [.. doc.Meshes, .. hallways.Meshes, .. windows.Meshes, .. walls.Meshes] : doc.Meshes;
-        var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), meshes, doc.Brushes);
+        var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), meshes, doc.Brushes, doc.Interior?.Profiles);
 
         if (windows.Panes.Count > 0)
         {

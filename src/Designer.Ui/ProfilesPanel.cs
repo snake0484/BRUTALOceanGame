@@ -7,9 +7,9 @@ using BrutalGame.Ships.Interior;
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>
-/// The Profiles tab. The plan's own profiles, hallway outlines and wall sections (half a hallway, for rooms): make one from
-/// a preset or from half a hallway, duplicate, rename, delete (when nothing uses it) and shape it in the editor; every
-/// hallway or room using it follows. The library on disk (<see cref="ProfileLibrary"/>, folders
+/// The Profiles tab. The plan's own profiles, hallway outlines, wall sections (half a hallway, for rooms) and brush outlines
+/// (swept along strokes): make one from a preset or from half a hallway, duplicate, rename, delete (when nothing uses it)
+/// and shape it in the editor; every hallway, room or brush using it follows. The library on disk (<see cref="ProfileLibrary"/>, folders
 /// as categories): import a profile into the plan, save a plan profile to it. The plan keeps its copy: a change to the
 /// library file shows here as "the library has changed" and reaches the plan only with Reimport.
 /// </summary>
@@ -25,6 +25,8 @@ public sealed class ProfilesPanel : IDisposable
     private float _height = (float)InteriorCommands.DefaultHeight;
     private float _wallHeight = 2.4f;
     private float _feature = 0.3f;
+    private float _brushWidth = 0.5f;
+    private float _brushDepth = 0.25f;
     private string _message = "";
 
     public ProfilesPanel(ProfileLibrary library)
@@ -88,6 +90,11 @@ public sealed class ProfilesPanel : IDisposable
                 var rooms = interior.RoomWalls.Count(w => w.Profile == i);
                 note = $"wall, {rooms} room{(rooms == 1 ? "" : "s")}";
             }
+            else if (p.Kind == ProfileKind.Brush)
+            {
+                var brushes = session.Doc.Brushes?.Brushes.Count(b => b.Kind == BrushKind.Sweep && b.Outline == i) ?? 0;
+                note = $"brush, {brushes} brush{(brushes == 1 ? "" : "es")}";
+            }
             else
             {
                 var users = interior.Hallways.Count(h => h.Profile == i);
@@ -106,6 +113,11 @@ public sealed class ProfilesPanel : IDisposable
 
         if (ImGui.Button("New wall"u8))
             Added(InteriorCommands.AddProfile(session, $"Wall {count + 1}", WallGeometry.Preset(WallPreset.Chamfered, _wallHeight, _feature), kind: ProfileKind.Wall));
+
+        ImGui.SameLine();
+
+        if (ImGui.Button("New brush"u8))
+            Added(InteriorCommands.AddProfile(session, $"Brush {count + 1}", BrushCommands.Profile(ProfilePreset.Rib, _brushWidth, _brushDepth), kind: ProfileKind.Brush));
 
         ImGui.SameLine();
         ImGui.BeginDisabled(Selected < 0 || Selected >= count);
@@ -164,6 +176,8 @@ public sealed class ProfilesPanel : IDisposable
 
         if (profile.Kind == ProfileKind.Wall)
             DrawWall(session, index, profile);
+        else if (profile.Kind == ProfileKind.Brush)
+            DrawBrush(session, index, profile);
         else
             DrawHallway(session, index, profile);
 
@@ -244,6 +258,31 @@ public sealed class ProfilesPanel : IDisposable
             Commit(session, index, edited);
 
         ImGui.TextWrapped("The room's side is on the right. The lower half keeps to the floor and the upper half to the ceiling, so taller rooms stretch the middle. Drag points; double-click a segment to add one, right-click a point to remove it."u8);
+    }
+
+    private void DrawBrush(DesignSession session, int index, HullProfile profile)
+    {
+        DesignerStyle.ItemWidth(90f);
+        ImGui.InputFloat("Width m##brush"u8, ref _brushWidth, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None);
+        ImGui.SameLine();
+        DesignerStyle.ItemWidth(90f);
+        ImGui.InputFloat("Depth m##brush"u8, ref _brushDepth, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None);
+        _brushWidth = Math.Clamp(_brushWidth, 0.02f, 8f);
+        _brushDepth = Math.Clamp(_brushDepth, 0.02f, 8f);
+
+        for (var p = 0; p < BrushCommands.PresetNames.Length; p++)
+        {
+            if (p > 0)
+                ImGui.SameLine();
+
+            if (ImGui.Button($"{BrushCommands.PresetNames[p]}##brushpreset{p}"))
+                Commit(session, index, BrushCommands.Profile((ProfilePreset)p, _brushWidth, _brushDepth));
+        }
+
+        if (_editor.Draw(index, profile.Points, default, ProfileKind.Brush) is { } edited)
+            Commit(session, index, edited);
+
+        ImGui.TextWrapped("An outline swept along brush strokes, X across, Y out of the hull (the bright line is Y = 0). Each brush using it sets where the stroke runs through it and its size. Up to 16 points: drag them, double-click an edge to add one, right-click to remove one."u8);
     }
 
     private void DrawSource(DesignSession session, int index, HullProfile profile)
@@ -334,7 +373,7 @@ public sealed class ProfilesPanel : IDisposable
         }
 
         var inPlan = interior?.Profiles.FindIndex(p => p.Source == node.Relative) ?? -1;
-        ImGui.TreeNodeEx($"{node.Name}{(node.Profile!.Kind == ProfileKind.Wall ? "  [wall]" : "")}{(inPlan >= 0 ? "  (in the plan)" : "")}##{node.Relative}", ImGuiTreeNodeFlags.Leaf | ImGuiTreeNodeFlags.NoTreePushOnOpen | ImGuiTreeNodeFlags.SpanAvailWidth);
+        ImGui.TreeNodeEx($"{node.Name}{(node.Profile!.Kind == ProfileKind.Hallway ? "" : $"  [{node.Profile.Kind.ToString().ToLowerInvariant()}]")}{(inPlan >= 0 ? "  (in the plan)" : "")}##{node.Relative}", ImGuiTreeNodeFlags.Leaf | ImGuiTreeNodeFlags.NoTreePushOnOpen | ImGuiTreeNodeFlags.SpanAvailWidth);
 
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Double-click to import a copy into the plan"u8);

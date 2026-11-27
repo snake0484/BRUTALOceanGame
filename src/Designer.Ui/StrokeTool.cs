@@ -40,6 +40,9 @@ public sealed class StrokeTool
     /// <summary>The selected stroke's id, or 0.</summary>
     public uint Selected;
 
+    /// <summary>The selected stroke's point last grabbed in the view (its size is edited in the panel), or -1.</summary>
+    public int Point = -1;
+
     /// <summary>Result of the last expansion (the host sets it after each bake starts): stuck paths to draw.</summary>
     public ExpandedHull? Expanded;
 
@@ -167,7 +170,7 @@ public sealed class StrokeTool
         {
             if (Hit(origin, ray, out var point, out var normal))
             {
-                _dragValue = StrokePoint.From(point, normal);
+                _dragValue = StrokePoint.From(point, normal) with { Scale = _dragValue.Scale };
                 _dragHit = true;
             }
 
@@ -219,6 +222,7 @@ public sealed class StrokeTool
             _dragPoint = hover;
             _dragValue = stroke.Points[hover];
             _dragHit = false;
+            Point = hover;
         }
 
         return true;

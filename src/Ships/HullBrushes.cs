@@ -5,13 +5,15 @@ namespace BrutalGame.Ships;
 /// <summary>What a brush lays along a stroke: copies of a mesh at a spacing, or a 2D profile swept along the line.</summary>
 public enum BrushKind : byte { Stamp, Sweep }
 
-/// <summary>A sweep profile corner: X across the stroke, Y out of the hull, in 1/1024 m.</summary>
+/// <summary>A profile corner, in 1/1024 m (for a brush: X across the stroke, Y out of the hull).</summary>
 public readonly record struct ProfilePoint(int X, int Y);
 
 /// <summary>
 /// A hull brush: a repeated design drawn onto the hull along strokes. A stamp copies a mesh from the plan's mesh table
-/// (its +Y out of the hull, +Z along the stroke, origin on the surface) every <see cref="Spacing"/>; a sweep extrudes
-/// a closed profile (≤ 16 corners) along the stroke. Treated as immutable once in a plan: edits replace the set.
+/// (its +Y out of the hull, +Z along the stroke, origin on the surface) every <see cref="Spacing"/>; a sweep extrudes one
+/// of the plan's brush profiles (<see cref="Outline"/>, a closed outline ≤ 16 corners) along the stroke, the stroke
+/// running through its <see cref="Anchor"/>. <see cref="Scale"/> sizes either. Treated as immutable once in a plan: edits
+/// replace the set.
 /// </summary>
 public sealed class HullBrush
 {
@@ -19,6 +21,11 @@ public sealed class HullBrush
     public const int MaxProfilePoints = 16;
     public const int MinSpacing = 64;
     public const int MaxProfileUnits = 16 * HullSolid.PositionUnitsPerMetre;
+
+    /// <summary>Sizes (brush, stroke and node scales), per mille: 0.05 to 10.</summary>
+    public const ushort UnitScale = 1000;
+    public const ushort MinScale = 50;
+    public const ushort MaxScale = 10000;
 
     public BrushKind Kind;
 
@@ -28,21 +35,25 @@ public sealed class HullBrush
     /// <summary>Stamp: distance between copies along the stroke, 1/1024 m.</summary>
     public int Spacing = HullSolid.PositionUnitsPerMetre;
 
-    /// <summary>Sweep: closed polygon, either winding (the expansion orients it).</summary>
-    public readonly List<ProfilePoint> Profile = new();
+    /// <summary>Sweep: index of the plan profile (a brush profile) it sweeps.</summary>
+    public byte Outline;
 
-    public HullBrush Clone()
-    {
-        var copy = new HullBrush { Kind = Kind, Mesh = Mesh, Spacing = Spacing };
-        copy.Profile.AddRange(Profile);
-        return copy;
-    }
+    /// <summary>Sweep: the point of the profile the stroke runs through (1/1024 m, profile coordinates).</summary>
+    public ProfilePoint Anchor;
+
+    /// <summary>Size of the design, per mille (1000 = as modelled).</summary>
+    public ushort Scale = UnitScale;
+
+    public HullBrush Clone() => new() { Kind = Kind, Mesh = Mesh, Spacing = Spacing, Outline = Outline, Anchor = Anchor, Scale = Scale };
 }
 
-/// <summary>A stroke point on the hull: position (1/1024 m, ship frame) and the surface normal (×32767).</summary>
+/// <summary>A stroke point on the hull: position (1/1024 m, ship frame), the surface normal (×32767) and the design's size there (per mille).</summary>
 public readonly record struct StrokePoint(int X, int Y, int Z, short NX, short NY, short NZ)
 {
     public const double NormalScale = 32767.0;
+
+    /// <summary>Size of the design at this point, per mille; blended along the stroke to the next point.</summary>
+    public ushort Scale { get; init; } = HullBrush.UnitScale;
 
     public Vector3d Position => new(X * HullSolid.MetresPerPositionUnit, Y * HullSolid.MetresPerPositionUnit, Z * HullSolid.MetresPerPositionUnit);
 
@@ -71,7 +82,7 @@ public sealed class HullStroke
 {
     public const int MinPoints = 2;
     public const int MaxPoints = 64;
-    public const ushort UnitScale = 1000;
+    public const ushort UnitScale = HullBrush.UnitScale;
 
     public uint Id;
     public ushort Brush;
@@ -93,6 +104,12 @@ public sealed class HullStroke
     }
 }
 
+/// <summary>
+/// The brush block's layout: BODY formats 4-9 held each sweep's outline inline and no point sizes (<see cref="Inline"/>);
+/// format 10 points sweeps at plan profiles with a line point and size, and gives every stroke point a size.
+/// </summary>
+public enum BrushLayout : byte { Inline, Profiles }
+
 /// <summary>The plan's brushes and strokes (BODY format 4). Edits replace the whole set, so undo restores it exactly.</summary>
 public sealed class HullBrushSet
 {
@@ -103,6 +120,11 @@ public sealed class HullBrushSet
     public readonly List<HullStroke> Strokes = new();
 
     public bool IsEmpty => Brushes.Count == 0 && Strokes.Count == 0;
+
+    /// <summary>Needs the profiles layout (BODY format 10): a sweep, or a size anywhere but the unit.</summary>
+    public bool NeedsProfiles =>
+        Brushes.Exists(b => b.Kind == BrushKind.Sweep || b.Scale != HullBrush.UnitScale)
+        || Strokes.Exists(s => s.Points.Exists(p => p.Scale != HullBrush.UnitScale));
 
     public HullBrushSet Clone()
     {
@@ -122,30 +144,35 @@ public sealed class HullBrushSet
     // ---- bytes ----
 
     /// <summary>
-    /// u8 brush count; per brush u8 kind, u16 mesh, i32 spacing, u8 profile count, (i32 x, i32 y) each. u16 stroke count;
-    /// per stroke u32 id, u16 brush, u8 material, i32 offset, u16 scale, u8 point count, (i32 x, y, z, i16 nx, ny, nz) each.
+    /// Profiles layout: u8 brush count; per brush u8 kind, u16 mesh, i32 spacing, u8 outline, i32 anchor x, y, u16 scale.
+    /// u16 stroke count; per stroke u32 id, u16 brush, u8 material, i32 offset, u16 scale, u8 point count, (i32 x, y, z,
+    /// i16 nx, ny, nz, u16 scale) each. The inline layout (<paramref name="profiles"/> false, formats 4-9) has per brush u8
+    /// kind, u16 mesh, i32 spacing, u8 outline point count (here 0: only stamps of unit size are written so), and no point sizes.
     /// </summary>
-    public byte[] ToBytes()
+    public byte[] ToBytes(bool profiles)
     {
-        var size = 1 + Brushes.Sum(b => 8 + b.Profile.Count * 8) + 2 + Strokes.Sum(s => 14 + s.Points.Count * 18);
+        var brushBytes = profiles ? 18 : 8;
+        var pointBytes = profiles ? 20 : 18;
+        var size = 1 + Brushes.Count * brushBytes + 2 + Strokes.Sum(s => 14 + s.Points.Count * pointBytes);
         var b = new byte[size];
         var o = 0;
         b[o++] = (byte)Brushes.Count;
 
         foreach (var brush in Brushes)
         {
-            b[o++] = (byte)brush.Kind;
-            BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(o), brush.Mesh);
-            BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(o + 2), brush.Spacing);
-            b[o + 6] = (byte)brush.Profile.Count;
-            o += 7;
+            b[o] = (byte)brush.Kind;
+            BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(o + 1), brush.Mesh);
+            BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(o + 3), brush.Spacing);
 
-            foreach (var p in brush.Profile)
+            if (profiles)
             {
-                BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(o), p.X);
-                BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(o + 4), p.Y);
-                o += 8;
+                b[o + 7] = brush.Outline;
+                BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(o + 8), brush.Anchor.X);
+                BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(o + 12), brush.Anchor.Y);
+                BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(o + 16), brush.Scale);
             }
+
+            o += brushBytes;
         }
 
         BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(o), (ushort)Strokes.Count);
@@ -169,15 +196,23 @@ public sealed class HullBrushSet
                 BinaryPrimitives.WriteInt16LittleEndian(b.AsSpan(o + 12), p.NX);
                 BinaryPrimitives.WriteInt16LittleEndian(b.AsSpan(o + 14), p.NY);
                 BinaryPrimitives.WriteInt16LittleEndian(b.AsSpan(o + 16), p.NZ);
-                o += 18;
+
+                if (profiles)
+                    BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(o + 18), p.Scale);
+
+                o += pointBytes;
             }
         }
 
         return b;
     }
 
-    /// <summary>Reads the block at the start of <paramref name="s"/>, structurally checked (counts within limits); null on failure.</summary>
-    public static HullBrushSet? Read(ReadOnlySpan<byte> s, out int consumed)
+    /// <summary>
+    /// Reads the block at the start of <paramref name="s"/>, structurally checked (counts within limits); null on failure.
+    /// In the inline layout each sweep's outline lands in <paramref name="inline"/> (brush index, corners) for the caller to
+    /// turn into plan profiles.
+    /// </summary>
+    public static HullBrushSet? Read(ReadOnlySpan<byte> s, out int consumed, BrushLayout layout, List<(int Brush, List<ProfilePoint> Points)>? inline = null)
     {
         consumed = 0;
 
@@ -185,6 +220,8 @@ public sealed class HullBrushSet
             return null;
 
         var set = new HullBrushSet();
+        var profiles = layout == BrushLayout.Profiles;
+        var pointBytes = profiles ? 20 : 18;
         int brushes = s[0], o = 1;
 
         if (brushes > MaxBrushes)
@@ -192,7 +229,7 @@ public sealed class HullBrushSet
 
         for (var i = 0; i < brushes; i++)
         {
-            if (s.Length < o + 8)
+            if (s.Length < o + (profiles ? 18 : 8))
                 return null;
 
             var brush = new HullBrush
@@ -201,14 +238,30 @@ public sealed class HullBrushSet
                 Mesh = BinaryPrimitives.ReadUInt16LittleEndian(s[(o + 1)..]),
                 Spacing = BinaryPrimitives.ReadInt32LittleEndian(s[(o + 3)..]),
             };
-            int points = s[o + 7];
-            o += 8;
 
-            if (points > HullBrush.MaxProfilePoints || s.Length < o + points * 8)
-                return null;
+            if (profiles)
+            {
+                brush.Outline = s[o + 7];
+                brush.Anchor = new ProfilePoint(BinaryPrimitives.ReadInt32LittleEndian(s[(o + 8)..]), BinaryPrimitives.ReadInt32LittleEndian(s[(o + 12)..]));
+                brush.Scale = BinaryPrimitives.ReadUInt16LittleEndian(s[(o + 16)..]);
+                o += 18;
+            }
+            else
+            {
+                int points = s[o + 7];
+                o += 8;
 
-            for (var j = 0; j < points; j++, o += 8)
-                brush.Profile.Add(new ProfilePoint(BinaryPrimitives.ReadInt32LittleEndian(s[o..]), BinaryPrimitives.ReadInt32LittleEndian(s[(o + 4)..])));
+                if (points > HullBrush.MaxProfilePoints || s.Length < o + points * 8)
+                    return null;
+
+                var outline = new List<ProfilePoint>(points);
+
+                for (var j = 0; j < points; j++, o += 8)
+                    outline.Add(new ProfilePoint(BinaryPrimitives.ReadInt32LittleEndian(s[o..]), BinaryPrimitives.ReadInt32LittleEndian(s[(o + 4)..])));
+
+                if (brush.Kind == BrushKind.Sweep)
+                    inline?.Add((i, outline));
+            }
 
             set.Brushes.Add(brush);
         }
@@ -235,21 +288,23 @@ public sealed class HullBrushSet
                 Offset = BinaryPrimitives.ReadInt32LittleEndian(s[(o + 7)..]),
                 Scale = BinaryPrimitives.ReadUInt16LittleEndian(s[(o + 11)..]),
             };
-            int points = s[o + 13];
+            int count = s[o + 13];
             o += 14;
 
-            if (points > HullStroke.MaxPoints || s.Length < o + points * 18)
+            if (count > HullStroke.MaxPoints || s.Length < o + count * pointBytes)
                 return null;
 
-            for (var j = 0; j < points; j++, o += 18)
+            for (var j = 0; j < count; j++, o += pointBytes)
             {
-                stroke.Points.Add(new StrokePoint(
+                var point = new StrokePoint(
                     BinaryPrimitives.ReadInt32LittleEndian(s[o..]),
                     BinaryPrimitives.ReadInt32LittleEndian(s[(o + 4)..]),
                     BinaryPrimitives.ReadInt32LittleEndian(s[(o + 8)..]),
                     BinaryPrimitives.ReadInt16LittleEndian(s[(o + 12)..]),
                     BinaryPrimitives.ReadInt16LittleEndian(s[(o + 14)..]),
-                    BinaryPrimitives.ReadInt16LittleEndian(s[(o + 16)..])));
+                    BinaryPrimitives.ReadInt16LittleEndian(s[(o + 16)..]));
+
+                stroke.Points.Add(profiles ? point with { Scale = BinaryPrimitives.ReadUInt16LittleEndian(s[(o + 18)..]) } : point);
             }
 
             set.Strokes.Add(stroke);

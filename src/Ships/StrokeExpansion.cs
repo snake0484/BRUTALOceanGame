@@ -1,3 +1,4 @@
+using BrutalGame.Ships.Interior;
 using static BrutalGame.Ships.HullSurface;
 
 namespace BrutalGame.Ships;
@@ -27,6 +28,9 @@ public sealed class StrokePath
     public readonly List<Vector3d> Points = new();
     public readonly List<Vector3d> Normals = new();
 
+    /// <summary>The design's size at each point (1 = as modelled), blended between the stroke's points.</summary>
+    public readonly List<double> Scales = new();
+
     /// <summary>Index in <see cref="Points"/> of each control point.</summary>
     public readonly List<int> Controls = new();
 }
@@ -36,7 +40,8 @@ public sealed class StrokePath
 /// drawn as they are and counted for mass, never baked into the hull grid. Each control point is stuck to the hull (cast back along its normal from <see cref="Reach"/> out), the
 /// segments between are resampled every <see cref="SampleMetres"/> and stuck too, so the line hugs curved hulls. A stamp
 /// brush places a copy of its mesh every spacing, +Y on the normal and +Z along the line; a sweep brush builds a tube of
-/// its profile along the path (split into pieces within the mesh limits), capped at both ends.
+/// its plan profile along the path, the line through the brush's line point (split into pieces within the mesh limits),
+/// capped at both ends. Sizes multiply: the brush's, the stroke's, and the points' (blended along the line).
 /// </summary>
 public static class StrokeExpansion
 {
@@ -47,7 +52,8 @@ public static class StrokeExpansion
     public const uint GeneratedIdBase = 0xF0000000;
     private const double MinStep = 1e-3;
 
-    public static ExpandedHull Expand(ReadOnlySpan<HullSolid> solids, IReadOnlyList<HullMesh> meshes, HullBrushSet? set)
+    /// <summary><paramref name="profiles"/>: the plan's profiles, which sweep brushes index.</summary>
+    public static ExpandedHull Expand(ReadOnlySpan<HullSolid> solids, IReadOnlyList<HullMesh> meshes, HullBrushSet? set, IReadOnlyList<HullProfile>? profiles)
     {
         var result = new ExpandedHull { PlanSolids = solids.Length };
         result.Meshes.AddRange(meshes);
@@ -78,13 +84,14 @@ public static class StrokeExpansion
                 Material = stroke.Material,
                 Rotation = SolidRotation.Identity,
             };
-            var scale = stroke.Scale / (double)HullStroke.UnitScale;
+            var scale = brush.Scale / (double)HullBrush.UnitScale * (stroke.Scale / (double)HullBrush.UnitScale);
             var offset = stroke.Offset * HullSolid.MetresPerPositionUnit;
 
             if (brush.Kind == BrushKind.Stamp && brush.Mesh < meshes.Count && brush.Spacing >= HullBrush.MinSpacing)
                 Stamps(path, meshes[brush.Mesh], brush.Spacing * HullSolid.MetresPerPositionUnit, scale, offset, s, template, result, generated);
-            else if (brush.Kind == BrushKind.Sweep && brush.Profile.Count >= HullBrush.MinProfilePoints)
-                Sweep(path, brush.Profile, scale, offset, s, template, result, generated);
+            else if (brush.Kind == BrushKind.Sweep && profiles is not null && brush.Outline < profiles.Count
+                && profiles[brush.Outline] is { Kind: ProfileKind.Brush, Points.Count: >= HullBrush.MinProfilePoints and <= HullBrush.MaxProfilePoints } profile)
+                Sweep(path, profile.Points, brush.Anchor, scale, offset, s, template, result, generated);
         }
 
         result.Generated = generated.Count;
@@ -100,10 +107,12 @@ public static class StrokeExpansion
     {
         var path = new StrokePath();
         Vector3d prevP = default, prevN = default;
+        var prevS = 1.0;
 
         for (var i = 0; i < stroke.Points.Count; i++)
         {
             var point = stroke.Points[i];
+            var size = point.Scale / (double)HullBrush.UnitScale;
 
             if (!surface.Project(point.Position, point.Normal, Reach, out var p, out var n))
                 unstuck++;
@@ -119,26 +128,28 @@ public static class StrokeExpansion
                     var q = Lerp(prevP, p, f);
                     var qn = Normalise(Lerp(prevN, n, f), n);
                     surface.Project(q, qn, Reach, out q, out qn);
-                    Append(path, q, qn);
+                    Append(path, q, qn, prevS + (size - prevS) * f);
                 }
             }
 
-            Append(path, p, n);
+            Append(path, p, n, size);
             path.Controls.Add(path.Points.Count - 1);
             prevP = p;
             prevN = n;
+            prevS = size;
         }
 
         return path;
     }
 
-    private static void Append(StrokePath path, Vector3d p, Vector3d n)
+    private static void Append(StrokePath path, Vector3d p, Vector3d n, double scale)
     {
         if (path.Points.Count > 0 && Sub(p, path.Points[^1]).Length() < MinStep)
             return;
 
         path.Points.Add(p);
         path.Normals.Add(n);
+        path.Scales.Add(scale);
     }
 
     /// <summary>Frame at a path point: normal up, tangent along the line made square to it, binormal = normal × tangent.</summary>
@@ -178,7 +189,8 @@ public static class StrokeExpansion
                 var p = Lerp(a, b, f);
                 var n = Normalise(Lerp(path.Normals[i], path.Normals[i + 1], f), path.Normals[i]);
                 var (bx, ny, tz) = Frame(n, Sub(b, a));
-                var placed = Transform(mesh, Add(p, Scale(ny, offset)), bx, ny, tz, scale, out var anchor);
+                var size = scale * (path.Scales[i] + (path.Scales[i + 1] - path.Scales[i]) * f);
+                var placed = Transform(mesh, Add(p, Scale(ny, offset)), bx, ny, tz, size, out var anchor);
 
                 if (placed is not null)
                     Emit(template, anchor, placed, strokeIndex, copy++, result, output);
@@ -214,7 +226,7 @@ public static class StrokeExpansion
         return new HullMesh(vertices, mesh.FaceSizes, mesh.Corners, mesh.Panels, mesh.Creases, mesh.SubdivLevels);
     }
 
-    private static void Sweep(StrokePath path, List<ProfilePoint> profile, double scale, double offset, int strokeIndex, HullSolid template, ExpandedHull result, List<HullSolid> output)
+    private static void Sweep(StrokePath path, List<ProfilePoint> profile, ProfilePoint lineAt, double scale, double offset, int strokeIndex, HullSolid template, ExpandedHull result, List<HullSolid> output)
     {
         // Orient the profile counter-clockwise in (across, out), so faces wind outward.
         var count = profile.Count;
@@ -235,7 +247,7 @@ public static class StrokeExpansion
         for (var j = 0; j < count; j++)
         {
             var p = profile[area > 0 ? j : count - 1 - j];
-            corners[j] = (p.X * HullSolid.MetresPerPositionUnit * scale, p.Y * HullSolid.MetresPerPositionUnit * scale + offset);
+            corners[j] = ((p.X - lineAt.X) * HullSolid.MetresPerPositionUnit * scale, (p.Y - lineAt.Y) * HullSolid.MetresPerPositionUnit * scale);
         }
 
         // Pieces share their boundary ring; each stays within the vertex, face and coordinate limits.
@@ -257,10 +269,11 @@ public static class StrokeExpansion
             {
                 var (bx, ny, _) = Frame(path.Normals[i], Along(path, i));
                 var centre = Sub(path.Points[i], exact);
+                var size = path.Scales[i];
 
                 foreach (var (x, y) in corners)
                 {
-                    var q = Quantise(Add(centre, Add(Scale(bx, x), Scale(ny, y))));
+                    var q = Quantise(Add(centre, Add(Scale(bx, x * size), Scale(ny, y * size + offset))));
 
                     if (Math.Abs(q.X) >= HullMesh.MaxCoordinate || Math.Abs(q.Y) >= HullMesh.MaxCoordinate || Math.Abs(q.Z) >= HullMesh.MaxCoordinate)
                     {

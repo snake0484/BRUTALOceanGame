@@ -125,11 +125,14 @@ public static class PlanValidator
                 if (brush.Spacing < HullBrush.MinSpacing || brush.Spacing * HullSolid.MetresPerPositionUnit > PlanLimits.MaxReachMetres)
                     log.Add(Severity.Error, IssueCode.BrushSpacing, default, i);
             }
-            else if (brush.Kind != BrushKind.Sweep || brush.Profile.Count is < HullBrush.MinProfilePoints or > HullBrush.MaxProfilePoints
-                || brush.Profile.Any(p => Math.Abs(p.X) > HullBrush.MaxProfileUnits || Math.Abs(p.Y) > HullBrush.MaxProfileUnits) || ProfileArea(brush.Profile) == 0)
+            else if (brush.Kind != BrushKind.Sweep || !IsBrushProfile(doc, brush.Outline)
+                || Math.Abs(brush.Anchor.X) > HullBrush.MaxProfileUnits || Math.Abs(brush.Anchor.Y) > HullBrush.MaxProfileUnits)
             {
                 log.Add(Severity.Error, IssueCode.BrushProfile, default, i);
             }
+
+            if (brush.Scale is < HullBrush.MinScale or > HullBrush.MaxScale)
+                log.Add(Severity.Error, IssueCode.BrushProfile, default, i);
         }
 
         foreach (var stroke in set.Strokes)
@@ -141,13 +144,22 @@ public static class PlanValidator
 
             if (stroke.Points.Count is < HullStroke.MinPoints or > HullStroke.MaxPoints
                 || stroke.Scale is < 100 or > 10000 || Math.Abs(stroke.Offset * HullSolid.MetresPerPositionUnit) > 16.0
-                || stroke.Points.Any(p => (p.NX == 0 && p.NY == 0 && p.NZ == 0) || p.Position.Length() > PlanLimits.MaxReachMetres))
+                || stroke.Points.Any(p => (p.NX == 0 && p.NY == 0 && p.NZ == 0) || p.Position.Length() > PlanLimits.MaxReachMetres || p.Scale is < HullBrush.MinScale or > HullBrush.MaxScale))
                 log.Add(Severity.Error, IssueCode.StrokeShape, element, stroke.Points.Count);
 
             if (stroke.Material >= doc.Materials.Count)
                 log.Add(Severity.Error, IssueCode.StrokeMaterial, element, stroke.Material);
         }
     }
+
+    /// <summary>Plan profile <paramref name="index"/> is a brush outline a sweep can use: 3-16 corners in range, enclosing some area.</summary>
+    public static bool IsBrushProfile(PlanDocument doc, int index) =>
+        doc.Interior is { } interior && index < interior.Profiles.Count && interior.Profiles[index] is { Kind: ProfileKind.Brush } profile
+        && IsBrushOutline(profile.Points);
+
+    public static bool IsBrushOutline(List<ProfilePoint> points) =>
+        points.Count is >= HullBrush.MinProfilePoints and <= HullBrush.MaxProfilePoints && ProfileArea(points) != 0
+        && !points.Any(p => Math.Abs(p.X) > HullBrush.MaxProfileUnits || Math.Abs(p.Y) > HullBrush.MaxProfileUnits);
 
     /// <summary>Parts, pipes and placements: counts, positive sizes, materials, pipe ends on real ports, placed prefabs present.</summary>
     private static void ValidateComponents(PlanDocument doc, ValidationLog log)
@@ -241,6 +253,10 @@ public static class PlanValidator
 
                 continue;
             }
+
+            // Brush outlines are checked with the brushes that use them.
+            if (interior.Profiles[i].Kind == ProfileKind.Brush)
+                continue;
 
             if (points.Count is < HullProfile.MinPoints or > HullProfile.MaxPoints || HallwayGeometry.Area2(points) == 0
                 || points.Any(p => Math.Abs(p.X) > HullProfile.MaxUnits || Math.Abs(p.Y) > HullProfile.MaxUnits))

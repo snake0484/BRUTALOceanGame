@@ -21,7 +21,7 @@ public sealed class ProfileNode
 
 /// <summary>
 /// The profile library on disk: <c>Documents/BRUTALGame/Profiles</c>, one <c>.bprofile</c> file per profile (JSON:
-/// name, kind (hallway or wall; hallway when missing) and points in 1/1024 m), subfolders as categories. Plans hold their own copies: importing copies a file into the
+/// name, kind (hallway, wall or brush; hallway when missing) and points in 1/1024 m), subfolders as categories. Plans hold their own copies: importing copies a file into the
 /// plan, and a change to the file reaches the plan only when that profile is reimported on purpose.
 /// </summary>
 public sealed class ProfileLibrary
@@ -83,10 +83,11 @@ public sealed class ProfileLibrary
         {
             var data = JsonSerializer.Deserialize<ProfileFile>(File.ReadAllText(file));
 
-            var kind = string.Equals(data?.Kind, nameof(ProfileKind.Wall), StringComparison.OrdinalIgnoreCase) ? ProfileKind.Wall : ProfileKind.Hallway;
+            var kind = Enum.TryParse<ProfileKind>(data?.Kind, ignoreCase: true, out var k) && Enum.IsDefined(k) ? k : ProfileKind.Hallway;
             var least = kind == ProfileKind.Wall ? HullProfile.MinWallPoints : HullProfile.MinPoints;
+            var most = kind == ProfileKind.Brush ? HullBrush.MaxProfilePoints : HullProfile.MaxPoints;
 
-            if (data?.Points is null || data.Points.Count < least || data.Points.Count > HullProfile.MaxPoints)
+            if (data?.Points is null || data.Points.Count < least || data.Points.Count > most)
                 return null;
 
             var profile = new HullProfile { Name = data.Name ?? Path.GetFileNameWithoutExtension(file), Source = relative, Kind = kind };

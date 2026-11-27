@@ -111,6 +111,9 @@ public sealed class DesignerPanels
         {
             _layersPanel.Draw(session);
             _brushesPanel.Draw(session, Strokes);
+
+            if (_brushesPanel.EditProfileRequest >= 0)
+                EditProfileRequest = _brushesPanel.EditProfileRequest;
         }
 
         ImGui.EndDisabled();

@@ -3,13 +3,14 @@ using System.Text;
 
 namespace BrutalGame.Ships.Interior;
 
-/// <summary>A hallway's closed cross-section, or one wall's section for rooms (half a hallway's).</summary>
-public enum ProfileKind : byte { Hallway, Wall }
+/// <summary>A hallway's closed cross-section, one wall's section for rooms (half a hallway's), or a brush's closed outline swept along strokes.</summary>
+public enum ProfileKind : byte { Hallway, Wall, Brush }
 
 /// <summary>
 /// A cross-section in 1/1024 m. A hallway profile is a closed outline, X across, Y up from the floor (Y = 0), 3-32 points.
 /// A wall profile is one wall's section, an open line from floor to ceiling, 2-32 points: X is how far the wall stands in
-/// from the room's side (≥ 0), Y the height (from 0, never going down). The plan keeps its own copy: <see cref="Source"/>
+/// from the room's side (≥ 0), Y the height (from 0, never going down). A brush profile is a closed outline of 3-16 points,
+/// X across the stroke, Y out of the hull; each brush using it says where in it the stroke runs and how big. The plan keeps its own copy: <see cref="Source"/>
 /// names the library file it came from, but a change to that file reaches the plan only when it is reimported on purpose.
 /// </summary>
 public sealed class HullProfile
@@ -137,8 +138,8 @@ public sealed class HullInterior
 
     public bool IsEmpty => Hallways.Count == 0 && Profiles.Count == 0 && RoomWalls.Count == 0;
 
-    /// <summary>Needs the wall layout (BODY format 9) to be written.</summary>
-    public bool HasWalls => RoomWalls.Count > 0 || Profiles.Any(p => p.Kind == ProfileKind.Wall);
+    /// <summary>Needs the kinds layout (BODY format 9 and on) to be written.</summary>
+    public bool HasKinds => RoomWalls.Count > 0 || Profiles.Any(p => p.Kind != ProfileKind.Hallway);
 
     public int IndexOf(uint id) => Hallways.FindIndex(h => h.Id == id);
 
@@ -287,7 +288,7 @@ public sealed class HullInterior
 
             if (walls)
             {
-                if (s[o] > (byte)ProfileKind.Wall)
+                if (s[o] > (byte)ProfileKind.Brush)
                     return null;
 
                 p.Kind = (ProfileKind)s[o++];

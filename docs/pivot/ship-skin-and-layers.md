@@ -46,6 +46,13 @@ CSG ray against the solids, then resamples between them every 0.25 m), and its p
 Strokes only add; they are drawn from their own geometry and counted for mass (volume x material density), never baked
 into the grid or collision. Plan BODY format 4 stores the brushes and strokes.
 
+**Brush profiles (2026-11-27, BODY format 10; plans without sweeps or sizes keep their format):** a sweep's outline is
+one of the plan's profiles, kind brush (closed, 3-16 points, X across, Y out of the hull), made and shaped in the
+Profiles tab and kept in the profile library like the others. Each sweep brush sets its **line point** (where in the
+outline the stroke runs; the cross in the Brushes panel, or typed) and its **size**; stamps have a size too. Every
+stroke **point has a size**, blended along the line to the next, so a stroke can taper or swell. Sizes multiply: brush x
+stroke x point. Older plans' inline outlines become plan brush profiles on load, the line at their origin as before.
+
 ## Interior spaces: hallways (2026-11-27)
 
 User direction: hallways are like pipes, a route of nodes with an area that must fit humanoids, and an adjustable
