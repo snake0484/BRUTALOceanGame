@@ -71,6 +71,8 @@ public enum IssueCode : ushort
     JointMember,
     OpeningCount,
     OpeningShape,
+    ProgramShape,
+    ProgramCall,
 }
 
 public readonly record struct ValidationIssue(Severity Severity, IssueCode Code, ElementRef Element, int Value);
@@ -374,6 +376,57 @@ public static class PlanValidator
         }
     }
 
+    /// <summary>
+    /// A programme: a valid interface; at most 64 nodes of known kinds, unique ids, each naming a call or state the interface
+    /// has and leading only to nodes that exist (an error, value: the node id); poses of states and joints that exist, a
+    /// joint's pose within its limits. A call with no node is a warning (value: the call's index): it does nothing.
+    /// </summary>
+    private static void ValidateProgram(PlanDocument doc, ValidationLog log)
+    {
+        if (doc.Program is not { } program)
+            return;
+
+        var face = program.Interface;
+
+        if (!Ships.Logic.ComponentInterface.IsValid(face) || program.Nodes.Count > Ships.Logic.HullProgram.MaxNodes || program.Poses.Count > Ships.Logic.HullProgram.MaxPoses)
+        {
+            log.Add(Severity.Error, IssueCode.ProgramShape, default, 0);
+            return;
+        }
+
+        var ids = new HashSet<ushort>();
+
+        foreach (var n in program.Nodes)
+        {
+            var named = n.Kind switch
+            {
+                Ships.Logic.NodeKind.OnCall => n.A < face.Calls.Count,
+                Ships.Logic.NodeKind.SetState or Ships.Logic.NodeKind.IfState => n.A < face.States.Count,
+                _ => true,
+            };
+
+            if (n.Id == 0 || !ids.Add(n.Id) || !Enum.IsDefined(n.Kind) || !named || n.B < 0
+                || (n.Out0 != 0 && program.IndexOf(n.Out0) < 0) || (n.Out1 != 0 && program.IndexOf(n.Out1) < 0))
+                log.Add(Severity.Error, IssueCode.ProgramShape, default, n.Id);
+        }
+
+        var joints = doc.Joints;
+
+        foreach (var p in program.Poses)
+        {
+            var at = joints?.IndexOf(p.Joint) ?? -1;
+
+            if (p.State >= face.States.Count || at < 0 || (joints!.Joints[at].Limited && (p.Value < joints.Joints[at].Min || p.Value > joints.Joints[at].Max)))
+                log.Add(Severity.Error, IssueCode.ProgramShape, default, p.State);
+        }
+
+        for (var c = 0; c < face.Calls.Count; c++)
+        {
+            if (!program.Nodes.Exists(n => n.Kind == Ships.Logic.NodeKind.OnCall && n.A == c))
+                log.Add(Severity.Warning, IssueCode.ProgramCall, default, c);
+        }
+    }
+
     /// <summary>Openings: count; each a known kind on a door profile of the plan, a valid rotation, within reach, a depth of 1 mm to 8 m.</summary>
     private static void ValidateOpenings(PlanDocument doc, ValidationLog log)
     {
@@ -564,6 +617,7 @@ public static class PlanValidator
         ValidatePaint(doc, log);
         ValidateJoints(doc, log);
         ValidateOpenings(doc, log);
+        ValidateProgram(doc, log);
         ValidateComponents(doc, log);
         ValidateInterior(doc, log);
         ValidateWindows(doc, log);
