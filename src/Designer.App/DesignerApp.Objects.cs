@@ -195,6 +195,45 @@ public sealed partial class DesignerApp
 
         if (_tree.Picked.Kind != ObjectKind.None)
             Select(_tree.Picked, _tree.Toggle);
+
+        if (_tree.Dropped is { } drop)
+            Reparent(drop.Item, drop.Onto);
+    }
+
+    /// <summary>
+    /// A tree drop: a solid joins the moving part it was dropped on (a joint's, or the one the solid dropped on moves
+    /// with; the root: the ship's own), with the rest of the solid selection if it was part of it; a joint is mounted on
+    /// the joint dropped on (or the one that solid moves with; the root: the ship).
+    /// </summary>
+    private void Reparent(ObjectRef item, ObjectRef onto)
+    {
+        var joints = _session.Doc.Joints;
+        var part = onto.Kind switch
+        {
+            ObjectKind.Joint => onto.Id,
+            ObjectKind.Solid => joints?.JointOf(onto.Id) ?? 0,
+            _ => 0u,
+        };
+
+        if (item.Kind == ObjectKind.Solid)
+        {
+            if (part != 0 && joints is null)
+                return;
+
+            var solids = _session.Selection.Contains(item.Id) ? _session.Selection.Ids.ToList() : [item.Id];
+            _session.Edit(_ =>
+            {
+                foreach (var solid in solids)
+                    JointCommands.SetMember(_session, solid, part);
+            });
+            _stats.Message = part == 0 ? $"{solids.Count} solid(s) now part of the {(_active.Component is null ? "ship" : "component")} itself" : $"{solids.Count} solid(s) now move with {JointsPanel.Label(_session, part)}";
+        }
+        else if (item.Kind == ObjectKind.Joint)
+        {
+            _stats.Message = JointCommands.SetParent(_session, item.Id, part)
+                ? part == 0 ? "Joint now mounted on the ship" : $"Joint now mounted on {JointsPanel.Label(_session, part)}"
+                : JointCommands.LastError;
+        }
     }
 
     private string Label(ObjectRef item) => item.Kind switch

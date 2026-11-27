@@ -146,6 +146,36 @@ public class JointTests
     }
 
     [Fact]
+    public void SetParent_Remounts_ButRefusesLoopsAndDepth()
+    {
+        var session = Demo();
+        var set = session.Doc.Joints!;
+        var rotor = set.Joints.Single(j => j.Kind == JointKind.Rotor).Id;
+        var hinge = set.Joints.Single(j => j.Kind == JointKind.Hinge).Id;
+
+        // The hinge onto the rotor's part, and back to the ship; undo is one step each.
+        Assert.True(JointCommands.SetParent(session, hinge, rotor));
+        Assert.Equal(rotor, session.Doc.Joints!.Joints.Single(j => j.Id == hinge).Parent);
+
+        // The rotor onto the hinge, which is mounted on the rotor: a loop.
+        Assert.False(JointCommands.SetParent(session, rotor, hinge));
+        Assert.Contains("own moving part", JointCommands.LastError);
+
+        // A third joint on the hinge makes three deep; the rotor (with two below it) cannot then go under anything.
+        var third = JointCommands.AddJoint(session, JointKind.Slider, new Vector3d(0, 5, 0), new Vector3d(1, 0, 0), 0);
+        Assert.True(JointCommands.SetParent(session, third, hinge));
+        Assert.Equal(3, session.Doc.Joints!.Depth(third));
+        var fourth = JointCommands.AddJoint(session, JointKind.Rotor, new Vector3d(0, 6, 0), new Vector3d(0, 1, 0), 0);
+        Assert.False(JointCommands.SetParent(session, rotor, fourth));
+        Assert.Contains("deep", JointCommands.LastError);
+
+        Assert.True(JointCommands.SetParent(session, hinge, 0));
+        Assert.Equal(0u, session.Doc.Joints!.Joints.Single(j => j.Id == hinge).Parent);
+        session.UndoLast();
+        Assert.Equal(rotor, session.Doc.Joints!.Joints.Single(j => j.Id == hinge).Parent);
+    }
+
+    [Fact]
     public void Snap_PointsPlusYAlongTheAxis()
     {
         foreach (var axis in new[] { new Vector3d(1, 0, 0), new Vector3d(0, 0, -1), new Vector3d(0, 1, 0) })

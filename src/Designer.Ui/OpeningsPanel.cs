@@ -118,7 +118,8 @@ public sealed class OpeningsPanel
         }
 
         var origin = o.Origin;
-        ImGui.TextDisabled($"Sill {origin.X:F2}, {origin.Y:F2}, {origin.Z:F2} m (arrows move it, rings turn it in the view)");
+        var centre = Middle(session.Doc, o);
+        ImGui.TextDisabled($"Middle {centre.X:F2}, {centre.Y:F2}, {centre.Z:F2} m; sill {origin.X:F2}, {origin.Y:F2}, {origin.Z:F2} m (arrows move it, rings turn it about its middle)");
 
         if (o.Kind == OpeningKind.DockingPort && current is not null)
             PortNotes(current);
@@ -206,12 +207,23 @@ public sealed class OpeningsPanel
         {
             var o = set.Openings[index];
 
-            if (_gizmo.Update(o.Origin, o.Rotation, camera, viewProj, viewport, mouse, mouseFree, io.MouseDown[0], clicked, step, overlay))
+            // The gizmo sits on the outline's middle (the point drawn and picked), and turns it about there.
+            var middle = Middle(session.Doc, o);
+
+            if (_gizmo.Update(middle, o.Rotation, camera, viewProj, viewport, mouse, mouseFree, io.MouseDown[0], clicked, step, overlay))
             {
                 if (_gizmo.Turned)
                 {
                     var rotation = _gizmo.Rotation;
-                    OpeningCommands.SetOpening(session, o.Id, x => x.Rotation = rotation);
+                    Span<double> before = stackalloc double[9];
+                    Span<double> after = stackalloc double[9];
+                    SolidRotation.Matrix(o.Rotation, before);
+                    SolidRotation.Matrix(rotation, after);
+                    var d = Sub(o.Origin, middle);
+                    var local = new Vector3d(before[0] * d.X + before[3] * d.Y + before[6] * d.Z, before[1] * d.X + before[4] * d.Y + before[7] * d.Z, before[2] * d.X + before[5] * d.Y + before[8] * d.Z);
+                    var origin = Add(middle, new Vector3d(after[0] * local.X + after[1] * local.Y + after[2] * local.Z, after[3] * local.X + after[4] * local.Y + after[5] * local.Z, after[6] * local.X + after[7] * local.Y + after[8] * local.Z));
+                    var q = ComponentCommands.Quantise(origin);
+                    OpeningCommands.SetOpening(session, o.Id, x => (x.Rotation, x.X, x.Y, x.Z) = (rotation, q.Item1, q.Item2, q.Item3));
                 }
                 else
                 {
