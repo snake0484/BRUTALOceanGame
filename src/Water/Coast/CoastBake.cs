@@ -151,7 +151,9 @@ public sealed class CoastBake : IJob
         var start = Stopwatch.GetTimestamp();
         Baked = false;
         DepthMs = 0f;
-        Probe();
+        Probe(_source!, _window, out var min, out var max);
+        ProbeMin = min;
+        ProbeMax = max;
 
         if (Coastal(ProbeMin, ProbeMax, _breakDepth) && !_key.Carrier.Calm)
         {
@@ -162,24 +164,22 @@ public sealed class CoastBake : IJob
         Ms = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
     }
 
-    private void Probe()
+    /// <summary>The shallowest and deepest of <see cref="ProbeSide"/>² depths across a window. Called from jobs.</summary>
+    public static void Probe(ICoastDepth source, in CoastWindow window, out float min, out float max)
     {
         const double step = CoastWindow.Size / ProbeSide;
-        var min = float.PositiveInfinity;
-        var max = float.NegativeInfinity;
+        min = float.PositiveInfinity;
+        max = float.NegativeInfinity;
 
         for (var z = 0; z < ProbeSide; z++)
         {
             for (var x = 0; x < ProbeSide; x++)
             {
-                var depth = _source!.GeneratedDepth(_window.Direction((x + 0.5) * step, (z + 0.5) * step));
+                var depth = source.GeneratedDepth(window.Direction((x + 0.5) * step, (z + 0.5) * step));
                 min = MathF.Min(min, depth);
                 max = MathF.Max(max, depth);
             }
         }
-
-        ProbeMin = min;
-        ProbeMax = max;
     }
 
     private void Bake()
