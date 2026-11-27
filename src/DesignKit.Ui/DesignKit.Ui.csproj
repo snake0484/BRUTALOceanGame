@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>BrutalGame.DesignKit.Ui</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Ahwoo.BRUTAL.ImGui" />
+    <PackageReference Include="Ahwoo.BRUTAL.NativeFileDialog" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\DesignKit\DesignKit.csproj" />
+    <ProjectReference Include="..\Engine\Engine.csproj" />
+  </ItemGroup>
+</Project>

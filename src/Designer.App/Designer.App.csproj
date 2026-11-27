@@ -5,7 +5,6 @@
     <AssemblyName>BRUTALDesigner</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Ahwoo.BRUTAL.NativeFileDialog" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" />
   </ItemGroup>
   <ItemGroup>
@@ -14,5 +13,8 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Designer.Ui\Designer.Ui.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="BrutalGame.DesignKit.Ui" />
   </ItemGroup>
 </Project>

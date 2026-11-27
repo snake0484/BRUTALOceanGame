@@ -107,6 +107,15 @@ public sealed class OceanSwell
 
     public SwellParams Wind => _to.Params;
 
+    /// <summary>The surf carrier of the swell being blended to: angular frequency (0 when calm), direction of travel, deep-water height crest to trough, and that swell's Hs.</summary>
+    public float TargetCarrierOmega { get; private set; }
+
+    public float TargetCarrierDirection { get; private set; }
+
+    public float TargetCarrierHeight { get; private set; }
+
+    public float TargetSignificantHeight { get; private set; }
+
     /// <summary>Effective spectrum for GPU detail, blended with the same weight as the CPU components.</summary>
     public SpectrumState GpuSpectrum { get; private set; }
 
@@ -119,6 +128,7 @@ public sealed class OceanSwell
         {
             _to.Build(wind, SplitMix64.Mix(_seed, _generation++));
             _hasWind = true;
+            PrepareTarget();
             Prepare();
             return;
         }
@@ -140,6 +150,7 @@ public sealed class OceanSwell
         _to.Build(wind, SplitMix64.Mix(_seed, _generation++));
         _blendStart = Time;
         _blending = true;
+        PrepareTarget();
     }
 
     /// <summary>
@@ -247,6 +258,31 @@ public sealed class OceanSwell
         // Komar and Gaylord (1972): H_b = 0.39 g^0.2 (T H0²)^0.4, H0 the carrier's deep-water height.
         var h0 = 2f * MathF.Sqrt(CarrierShare * energy);
         _breakerHeight = 0.39f * MathF.Pow(9.81f, 0.2f) * MathF.Pow(MathF.Tau / omega * h0 * h0, 0.4f);
+    }
+
+    /// <summary>
+    /// The surf carrier of the swell being blended to: it moves in steps, when a new wind is taken up, so the coast maps
+    /// (<see cref="Coast.CoastRegionSet"/>) are baked for it and cross-fade as the swell does.
+    /// </summary>
+    private void PrepareTarget()
+    {
+        var omega = (float)_to.CarrierOmega;
+        var energy = 0f;
+        var total = 0.0;
+
+        for (var i = 0; i < _to.Count; i++)
+        {
+            var a = _to.Amplitude[i];
+            total += 0.5 * a * a;
+
+            if (omega > 0f)
+                energy += a * a * (1f - Smooth((MathF.Abs(MathF.Log(_to.Omega[i] / omega)) - BandInner) / (BandOuter - BandInner)));
+        }
+
+        TargetCarrierOmega = omega;
+        TargetCarrierDirection = _to.CarrierDirection;
+        TargetCarrierHeight = 2f * MathF.Sqrt(CarrierShare * energy);
+        TargetSignificantHeight = (float)(4.0 * Math.Sqrt(total));
     }
 
     private static float SetRatio(WaveSet set) => Math.Clamp(2f * (float)set.CarrierBandwidth, MinGroupRatio, MaxGroupRatio);

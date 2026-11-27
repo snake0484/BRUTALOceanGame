@@ -60,7 +60,7 @@ public sealed class MeshEditState
 /// <summary>
 /// The 3D viewport's mouse tool and overlay (drawn by <see cref="OverlayRenderer"/>, depth tested against the hull,
 /// faint where hidden): solid outlines (Add grey, Subtract red, Paint amber, selection thick white), a move gizmo on ship
-/// axes and resize handles on the primary solid's local axes, and a translucent ghost of the solid being dragged
+/// axes, rotation rings or face resize handles on the primary solid (by <see cref="Mode"/>), and a translucent ghost of the solid being dragged
 /// (nothing bakes until release, which commits one undo group). With the mesh editor on, the primary mesh solid's cage
 /// is drawn instead, clicks pick vertices, edges or faces, and the gizmo moves the selection.
 /// </summary>
@@ -101,11 +101,20 @@ public sealed class ViewportTool
     private HullMesh? _previewMesh;
     private HashSet<int>? _dragVertices;
     private int _hoverAxis = -1;
+    private int _hoverSide;
+    private int _ringHover = -1;
     private DragKind _hoverKind;
+    private int _dragSide;
+    private Vector3d _dragLast;
+    private double _dragAngle;
+    private int _dragSteps;
 
-    private enum DragKind { None, Move, Resize, MeshMove }
+    private enum DragKind { None, Move, Resize, MeshMove, Rotate }
 
     public bool Dragging => _drag != DragKind.None;
+
+    /// <summary>What the handles on the primary solid do: move arrows, rotation rings, or a resize handle on each face.</summary>
+    public GizmoMode Mode;
 
     public void Update(DesignSession session, MeshEditState edit, OrbitCamera camera, Vector2 viewport, in Matrix4x4 viewProj, bool mouseFree, OverlayRenderer overlay)
     {
@@ -149,10 +158,16 @@ public sealed class ViewportTool
 
         if (_drag != DragKind.None)
         {
+            var turning = _drag == DragKind.Rotate;
             UpdateDrag(session, camera, viewport, mouse, io.MouseDown[0]);
-            DrawGhost(overlay, _preview, MeshCommands.MeshOf(session, _preview.Id), session);
-            DrawSolid(overlay, session, _preview, null, camera, SelectedColour, true);
-            DrawHandles(overlay, _preview, camera, viewProj, viewport, mouse, hover: false, resize: true);
+            var shown = _previewMesh ?? MeshCommands.MeshOf(session, _preview.Id);
+            DrawGhost(overlay, _preview, shown, session);
+            DrawSolid(overlay, session, _preview, shown, camera, SelectedColour, true);
+            DrawHandles(overlay, _preview, shown, camera, viewProj, viewport, mouse, hover: false);
+
+            if (turning)
+                RotationRings.Label(mouse, _dragSteps);
+
             return;
         }
 
@@ -165,7 +180,7 @@ public sealed class ViewportTool
         }
 
         if (hasPrimary)
-            DrawHandles(overlay, solid, camera, viewProj, viewport, mouse, hover: mouseFree, resize: solid.Shape != SolidShape.Mesh);
+            DrawHandles(overlay, solid, mesh, camera, viewProj, viewport, mouse, hover: mouseFree);
 
         if (!mouseFree || !ImGui.IsMouseClicked(ImGuiMouseButton.Left, false))
             return;
@@ -194,24 +209,57 @@ public sealed class ViewportTool
     {
         _drag = _hoverKind;
         _dragAxis = _hoverAxis;
+        _dragSide = _hoverSide;
         _dragSolid = solid;
         _preview = solid;
+        _previewMesh = null;
+        _dragVertices = null;
         _dragOrigin = new Vector3d(solid.PositionX, solid.PositionY, solid.PositionZ);
-        _dragDirection = _drag == DragKind.Move ? ShipAxis(_dragAxis) : LocalAxis(solid, _dragAxis);
+        var eye = ToVector3d(camera.Position);
         var ray = camera.Ray(mouse, viewport);
 
-        if (!HullPicking.ClosestOnAxis(ToVector3d(camera.Position), ray, _dragOrigin, _dragDirection, out _dragStart))
+        if (_drag == DragKind.Rotate)
+        {
+            _dragDirection = RotationRings.Axis(solid.Rotation, _dragAxis);
+            (_dragAngle, _dragSteps) = (0, 0);
+
+            if (!RotationRings.Hit(eye, ray, _dragOrigin, _dragDirection, out _dragLast))
+                _drag = DragKind.None;
+
+            return;
+        }
+
+        _dragDirection = _drag == DragKind.Move ? ShipAxis(_dragAxis) : LocalAxis(solid, _dragAxis);
+
+        if (_drag == DragKind.Resize && _dragSide == 1)
+            _dragDirection = HullSurface.Scale(_dragDirection, -1);
+
+        if (!HullPicking.ClosestOnAxis(eye, ray, _dragOrigin, _dragDirection, out _dragStart))
             _drag = DragKind.None;
     }
 
     private void UpdateDrag(DesignSession session, OrbitCamera camera, Vector2 viewport, Vector2 mouse, bool held)
     {
+        var eye = ToVector3d(camera.Position);
         var ray = camera.Ray(mouse, viewport);
+        var solid = _dragSolid;
+        var mesh = solid.Shape == SolidShape.Mesh ? MeshCommands.MeshOf(session, solid.Id) : null;
 
-        if (HullPicking.ClosestOnAxis(ToVector3d(camera.Position), ray, _dragOrigin, _dragDirection, out var along))
+        if (_drag == DragKind.Rotate)
+        {
+            if (RotationRings.Hit(eye, ray, _dragOrigin, _dragDirection, out var direction))
+            {
+                _dragAngle += RotationRings.Angle(_dragDirection, _dragLast, direction);
+                _dragLast = direction;
+            }
+
+            _dragSteps = RotationRings.Steps(_dragAngle);
+            solid.Rotation = SolidRotation.AddSteps(_dragSolid.Rotation, _dragAxis, _dragSteps);
+            _preview = solid;
+        }
+        else if (HullPicking.ClosestOnAxis(eye, ray, _dragOrigin, _dragDirection, out var along))
         {
             var delta = along - _dragStart;
-            var solid = _dragSolid;
 
             if (_drag == DragKind.Move)
             {
@@ -223,20 +271,74 @@ public sealed class ViewportTool
                     solid.PosY += units;
                 else
                     solid.PosZ += units;
+
+                _preview = session.Snap.SnapSolid(solid);
+            }
+            else if (mesh is not null)
+            {
+                _previewMesh = ScaleMesh(mesh, _dragAxis, _dragSide, delta, session.Snap);
             }
             else
             {
                 Resize(ref solid, delta);
+                _preview = session.Snap.SnapSolid(solid);
             }
-
-            _preview = session.Snap.SnapSolid(solid);
         }
 
         if (held)
             return;
 
+        var kind = _drag;
         _drag = DragKind.None;
+
+        if (kind == DragKind.Resize && mesh is not null)
+        {
+            if (_previewMesh is not null && !ReferenceEquals(_previewMesh, mesh))
+                MeshCommands.Replace(session, _dragSolid.Id, _previewMesh);
+
+            _previewMesh = null;
+            return;
+        }
+
+        if (kind == DragKind.Rotate && _dragSteps == 0)
+            return;
+
         HullCommands.SetSolid(session, _dragSolid.Id, _preview);
+    }
+
+    /// <summary>
+    /// A mesh solid resized like a primitive: its vertices stretched along one local axis so the dragged face moves by
+    /// <paramref name="delta"/> metres (snapped to the grid step) and the opposite face stays put.
+    /// </summary>
+    private static HullMesh ScaleMesh(HullMesh mesh, int axis, int side, double delta, Snap snap)
+    {
+        int min = int.MaxValue, max = int.MinValue;
+
+        foreach (var v in mesh.Vertices)
+        {
+            var c = axis == 0 ? v.X : axis == 1 ? v.Y : v.Z;
+            (min, max) = (Math.Min(min, c), Math.Max(max, c));
+        }
+
+        var extent = max - min;
+
+        if (extent <= 0)
+            return mesh;
+
+        var step = snap.PositionStep;
+        var units = (int)Math.Round(delta * HullSolid.PositionUnitsPerMetre / step) * step;
+        var factor = Math.Max(MeshSnapUnits, extent + units) / (double)extent;
+        var builder = new MeshBuilder(mesh);
+
+        for (var i = 0; i < builder.Vertices.Count; i++)
+        {
+            var v = builder.Vertices[i];
+            var c = axis == 0 ? v.X : axis == 1 ? v.Y : v.Z;
+            var scaled = (int)Math.Round(side == 0 ? min + (c - min) * factor : max - (max - c) * factor);
+            builder.Vertices[i] = axis == 0 ? new MeshVertex(scaled, v.Y, v.Z) : axis == 1 ? new MeshVertex(v.X, scaled, v.Z) : new MeshVertex(v.X, v.Y, scaled);
+        }
+
+        return builder.Build();
     }
 
     /// <summary>Grows the solid along one local axis by <paramref name="delta"/> metres, keeping the opposite face still.</summary>
@@ -723,6 +825,7 @@ public sealed class ViewportTool
         var length = Math.Max(0.5, camera.Depth(centre) * GizmoScreenFraction);
         var best = HandlePixels;
         var hasCentre = camera.Project(centre, viewProj, viewport, out var c);
+        overlay.OnTop = true;
 
         for (var axis = 0; axis < 3; axis++)
         {
@@ -746,37 +849,99 @@ public sealed class ViewportTool
                 }
             }
         }
+
+        overlay.OnTop = false;
     }
 
-    private void DrawHandles(OverlayRenderer overlay, in HullSolid solid, OrbitCamera camera, in Matrix4x4 viewProj, Vector2 viewport, Vector2 mouse, bool hover, bool resize)
+    private void DrawHandles(OverlayRenderer overlay, in HullSolid solid, HullMesh? mesh, OrbitCamera camera, in Matrix4x4 viewProj, Vector2 viewport, Vector2 mouse, bool hover)
     {
         var centre = new Vector3d(solid.PositionX, solid.PositionY, solid.PositionZ);
-        DrawMoveGizmo(overlay, centre, camera, viewProj, viewport, mouse, hover);
-
-        if (!resize)
-            return;
-
         var length = Math.Max(0.5, camera.Depth(centre) * GizmoScreenFraction);
-        var half = SolidGeometry.Half(solid);
-        var best = _hoverAxis >= 0 ? 0f : HandlePixels;
+
+        if (Mode == GizmoMode.Move)
+        {
+            DrawMoveGizmo(overlay, centre, camera, viewProj, viewport, mouse, hover);
+            return;
+        }
+
+        if (Mode == GizmoMode.Rotate)
+        {
+            var active = _drag == DragKind.Rotate ? _dragAxis : -1;
+            overlay.OnTop = true;
+            var hit = RotationRings.Draw(overlay, centre, length, solid.Rotation, active, _ringHover, camera, viewProj, viewport, mouse, hover, HandlePixels);
+
+            overlay.OnTop = false;
+
+            if (hover)
+            {
+                _ringHover = hit;
+
+                if (hit >= 0)
+                    (_hoverAxis, _hoverKind) = (hit, DragKind.Rotate);
+            }
+
+            return;
+        }
+
+        // Scale: a handle just outside the middle of each face, on the solid's own axes.
+        LocalBounds(solid, mesh, out var min, out var max);
+        SolidRotation.Matrix(solid.Rotation, _matrix);
+        var mid = HullSurface.Scale(HullSurface.Add(min, max), 0.5);
+        var middle = Transform(centre, mid.X, mid.Y, mid.Z);
+        var margin = 0.04 * length;
+        var best = HandlePixels;
+        overlay.OnTop = true;
 
         for (var axis = 0; axis < 3; axis++)
         {
             if (solid.Shape == SolidShape.Cylinder && axis == 2)
                 continue;
 
-            var d = LocalAxis(solid, axis);
-            var reach = (axis == 0 ? half.X : axis == 1 ? half.Y : half.Z) + 0.03 * length;
-            var face = new Vector3d(centre.X + d.X * reach, centre.Y + d.Y * reach, centre.Z + d.Z * reach);
-            var active = (_drag == DragKind.Resize && _dragAxis == axis) || (_hoverKind == DragKind.Resize && _hoverAxis == axis);
-            overlay.Cube(face, length * (active ? 0.05 : 0.035), active ? HoverColour : AxisColours[axis]);
-
-            if (hover && camera.Project(face, viewProj, viewport, out var f) && Vector2.Distance(mouse, f) < best)
+            for (var side = 0; side < 2; side++)
             {
-                best = Vector2.Distance(mouse, f);
-                (_hoverAxis, _hoverKind) = (axis, DragKind.Resize);
+                var reach = side == 0 ? Get(max, axis) + margin : Get(min, axis) - margin;
+                var local = axis == 0 ? new Vector3d(reach, mid.Y, mid.Z) : axis == 1 ? new Vector3d(mid.X, reach, mid.Z) : new Vector3d(mid.X, mid.Y, reach);
+                var handle = Transform(centre, local.X, local.Y, local.Z);
+                var active = (_drag == DragKind.Resize && _dragAxis == axis && _dragSide == side) || (_drag == DragKind.None && _hoverKind == DragKind.Resize && _hoverAxis == axis && _hoverSide == side);
+                var colour = active ? HoverColour : AxisColours[axis];
+                overlay.Line(middle, handle, OverlayRenderer.WithAlpha(colour, 140));
+                overlay.Cube(handle, length * (active ? 0.05 : 0.035), colour);
+
+                if (hover && camera.Project(handle, viewProj, viewport, out var f) && Vector2.Distance(mouse, f) < best)
+                {
+                    best = Vector2.Distance(mouse, f);
+                    (_hoverAxis, _hoverKind, _hoverSide) = (axis, DragKind.Resize, side);
+                }
             }
         }
+
+        overlay.OnTop = false;
+    }
+
+    private static double Get(Vector3d v, int axis) => axis == 0 ? v.X : axis == 1 ? v.Y : v.Z;
+
+    /// <summary>The solid's extent in its own frame (metres): a primitive's half sizes, or a mesh solid's vertex bounds.</summary>
+    private static void LocalBounds(in HullSolid solid, HullMesh? mesh, out Vector3d min, out Vector3d max)
+    {
+        if (solid.Shape == SolidShape.Mesh && mesh is not null && mesh.Vertices.Length > 0)
+        {
+            double x0 = double.MaxValue, y0 = double.MaxValue, z0 = double.MaxValue, x1 = double.MinValue, y1 = double.MinValue, z1 = double.MinValue;
+
+            foreach (var v in mesh.Vertices)
+            {
+                (x0, y0, z0) = (Math.Min(x0, v.X), Math.Min(y0, v.Y), Math.Min(z0, v.Z));
+                (x1, y1, z1) = (Math.Max(x1, v.X), Math.Max(y1, v.Y), Math.Max(z1, v.Z));
+            }
+
+            const double k = HullSolid.MetresPerPositionUnit;
+            min = new Vector3d(x0 * k, y0 * k, z0 * k);
+            max = new Vector3d(x1 * k, y1 * k, z1 * k);
+            return;
+        }
+
+        var h = SolidGeometry.Half(solid);
+        min = new Vector3d(-h.X, -h.Y, -h.Z);
+        max = new Vector3d(h.X, h.Y, h.Z);
     }
 
     private void DrawSolid(OverlayRenderer overlay, DesignSession session, in HullSolid solid, HullMesh? meshOverride, OrbitCamera camera, uint colour, bool thick)

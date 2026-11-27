@@ -9,6 +9,15 @@ struct Wave { vec4 a; vec4 b; }; // a = (ku, kv, unused, amplitude), b = (cu, cv
 
 const int MAX_WAVES = 512;
 const int MAX_SLOTS = 4;
+const int MAX_COAST = 8;
+
+// A coast region against the camera (CoastPlacement, CoastAtlasGpu): its cell coordinates are dot(cell.xy, x0) + cell.z.
+struct CoastRegion
+{
+    vec4 cellX; // w = the sea tile slot of its tile
+    vec4 cellZ; // w = its layer of the atlas textures
+    vec4 wave;  // x = the map's phase at the frame's time, y = the carrier's omega, z = its deep-water height, w = the region's fade
+};
 
 layout(set = 0, binding = 0, std140) uniform Frame {
     mat4 viewProj;
@@ -34,10 +43,11 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 slotToTile[MAX_SLOTS];   // per slot: (u by x, u by z, v by x, v by z), sea frame plane to tile plane at the camera
     vec4 slotFromTile[MAX_SLOTS]; // per slot: the inverse, (x by u, x by v, z by u, z by v)
     vec4 slotSide[MAX_SLOTS];     // per slot: x = side of the row edge, y = side of its row's cell edge (-1, +1, 0 = whole), z = its row (0 south, 1 north)
+    CoastRegion coast[MAX_COAST]; // the coast regions drawn (ocean_breaker.glsl)
     int waveCount;
     int slotCount;
     float debugView;     // 1 = Jacobian/foam
-    float pad0;
+    int coastCount;
     Wave waves[MAX_WAVES];
     vec4 phases[MAX_WAVES]; // per wave, its phase at the camera in each slot's tile plane
 } frame;
@@ -250,6 +260,7 @@ struct OceanPoint
     float cpuDxz;
     float shore;       // share of the FFT slopes drawn: 0 on the beach .. 1 on open water
     float surfFoam;    // whitewater left behind by the surf (ocean_surf_foam.comp)
+    float breakFoam;   // whitewater of the breaking face (ocean_breaker.glsl)
     float swashEdge;   // 1 at the edge of the swash sheet drawn here, 0 half a metre behind it or where the sea is the surface (ocean.frag's edge line)
 };
 
@@ -289,6 +300,8 @@ void slotWeights(vec2 x0, out float w[MAX_SLOTS])
         w[s] = sqrt(wr * wc);
     }
 }
+
+#include "ocean_breaker.glsl"
 
 // The swell (OceanSurface.Sample) anti-aliased over [lo, hi], every component scaled by cap: each slot's tile field,
 // summed in its own plane (u, v) and turned into the sea frame's.
@@ -358,7 +371,11 @@ OceanPoint oceanAt(vec2 x0, float se)
     float depth = waterDepth(x0);
     float cap = frame.shore.w > 1e-4 ? clamp(BREAKING_GAMMA * depth / frame.shore.w, 0.0, 1.0) : 1.0;
     Swell sw = swellAt(x0, 2.0 * se, 4.0 * se, cap);
-    float height = sw.height;
+
+    // The breaking face over the coast regions: the surf carrier and its breakers, on top of the swell. Drawn only: the
+    // CPU's OceanSurface does not have it.
+    Face face = coastFace(x0, se);
+    float height = sw.height + face.height;
 
     // Swash is metres wide: a grid this coarse can't show it, so it fades out with the spacing (smoothly, so no seam
     // where one clipmap level hands over to the next) and far vertices skip the work.
@@ -382,7 +399,7 @@ OceanPoint oceanAt(vec2 x0, float se)
     }
 
     // GPU cascades: displacement only, faded out where the grid cannot resolve the band; open fetch everywhere.
-    vec3 cpuBand = vec3(sw.Dx, height, sw.Dz);
+    vec3 cpuBand = vec3(sw.Dx + face.shift.x, height, sw.Dz + face.shift.y);
     vec3 fft = vec3(0.0);
     int cascades = min(int(frame.cascadeL.w), 3);
     for (int i = 0; i < cascades; ++i)
@@ -407,10 +424,11 @@ OceanPoint oceanAt(vec2 x0, float se)
     // CPU partials in contract form: dxx = 1 + λDxx, so λDxx = -jxx (likewise zz, xz).
     OceanPoint p;
     p.position = vec3(x0.x + disp.x, disp.y, x0.y + disp.z);
-    p.cpuPartials = vec4(sw.hx, sw.hz, -sw.jxx, -sw.jzz);
-    p.cpuDxz = -sw.jxz;
+    p.cpuPartials = vec4(sw.hx + face.slope.x, sw.hz + face.slope.y, face.jacobian.x - sw.jxx, face.jacobian.y - sw.jzz);
+    p.cpuDxz = face.jacobian.z - sw.jxz;
     p.shore = shore;
     p.surfFoam = surfFoamAt(x0);
+    p.breakFoam = face.foam;
     p.swashEdge = swashEdge;
     return p;
 }

@@ -2,10 +2,10 @@ using Brutal.ImGuiApi;
 using System.Runtime.InteropServices;
 using Brutal.Numerics;
 
-namespace BrutalGame.Designer.Ui;
+namespace BrutalGame.DesignKit.Ui;
 
 /// <summary>
-/// The designer's look, matched to the main menu (Game's MenuStyle: Segoe UI, near-black translucent panels, white text,
+/// The design tools' look, matched to the main menu (Game's MenuStyle: Segoe UI, near-black translucent panels, white text,
 /// orange accent) with square corners everywhere. Pushed round the whole UI each frame. Sizes are pixels at a 1080-high
 /// window and scale with the window's height, never below the monitor's content scale. Also owns the docked layout: a
 /// dockspace over the window whose central node passes the 3D view through, seeded with a default arrangement when no
@@ -17,7 +17,6 @@ public sealed class DesignerStyle
     public const float BodySize = 18f;
     public const float SmallSize = 15f;
     public const uint DockSpaceId = 0x0D0C5000;
-    public const uint EditDock = 0x00000005;
 
     private const float MinDpiShare = 0.8f;
     private const float MinScale = 0.6f;
@@ -67,76 +66,46 @@ public sealed class DesignerStyle
     }
 
     /// <summary>
-    /// The layout file: per user, outside the build output, so the arrangement survives rebuilds and every checkout shares
-    /// it. ImGui loads it on the first frame and saves it a few seconds after each change and on exit.
+    /// A tool's layout file: per user, outside the build output, so the arrangement survives rebuilds and every checkout
+    /// shares it. ImGui loads it on the first frame and saves it a few seconds after each change and on exit.
     /// </summary>
-    public static string LayoutPath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BRUTALGame", "designer-layout.ini");
+    public static string LayoutPath(string fileName) => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "BRUTALGame", fileName);
 
     /// <summary>
-    /// Once, before the first frame: points ImGui at <see cref="LayoutPath"/> and, when that file does not exist yet, seeds
-    /// the default docked layout. Tools and solids on the left; properties, mesh and hull layers as tabs top right; stats
-    /// bottom right; the middle is the 3D view.
+    /// Once, before the first frame: points ImGui at <see cref="LayoutPath"/> of <paramref name="fileName"/> and, when that
+    /// file does not exist yet, loads <paramref name="seed"/>'s default layout (ImGui ini text for the window size; dock
+    /// it under <see cref="DockSpaceId"/>, with a CentralNode=1 node for the 3D view).
     /// </summary>
-    public static unsafe void UseLayout(float width, float height)
+    public static unsafe void UseLayout(string fileName, float width, float height, Func<int, int, string>? seed)
     {
-        var path = LayoutPath;
+        var path = LayoutPath(fileName);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
         // ImGui keeps the pointer for the context's lifetime: allocated once per process, never freed.
         ImGui.GetIO().IniFilename = (byte*)Marshal.StringToCoTaskMemUTF8(path);
 
-        if (File.Exists(path))
+        if (File.Exists(path) || seed is null)
             return;
 
-        var w = (int)width;
-        var h = (int)height;
-        var left = Math.Min(440, w / 4);
-        var right = Math.Min(420, w / 4);
-        var ini = $"""
-            [Window][Designer]
-            DockId=0x00000007,0
+        ImGui.LoadIniSettingsFromMemory(seed((int)width, (int)height));
+    }
 
-            [Window][Solids]
-            DockId=0x00000008,0
+    /// <summary>The 3D view's free area: the dock space's central node (after <see cref="DockSpace"/> this frame), else the whole window.</summary>
+    public static void CentralRect(out float2 min, out float2 max)
+    {
+        var node = ImGui.Internal.DockBuilderGetCentralNode(new ImGuiID(DockSpaceId));
 
-            [Window][Components]
-            DockId=0x00000008,1
+        if (!node.IsNull())
+        {
+            min = node.Pos;
+            max = new float2(node.Pos.X + node.Size.X, node.Pos.Y + node.Size.Y);
+            return;
+        }
 
-            [Window][Properties]
-            DockId=0x00000005,0
-
-            [Window][Mesh]
-            DockId=0x00000005,1
-
-            [Window][Hull layers]
-            DockId=0x00000005,2
-
-            [Window][Brushes]
-            DockId=0x00000005,3
-
-            [Window][Parts]
-            DockId=0x00000005,4
-
-            [Window][Test bench]
-            DockId=0x00000005,5
-
-            [Window][Stats]
-            DockId=0x00000006,0
-
-            [Docking][Data]
-            DockSpace     ID=0x{DockSpaceId:X8} Pos=0,0 Size={w},{h} Split=X
-              DockNode    ID=0x00000001 Parent=0x{DockSpaceId:X8} SizeRef={left},{h} Split=Y
-                DockNode  ID=0x00000007 Parent=0x00000001 SizeRef={left},{h * 62 / 100}
-                DockNode  ID=0x00000008 Parent=0x00000001 SizeRef={left},{h * 38 / 100}
-              DockNode    ID=0x00000002 Parent=0x{DockSpaceId:X8} SizeRef={w - left},{h} Split=X
-                DockNode  ID=0x00000003 Parent=0x00000002 SizeRef={w - left - right},{h} CentralNode=1
-                DockNode  ID=0x00000004 Parent=0x00000002 SizeRef={right},{h} Split=Y
-                  DockNode ID=0x00000005 Parent=0x00000004 SizeRef={right},{h * 66 / 100}
-                  DockNode ID=0x00000006 Parent=0x00000004 SizeRef={right},{h * 34 / 100}
-
-            """;
-        ImGui.LoadIniSettingsFromMemory(ini);
+        var viewport = ImGui.GetMainViewport();
+        min = viewport.WorkPos;
+        max = new float2(viewport.WorkPos.X + viewport.WorkSize.X, viewport.WorkPos.Y + viewport.WorkSize.Y);
     }
 
     /// <summary>The dockspace over the whole window; its empty middle passes the mouse through to the 3D view.</summary>

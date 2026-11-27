@@ -37,6 +37,13 @@ public sealed class CoastBake : IJob
     private const int TableSize = 1024;
     private const float Gravity = SurfCarrier.Gravity;
     private const float LandDepth = 0.2f;
+
+    /// <summary>
+    /// The phase runs on up a beach to this height over the sea (m), at the wavenumber of the last water: a crest is
+    /// followed ashore, where the face lets it go, rather than lost at the waterline. Higher ground slows the solve
+    /// (<see cref="LandSlowness"/>), so waves bend round it.
+    /// </summary>
+    private const float BeachRise = 3f;
     private const float LandSlowness = 8f;
     private const float MaxDivergence = 0.3f;
     private const float MaxAmplitude = 3f;
@@ -89,6 +96,7 @@ public sealed class CoastBake : IJob
     private readonly float[] _plunge = new float[N * N];
     private readonly byte[] _fixed = new byte[N * N];
     private readonly byte[] _wet = new byte[N * N];
+    private readonly byte[] _phased = new byte[N * N];
     private readonly float[] _parentLag = new float[ParentSide * ParentSide];
     private readonly float[] _parentAmp = new float[ParentSide * ParentSide];
     private readonly float[] _parentBreak = new float[ParentSide * ParentSide];
@@ -130,7 +138,7 @@ public sealed class CoastBake : IJob
     public CoastAtlas? Atlas => _atlas;
 
     /// <summary>The scratch buffers' size (bytes), held for the instance's life.</summary>
-    public static int ScratchBytes => N * N * (12 * sizeof(float) + 2) + N * N / (DepthStep * DepthStep) * sizeof(float) + 4 * ParentSide * ParentSide * sizeof(float) + 2 * TableSize * sizeof(float);
+    public static int ScratchBytes => N * N * (12 * sizeof(float) + 3) + N * N / (DepthStep * DepthStep) * sizeof(float) + 4 * ParentSide * ParentSide * sizeof(float) + 2 * TableSize * sizeof(float);
 
     public static bool Coastal(float probeMin, float probeMax, float breakDepth) => probeMax > LandDepth && probeMin < breakDepth;
 
@@ -151,7 +159,9 @@ public sealed class CoastBake : IJob
         var start = Stopwatch.GetTimestamp();
         Baked = false;
         DepthMs = 0f;
-        Probe();
+        Probe(_source!, _window, out var min, out var max);
+        ProbeMin = min;
+        ProbeMax = max;
 
         if (Coastal(ProbeMin, ProbeMax, _breakDepth) && !_key.Carrier.Calm)
         {
@@ -162,24 +172,22 @@ public sealed class CoastBake : IJob
         Ms = (float)Stopwatch.GetElapsedTime(start).TotalMilliseconds;
     }
 
-    private void Probe()
+    /// <summary>The shallowest and deepest of <see cref="ProbeSide"/>� depths across a window. Called from jobs.</summary>
+    public static void Probe(ICoastDepth source, in CoastWindow window, out float min, out float max)
     {
         const double step = CoastWindow.Size / ProbeSide;
-        var min = float.PositiveInfinity;
-        var max = float.NegativeInfinity;
+        min = float.PositiveInfinity;
+        max = float.NegativeInfinity;
 
         for (var z = 0; z < ProbeSide; z++)
         {
             for (var x = 0; x < ProbeSide; x++)
             {
-                var depth = _source!.GeneratedDepth(_window.Direction((x + 0.5) * step, (z + 0.5) * step));
+                var depth = source.GeneratedDepth(window.Direction((x + 0.5) * step, (z + 0.5) * step));
                 min = MathF.Min(min, depth);
                 max = MathF.Max(max, depth);
             }
         }
-
-        ProbeMin = min;
-        ProbeMax = max;
     }
 
     private void Bake()
@@ -274,8 +282,8 @@ public sealed class CoastBake : IJob
             _amp[c] = Math.Clamp(MathF.Sqrt(MathF.Exp(_f[c]) * _cg0 / _cg[c]), 0f, MaxAmplitude);
         }
 
-        FillLand();
         SolveBreak();
+        FillLand();
     }
 
     /// <summary>The open carrier's phase k₀ d̂·x at a cell's centre, in the window's local metres.</summary>
@@ -285,21 +293,23 @@ public sealed class CoastBake : IJob
     private void Wavenumbers()
     {
         Dispersion(LandDepth, out var kLand, out _);
+        Dispersion(SurfCarrier.SpentDepthK, out var kBeach, out _);
         kLand *= LandSlowness;
 
         for (var c = 0; c < _n * _n; c++)
         {
             var h = _depth[c];
             _wet[c] = h > LandDepth ? (byte)1 : (byte)0;
+            _phased[c] = h > -BeachRise ? (byte)1 : (byte)0;
 
             if (_wet[c] == 0)
             {
-                _k[c] = kLand;
+                _k[c] = _phased[c] != 0 ? kBeach : kLand;
                 _cg[c] = 1f;
                 continue;
             }
 
-            Dispersion(h, out _k[c], out _cg[c]);
+            Dispersion(MathF.Max(h, SurfCarrier.SpentDepthK), out _k[c], out _cg[c]);
         }
     }
 
@@ -399,7 +409,7 @@ public sealed class CoastBake : IJob
                 var gz = b < _psi[c] ? (_psi[c] - b) * (down <= up ? 1f : -1f) : 0f;
                 var length = MathF.Sqrt(gx * gx + gz * gz);
 
-                (_ux[c], _uz[c]) = _fixed[c] != 0 || length < 1e-6f || _wet[c] == 0 ? (_dirX, _dirZ) : (gx / length, gz / length);
+                (_ux[c], _uz[c]) = _fixed[c] != 0 || length < 1e-6f || _phased[c] == 0 ? (_dirX, _dirZ) : (gx / length, gz / length);
             }
         }
     }
@@ -508,13 +518,19 @@ public sealed class CoastBake : IJob
         }
     }
 
-    /// <summary>Land takes the lag and amplitude of neighbouring water, so shoreline samples stay smooth.</summary>
+    /// <summary>
+    /// Ground takes what the water beside it has, so samples across the waterline stay smooth: the lag where the phase
+    /// was not solved, the amplitude, break clock and breaker type where there is no water.
+    /// </summary>
     private void FillLand()
     {
         for (var c = 0; c < _n * _n; c++)
         {
-            if (_wet[c] == 0)
+            if (_phased[c] == 0)
                 _lag[c] = float.NaN;
+
+            if (_wet[c] == 0)
+                _amp[c] = float.NaN;
         }
 
         for (var it = 0; it < FillIterations; it++)
@@ -534,7 +550,10 @@ public sealed class CoastBake : IJob
         for (var c = 0; c < _n * _n; c++)
         {
             if (float.IsNaN(_lag[c]))
-                (_lag[c], _amp[c]) = (0f, 1f);
+                _lag[c] = 0f;
+
+            if (float.IsNaN(_amp[c]))
+                (_amp[c], _break[c], _plunge[c]) = (1f, 0f, 0f);
         }
     }
 
@@ -542,33 +561,62 @@ public sealed class CoastBake : IJob
     {
         var c = x + z * _n;
 
-        if (_wet[c] != 0)
+        if (float.IsNaN(_lag[c]))
+        {
+            var lag = 0f;
+            var count = 0;
+            Accumulate(_lag, x - 1, z, ref lag, ref count);
+            Accumulate(_lag, x + 1, z, ref lag, ref count);
+            Accumulate(_lag, x, z - 1, ref lag, ref count);
+            Accumulate(_lag, x, z + 1, ref lag, ref count);
+
+            if (count > 0)
+                _lag[c] = lag / count;
+        }
+
+        if (!float.IsNaN(_amp[c]))
             return;
 
-        var lag = 0f;
         var amp = 0f;
-        var count = 0;
-        Accumulate(x - 1, z, ref lag, ref amp, ref count);
-        Accumulate(x + 1, z, ref lag, ref amp, ref count);
-        Accumulate(x, z - 1, ref lag, ref amp, ref count);
-        Accumulate(x, z + 1, ref lag, ref amp, ref count);
+        var clock = 0f;
+        var plunge = 0f;
+        var water = 0;
+        Accumulate(x - 1, z, ref amp, ref clock, ref plunge, ref water);
+        Accumulate(x + 1, z, ref amp, ref clock, ref plunge, ref water);
+        Accumulate(x, z - 1, ref amp, ref clock, ref plunge, ref water);
+        Accumulate(x, z + 1, ref amp, ref clock, ref plunge, ref water);
 
-        if (count > 0)
-            (_lag[c], _amp[c]) = (lag / count, amp / count);
+        if (water > 0)
+            (_amp[c], _break[c], _plunge[c]) = (amp / water, clock / water, plunge / water);
     }
 
-    private void Accumulate(int x, int z, ref float lag, ref float amp, ref int count)
+    private void Accumulate(float[] field, int x, int z, ref float sum, ref int count)
+    {
+        if ((uint)x >= _n || (uint)z >= _n)
+            return;
+
+        var value = field[x + z * _n];
+
+        if (float.IsNaN(value))
+            return;
+
+        sum += value;
+        count++;
+    }
+
+    private void Accumulate(int x, int z, ref float amp, ref float clock, ref float plunge, ref int count)
     {
         if ((uint)x >= _n || (uint)z >= _n)
             return;
 
         var n = x + z * _n;
 
-        if (float.IsNaN(_lag[n]))
+        if (float.IsNaN(_amp[n]))
             return;
 
-        lag += _lag[n];
         amp += _amp[n];
+        clock += _break[n];
+        plunge += _plunge[n];
         count++;
     }
 

@@ -14,7 +14,6 @@ public sealed class MeshPanel
 {
     private const int Units = HullSolid.PositionUnitsPerMetre;
 
-    private static readonly string[] Modes = ["Vertex", "Edge", "Face"];
     private static readonly string[] Axes = ["X", "Y", "Z"];
 
     private float _extrude = 1f;
@@ -56,17 +55,7 @@ public sealed class MeshPanel
             ImGui.Checkbox("Edit mesh (Tab)"u8, ref edit.Enabled);
             ImGui.SameLine();
             ImGui.Checkbox("Live mirror X"u8, ref edit.Mirror);
-            var mode = (int)edit.Selection.Mode;
-
-            for (var i = 0; i < Modes.Length; i++)
-            {
-                if (i > 0)
-                    ImGui.SameLine();
-
-                if (ImGui.RadioButton($"{Modes[i]} ({i + 1})", mode == i))
-                    edit.Selection.Mode = (MeshSelectMode)i;
-            }
-
+            ImGui.TextDisabled("Vertex, edge or face select: top left of the view (1, 2, 3)."u8);
             ImGui.Text($"selected: {edit.Selection.Vertices.Count} v  {edit.Selection.Edges.Count} e  {edit.Selection.Faces.Count} f");
 
             if (ImGui.Button("All faces"u8))

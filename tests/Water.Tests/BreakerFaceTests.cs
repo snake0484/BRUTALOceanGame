@@ -182,7 +182,7 @@ public sealed class BreakerFaceTests(ITestOutputHelper output)
     }
 
     /// <summary>
-    /// Per tick, in motion: at fixed rest points across the surf zone the face's height, shift, slope and whitewater
+    /// Per tick, in motion: at fixed rest points across the surf zone and on up the beach the face's height, shift, slope and whitewater
     /// move by a wave's own travel and never jump. The old face moved 0.038 to 0.076 m a tick.
     /// </summary>
     [Theory]
@@ -193,7 +193,7 @@ public sealed class BreakerFaceTests(ITestOutputHelper output)
         var atlas = oblique ? Oblique : HeadOn;
         var stats = default(BreakerStability);
 
-        for (var x = 680f; x <= 790f; x += 3.7f)
+        for (var x = 680f; x <= 806f; x += 1.3f)
         {
             for (var z = 300f; z <= 700f; z += 133f)
                 stats.Run(atlas, x, z, 0, 600, TickSeconds);

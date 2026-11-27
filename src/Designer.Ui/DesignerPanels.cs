@@ -6,9 +6,9 @@ using BrutalGame.Ships;
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>What the panels ask the host to do this frame (file dialogs and disk live in the host).</summary>
-public enum FileRequest { None, New, Open, Save, SaveAs, OpenPath, SavePath }
+public enum FileRequest { None, New, NewComponent, Open, Save, SaveAs, OpenPath, SavePath }
 
-/// <summary>Which plan the designer is editing: the ship, or a component (its own plan, made into a prefab by saving it).</summary>
+/// <summary>What the open tab is: a ship, or a component (its own plan, made into a prefab by saving it).</summary>
 public enum Workspace { Ship, Component }
 
 /// <summary>Numbers the stats panel shows; the host fills them after each bake and validation.</summary>
@@ -46,7 +46,6 @@ public sealed class DesignStats
 /// </summary>
 public sealed class DesignerPanels
 {
-    private const float DefaultSizeMetres = 4f;
 
     private static readonly string[] ShapeNames = ["Box", "Wedge", "Cylinder"];
     private static readonly string[] OpNames = ["Add", "Subtract", "Paint"];
@@ -89,7 +88,7 @@ public sealed class DesignerPanels
 
     public FileRequest Request { get; private set; }
 
-    /// <summary>The workspace the user picked; the host switches plans when it changes.</summary>
+    /// <summary>What the open tab is (the host sets it); a ship shows hull layers and brushes.</summary>
     public Workspace Workspace;
 
     /// <summary>The path field's text (fallback when no file dialog is available).</summary>
@@ -129,51 +128,28 @@ public sealed class DesignerPanels
     {
         if (ImGui.Begin("Designer"u8))
         {
-            if (ImGui.RadioButton("Ship"u8, Workspace == Workspace.Ship))
-                Workspace = Workspace.Ship;
+            var name = session.Path.Length > 0 ? Path.GetFileName(session.Path) : "not saved yet";
+            ImGui.Text($"{(Workspace == Workspace.Component ? "Component" : "Ship")}: {name}{(session.Modified ? " *" : "")}  ({session.Doc.Solids.Count} solids)");
 
-            ImGui.SameLine();
-
-            if (ImGui.RadioButton("Component"u8, Workspace == Workspace.Component))
-                Workspace = Workspace.Component;
-
-            ImGui.SameLine();
-            ImGui.TextDisabled(Workspace == Workspace.Ship ? "placed components stay as they are"u8 : "save to make it a prefab"u8);
-
-            var name = session.Path.Length > 0 ? Path.GetFileName(session.Path) : "untitled";
-            ImGui.Text($"{name}{(session.Modified ? " *" : "")}  ({session.Doc.Solids.Count} solids)");
-
-            if (ImGui.Button("New"u8))
-                Request = FileRequest.New;
-
-            ImGui.SameLine();
-
-            if (ImGui.Button("Open..."u8))
-                Request = FileRequest.Open;
-
-            ImGui.SameLine();
-
-            if (ImGui.Button("Save"u8))
-                Request = FileRequest.Save;
-
-            ImGui.SameLine();
-
-            if (ImGui.Button("Save as..."u8))
-                Request = FileRequest.SaveAs;
-
-            ImGui.SetNextItemWidth(-1f);
-            ImGui.InputText("##path"u8, _pathBuffer, ImGuiInputTextFlags.None, (ImGuiInputTextCallback?)null, default);
-
-            if (ImGui.Button("Load path"u8))
-                Request = FileRequest.OpenPath;
-
-            ImGui.SameLine();
-
-            if (ImGui.Button("Save path"u8))
-                Request = FileRequest.SavePath;
+            if (Workspace == Workspace.Component)
+                ImGui.TextDisabled("Save it to make it a prefab the ship tabs can place."u8);
 
             if (stats.Message.Length > 0)
                 ImGui.TextWrapped($"{stats.Message}");
+
+            if (ImGui.CollapsingHeader("Load or save by path"u8, ImGuiTreeNodeFlags.None))
+            {
+                ImGui.SetNextItemWidth(-1f);
+                ImGui.InputText("##path"u8, _pathBuffer, ImGuiInputTextFlags.None, (ImGuiInputTextCallback?)null, default);
+
+                if (ImGui.Button("Load path"u8))
+                    Request = FileRequest.OpenPath;
+
+                ImGui.SameLine();
+
+                if (ImGui.Button("Save path"u8))
+                    Request = FileRequest.SavePath;
+            }
 
             ImGui.SeparatorText("Add solid"u8);
             ImGui.Checkbox("Subtract"u8, ref _newSubtract);
@@ -234,7 +210,8 @@ public sealed class DesignerPanels
 
             ImGui.EndDisabled();
             ImGui.TextDisabled("RMB orbit, MMB/Shift+RMB pan, wheel zoom, LMB pick (Ctrl adds)"u8);
-            ImGui.TextDisabled("Del delete, Ctrl+D duplicate, Ctrl+Z/Y undo/redo, F frame"u8);
+            ImGui.TextDisabled("W move, E rotate, R scale; Del delete, Ctrl+D duplicate"u8);
+            ImGui.TextDisabled("Ctrl+Z/Y undo/redo, F frame, Ctrl+W close tab"u8);
         }
 
         ImGui.End();
@@ -242,7 +219,9 @@ public sealed class DesignerPanels
 
     private void AddSolid(DesignSession session, SolidShape shape)
     {
-        var half = (ushort)(DefaultSizeMetres * 0.5f * HullSolid.HalfUnitsPerMetre);
+        // A ship's new solid is 4 m; a component's housing pieces are much smaller.
+        var size = Workspace == Workspace.Component ? 0.25f : 4f;
+        var half = (ushort)(size * 0.5f * HullSolid.HalfUnitsPerMetre);
         var material = _catalog.All.Count > 0 ? _catalog.All[Math.Clamp(_newMaterial, 0, _catalog.All.Count - 1)].Id : default;
         var units = HullSolid.PositionUnitsPerMetre;
         HullCommands.AddSolid(session, shape, _newSubtract ? SolidOp.Subtract : SolidOp.Add,

@@ -47,6 +47,23 @@ public class ComponentTests
     }
 
     [Fact]
+    public void Snap_SkipsAPortAnotherPartAlreadyUses()
+    {
+        var data = Rocket().Components!;
+        var injectors = data.Parts.Where(p => p.Kind == PartKind.Injector).ToList();
+        var fuel = injectors[0];
+        var gap = Math.Abs(injectors[1].Position.X - fuel.Position.X);
+
+        // Nudged most of the way toward its neighbour, within snap range of the neighbour's chamber port: it must not
+        // land on that port (it is taken), only back on its own.
+        var moved = fuel;
+        (moved.PosX, moved.PosY, moved.PosZ) = ComponentCommands.Quantise(new Vector3d(fuel.Position.X + Math.Sign(injectors[1].Position.X - fuel.Position.X) * gap * 0.8, fuel.Position.Y, fuel.Position.Z));
+        ComponentCommands.Snap(data, ref moved);
+
+        Assert.NotEqual(injectors[1].Position.X, moved.Position.X, 3);
+    }
+
+    [Fact]
     public void Rocket_CompilesWithoutIssues_AndPipesAreRated()
     {
         var doc = Rocket();

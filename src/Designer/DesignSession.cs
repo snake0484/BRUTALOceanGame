@@ -1,3 +1,4 @@
+using BrutalGame.DesignKit;
 using BrutalGame.Plans;
 using BrutalGame.Ships;
 
@@ -40,102 +41,34 @@ public sealed class Selection
 /// group (<see cref="Edit"/>), which records the op and marks dirty bits; <see cref="Version"/> moves on each committed
 /// change so the host re-bakes and re-validates on commit, never per frame.
 /// </summary>
-public sealed class DesignSession
+public sealed class DesignSession : EditSession<PlanOp, PlanDocument>
 {
-    public readonly UndoStack Undo = new();
     public readonly Selection Selection = new();
     public readonly Snap Snap = new();
     public readonly Symmetry Symmetry = new();
     public Dirty Dirty;
 
     public DesignSession(PlanDocument? doc = null)
+        : this(doc ?? new PlanDocument(), new UndoStack())
     {
-        Doc = doc ?? new PlanDocument();
     }
 
-    public PlanDocument Doc { get; private set; }
-
-    public int Version { get; private set; }
-
-    /// <summary>Path of the file the plan came from or was last saved to; empty for a new plan.</summary>
-    public string Path = "";
-
-    /// <summary>Changes since the last save or load.</summary>
-    public bool Modified { get; private set; }
-
-    /// <summary>Replaces the document (new or loaded): clears undo and selection.</summary>
-    public void Open(PlanDocument doc, string path)
+    private DesignSession(PlanDocument doc, UndoStack undo)
+        : base(doc, undo)
     {
-        Doc = doc;
-        Path = path;
-        Undo.Clear();
-        Selection.Clear();
-        Modified = false;
-        Changed();
+        Undo = undo;
     }
 
-    public void MarkSaved(string path)
-    {
-        Path = path;
-        Modified = false;
-    }
+    public UndoStack Undo { get; }
 
     /// <summary>Runs <paramref name="action"/> as one undo group; nothing recorded means no change.</summary>
-    public void Edit(Action<DesignSession> action)
-    {
-        var nested = Undo.InGroup;
+    public void Edit(Action<DesignSession> action) => Edit(() => action(this));
 
-        if (!nested)
-            Undo.BeginGroup();
+    protected override void OnOpened() => Selection.Clear();
 
-        var before = Undo.UndoCount;
+    protected override void OnHistoryMoved() => Selection.Prune(Doc);
 
-        try
-        {
-            action(this);
-        }
-        finally
-        {
-            if (!nested)
-            {
-                Undo.EndGroup();
-
-                if (Undo.UndoCount != before)
-                {
-                    Modified = true;
-                    Changed();
-                }
-            }
-        }
-    }
-
-    public void Apply(in PlanOp op)
-    {
-        op.ApplyTo(Doc);
-        Undo.Record(op);
-    }
-
-    public bool UndoLast()
-    {
-        if (!Undo.Undo(Doc))
-            return false;
-
-        Selection.Prune(Doc);
-        Modified = true;
-        Changed();
-        return true;
-    }
-
-    public bool RedoNext()
-    {
-        if (!Undo.Redo(Doc))
-            return false;
-
-        Selection.Prune(Doc);
-        Modified = true;
-        Changed();
-        return true;
-    }
+    protected override void OnChanged() => Dirty |= Dirty.Geometry;
 
     /// <summary>Plan material index of <paramref name="material"/>, appending it to the table if new (inside a group).</summary>
     public byte EnsureMaterial(DefId material)
@@ -158,11 +91,5 @@ public sealed class DesignSession
         var index = Doc.Solids.IndexOf(id);
         solid = index >= 0 ? Doc.Solids[index] : default;
         return index >= 0;
-    }
-
-    private void Changed()
-    {
-        Dirty |= Dirty.Geometry;
-        Version++;
     }
 }

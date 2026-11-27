@@ -203,11 +203,13 @@ public static class ComponentCommands
 
     /// <summary>
     /// Pulls <paramref name="part"/> onto the nearest matching port of another part within <see cref="SnapMetres"/>: the
-    /// same kind, facing it. Translation only; the rotation is the user's.
+    /// same kind, facing it, and free (not already joined to a third part or carrying a pipe). Translation only; the
+    /// rotation is the user's.
     /// </summary>
     public static bool Snap(ComponentData data, ref ComponentPart part)
     {
         var ports = PartGeometry.Ports(part);
+        var links = ComponentModel.Links(data);
         var best = SnapMetres;
         var move = default(Vector3d);
         var found = false;
@@ -225,7 +227,7 @@ public static class ComponentCommands
 
                 for (var j = 0; j < otherPorts.Length; j++)
                 {
-                    if (otherPorts[j].Kind != ports[i].Kind)
+                    if (otherPorts[j].Kind != ports[i].Kind || Taken(data, links, other.Id, j, part.Id))
                         continue;
 
                     var (q, e) = PartGeometry.PortAt(other, j);
@@ -247,6 +249,21 @@ public static class ComponentCommands
         var at = Add(part.Position, move);
         (part.PosX, part.PosY, part.PosZ) = Quantise(at);
         return true;
+    }
+
+    /// <summary>A port joined to some part other than <paramref name="moving"/>, or with a pipe end on it.</summary>
+    private static bool Taken(ComponentData data, List<PortLink> links, uint part, int port, uint moving)
+    {
+        if (ComponentModel.Partner(links, part, port, out var other, out _) && other != moving)
+            return true;
+
+        foreach (var pipe in data.Pipes)
+        {
+            if ((pipe.From.Part == part && pipe.From.Port == port && !pipe.From.IsOpen) || (pipe.To.Part == part && pipe.To.Port == port && !pipe.To.IsOpen))
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>Moves every pipe end that sits on a port onto that port's current position.</summary>

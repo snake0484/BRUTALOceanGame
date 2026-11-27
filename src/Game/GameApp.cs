@@ -12,6 +12,7 @@ using BrutalGame.Sim;
 using BrutalGame.Terrain;
 using BrutalGame.Terrain.Runtime;
 using BrutalGame.Terrain.Runtime.Rendering;
+using BrutalGame.Water.Coast;
 using BrutalGame.Water.Ocean;
 using BrutalGame.Water.Rendering;
 using BrutalGame.Weather;
@@ -32,6 +33,12 @@ public sealed partial class GameApp : IDisposable
 
     /// <summary>The sea frame moves to the camera once the camera is this far (m) from its origin: the far depth map (±12 km) still covers the waves' reach, and everything in the frame stays small.</summary>
     private const double SeaFrameReach = 3072.0;
+
+    /// <summary>--surf-beach: in the spawn's bubble (y up, sea level 0, +x out to sea), yaw and pitch in radians.</summary>
+    private static readonly System.Numerics.Vector3 SurfBeachPosition = new(60f, 3f, -40f);
+    private const float SurfBeachYaw = 1.9f;
+    private const float SurfBeachPitch = -0.08f;
+    private const double SurfBeachSunElevation = 0.6;
 
     /// <summary>Camera height above the sea (m) below which the sea frame has depth maps, and below which the near window (shore wash) is kept; each is dropped again a little higher.</summary>
     private const double DepthMapsTop = 28_000.0;
@@ -84,6 +91,11 @@ public sealed partial class GameApp : IDisposable
     private readonly GpuBenchmark? _bench;
     private readonly PlanetFlyTest? _planetFly;
     private readonly ShoreFlyTest? _shoreFly;
+    private readonly CoastRegionSet _coast;
+    private readonly CoastAtlasGpu _coastGpu;
+    private readonly TimingRing _coastMs = new(256);
+    private readonly bool _benchFaces;
+    private readonly bool _surfBeach;
     private readonly OrbitTest? _orbitTest;
     private readonly MoonTest? _moonTest;
     private readonly SeamTest? _seamTest;
@@ -133,9 +145,14 @@ public sealed partial class GameApp : IDisposable
     /// <param name="planetKind">--planet-kind &lt;id&gt; [--kind-seed N]: the terrain planet and the moons take this planet kind (data/planets/kinds), its ranges drawn from the seed.</param>
     /// <param name="steep">--steep: --planet-fly and --seam-test run over the planet's steepest ground, not the spawn.</param>
     /// <param name="seamTest">--seam-test: static views of the octree alone over a key clear colour; one captured frame per view counts the pixels showing through it.</param>
+    /// <param name="faces">false with --no-faces: the breaking faces over the coast regions are not drawn (A/B).</param>
+    /// <param name="benchFaces">--bench-faces: --bench alternates the breaking faces, not the shore wash.</param>
+    /// <param name="surfBeach">--surf-beach: the camera stands in the shallows off the spawn's beach, looking along the break (unless --cam places it), under a sun held over the beach.</param>
     /// <param name="menu">Menu mode (no test or bench flag): app states, menus and settings (GameApp.Menu.cs); null runs as before.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false, bool shoreFly = false, bool seamTest = false, Menu.MenuLaunch? menu = null, string? planetKind = null, ulong? kindSeed = null, bool steep = false)
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false, bool shoreFly = false, bool seamTest = false, Menu.MenuLaunch? menu = null, string? planetKind = null, ulong? kindSeed = null, bool steep = false, bool faces = true, bool benchFaces = false, bool surfBeach = false)
     {
+        _benchFaces = benchFaces;
+        _surfBeach = surfBeach;
         var weatherField = new WeatherField(new WeatherClimate());
         _sim = new SimWorld(seed: menu?.Seed ?? 1, WorkerBudget.Tick, weatherField, kind: planetKind, kindSeed: kindSeed) { DriveWind = weather, WeatherTimeOffset = weatherOffset * 60.0 };
 
@@ -158,6 +175,8 @@ public sealed partial class GameApp : IDisposable
         {
             PlaceCamera(new System.Numerics.Vector3(camera[0], camera[1], camera[2]), camera[3] * MathF.PI / 180f, camera[4] * MathF.PI / 180f);
         }
+        else if (surfBeach)
+            PlaceCamera(SurfBeachPosition, SurfBeachYaw, SurfBeachPitch);
         else
             PlaceCamera(new System.Numerics.Vector3(55f, 28f, 0f), MathF.PI, -0.12f);
 
@@ -190,7 +209,9 @@ public sealed partial class GameApp : IDisposable
         _oceanFft = new OceanFft(_renderer) { DebugView = foamDebug };
         _depths = new ShoreDepthGrid(_sim.Shore);
         _depthTexture = new ShoreDepthTexture(_renderer);
-        _oceanPanel = new OceanPanel(_sim.Ocean, _oceanFft, _depths, _depthTexture);
+        _coast = new CoastRegionSet(_sim.Ocean.Tiles, _sim.CoastDepth, WorkerBudget.Side);
+        _coastGpu = new CoastAtlasGpu(_renderer);
+        _oceanPanel = new OceanPanel(_sim.Ocean, _oceanFft, _depths, _depthTexture, _coast, _coastGpu) { BreakerFaces = faces };
         _weatherPanel = new WeatherPanel(_weather.Map) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset };
         _instances = new InstanceBuffer(_renderer);
         _terrainRenderer = new TerrainRenderer(_renderer, _instances);
@@ -209,7 +230,7 @@ public sealed partial class GameApp : IDisposable
         _brush = new TerrainBrush(_sim, _camera);
         _editTest = editTest ? new EditTest(_sim, _terrain, _brush, _camera) : null;
         _terrainPanel = new TerrainPanel(_terrain, _terrainRenderer, _sim.Physics);
-        _ocean = new OceanRenderer(_renderer, _oceanFft, _depthTexture.NearView, _depthTexture.NearSampler, _depthTexture.FarView, _depthTexture.FarSampler);
+        _ocean = new OceanRenderer(_renderer, _oceanFft, _depthTexture.NearView, _depthTexture.NearSampler, _depthTexture.FarView, _depthTexture.FarSampler, _coastGpu);
         _planetFly = planetFly ? new PlanetFlyTest(_camera, _sim, _terrain, steep) : null;
         _profiler = new ProfilerPanel(_stats, _renderer, _terrainRenderer, _ocean);
 
@@ -237,7 +258,7 @@ public sealed partial class GameApp : IDisposable
         UpdateWeather();
 
         if (benchSeconds > 0.0)
-            _bench = new GpuBenchmark(_renderer.GpuTimer, benchSeconds, ["CPU frame", "CPU record", "Terrain rec"], [_stats.Frame, _stats.Record, _terrainRenderer.DrawMs]);
+            _bench = new GpuBenchmark(_renderer.GpuTimer, benchSeconds, ["CPU frame", "CPU record", "Terrain rec", "Coast update"], [_stats.Frame, _stats.Record, _terrainRenderer.DrawMs, _coastMs]);
 
         if (hideUi || _bench is not null || _planetFly is not null || _moonTest is not null || _shoreFly is not null || _seamTest is not null)
         {
@@ -250,14 +271,18 @@ public sealed partial class GameApp : IDisposable
         InitMenu(menu); // menu
     }
 
-    /// <summary>--bench: alternates the shore wash on/off once the world has settled, then closes.</summary>
+    /// <summary>--bench: alternates the shore wash (the breaking faces with --bench-faces) on/off once the world has settled, then closes.</summary>
     private void UpdateBench()
     {
         if (_bench is null)
             return;
 
-        _bench.Update(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady);
-        _oceanPanel.ShoreWash = _bench.FeatureOn;
+        _bench.Update(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, WorldReady && (!_benchFaces || _coast.Settled));
+
+        if (_benchFaces)
+            _oceanPanel.BreakerFaces = _bench.FeatureOn;
+        else
+            _oceanPanel.ShoreWash = _bench.FeatureOn;
 
         if (_bench.Done)
             _window.ShouldClose = true;
@@ -315,7 +340,7 @@ public sealed partial class GameApp : IDisposable
             _terrain.Update(_orbitTest is null ? terrainCamera : _sim.Bubble.Origin, _planetFly?.Speed ?? _cameraSpeed);
             terrain &= _terrain.Focus == (_orbitTest is null ? _celestial.FocusTerrainBody : _planetTerrainBody);
             UpdateOctreeCover(terrain, frameSeconds);
-            UpdateSea(terrain, terrainCamera);
+            UpdateSea(terrain, terrainCamera, frameSeconds);
             _sections.Terrain = Lap(ref mark);
             UpdateSun(terrainCamera, terrainAxes);
             UpdateWeather();
@@ -345,6 +370,7 @@ public sealed partial class GameApp : IDisposable
                 gpu.Begin(commands, _uploadScope);
                 _terrainRenderer.RecordUploads(commands, _renderer.FrameIndex);
                 _depthTexture.Record(commands, _renderer.FrameIndex, _depths);
+                _coastGpu.Record(commands, _renderer.FrameIndex, _coast);
                 _celestial.RecordUploads(commands);
                 gpu.End(commands, _uploadScope);
                 _sections.Uploads = Lap(ref mark);
@@ -356,6 +382,7 @@ public sealed partial class GameApp : IDisposable
                 if (ocean)
                 {
                     _ocean.ShoreWash = _oceanPanel.ShoreWash;
+                    _ocean.BreakerFaces = _oceanPanel.BreakerFaces;
                     _ocean.Prepare(_renderer.FrameIndex, _sim.Ocean, _seaFrame, renderTime, new OceanRenderer.View
                     {
                         ViewProj = _seaFrame.Rotation * viewProj,
@@ -368,7 +395,7 @@ public sealed partial class GameApp : IDisposable
                         DepthCellX = _depths.Origin.X,
                         DepthCellZ = _depths.Origin.Z,
                         DepthVersion = _depths.FrameVersion,
-                    });
+                    }, _coast);
                     _sections.Prepare = Lap(ref mark);
                     gpu.Begin(commands, _oceanComputeScope);
                     _ocean.RecordCompute(commands, _renderer.FrameIndex, (float)frameSeconds, _sim.Clock.TickIndex);
@@ -496,6 +523,9 @@ public sealed partial class GameApp : IDisposable
         if (_sunCamera == double3.Zero)
             return;
 
+        if (_surfBeach)
+            _sunCamera = terrainAxes * SurfBeachSun();
+
         var sunBody = doubleQuat.Conjugate(terrainAxes) * _sunCamera;
         var up = terrainCamera.Length() > 0.0 ? double3.Normalize(terrainCamera) : double3.UnitY;
         _sunElevation = (float)double3.Dot(sunBody, up);
@@ -510,7 +540,7 @@ public sealed partial class GameApp : IDisposable
     /// maps come or go with altitude) and swapped in whole, the FFT tiles and foam lace kept where they were. The depth
     /// maps then follow the camera inside it.
     /// </summary>
-    private void UpdateSea(bool terrain, double3 camera)
+    private void UpdateSea(bool terrain, double3 camera, double frameSeconds)
     {
         var altitude = camera.Length() - _sim.Planet.SeaRadius;
         _seaWanted = terrain && _orbitTest is null && _camera.Frame == _planetFrame && _celestial.Focus == _sim.PlanetIndex && _sim.Planet.HasSea
@@ -519,6 +549,7 @@ public sealed partial class GameApp : IDisposable
         _ocean.Opacity = 1f - Smooth(0f, OceanGone, DetailLadder.SpaceLook(_celestial.FocusAltitude));
         _oceanPanel.Probe = camera;
         _oceanPanel.Tick = _sim.Clock.TickIndex;
+        UpdateCoast(camera, frameSeconds);
 
         if (!_seaWanted)
             return;
@@ -548,6 +579,27 @@ public sealed partial class GameApp : IDisposable
         }
 
         _depths.Update(local.X, local.Z, _nearDepth);
+    }
+
+    /// <summary>--surf-beach holds the sun (planet frame) over the spawn's beach, up the coast and a little out to sea, so the surf is lit whatever the hour.</summary>
+    private double3 SurfBeachSun()
+    {
+        var up = double3.Normalize(_sim.Bubble.Origin);
+        var along = double3.Normalize(double3.Cross(up, _sim.Seaward));
+        var (sin, cos) = Math.SinCos(SurfBeachSunElevation);
+        return double3.Normalize(up * sin + double3.Normalize(along * 0.8 + _sim.Seaward * 0.6) * cos);
+    }
+
+    /// <summary>
+    /// The coast regions follow the camera and the swell's target carrier (breaking-waves-brief.md): baked on a job,
+    /// faded in and out; none without a sea to draw.
+    /// </summary>
+    private void UpdateCoast(double3 camera, double frameSeconds)
+    {
+        var start = Stopwatch.GetTimestamp();
+        var carrier = _seaWanted ? CoastCarrier.From(_swell.TargetCarrierDirection, _swell.TargetCarrierOmega, _swell.TargetCarrierHeight) : default;
+        _coast.Update(camera, carrier, _swell.TargetSignificantHeight, (float)frameSeconds);
+        _coastMs.Record((float)Stopwatch.GetElapsedTime(start).TotalMilliseconds);
     }
 
     /// <summary>
@@ -851,6 +903,8 @@ public sealed partial class GameApp : IDisposable
         _ocean.Dispose();
         _depths.Dispose();
         _depthTexture.Dispose();
+        _coast.Dispose();
+        _coastGpu.Dispose();
         _oceanFft.Dispose();
         _imgui.Dispose();
         _renderer.Dispose();

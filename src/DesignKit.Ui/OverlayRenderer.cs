@@ -6,13 +6,12 @@ using Brutal.ShaderCApi;
 using Brutal.VulkanApi;
 using Brutal.VulkanApi.Abstractions;
 using BrutalGame.Engine.Rendering;
-using BrutalGame.Ships;
 
-namespace BrutalGame.Designer.Ui;
+namespace BrutalGame.DesignKit.Ui;
 
 /// <summary>
-/// The designer's 3D overlay: lines and translucent triangles (solid outlines, gizmos, mesh cages, drag ghosts) depth
-/// tested against the hull, drawn after it in the second scene pass. Each primitive is drawn twice: where it is in front
+/// A design tool's 3D overlay: lines and translucent triangles (outlines, gizmos, cages, ghosts, markers) depth tested
+/// against the scene, drawn after it in the second scene pass. Each primitive is drawn twice: where it is in front
 /// (full colour, a small depth pull so lines on the surface win) and where the hull hides it (faint), so gizmos and
 /// selections stay readable through the hull. Geometry is rebuilt on the CPU each frame into a per-frame host-visible
 /// buffer (camera-relative floats from double positions); no descriptor sets, the view-projection rides in push constants.
@@ -29,9 +28,20 @@ public sealed unsafe class OverlayRenderer : IDisposable
     private readonly Device _device;
     private readonly GpuBuffer _buffer;
     private readonly VkPipelineLayout _layout;
-    private readonly VkPipeline _triVisible, _triHidden, _lineVisible, _lineHidden;
+    private readonly VkPipeline _triVisible, _triHidden, _lineVisible, _lineHidden, _triTop, _lineTop;
     private readonly List<Vertex> _tris = new(4096);
     private readonly List<Vertex> _lines = new(4096);
+    private readonly List<Vertex> _topTris = new(4096);
+    private readonly List<Vertex> _topLines = new(1024);
+
+    /// <summary>While set, what is added draws over everything at full colour (gizmo handles: never hidden inside a part).</summary>
+    public bool OnTop;
+
+    private List<Vertex> Tris => OnTop ? _topTris : _tris;
+
+    private List<Vertex> Lines => OnTop ? _topLines : _lines;
+
+    private int Total => _tris.Count + _lines.Count + _topTris.Count + _topLines.Count;
     private double3 _camera;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -66,6 +76,8 @@ public sealed unsafe class OverlayRenderer : IDisposable
             _triHidden = CreatePipeline(vert, frag, pass, VkPrimitiveTopology.TriangleList, VkCompareOp.Less);
             _lineVisible = CreatePipeline(vert, frag, pass, VkPrimitiveTopology.LineList, VkCompareOp.GreaterOrEqual);
             _lineHidden = CreatePipeline(vert, frag, pass, VkPrimitiveTopology.LineList, VkCompareOp.Less);
+            _triTop = CreatePipeline(vert, frag, pass, VkPrimitiveTopology.TriangleList, VkCompareOp.Always);
+            _lineTop = CreatePipeline(vert, frag, pass, VkPrimitiveTopology.LineList, VkCompareOp.Always);
         }
         finally
         {
@@ -74,43 +86,48 @@ public sealed unsafe class OverlayRenderer : IDisposable
         }
     }
 
-    public int VertexCount => _tris.Count + _lines.Count;
+    public int VertexCount => Total;
 
     public static uint Rgba(byte r, byte g, byte b, byte a = 255) => r | ((uint)g << 8) | ((uint)b << 16) | ((uint)a << 24);
 
     public static uint WithAlpha(uint rgba, byte a) => (rgba & 0x00FFFFFF) | ((uint)a << 24);
 
-    /// <summary>Starts a frame's overlay; positions are given in ship metres and drawn relative to <paramref name="camera"/>.</summary>
+    /// <summary>Starts a frame's overlay; positions are given in the scene's metres (double) and drawn relative to <paramref name="camera"/>.</summary>
     public void Begin(double3 camera)
     {
         _camera = camera;
         _tris.Clear();
         _lines.Clear();
+        _topTris.Clear();
+        _topLines.Clear();
+        OnTop = false;
     }
 
-    private Vector3 Rel(Vector3d p) => new((float)(p.X - _camera.X), (float)(p.Y - _camera.Y), (float)(p.Z - _camera.Z));
+    private Vector3 Rel(double3 p) => new((float)(p.X - _camera.X), (float)(p.Y - _camera.Y), (float)(p.Z - _camera.Z));
 
-    public void Line(Vector3d a, Vector3d b, uint rgba)
+    public void Line(double3 a, double3 b, uint rgba)
     {
-        if (_lines.Count + _tris.Count + 2 > MaxVertices)
+        if (Total + 2 > MaxVertices)
             return;
 
-        _lines.Add(new Vertex { Position = Rel(a), Colour = rgba });
-        _lines.Add(new Vertex { Position = Rel(b), Colour = rgba });
+        var lines = Lines;
+        lines.Add(new Vertex { Position = Rel(a), Colour = rgba });
+        lines.Add(new Vertex { Position = Rel(b), Colour = rgba });
     }
 
-    public void Triangle(Vector3d a, Vector3d b, Vector3d c, uint rgba)
+    public void Triangle(double3 a, double3 b, double3 c, uint rgba)
     {
-        if (_lines.Count + _tris.Count + 3 > MaxVertices)
+        if (Total + 3 > MaxVertices)
             return;
 
-        _tris.Add(new Vertex { Position = Rel(a), Colour = rgba });
-        _tris.Add(new Vertex { Position = Rel(b), Colour = rgba });
-        _tris.Add(new Vertex { Position = Rel(c), Colour = rgba });
+        var tris = Tris;
+        tris.Add(new Vertex { Position = Rel(a), Colour = rgba });
+        tris.Add(new Vertex { Position = Rel(b), Colour = rgba });
+        tris.Add(new Vertex { Position = Rel(c), Colour = rgba });
     }
 
     /// <summary>A camera-facing ribbon <paramref name="pixels"/> wide at the given metres-per-pixel scale (thick line).</summary>
-    public void Ribbon(Vector3d a, Vector3d b, double width, uint rgba)
+    public void Ribbon(double3 a, double3 b, double width, uint rgba)
     {
         var ra = Rel(a);
         var rb = Rel(b);
@@ -127,24 +144,25 @@ public sealed unsafe class OverlayRenderer : IDisposable
 
     private void Quad(Vector3 a, Vector3 b, Vector3 c, Vector3 d, uint rgba)
     {
-        if (_lines.Count + _tris.Count + 6 > MaxVertices)
+        if (Total + 6 > MaxVertices)
             return;
 
-        _tris.Add(new Vertex { Position = a, Colour = rgba });
-        _tris.Add(new Vertex { Position = b, Colour = rgba });
-        _tris.Add(new Vertex { Position = c, Colour = rgba });
-        _tris.Add(new Vertex { Position = a, Colour = rgba });
-        _tris.Add(new Vertex { Position = c, Colour = rgba });
-        _tris.Add(new Vertex { Position = d, Colour = rgba });
+        var tris = Tris;
+        tris.Add(new Vertex { Position = a, Colour = rgba });
+        tris.Add(new Vertex { Position = b, Colour = rgba });
+        tris.Add(new Vertex { Position = c, Colour = rgba });
+        tris.Add(new Vertex { Position = a, Colour = rgba });
+        tris.Add(new Vertex { Position = c, Colour = rgba });
+        tris.Add(new Vertex { Position = d, Colour = rgba });
     }
 
     /// <summary>An axis-aligned cube of half size <paramref name="half"/> metres (gizmo handles, vertex markers).</summary>
-    public void Cube(Vector3d centre, double half, uint rgba)
+    public void Cube(double3 centre, double half, uint rgba)
     {
-        Span<Vector3d> c = stackalloc Vector3d[8];
+        Span<double3> c = stackalloc double3[8];
 
         for (var i = 0; i < 8; i++)
-            c[i] = new Vector3d(centre.X + ((i & 1) != 0 ? half : -half), centre.Y + ((i & 2) != 0 ? half : -half), centre.Z + ((i & 4) != 0 ? half : -half));
+            c[i] = new double3(centre.X + ((i & 1) != 0 ? half : -half), centre.Y + ((i & 2) != 0 ? half : -half), centre.Z + ((i & 4) != 0 ? half : -half));
 
         ReadOnlySpan<byte> faces = [1, 3, 7, 5, 0, 4, 6, 2, 2, 6, 7, 3, 0, 1, 5, 4, 4, 5, 7, 6, 0, 2, 3, 1];
 
@@ -156,43 +174,45 @@ public sealed unsafe class OverlayRenderer : IDisposable
     }
 
     /// <summary>A cone from <paramref name="base"/> to <paramref name="tip"/> (gizmo arrow heads).</summary>
-    public void Cone(Vector3d @base, Vector3d tip, double radius, uint rgba)
+    public void Cone(double3 @base, double3 tip, double radius, uint rgba)
     {
         const int sides = 10;
-        var axis = new Vector3d(tip.X - @base.X, tip.Y - @base.Y, tip.Z - @base.Z);
-        var helper = Math.Abs(axis.Y) < 0.9 * axis.Length() ? new Vector3d(0, 1, 0) : new Vector3d(1, 0, 0);
+        var axis = new double3(tip.X - @base.X, tip.Y - @base.Y, tip.Z - @base.Z);
+        var helper = Math.Abs(axis.Y) < 0.9 * axis.Length() ? new double3(0, 1, 0) : new double3(1, 0, 0);
         var u = Normalize(Cross(axis, helper));
         var v = Normalize(Cross(axis, u));
 
         for (var i = 0; i < sides; i++)
         {
             double a0 = i * Math.Tau / sides, a1 = (i + 1) * Math.Tau / sides;
-            var p0 = new Vector3d(@base.X + (u.X * Math.Cos(a0) + v.X * Math.Sin(a0)) * radius, @base.Y + (u.Y * Math.Cos(a0) + v.Y * Math.Sin(a0)) * radius, @base.Z + (u.Z * Math.Cos(a0) + v.Z * Math.Sin(a0)) * radius);
-            var p1 = new Vector3d(@base.X + (u.X * Math.Cos(a1) + v.X * Math.Sin(a1)) * radius, @base.Y + (u.Y * Math.Cos(a1) + v.Y * Math.Sin(a1)) * radius, @base.Z + (u.Z * Math.Cos(a1) + v.Z * Math.Sin(a1)) * radius);
+            var p0 = new double3(@base.X + (u.X * Math.Cos(a0) + v.X * Math.Sin(a0)) * radius, @base.Y + (u.Y * Math.Cos(a0) + v.Y * Math.Sin(a0)) * radius, @base.Z + (u.Z * Math.Cos(a0) + v.Z * Math.Sin(a0)) * radius);
+            var p1 = new double3(@base.X + (u.X * Math.Cos(a1) + v.X * Math.Sin(a1)) * radius, @base.Y + (u.Y * Math.Cos(a1) + v.Y * Math.Sin(a1)) * radius, @base.Z + (u.Z * Math.Cos(a1) + v.Z * Math.Sin(a1)) * radius);
             Triangle(p0, p1, tip, rgba);
             Triangle(p1, p0, @base, rgba);
         }
     }
 
-    private static Vector3d Cross(Vector3d a, Vector3d b) => new(a.Y * b.Z - a.Z * b.Y, a.Z * b.X - a.X * b.Z, a.X * b.Y - a.Y * b.X);
+    private static double3 Cross(double3 a, double3 b) => new(a.Y * b.Z - a.Z * b.Y, a.Z * b.X - a.X * b.Z, a.X * b.Y - a.Y * b.X);
 
-    private static Vector3d Normalize(Vector3d v)
+    private static double3 Normalize(double3 v)
     {
         var l = v.Length();
-        return l > 0 ? new Vector3d(v.X / l, v.Y / l, v.Z / l) : new Vector3d(1, 0, 0);
+        return l > 0 ? new double3(v.X / l, v.Y / l, v.Z / l) : new double3(1, 0, 0);
     }
 
-    /// <summary>In the second scene pass (after the hull): hidden parts faint, then visible parts.</summary>
+    /// <summary>In the second scene pass (after the hull): hidden parts faint, then visible parts, then the on-top layer.</summary>
     public void Record(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj)
     {
-        var count = _tris.Count + _lines.Count;
-
-        if (count == 0)
+        if (Total == 0)
             return;
 
         var mapped = new Span<Vertex>((byte*)_buffer.Mapped + frameIndex * MaxVertices * sizeof(Vertex), MaxVertices);
+        var topTris = _tris.Count + _lines.Count;
+        var topLines = topTris + _topTris.Count;
         CollectionsMarshal.AsSpan(_tris).CopyTo(mapped);
         CollectionsMarshal.AsSpan(_lines).CopyTo(mapped[_tris.Count..]);
+        CollectionsMarshal.AsSpan(_topTris).CopyTo(mapped[topTris..]);
+        CollectionsMarshal.AsSpan(_topLines).CopyTo(mapped[topLines..]);
 
         commands.SetViewport(0, [new VkViewport { Width = extent.Width, Height = extent.Height, MaxDepth = 1f }]);
         commands.SetScissor(0, [new VkRect2D { Extent = extent }]);
@@ -202,6 +222,8 @@ public sealed unsafe class OverlayRenderer : IDisposable
         Draw(commands, _lineHidden, viewProj, DepthPull, HiddenAlpha, _tris.Count, _lines.Count);
         Draw(commands, _triVisible, viewProj, DepthPull, 1f, 0, _tris.Count);
         Draw(commands, _lineVisible, viewProj, DepthPull, 1f, _tris.Count, _lines.Count);
+        Draw(commands, _triTop, viewProj, DepthPull, 1f, topTris, _topTris.Count);
+        Draw(commands, _lineTop, viewProj, DepthPull, 1f, topLines, _topLines.Count);
     }
 
     private void Draw(CommandBuffer commands, VkPipeline pipeline, in Matrix4x4 viewProj, float pull, float alpha, int first, int count)
@@ -285,6 +307,8 @@ public sealed unsafe class OverlayRenderer : IDisposable
         _device.DestroyPipeline(_triHidden, null);
         _device.DestroyPipeline(_lineVisible, null);
         _device.DestroyPipeline(_lineHidden, null);
+        _device.DestroyPipeline(_triTop, null);
+        _device.DestroyPipeline(_lineTop, null);
         _device.DestroyPipelineLayout(_layout, null);
         _buffer.Dispose();
     }

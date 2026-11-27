@@ -34,7 +34,7 @@ public sealed class BrushesPanel
             Finish(session, tool);
 
         // Docks with Properties the first time (layouts saved before brushes existed have no place for it).
-        ImGui.SetNextWindowDockID(new ImGuiID(DesignerStyle.EditDock), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowDockID(new ImGuiID(ShipLayout.EditDock), ImGuiCond.FirstUseEver);
 
         if (ImGui.Begin("Brushes"u8))
         {

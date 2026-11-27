@@ -1,4 +1,4 @@
-using Brutal.NativeFileDialogApi;
+using BrutalGame.DesignKit.Ui;
 using BrutalGame.Plans;
 
 namespace BrutalGame.Designer.App;
@@ -12,53 +12,16 @@ public sealed class FilePlanHost : IDisposable
 {
     public const string Extension = "bplan";
 
-    private static readonly FilterItem[] Filters = [new FilterItem { Name = "BRUTAL plan", Spec = Extension }];
-    private readonly bool _dialogs;
+    private readonly FileDialogs _dialogs = new("BRUTAL plan", Extension,
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "BRUTALGame", "Plans"));
 
-    public FilePlanHost()
-    {
-        LibraryFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "BRUTALGame", "Plans");
+    public string LibraryFolder => _dialogs.LibraryFolder;
 
-        try
-        {
-            NativeFileDialog.Initialize();
-            _dialogs = true;
-        }
-        catch (Exception e) when (e is DllNotFoundException or EntryPointNotFoundException)
-        {
-            _dialogs = false;
-        }
-    }
+    public bool HasDialogs => _dialogs.HasDialogs;
 
-    public string LibraryFolder { get; }
+    public string? PickOpen() => _dialogs.PickOpen();
 
-    public bool HasDialogs => _dialogs;
-
-    public string? PickOpen()
-    {
-        if (!_dialogs)
-            return null;
-
-        Directory.CreateDirectory(LibraryFolder);
-        var path = NativeFileDialog.OpenDialog(new FileDialogInfo { FilterList = Filters, DefaultPath = LibraryFolder }, out var result);
-        return result == NativeFileDialog.Result.Okay ? path : null;
-    }
-
-    public string? PickSave(string currentPath)
-    {
-        if (!_dialogs)
-            return null;
-
-        Directory.CreateDirectory(LibraryFolder);
-        var name = currentPath.Length > 0 ? Path.GetFileName(currentPath) : "untitled." + Extension;
-        var folder = currentPath.Length > 0 ? Path.GetDirectoryName(currentPath) ?? LibraryFolder : LibraryFolder;
-        var path = NativeFileDialog.OpenDialog(new SaveFileDialogInfo { FilterList = Filters, DefaultPath = folder, DefaultName = name }, out var result);
-
-        if (result != NativeFileDialog.Result.Okay)
-            return null;
-
-        return Path.HasExtension(path) ? path : path + "." + Extension;
-    }
+    public string? PickSave(string currentPath) => _dialogs.PickSave(currentPath);
 
     /// <summary>Writes the canonical bytes of a copy of <paramref name="doc"/>; returns its plan hash.</summary>
     public static PlanHash Save(PlanDocument doc, string path)
@@ -103,9 +66,5 @@ public sealed class FilePlanHost : IDisposable
         return true;
     }
 
-    public void Dispose()
-    {
-        if (_dialogs)
-            NativeFileDialog.Shutdown();
-    }
+    public void Dispose() => _dialogs.Dispose();
 }

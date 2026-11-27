@@ -31,7 +31,7 @@ public sealed class ComponentWorkspace
 
     private readonly HullMaterialCatalog _catalog;
     private readonly ChemistryData _chemistry;
-    private readonly MoveGizmo _gizmo = new();
+    private readonly TransformGizmo _gizmo = new();
     private readonly List<SurfacePolygon> _surface = new();
     private readonly Dictionary<uint, List<SurfacePolygon>> _partSurfaces = new();
     private int _surfaceVersion = -1;
@@ -64,6 +64,9 @@ public sealed class ComponentWorkspace
         _chemistry = chemistry;
     }
 
+    /// <summary>The viewport gizmo's mode (the host's W/E/R).</summary>
+    public GizmoMode Mode;
+
     public uint SelectedPart;
     public uint SelectedPipe;
     public int SelectedNode = -1;
@@ -95,6 +98,44 @@ public sealed class ComponentWorkspace
             PipeGeometry.Surface(pipe, _surface);
 
         return _surface;
+    }
+
+    /// <summary>The Delete key: removes the selected part, or the selected pipe node (the whole pipe when it would drop below two). False when nothing of the component is selected.</summary>
+    public bool DeleteSelected(DesignSession session)
+    {
+        var data = session.Doc.Components;
+
+        if (data is null)
+            return false;
+
+        if (data.IndexOfPart(SelectedPart) >= 0)
+        {
+            ComponentCommands.RemovePart(session, SelectedPart);
+            SelectedPart = 0;
+            return true;
+        }
+
+        var index = data.IndexOfPipe(SelectedPipe);
+
+        if (index < 0)
+            return false;
+
+        var pipe = data.Pipes[index];
+        var node = SelectedNode;
+        var pinned = (node == 0 && !pipe.From.IsOpen) || (node == pipe.Nodes.Count - 1 && !pipe.To.IsOpen);
+
+        if (node >= 0 && node < pipe.Nodes.Count && !pinned && pipe.Nodes.Count > 2)
+        {
+            ComponentCommands.SetPipe(session, pipe.Id, p => p.Nodes.RemoveAt(node));
+            SelectedNode = Math.Max(0, node - 1);
+        }
+        else
+        {
+            ComponentCommands.RemovePipe(session, pipe.Id);
+            (SelectedPipe, SelectedNode) = (0, -1);
+        }
+
+        return true;
     }
 
     // ---- panels ----
@@ -608,6 +649,17 @@ public sealed class ComponentWorkspace
         Surfaces(session);
         var links = ComponentModel.Links(data);
 
+        if (_partSurfaces.TryGetValue(SelectedPart, out var picked))
+        {
+            var tint = OverlayRenderer.WithAlpha(SelectedColour, 70);
+
+            foreach (var poly in picked)
+            {
+                for (var i = 1; i + 1 < poly.Points.Length; i++)
+                    overlay.Triangle(poly.Points[0], poly.Points[i], poly.Points[i + 1], tint);
+            }
+        }
+
         foreach (var part in data.Parts)
         {
             var ports = PartGeometry.Ports(part);
@@ -668,9 +720,13 @@ public sealed class ComponentWorkspace
         {
             var p = data.Parts[part];
 
-            if (_gizmo.Update(p.Position, camera, viewProj, viewport, mouse, mouseFree, down, clicked, Grid, overlay))
+            if (_gizmo.Update(p.Position, p.Rotation, Mode, camera, viewProj, viewport, mouse, mouseFree, down, clicked, Grid, overlay))
             {
-                (p.PosX, p.PosY, p.PosZ) = ComponentCommands.Quantise(Add(p.Position, _gizmo.Offset));
+                if (_gizmo.Turned)
+                    p.Rotation = _gizmo.Rotation;
+                else
+                    (p.PosX, p.PosY, p.PosZ) = ComponentCommands.Quantise(Add(p.Position, _gizmo.Offset));
+
                 ComponentCommands.SetPart(session, p);
             }
 
@@ -687,7 +743,7 @@ public sealed class ComponentWorkspace
 
             var node = SelectedNode;
 
-            if (_gizmo.Update(route.Node(node), camera, viewProj, viewport, mouse, mouseFree, down, clicked, Grid, overlay))
+            if (_gizmo.Update(route.Node(node), null, Mode, camera, viewProj, viewport, mouse, mouseFree, down, clicked, Grid, overlay))
             {
                 var at = ComponentCommands.Quantise(Add(route.Node(node), _gizmo.Offset));
                 ComponentCommands.SetPipe(session, route.Id, r => r.Nodes[node] = at);

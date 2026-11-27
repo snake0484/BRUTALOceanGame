@@ -1,21 +1,26 @@
 using System.Numerics;
+using Brutal.ImGuiApi;
 using Brutal.Numerics;
 using BrutalGame.Frames;
-using BrutalGame.Ships;
 
-namespace BrutalGame.Designer.Ui;
+namespace BrutalGame.DesignKit.Ui;
 
 /// <summary>
-/// Orbit camera about a target in ship metres (Y up): right drag orbits, middle drag (or Shift + right) pans, the wheel
-/// zooms. The view has no translation; draws go at (point − <see cref="Position"/>) in double. Infinite reverse-Z.
+/// Orbit camera about a target in double precision (Y up): right drag orbits, middle drag (or Shift + right) pans, the
+/// wheel zooms. The view has no translation; draws go at (point − <see cref="Position"/>) in double. Infinite reverse-Z.
+/// The distance range is the host's (a ship: 1 m to 2 km; a planet: metres above the ground to several radii).
 /// </summary>
 public sealed class OrbitCamera
 {
     private const double MaxPitch = 89.0 * Math.PI / 180.0;
     private const double OrbitPerPixel = 0.006;
     private const double ZoomPerNotch = 0.88;
-    private const double MinDistance = 1.0;
-    private const double MaxDistance = 2000.0;
+
+    /// <summary>Closest the camera zooms to its target (metres).</summary>
+    public double MinDistance = 1.0;
+
+    /// <summary>Farthest the camera zooms out (metres).</summary>
+    public double MaxDistance = 2000.0;
 
     public double3 Target = new(0.0, 0.0, 0.0);
     public double Yaw = 0.8;
@@ -33,8 +38,41 @@ public sealed class OrbitCamera
 
     public Matrix4x4 ViewProjection(float aspect) => CameraProjection.View(Rotation) * CameraProjection.Projection(FovY, aspect, Near);
 
+    private double _goalYaw;
+    private double _goalPitch;
+    private bool _turning;
+
+    /// <summary>Starts a smooth turn to look from yaw and pitch (radians); <see cref="Step"/> runs it.</summary>
+    public void TurnTo(double yaw, double pitch)
+    {
+        (_goalYaw, _goalPitch, _turning) = (yaw, Math.Clamp(pitch, -MaxPitch, MaxPitch), true);
+    }
+
+    /// <summary>Each frame: eases a turn started by <see cref="TurnTo"/> (the short way round), about a fifth of a second.</summary>
+    public void Step(double dt)
+    {
+        if (!_turning)
+            return;
+
+        var k = 1.0 - Math.Exp(-dt * 16.0);
+        var yaw = Math.IEEERemainder(_goalYaw - Yaw, Math.Tau);
+        var pitch = _goalPitch - Pitch;
+
+        if (Math.Abs(yaw) < 1e-4 && Math.Abs(pitch) < 1e-4)
+        {
+            Yaw += yaw;
+            Pitch = _goalPitch;
+            _turning = false;
+            return;
+        }
+
+        Yaw += yaw * k;
+        Pitch += pitch * k;
+    }
+
     public void Orbit(double dx, double dy)
     {
+        _turning = false;
         Yaw -= dx * OrbitPerPixel;
         Pitch = Math.Clamp(Pitch + dy * OrbitPerPixel, -MaxPitch, MaxPitch);
     }
@@ -49,6 +87,21 @@ public sealed class OrbitCamera
         Target += (-right * dx + up * dy) * metresPerPixel;
     }
 
+    /// <summary>The usual mouse: right drag orbits, middle drag (or Shift + right) pans, the wheel zooms. Call when the UI does not want the mouse.</summary>
+    public void Mouse(ImGuiIOPtr io, float viewportHeight)
+    {
+        var delta = io.MouseDelta;
+        var panning = io.MouseDown[2] || (io.MouseDown[1] && io.KeyShift);
+
+        if (panning)
+            Pan(delta.X, delta.Y, viewportHeight);
+        else if (io.MouseDown[1])
+            Orbit(delta.X, delta.Y);
+
+        if (io.MouseWheel != 0f)
+            Zoom(io.MouseWheel);
+    }
+
     public void Zoom(double notches) => Distance = Math.Clamp(Distance * Math.Pow(ZoomPerNotch, notches), MinDistance, MaxDistance);
 
     /// <summary>Looks at <paramref name="centre"/> from far enough to see a sphere of <paramref name="radius"/>.</summary>
@@ -59,7 +112,7 @@ public sealed class OrbitCamera
     }
 
     /// <summary>Unit ray through a pixel (top-left origin) in ship axes, from <see cref="Position"/>.</summary>
-    public Vector3d Ray(Vector2 pixel, Vector2 viewport)
+    public double3 Ray(Vector2 pixel, Vector2 viewport)
     {
         var aspect = viewport.X / Math.Max(1f, viewport.Y);
         var t = Math.Tan(FovY * 0.5);
@@ -67,12 +120,11 @@ public sealed class OrbitCamera
         var y = (1.0 - pixel.Y / viewport.Y * 2.0) * t;
         var rotation = Rotation;
         var d = rotation * new double3(x, y, -1.0);
-        d = double3.Normalize(d);
-        return new Vector3d(d.X, d.Y, d.Z);
+        return double3.Normalize(d);
     }
 
     /// <summary>Pixel of a ship-space point; false behind the near plane.</summary>
-    public bool Project(Vector3d point, in Matrix4x4 viewProj, Vector2 viewport, out Vector2 pixel)
+    public bool Project(double3 point, in Matrix4x4 viewProj, Vector2 viewport, out Vector2 pixel)
     {
         var p = Position;
         var relative = new Vector3((float)(point.X - p.X), (float)(point.Y - p.Y), (float)(point.Z - p.Z));
@@ -87,7 +139,7 @@ public sealed class OrbitCamera
     }
 
     /// <summary>View-space depth (distance along the view axis) of a ship-space point.</summary>
-    public double Depth(Vector3d point)
+    public double Depth(double3 point)
     {
         var back = Back;
         var p = Position;

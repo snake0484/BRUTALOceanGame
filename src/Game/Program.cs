@@ -33,6 +33,11 @@ string? planetKind = null;
 ulong? kindSeed = null;
 var steep = false;
 
+// Breaking waves: --no-faces draws none (A/B); --bench-faces alternates them in --bench; --surf-beach stands the camera in the surf.
+var faces = true;
+var benchFaces = false;
+var surfBeach = false;
+
 for (var i = 0; i < args.Length; i++)
 {
     if (args[i] == "--wind" && i + 1 < args.Length)
@@ -83,6 +88,12 @@ for (var i = 0; i < args.Length; i++)
         kindSeed = ulong.Parse(args[++i], System.Globalization.CultureInfo.InvariantCulture);
     else if (args[i] == "--steep")
         steep = true;
+    else if (args[i] == "--no-faces")
+        faces = false;
+    else if (args[i] == "--bench-faces")
+        benchFaces = true;
+    else if (args[i] == "--surf-beach")
+        surfBeach = true;
     else if (args[i] == "--orbit-test")
     {
         orbitTest = OrbitTestFrame.Surface;
@@ -106,7 +117,7 @@ if (BrutalGame.Menu.MenuLaunch.FromArgs(args) is { } menu)
 {
     do
     {
-        using var menuApp = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest, shoreFly, seamTest, menu, planetKind, kindSeed, steep);
+        using var menuApp = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest, shoreFly, seamTest, menu, planetKind, kindSeed, steep, faces, benchFaces, surfBeach);
         menuApp.Run();
     }
     while (menu.TakeRelaunch());
@@ -114,5 +125,5 @@ if (BrutalGame.Menu.MenuLaunch.FromArgs(args) is { } menu)
     return;
 }
 
-using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest, shoreFly, seamTest, planetKind: planetKind, kindSeed: kindSeed, steep: steep);
+using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest, shoreFly, seamTest, planetKind: planetKind, kindSeed: kindSeed, steep: steep, faces: faces, benchFaces: benchFaces, surfBeach: surfBeach);
 app.Run();
