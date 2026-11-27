@@ -5,7 +5,8 @@ component level: parametric parts, pipes, a component editor with a test bench, 
 
 ## What is built
 
-- **Workspaces.** The designer has a Ship and a Component workspace in one window, each with its own plan. A component
+- **Tabs.** Every open ship or component is its own tab across the top (File menu: new ship, new component, open,
+  save, close; unsaved tabs ask before closing). Each tab keeps its own plan, camera and component bench. A component
   plan (level Component) holds housing solids, parts and pipes. Saving it under `Documents\BRUTALGame\Components`
   (subfolders are categories) makes it a prefab.
 - **Parts** (`Ships/Components`): burn chamber, bell nozzle, injector (one-way orifice, fuel or oxidiser), igniter. Each

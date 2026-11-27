@@ -29,9 +29,20 @@ public sealed unsafe class OverlayRenderer : IDisposable
     private readonly Device _device;
     private readonly GpuBuffer _buffer;
     private readonly VkPipelineLayout _layout;
-    private readonly VkPipeline _triVisible, _triHidden, _lineVisible, _lineHidden;
+    private readonly VkPipeline _triVisible, _triHidden, _lineVisible, _lineHidden, _triTop, _lineTop;
     private readonly List<Vertex> _tris = new(4096);
     private readonly List<Vertex> _lines = new(4096);
+    private readonly List<Vertex> _topTris = new(4096);
+    private readonly List<Vertex> _topLines = new(1024);
+
+    /// <summary>While set, what is added draws over everything at full colour (gizmo handles: never hidden inside a part).</summary>
+    public bool OnTop;
+
+    private List<Vertex> Tris => OnTop ? _topTris : _tris;
+
+    private List<Vertex> Lines => OnTop ? _topLines : _lines;
+
+    private int Total => _tris.Count + _lines.Count + _topTris.Count + _topLines.Count;
     private double3 _camera;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -66,6 +77,8 @@ public sealed unsafe class OverlayRenderer : IDisposable
             _triHidden = CreatePipeline(vert, frag, pass, VkPrimitiveTopology.TriangleList, VkCompareOp.Less);
             _lineVisible = CreatePipeline(vert, frag, pass, VkPrimitiveTopology.LineList, VkCompareOp.GreaterOrEqual);
             _lineHidden = CreatePipeline(vert, frag, pass, VkPrimitiveTopology.LineList, VkCompareOp.Less);
+            _triTop = CreatePipeline(vert, frag, pass, VkPrimitiveTopology.TriangleList, VkCompareOp.Always);
+            _lineTop = CreatePipeline(vert, frag, pass, VkPrimitiveTopology.LineList, VkCompareOp.Always);
         }
         finally
         {
@@ -74,7 +87,7 @@ public sealed unsafe class OverlayRenderer : IDisposable
         }
     }
 
-    public int VertexCount => _tris.Count + _lines.Count;
+    public int VertexCount => Total;
 
     public static uint Rgba(byte r, byte g, byte b, byte a = 255) => r | ((uint)g << 8) | ((uint)b << 16) | ((uint)a << 24);
 
@@ -86,27 +99,32 @@ public sealed unsafe class OverlayRenderer : IDisposable
         _camera = camera;
         _tris.Clear();
         _lines.Clear();
+        _topTris.Clear();
+        _topLines.Clear();
+        OnTop = false;
     }
 
     private Vector3 Rel(Vector3d p) => new((float)(p.X - _camera.X), (float)(p.Y - _camera.Y), (float)(p.Z - _camera.Z));
 
     public void Line(Vector3d a, Vector3d b, uint rgba)
     {
-        if (_lines.Count + _tris.Count + 2 > MaxVertices)
+        if (Total + 2 > MaxVertices)
             return;
 
-        _lines.Add(new Vertex { Position = Rel(a), Colour = rgba });
-        _lines.Add(new Vertex { Position = Rel(b), Colour = rgba });
+        var lines = Lines;
+        lines.Add(new Vertex { Position = Rel(a), Colour = rgba });
+        lines.Add(new Vertex { Position = Rel(b), Colour = rgba });
     }
 
     public void Triangle(Vector3d a, Vector3d b, Vector3d c, uint rgba)
     {
-        if (_lines.Count + _tris.Count + 3 > MaxVertices)
+        if (Total + 3 > MaxVertices)
             return;
 
-        _tris.Add(new Vertex { Position = Rel(a), Colour = rgba });
-        _tris.Add(new Vertex { Position = Rel(b), Colour = rgba });
-        _tris.Add(new Vertex { Position = Rel(c), Colour = rgba });
+        var tris = Tris;
+        tris.Add(new Vertex { Position = Rel(a), Colour = rgba });
+        tris.Add(new Vertex { Position = Rel(b), Colour = rgba });
+        tris.Add(new Vertex { Position = Rel(c), Colour = rgba });
     }
 
     /// <summary>A camera-facing ribbon <paramref name="pixels"/> wide at the given metres-per-pixel scale (thick line).</summary>
@@ -127,15 +145,16 @@ public sealed unsafe class OverlayRenderer : IDisposable
 
     private void Quad(Vector3 a, Vector3 b, Vector3 c, Vector3 d, uint rgba)
     {
-        if (_lines.Count + _tris.Count + 6 > MaxVertices)
+        if (Total + 6 > MaxVertices)
             return;
 
-        _tris.Add(new Vertex { Position = a, Colour = rgba });
-        _tris.Add(new Vertex { Position = b, Colour = rgba });
-        _tris.Add(new Vertex { Position = c, Colour = rgba });
-        _tris.Add(new Vertex { Position = a, Colour = rgba });
-        _tris.Add(new Vertex { Position = c, Colour = rgba });
-        _tris.Add(new Vertex { Position = d, Colour = rgba });
+        var tris = Tris;
+        tris.Add(new Vertex { Position = a, Colour = rgba });
+        tris.Add(new Vertex { Position = b, Colour = rgba });
+        tris.Add(new Vertex { Position = c, Colour = rgba });
+        tris.Add(new Vertex { Position = a, Colour = rgba });
+        tris.Add(new Vertex { Position = c, Colour = rgba });
+        tris.Add(new Vertex { Position = d, Colour = rgba });
     }
 
     /// <summary>An axis-aligned cube of half size <paramref name="half"/> metres (gizmo handles, vertex markers).</summary>
@@ -182,17 +201,19 @@ public sealed unsafe class OverlayRenderer : IDisposable
         return l > 0 ? new Vector3d(v.X / l, v.Y / l, v.Z / l) : new Vector3d(1, 0, 0);
     }
 
-    /// <summary>In the second scene pass (after the hull): hidden parts faint, then visible parts.</summary>
+    /// <summary>In the second scene pass (after the hull): hidden parts faint, then visible parts, then the on-top layer.</summary>
     public void Record(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj)
     {
-        var count = _tris.Count + _lines.Count;
-
-        if (count == 0)
+        if (Total == 0)
             return;
 
         var mapped = new Span<Vertex>((byte*)_buffer.Mapped + frameIndex * MaxVertices * sizeof(Vertex), MaxVertices);
+        var topTris = _tris.Count + _lines.Count;
+        var topLines = topTris + _topTris.Count;
         CollectionsMarshal.AsSpan(_tris).CopyTo(mapped);
         CollectionsMarshal.AsSpan(_lines).CopyTo(mapped[_tris.Count..]);
+        CollectionsMarshal.AsSpan(_topTris).CopyTo(mapped[topTris..]);
+        CollectionsMarshal.AsSpan(_topLines).CopyTo(mapped[topLines..]);
 
         commands.SetViewport(0, [new VkViewport { Width = extent.Width, Height = extent.Height, MaxDepth = 1f }]);
         commands.SetScissor(0, [new VkRect2D { Extent = extent }]);
@@ -202,6 +223,8 @@ public sealed unsafe class OverlayRenderer : IDisposable
         Draw(commands, _lineHidden, viewProj, DepthPull, HiddenAlpha, _tris.Count, _lines.Count);
         Draw(commands, _triVisible, viewProj, DepthPull, 1f, 0, _tris.Count);
         Draw(commands, _lineVisible, viewProj, DepthPull, 1f, _tris.Count, _lines.Count);
+        Draw(commands, _triTop, viewProj, DepthPull, 1f, topTris, _topTris.Count);
+        Draw(commands, _lineTop, viewProj, DepthPull, 1f, topLines, _topLines.Count);
     }
 
     private void Draw(CommandBuffer commands, VkPipeline pipeline, in Matrix4x4 viewProj, float pull, float alpha, int first, int count)
@@ -285,6 +308,8 @@ public sealed unsafe class OverlayRenderer : IDisposable
         _device.DestroyPipeline(_triHidden, null);
         _device.DestroyPipeline(_lineVisible, null);
         _device.DestroyPipeline(_lineHidden, null);
+        _device.DestroyPipeline(_triTop, null);
+        _device.DestroyPipeline(_lineTop, null);
         _device.DestroyPipelineLayout(_layout, null);
         _buffer.Dispose();
     }
