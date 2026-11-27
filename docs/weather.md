@@ -2,7 +2,7 @@
 
 Localized weather: storms in one place, sun and calm in another. It is cheap because almost nothing about it changes from one tick to the next. Weather is **analytic** (a function of seed and time, like the swell), so it can be evaluated anywhere and needs no networking. A coarse **snapshot map** around the camera is the product everything queries.
 
-On planets (D31) the same model runs on the sphere: `SphereWeatherField` and `SphereWeatherCache` (see "On planets" below). The flat `WeatherField` and `WeatherMap` stay until `src/Game` and `src/Sim` move over; nothing else uses them.
+On planets (D31) the same model runs on the sphere: `SphereWeatherField` and `SphereWeatherCache` (see "On planets" below). They drive the game since 2026-11-27 (weather wiring, `docs/pivot/README.md`); the flat island `WeatherField`, `WeatherClimate` and `WeatherMap` are deleted, so the sections on them below describe the old island game.
 
 ## Model (`src/Weather/`, namespace `BrutalGame.Weather`, pure CPU, v1 implemented)
 
@@ -58,7 +58,7 @@ On planets (D31) the same model runs on the sphere: `SphereWeatherField` and `Sp
 - **Layout:** cells are AoS (`WeatherSample`, 7 floats). Each sample reads all fields at 4 nodes, so they sit together.
 - **Threading:** Tick on the main thread. Sample is read-only between ticks, like the swell.
 
-## On planets (`SphereWeatherField`, `SphereWeatherCache`, `PlanetClimate`; D31, implemented, not yet hooked up)
+## On planets (`SphereWeatherField`, `SphereWeatherCache`, `PlanetClimate`; D31, implemented and hooked up)
 
 The island model carried over: kinds, lives, profiles and how systems combine are unchanged. What changed is where systems spawn, how they move, the distances and the circulation sense. It is still a pure function of seed + tick.
 
@@ -130,7 +130,7 @@ The island model carried over: kinds, lives, profiles and how systems combine ar
   - For clouds near the camera, upload the kept tiles' nodes (cloud, rain, storm) after a bake. It is GPU-only, and nothing reads back.
   - The planet-wide GPU coverage bake (planets.md) can enumerate systems with `Gather(centre, hemisphere angle, time, span)`.
 - **Gas giants:** `new SphereWeatherField(PlanetClimate.GasGiant(...))`. `GasGiantWind` adds depth and gust noise on top.
-- **Not done here:** `WeatherSystem`, `SwellWind`, `SimWorld` and `WeatherPanel` still use the flat field. Swap them during M2, then delete `WeatherField`, `WeatherMap` and their tests.
+- **Done (2026-11-27):** `SimWorld` owns the field and a per-sea-tile wind schedule (`SeaWindSchedule`, which replaced `SwellWind`); `WeatherSystem` and `WeatherPanel` read a `SphereWeatherCache` round the camera. The flat field, map and their tests are deleted. Drag and lift are not wired yet.
 
 ### Measured (2026-11-26, Release, this dev machine, with other sessions building)
 

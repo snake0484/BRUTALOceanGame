@@ -109,7 +109,7 @@ M0 landed on `space-pivot` (2f70258..1df5d87). Review items left for the milesto
 
 The island is gone (`TerrainGenerator`, `TerrainParams`, `Coastline`, `IslandFrame`, `ShoreGuard`, `TerrainShoreDepth`; D30 is now `PlanetGenerator.IsFullyProtected` plus the clamped removal). `TerrainWorld` streams the test planet's octree in its rotating frame: 8 roots at LOD 15, leaves LOD 0..12, maps keyed by `ChunkCoord.Key` (ulong), selection on a job (`PlanetLeafSelector`: shell classify, horizon pruning nested parent to child with a 2 km + 2 s of travel margin, speed LOD bias with hysteresis), retire by walking the selection's split nodes. Empty leaves take no renderer slot; terrain indices are 16-bit (planets.md "Memory"); arenas 80 MB vertex + 64 MB index. Collision: LOD-0 leaves within 128 m of the camera, pooled `StaticMeshShape`s with growable buffers (review P2). The camera spawns on a coast found by `PlanetSpawn`.
 
-**Physics bubble (interim):** one Jolt world in a surface bubble (`PhysicsBubble`) with its origin fixed on the sea sphere at the spawn, +Y radially up, scene gravity g + centrifugal there. Float precision falls off with distance from it (about 1 mm at 10 km); collision chunks are placed in it from planet-frame doubles. The sea frame and the weather plane share it. Rebasing in 32 m steps and several bubbles are M3.
+**Physics bubble (interim):** one Jolt world in a surface bubble (`PhysicsBubble`) with its origin fixed on the sea sphere at the spawn, +Y radially up, scene gravity g + centrifugal there. Float precision falls off with distance from it (about 1 mm at 10 km); collision chunks are placed in it from planet-frame doubles. The sea frame shares it. Rebasing in 32 m steps and several bubbles are M3.
 
 Measured with `--planet-fly` (Release, RTX 4090, 1600x900; each leg starts settled; holes = frames where a desired leaf in view, not provably below the horizon or empty, has nothing loaded over it):
 
@@ -185,7 +185,7 @@ Left for later:
 - **Sea's limb from 20-60 km:** the far shell still reflects the ground-level sky, a pale rim until the atmosphere LUTs replace the sky and fog terms.
 - **Far map and edits:** the far map is generated ground only (a pier is invisible at 48 m cells); placed fill shows in the near window and in `PlanetShore`.
 - **Buoyancy:** nothing floats yet; `OceanSurface.Sample` is ready for M3 bodies. The surf carrier is taken from the camera's tile, so swash timing steps when the camera crosses a tile edge (every ~64 km).
-- **Weather on the sphere (D31):** the swell's wind is still sampled in the spawn bubble's plane and applied planet-wide.
+- ~~**Weather on the sphere (D31)**~~: done, each sea tile takes its own weather's wind (Weather wiring below).
 - **Spawn beach:** still the wide flat of step 2; a steeper coast would show the wash better.
 
 ### Breaking waves, slice 1: after review (2026-11-27)
@@ -197,11 +197,43 @@ The breaking face (`docs/pivot/briefs/breaking-waves-brief.md`) as it stands aft
 - **Swash** arrives on the regions' carrier phase at the shoreline point, each region by its weight.
 - **Bake.** Solved 32 cells past the window, slowness averaged along each step, inflow edges on the coarse solve's ray direction. Where two windows overlap on the spawn beach: 0.00 rad and 0.00 m apart (0.11 rad and 0.60 m before); on a barred, curved test seabed up to 0.29 rad, 0.17 of amplitude, 1.3 m of break clock. Only water joined to the open sea carries the wave. Depths: 16 m corners, 8 m and 4 m where the seabed bends (7.6k samples a region here, 17.4k before). Worker time 23-25 ms settled; during the load 27-30 ms median and 49-57 ms slowest (was 27-32 settled, 32-34 and 47-49).
 - **Carrier.** Drawn only in water shallower than 8 x its deep-water height, so it never starts on a window's edge; the long lines of carrier further out are gone with it.
-- **Rebake.** Only past 1°, 1 % of frequency or 5 % of height. 5.4 minutes with weather on: no rebake but the test's own 15° turn (7 bakes). The weather did not take the carrier past the tolerance in that time; what it did inside it was not logged.
+- **Rebake.** Only past 1°, 1 % of frequency or 5 % of height. 5.4 minutes with weather on: no rebake but the test's own 15° turn (7 bakes). A storm taking the carrier past the tolerance has since been run (Weather wiring below): 4 weather rebakes in 15 minutes, 0 kicks.
 - **Tile edges.** One tile's carrier but for a 540 m band at an edge, phases matched under the camera (`SeaTiles.Hand`, `CoastRegionSet.Match`). Tested at 40° of latitude only, not seen in the game; away from the camera the two carriers drift apart along the band by k0 x the angle between the tiles' frames per metre, and crossing it at vehicle speed, or near the poles, shifts the waves visibly.
 - **In motion** (`BreakerStability`): per tick at 275 points across the surf, height step 0.018 m, second differences 0.0044 m, 0.0072 rad, 0.019 of whitewater, 0 jumps, 0 kicks; the same through the load and through a rebake's cross-fade.
 - **GPU.** Ocean pass with faces on against off: +0.011 ms at the beach, +0.020 ms from 600 m; surf foam compute +0.003 ms. Main thread: 0 bytes allocated in 43,020 frames once loaded.
-- **Not done:** the far band and the swash's timing were looked at in stills and bursts, not judged in motion by eye; the depth refinement has only run in tests (the spawn beach bends nowhere enough to trigger it); a storm arriving has not been run through the rebake.
+- **Not done:** the far band and the swash's timing were looked at in stills and bursts, not judged in motion by eye; the depth refinement has only run in tests (the spawn beach bends nowhere enough to trigger it); a storm arriving has since been run through the rebake (Weather wiring below).
+
+### Weather wiring (2026-11-27)
+
+The sphere weather (D31) drives the game and the headless sim; the flat island field, climate and map are deleted. Decisions in D84.
+
+- **Sim.** `SimWorld` owns the sea planet's `SphereWeatherField` (`PlanetClimate.Rocky` from the body seed, systems 4× the island's: `SimWorld.WeatherSizeScale`) and a `SeaWindSchedule`: each `SeaTiles` tile's wind at each 60 s epoch, the mean over a 5 × 5 lattice across the tile (mean speed along the mean direction), quantized to 1 m/s and 10°. The server passes `weather: true`. `--weather-offset` is a whole-tick offset of weather time.
+- **Sea.** `SeaSwells` keeps a swell per live tile. At an epoch's first tick a changed key crossfades in over 45 s, its components seeded by tile and key; the next epoch's key is read and its set built mid-epoch, staggered by tile. The surf carrier's phase is closed form (lerped ω integrated over the blend plus the gap to the new set's −ω t closed on the smoothstep), so a tile made late is bit-identical to one live all along (`LateTile_MatchesOneLiveAllAlong`). Live tiles: the GPU window and blend tiles round the bubble, the view and entities within 10 km of sea level; dropped 10 s after the last anchor leaves. `OceanSurface` blends the tiles' swells with the old squared weights; the depth cap's Hs is the blend's. A query on a tile with no live swell sees calm and counts a miss (0 in the runs below).
+- **GPU.** Each of the four slots carries its own tile's waves (up to 1536 in the frame block, phase in `a.z`, a range per slot). The FFT detail takes the camera blend's spectra mixed by squared weight. Coast regions and the shore wash still take the camera tile's carrier (see Left).
+- **Client.** `WeatherSystem` bakes a `SphereWeatherCache` round the camera and samples it for the sky. The Weather panel shows the wind, pressure and sky at the camera, the sea tile's key, Hs, Tp and blend, the systems within 150 km (list and map) and the cache's and sea's tick times.
+
+Measured (Release, RTX 4090 machine, other sessions working; `SeaSwellsTests.Costs`, in-game panel):
+
+| What | Cost |
+| --- | --- |
+| A tile's wind (1 gather + 25 evaluations) | 34 µs median (6 ms on its first, cold call) |
+| Sea tick, 8 live tiles, off epoch | 37 µs median, 59 µs p99 (~4.6 µs a tile: `Prepare` of 150-300 components) |
+| Sea tick on an epoch's first tick (sets prebuilt) | 38-83 µs (316-369 µs without the mid-epoch prefetch) |
+| A tile made (2 winds, 2 sets) | 85 µs median, 110 µs max |
+| `OceanSurface.Sample` | 7-9 µs inside a tile and 5-7 µs at a corner driven, 8-9 and 2.5 µs on one uniform swell; it follows the components of each blended tile (a blending tile has twice as many). Noisy here: the uniform baseline in `Sampling_Cost` reads 5 / 10 / 15 µs inside / edge / corner |
+| Weather cache tick | 11.7 µs median, 24 µs p99 with the anchor moving at 30 m/s (`SampleCost`); 2.5 µs average in game. Field sample 3.5 µs, cache sample 0.35 µs |
+| Allocation per tick | 0 B over 7,200 ticks |
+
+Storm (`--surf-beach --weather-offset 3972`, the week's strongest wind at the spawn tile, seed 1): the headless timeline (`SpawnTile_StormTimeline`) has the tile wind rising 5 → 13 m/s over 3968-3976 min. At 12 m/s the wind sea overtakes the 1.2 m groundswell and the carrier switches from 13 s to 6.6 s. Seven rebakes run through the storm (3975-3996 min); the first 12 h of play have none (96 key changes, top 8 m/s). In game, 15 minutes of that weather (3972-3987 min) gave exactly the four rebakes the timeline predicts there (3975, 3976, 3977 and 3986 min). Each settled 14.2-14.6 s after the carrier moved. Through each rebake, tick by tick at 5 points: face 0 jumps, 0 kicks, second differences ≤ 0.0087 m, 0.0031 rad, 0.0035 whitewater; the open swell (`OceanSurface`) ≤ 0.0025 m. In steady weather between rebakes: face ≤ 0.0010 m, swell 0.0019-0.0044 m. So a key change sits inside the steady noise: no pop. A 60-frame burst at 250 ms from 5 s after the carrier switch (inside the coast cross-fade and the swell's 45 s blend) shows the shorter wind-sea surf arriving with no step; frame-to-frame mean differences run 3.1-6.6, peaking only on swash run-ups. The coast update allocated 136 B per rebake on the main thread (0 between).
+
+What the cloud work (D80) can read: `SimWorld.Weather` (`SphereWeatherField`: `Gather(unit, extra, time, span)` lists the systems with centre, radius, kind, strength, cloud, rain, convection; `Sample` gives cloud, rain, storm at a point) and the client's `WeatherSystem.Cache` (`SphereWeatherCache`, ~1 km nodes of cloud, rain, storm and wind round the camera, rebaked every 5 s and lerped). Both are pure functions of seed and tick, so a cloud map built from them needs no bandwidth.
+
+Left:
+- **Coast carriers per tile.** Coast regions and the shore wash follow the camera tile's carrier; a region in a neighbouring tile is baked for the camera tile's swell, not its own, and re-keys when the camera crosses the edge. Per-tile carriers need `CoastRegionSet`'s hand-over to match two carriers of different frequency.
+- **Base swell changes** (`SetSwell`: the panel's Apply, launch options) rebuild every live tile at once, without a blend.
+- **Drag and lift** do not read the weather yet.
+- **GPU cost** of per-slot waves was not A/B benched; the in-game profiler read 0.25 ms for the ocean surface pass at the spawn with the UI up.
+- **Only the spawn tile's storm** was run in game; a storm across a tile edge, seen from the edge, was not.
 
 ### Carry-overs from M2 (2026-11-26)
 

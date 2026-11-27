@@ -218,7 +218,7 @@ Descriptor set: keep bindings 0–4 (frame, disp, deriv, foam, depth) and 8 (sur
 | Water/Ocean/OceanSwell.cs | `SampleHeight(float x, float z)` world; phase `k·x` (8 m waves at 1e6 m lose ~0.06 rad) | High: SeaFrame coords + anchored phases |
 | Water/Rendering/OceanRenderer.cs | Clipmap snap `MathF.Round(cameraPos.X / snap)` world float (line 1114); `CameraPos.w = (float)renderTime` (line 946; ulp 0.06 s after ~11 days of server uptime); flat plane at y = 0 | High |
 | shaders/ocean_common.glsl + OceanFft.cs | `textureLod(dispMap, x0 / L)` with world `x0` (uv ~2e4: half-texel error); `k·x0` with world `x0`; eddy/lace noise on `cameraPos.w` time | High: pass `camera mod L` per cascade, wrap time at 3000 s |
-| Weather/WeatherMap.cs | Float XZ, flat 32 km snapshot | Low precision risk; needs a sphere |
+| ~~Weather/WeatherMap.cs~~ | Deleted 2026-11-27: the client reads `SphereWeatherCache` | |
 | Game/TerrainBrush.cs | Ray from a world-float camera | Medium |
 
 ### Ordered cut list (least breakage first) and time recovered
