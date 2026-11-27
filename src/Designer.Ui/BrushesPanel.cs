@@ -1,4 +1,5 @@
 using Brutal.ImGuiApi;
+using Brutal.Numerics;
 using BrutalGame.Plans;
 using BrutalGame.Ships;
 using BrutalGame.Ships.Interior;
@@ -14,13 +15,24 @@ public sealed class BrushesPanel
 {
     private const double Units = HullSolid.PositionUnitsPerMetre;
 
-    private static readonly string[] KindNames = ["Stamp", "Sweep"];
+    private static readonly string[] KindNames = ["Stamp", "Sweep", "Paint"];
+    private static readonly string[] PatternNames = ["Line cross"];
 
     private readonly HullMaterialCatalog _catalog;
     private int _brush = -1;
     private int _preset;
     private float _width = 0.5f;
     private float _height = 0.25f;
+    private Paint _paint = new() { Colour = new float4(0.9f, 0.16f, 0.16f, 1f), Width = 1f, Spacing = 0.25f, LineWidth = 0.04f };
+    private (int, int) _paintFor = (-1, -1);
+
+    /// <summary>A paint brush's look as edited (colour sRGB 0-1, sizes in metres).</summary>
+    private struct Paint
+    {
+        public int Pattern;
+        public float4 Colour;
+        public float Width, Spacing, LineWidth;
+    }
     private float _spacing = 1f;
     private float _offset;
     private float _scale = 1f;
@@ -78,7 +90,12 @@ public sealed class BrushesPanel
         for (var i = 0; i < count; i++)
         {
             var b = set!.Brushes[i];
-            var label = b.Kind == BrushKind.Stamp ? $"{i + 1}  Stamp, every {b.Spacing / Units:0.##} m" : $"{i + 1}  Sweep: {ProfileName(profiles, b.Outline)}";
+            var label = b.Kind switch
+            {
+                BrushKind.Stamp => $"{i + 1}  Stamp, every {b.Spacing / Units:0.##} m",
+                BrushKind.Paint => $"{i + 1}  Paint: {PatternNames[Math.Min((int)b.Pattern, PatternNames.Length - 1)]}, {b.Width / Units:0.##} m wide",
+                _ => $"{i + 1}  Sweep: {ProfileName(profiles, b.Outline)}",
+            };
 
             if (ImGui.Selectable($"{label}##brush{i}", i == _brush, ImGuiSelectableFlags.None, default))
             {
@@ -124,6 +141,11 @@ public sealed class BrushesPanel
         if (ImGui.Button("New sweep from preset"u8))
             Made(BrushCommands.AddSweep(session, (ProfilePreset)_preset, _width, _height), tool);
 
+        ImGui.SameLine();
+
+        if (ImGui.Button("New paint brush"u8))
+            Made(BrushCommands.AddPaint(session, (PaintPattern)_paint.Pattern, Pack(_paint.Colour), _paint.Width, _paint.Spacing, _paint.LineWidth), tool);
+
         if (_brush < 0 || set is null)
             return;
 
@@ -139,6 +161,9 @@ public sealed class BrushesPanel
 
         if (brush.Kind == BrushKind.Sweep && profiles is not null)
             DrawSweep(session, brush, profiles);
+
+        if (brush.Kind == BrushKind.Paint)
+            DrawPaint(session, brush);
 
         if (brush.Kind == BrushKind.Stamp)
         {
@@ -197,6 +222,52 @@ public sealed class BrushesPanel
         if (done)
             BrushCommands.SetAnchor(session, _brush, new ProfilePoint((int)Math.Round(_lineX * Units), (int)Math.Round(_lineY * Units)));
     }
+
+    /// <summary>A paint brush: pattern, colour and opacity, band width, line spacing and width. Paint goes on the hull and the flair under it.</summary>
+    private void DrawPaint(DesignSession session, HullBrush brush)
+    {
+        if (_paintFor != (_brush, session.Version))
+        {
+            _paint = new Paint
+            {
+                Pattern = (int)brush.Pattern,
+                Colour = Unpack(brush.Colour),
+                Width = (float)(brush.Width / Units),
+                Spacing = (float)(brush.Spacing / Units),
+                LineWidth = (float)(brush.LineWidth / Units),
+            };
+            _paintFor = (_brush, session.Version);
+        }
+
+        DesignerStyle.ItemWidth(140f);
+        var changed = Combo("Pattern"u8, ref _paint.Pattern, PatternNames);
+        DesignerStyle.ItemWidth(200f);
+        ImGui.ColorEdit4("Colour##paint"u8, ref _paint.Colour, ImGuiColorEditFlags.None);
+        changed |= ImGui.IsItemDeactivatedAfterEdit();
+        DesignerStyle.ItemWidth(90f);
+        ImGui.InputFloat("Width m##paint"u8, ref _paint.Width, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None);
+        changed |= ImGui.IsItemDeactivatedAfterEdit();
+        DesignerStyle.ItemWidth(90f);
+        ImGui.InputFloat("Line spacing m"u8, ref _paint.Spacing, 0f, 0f, "%.3f"u8, ImGuiInputTextFlags.None);
+        changed |= ImGui.IsItemDeactivatedAfterEdit();
+        ImGui.SameLine();
+        DesignerStyle.ItemWidth(90f);
+        ImGui.InputFloat("Line width m"u8, ref _paint.LineWidth, 0f, 0f, "%.3f"u8, ImGuiInputTextFlags.None);
+        changed |= ImGui.IsItemDeactivatedAfterEdit();
+
+        if (changed)
+            BrushCommands.SetPaint(session, _brush, (PaintPattern)_paint.Pattern, Pack(_paint.Colour), _paint.Width, _paint.Spacing, _paint.LineWidth);
+
+        ImGui.TextDisabled("Paint lies on the hull and the brushes under it; point sizes widen or narrow the band."u8);
+    }
+
+    private static uint Pack(float4 c)
+    {
+        static uint B(float v) => (uint)Math.Round(Math.Clamp(v, 0f, 1f) * 255);
+        return B(c.X) | (B(c.Y) << 8) | (B(c.Z) << 16) | (B(c.W) << 24);
+    }
+
+    private static float4 Unpack(uint c) => new((c & 0xFF) / 255f, ((c >> 8) & 0xFF) / 255f, ((c >> 16) & 0xFF) / 255f, (c >> 24) / 255f);
 
     private void Made(int index, StrokeTool tool)
     {

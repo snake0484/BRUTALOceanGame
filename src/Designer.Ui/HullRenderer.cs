@@ -17,6 +17,11 @@ namespace BrutalGame.Designer.Ui;
 /// its camera-relative origin (double, then cast) as a push constant. <see cref="Upload"/> runs only when a bake finishes
 /// (on commit), waits for the device and rewrites both buffers; nothing is uploaded per frame. Moves to Ships.Rendering
 /// with the indirect brick arena once ships draw in game.
+/// <para>
+/// Paint and decals are <see cref="HullProjector"/> boxes the fragment shader colours the surface with. Each brick has the
+/// list of boxes that touch its bounds (built on commit), so a fragment tests only those; the boxes themselves are written
+/// camera-relative each frame (centres in double, then cast), a few kilobytes.
+/// </para>
 /// </summary>
 public sealed unsafe class HullRenderer : IDisposable
 {
@@ -24,6 +29,8 @@ public sealed unsafe class HullRenderer : IDisposable
     private const int UniformAlignment = 256;
     private const int PushConstantSize = 48;
     private const int VertexStride = PackedTerrainVertex.SizeInBytes;
+    private const int MaxProjectors = StrokeExpansion.MaxProjectors + 256;
+    private const int ProjectorRegion = MaxProjectors * 96;
 
     private readonly Renderer _renderer;
     private readonly Device _device;
@@ -38,6 +45,11 @@ public sealed unsafe class HullRenderer : IDisposable
     private readonly Vector4[] _palette = new Vector4[PaletteSize];
     private GpuBuffer? _vertices;
     private GpuBuffer? _indices;
+    private readonly GpuBuffer _projectors;
+    private GpuBuffer _lists;
+    private readonly List<HullProjector> _boxes = new();
+    private readonly List<uint> _listScratch = new();
+    private readonly DecalTextures _decals;
 
     private struct Draw
     {
@@ -45,6 +57,22 @@ public sealed unsafe class HullRenderer : IDisposable
         public int FirstIndex;
         public int IndexCount;
         public int VertexOffset;
+        public Vector3d Min;
+        public Vector3d Max;
+        public int FirstBox;
+        public int BoxCount;
+    }
+
+    /// <summary>A projector as the shader reads it (std430, six vec4).</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GpuProjector
+    {
+        public Vector4 Centre;  // xyz camera-relative, w kind
+        public Vector4 U;       // xyz axis / half, w half (metres)
+        public Vector4 V;
+        public Vector4 N;       // w: paint's distance along the stroke at the centre
+        public Vector4 Colour;  // rgb linear, a opacity
+        public Vector4 Params;  // paint: spacing, line width, pattern; decal: w layer
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -63,12 +91,15 @@ public sealed unsafe class HullRenderer : IDisposable
         private Vector4 _element;
     }
 
-    public HullRenderer(Renderer renderer)
+    public HullRenderer(Renderer renderer, DecalTextures decals)
     {
         _renderer = renderer;
+        _decals = decals;
         var context = renderer.Context;
         _device = context.Device;
         _uniforms = new GpuBuffer(context, UniformStride * Renderer.FramesInFlight, VkBufferUsageFlags.UniformBufferBit, true);
+        _projectors = new GpuBuffer(context, ProjectorRegion * Renderer.FramesInFlight, VkBufferUsageFlags.StorageBufferBit, true);
+        _lists = new GpuBuffer(context, 1 << 16, VkBufferUsageFlags.StorageBufferBit, true);
         _setLayout = CreateSetLayout();
         _pool = CreatePool();
         CreateSets();
@@ -88,6 +119,11 @@ public sealed unsafe class HullRenderer : IDisposable
     public long VertexBytes => _vertices?.Size ?? 0;
 
     public long IndexBytes => _indices?.Size ?? 0;
+
+    /// <summary>Paint and decal boxes drawn, and the brick list entries pointing at them.</summary>
+    public int Projectors => _boxes.Count;
+
+    public int ProjectorRefs { get; private set; }
 
     private static int UniformStride => (sizeof(FrameUniforms) + UniformAlignment - 1) / UniformAlignment * UniformAlignment;
 
@@ -136,10 +172,120 @@ public sealed unsafe class HullRenderer : IDisposable
 
             brick.VertexSpan.CopyTo(vertices[v..]);
             brick.IndexSpan.CopyTo(indices[i..]);
-            _draws.Add(new Draw { Origin = brick.Origin, FirstIndex = i, IndexCount = brick.IndexCount, VertexOffset = v });
+            Bounds(brick, out var min, out var max);
+            _draws.Add(new Draw { Origin = brick.Origin, FirstIndex = i, IndexCount = brick.IndexCount, VertexOffset = v, Min = min, Max = max });
             v += brick.VertexCount;
             i += brick.IndexCount;
         }
+
+        BuildLists();
+    }
+
+    /// <summary>Replaces the paint and decal boxes (ship space). Waits for the device: call on commit only.</summary>
+    public void SetProjectors(IReadOnlyList<HullProjector> boxes)
+    {
+        _renderer.WaitIdle();
+        _boxes.Clear();
+
+        for (var i = 0; i < boxes.Count && _boxes.Count < MaxProjectors; i++)
+            _boxes.Add(boxes[i]);
+
+        BuildLists();
+    }
+
+    /// <summary>A brick's ship-space bounds from its packed vertices.</summary>
+    private static void Bounds(HullBrick brick, out Vector3d min, out Vector3d max)
+    {
+        const double scale = HullBins.CellMetres / PackedTerrainVertex.StepsPerVoxel;
+        const double offset = PackedTerrainVertex.OffsetVoxels * PackedTerrainVertex.StepsPerVoxel;
+        int x0 = int.MaxValue, y0 = int.MaxValue, z0 = int.MaxValue, x1 = int.MinValue, y1 = int.MinValue, z1 = int.MinValue;
+
+        foreach (var p in brick.VertexSpan)
+        {
+            (x0, y0, z0) = (Math.Min(x0, p.X), Math.Min(y0, p.Y), Math.Min(z0, p.Z));
+            (x1, y1, z1) = (Math.Max(x1, p.X), Math.Max(y1, p.Y), Math.Max(z1, p.Z));
+        }
+
+        var o = brick.Origin;
+        min = new Vector3d(o.X + (x0 - offset) * scale, o.Y + (y0 - offset) * scale, o.Z + (z0 - offset) * scale);
+        max = new Vector3d(o.X + (x1 - offset) * scale, o.Y + (y1 - offset) * scale, o.Z + (z1 - offset) * scale);
+    }
+
+    /// <summary>Each brick's list of the boxes touching its bounds, in box order (decals later in the list draw on top).</summary>
+    private void BuildLists()
+    {
+        _listScratch.Clear();
+        Span<(Vector3d Min, Vector3d Max)> bounds = _boxes.Count <= 1024 ? stackalloc (Vector3d, Vector3d)[_boxes.Count] : new (Vector3d, Vector3d)[_boxes.Count];
+
+        for (var b = 0; b < _boxes.Count; b++)
+        {
+            _boxes[b].Bounds(out var min, out var max);
+            bounds[b] = (min, max);
+        }
+
+        for (var d = 0; d < _draws.Count; d++)
+        {
+            var draw = _draws[d];
+            draw.FirstBox = _listScratch.Count;
+
+            for (var b = 0; b < _boxes.Count; b++)
+            {
+                var (min, max) = bounds[b];
+
+                if (min.X <= draw.Max.X && max.X >= draw.Min.X && min.Y <= draw.Max.Y && max.Y >= draw.Min.Y && min.Z <= draw.Max.Z && max.Z >= draw.Min.Z)
+                    _listScratch.Add((uint)b);
+            }
+
+            draw.BoxCount = _listScratch.Count - draw.FirstBox;
+            _draws[d] = draw;
+        }
+
+        ProjectorRefs = _listScratch.Count;
+        var bytes = Math.Max(_listScratch.Count, 1) * sizeof(uint);
+
+        if (bytes > _lists.Size)
+        {
+            _renderer.WaitIdle();
+            _lists.Dispose();
+            var size = _lists.Size;
+
+            while (size < bytes)
+                size *= 2;
+
+            _lists = new GpuBuffer(_renderer.Context, size, VkBufferUsageFlags.StorageBufferBit, true);
+            WriteSets();
+        }
+
+        CollectionsMarshal.AsSpan(_listScratch).CopyTo(_lists.AsSpan<uint>());
+    }
+
+    /// <summary>This frame's boxes, camera-relative.</summary>
+    private void WriteProjectors(int frameIndex, double3 camera)
+    {
+        var target = new Span<GpuProjector>((byte*)_projectors.Mapped + frameIndex * ProjectorRegion, MaxProjectors);
+
+        for (var i = 0; i < _boxes.Count; i++)
+        {
+            var b = _boxes[i];
+            target[i] = new GpuProjector
+            {
+                Centre = new Vector4((float)(b.Centre.X - camera.X), (float)(b.Centre.Y - camera.Y), (float)(b.Centre.Z - camera.Z), (float)b.Kind),
+                U = Axis(b.U, b.HalfU),
+                V = Axis(b.V, b.HalfV),
+                N = Axis(b.N, b.HalfN) with { W = (float)b.Along },
+                Colour = Linear(b.Colour),
+                Params = new Vector4(b.Spacing, b.LineWidth, (float)b.Pattern, b.Layer),
+            };
+        }
+    }
+
+    private static Vector4 Axis(Vector3d axis, double half) =>
+        new((float)(axis.X / half), (float)(axis.Y / half), (float)(axis.Z / half), (float)half);
+
+    private static Vector4 Linear(uint srgb)
+    {
+        static float Channel(uint c) => MathF.Pow(c / 255f, 2.2f);
+        return new Vector4(Channel(srgb & 0xFF), Channel((srgb >> 8) & 0xFF), Channel((srgb >> 16) & 0xFF), (srgb >> 24) / 255f);
     }
 
     /// <summary>
@@ -188,6 +334,9 @@ public sealed unsafe class HullRenderer : IDisposable
         for (var p = 0; p < PaletteSize; p++)
             uniforms->Colours[p] = _palette[p];
 
+        if (ghost <= 0f && !glazing)
+            WriteProjectors(frameIndex, camera);
+
         commands.BindPipeline(VkPipelineBindPoint.Graphics, ghost > 0f || glazing ? _ghostPipeline : _pipeline);
         commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex]], []);
         commands.SetViewport(0, [new VkViewport { Width = extent.Width, Height = extent.Height, MaxDepth = 1f }]);
@@ -214,6 +363,8 @@ public sealed unsafe class HullRenderer : IDisposable
         foreach (var draw in _draws)
         {
             push[0] = new Vector4((float)(draw.Origin.X - camera.X), (float)(draw.Origin.Y - camera.Y), (float)(draw.Origin.Z - camera.Z), scale);
+            push[2].Z = ghost > 0f || glazing ? 0f : draw.FirstBox;
+            push[2].W = ghost > 0f || glazing ? 0f : draw.BoxCount;
             commands.PushConstants(_layout, VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit, 0, new ReadOnlySpan<byte>(push, PushConstantSize));
             commands.DrawIndexed(draw.IndexCount, 1, draw.FirstIndex, draw.VertexOffset, 0);
         }
@@ -233,23 +384,29 @@ public sealed unsafe class HullRenderer : IDisposable
         buffer = new GpuBuffer(_renderer.Context, size, usage, hostVisible: true);
     }
 
+    /// <summary>0 frame uniforms, 1 projectors, 2 brick lists, 3 decal images.</summary>
     private VkDescriptorSetLayout CreateSetLayout()
     {
-        var binding = new VkDescriptorSetLayoutBinding
+        var bindings = stackalloc VkDescriptorSetLayoutBinding[]
         {
-            Binding = 0,
-            DescriptorType = VkDescriptorType.UniformBuffer,
-            DescriptorCount = 1,
-            StageFlags = VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit,
+            new() { Binding = 0, DescriptorType = VkDescriptorType.UniformBuffer, DescriptorCount = 1, StageFlags = VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit },
+            new() { Binding = 1, DescriptorType = VkDescriptorType.StorageBuffer, DescriptorCount = 1, StageFlags = VkShaderStageFlags.FragmentBit },
+            new() { Binding = 2, DescriptorType = VkDescriptorType.StorageBuffer, DescriptorCount = 1, StageFlags = VkShaderStageFlags.FragmentBit },
+            new() { Binding = 3, DescriptorType = VkDescriptorType.CombinedImageSampler, DescriptorCount = 1, StageFlags = VkShaderStageFlags.FragmentBit },
         };
 
-        return _device.CreateDescriptorSetLayout(new VkDescriptorSetLayoutCreateInfo { BindingCount = 1, Bindings = &binding }, null);
+        return _device.CreateDescriptorSetLayout(new VkDescriptorSetLayoutCreateInfo { BindingCount = 4, Bindings = bindings }, null);
     }
 
     private VkDescriptorPool CreatePool()
     {
-        var size = new VkDescriptorPoolSize { Type = VkDescriptorType.UniformBuffer, DescriptorCount = Renderer.FramesInFlight };
-        return _device.CreateDescriptorPool(new VkDescriptorPoolCreateInfo { MaxSets = Renderer.FramesInFlight, PoolSizeCount = 1, PoolSizes = &size }, null);
+        var sizes = stackalloc VkDescriptorPoolSize[]
+        {
+            new() { Type = VkDescriptorType.UniformBuffer, DescriptorCount = Renderer.FramesInFlight },
+            new() { Type = VkDescriptorType.StorageBuffer, DescriptorCount = 2 * Renderer.FramesInFlight },
+            new() { Type = VkDescriptorType.CombinedImageSampler, DescriptorCount = Renderer.FramesInFlight },
+        };
+        return _device.CreateDescriptorPool(new VkDescriptorPoolCreateInfo { MaxSets = Renderer.FramesInFlight, PoolSizeCount = 3, PoolSizes = sizes }, null);
     }
 
     private void CreateSets()
@@ -264,25 +421,24 @@ public sealed unsafe class HullRenderer : IDisposable
             _sets
         );
 
+        WriteSets();
+    }
+
+    private void WriteSets()
+    {
         for (var i = 0; i < Renderer.FramesInFlight; i++)
         {
-            var info = new VkDescriptorBufferInfo
-            {
-                Buffer = _uniforms.Handle,
-                Offset = (ByteSize64)(i * UniformStride),
-                Range = (ByteSize64)sizeof(FrameUniforms),
-            };
+            var uniforms = new VkDescriptorBufferInfo { Buffer = _uniforms.Handle, Offset = (ByteSize64)(i * UniformStride), Range = (ByteSize64)sizeof(FrameUniforms) };
+            var projectors = new VkDescriptorBufferInfo { Buffer = _projectors.Handle, Offset = (ByteSize64)(i * ProjectorRegion), Range = (ByteSize64)ProjectorRegion };
+            var lists = new VkDescriptorBufferInfo { Buffer = _lists.Handle, Offset = (ByteSize64)0, Range = (ByteSize64)_lists.Size };
+            var image = new VkDescriptorImageInfo { ImageView = _decals.View, Sampler = _decals.Sampler, ImageLayout = VkImageLayout.ShaderReadOnlyOptimal };
 
             _device.UpdateDescriptorSets(
                 [
-                    new VkWriteDescriptorSet
-                    {
-                        DstSet = _sets[i],
-                        DstBinding = 0,
-                        DescriptorCount = 1,
-                        DescriptorType = VkDescriptorType.UniformBuffer,
-                        BufferInfo = &info,
-                    },
+                    new VkWriteDescriptorSet { DstSet = _sets[i], DstBinding = 0, DescriptorCount = 1, DescriptorType = VkDescriptorType.UniformBuffer, BufferInfo = &uniforms },
+                    new VkWriteDescriptorSet { DstSet = _sets[i], DstBinding = 1, DescriptorCount = 1, DescriptorType = VkDescriptorType.StorageBuffer, BufferInfo = &projectors },
+                    new VkWriteDescriptorSet { DstSet = _sets[i], DstBinding = 2, DescriptorCount = 1, DescriptorType = VkDescriptorType.StorageBuffer, BufferInfo = &lists },
+                    new VkWriteDescriptorSet { DstSet = _sets[i], DstBinding = 3, DescriptorCount = 1, DescriptorType = VkDescriptorType.CombinedImageSampler, ImageInfo = &image },
                 ],
                 []
             );
@@ -390,5 +546,7 @@ public sealed unsafe class HullRenderer : IDisposable
         _vertices?.Dispose();
         _indices?.Dispose();
         _uniforms.Dispose();
+        _projectors.Dispose();
+        _lists.Dispose();
     }
 }

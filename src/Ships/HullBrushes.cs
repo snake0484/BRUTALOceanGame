@@ -2,8 +2,11 @@ using System.Buffers.Binary;
 
 namespace BrutalGame.Ships;
 
-/// <summary>What a brush lays along a stroke: copies of a mesh at a spacing, or a 2D profile swept along the line.</summary>
-public enum BrushKind : byte { Stamp, Sweep }
+/// <summary>What a brush lays along a stroke: copies of a mesh at a spacing, a 2D profile swept along the line, or paint.</summary>
+public enum BrushKind : byte { Stamp, Sweep, Paint }
+
+/// <summary>The pattern a paint brush lays: crossing diagonal lines.</summary>
+public enum PaintPattern : byte { LineCross }
 
 /// <summary>A profile corner, in 1/1024 m (for a brush: X across the stroke, Y out of the hull).</summary>
 public readonly record struct ProfilePoint(int X, int Y);
@@ -12,8 +15,9 @@ public readonly record struct ProfilePoint(int X, int Y);
 /// A hull brush: a repeated design drawn onto the hull along strokes. A stamp copies a mesh from the plan's mesh table
 /// (its +Y out of the hull, +Z along the stroke, origin on the surface) every <see cref="Spacing"/>; a sweep extrudes one
 /// of the plan's brush profiles (<see cref="Outline"/>, a closed outline ≤ 16 corners) along the stroke, the stroke
-/// running through its <see cref="Anchor"/>. <see cref="Scale"/> sizes either. Treated as immutable once in a plan: edits
-/// replace the set.
+/// running through its <see cref="Anchor"/>. A paint brush paints a band of its <see cref="Pattern"/> along the stroke,
+/// <see cref="Width"/> across, onto the hull and any flair under it (drawn only: it changes no shape or mass).
+/// <see cref="Scale"/> sizes any of them. Treated as immutable once in a plan: edits replace the set.
 /// </summary>
 public sealed class HullBrush
 {
@@ -26,13 +30,15 @@ public sealed class HullBrush
     public const ushort UnitScale = 1000;
     public const ushort MinScale = 50;
     public const ushort MaxScale = 10000;
+    public const int MinPaintUnits = 8;
+    public const int MaxPaintUnits = 16 * HullSolid.PositionUnitsPerMetre;
 
     public BrushKind Kind;
 
     /// <summary>Stamp: mesh table slot.</summary>
     public ushort Mesh;
 
-    /// <summary>Stamp: distance between copies along the stroke, 1/1024 m.</summary>
+    /// <summary>Stamp: distance between copies along the stroke; paint: between the pattern's lines (1/1024 m).</summary>
     public int Spacing = HullSolid.PositionUnitsPerMetre;
 
     /// <summary>Sweep: index of the plan profile (a brush profile) it sweeps.</summary>
@@ -44,7 +50,23 @@ public sealed class HullBrush
     /// <summary>Size of the design, per mille (1000 = as modelled).</summary>
     public ushort Scale = UnitScale;
 
-    public HullBrush Clone() => new() { Kind = Kind, Mesh = Mesh, Spacing = Spacing, Outline = Outline, Anchor = Anchor, Scale = Scale };
+    /// <summary>Paint: the pattern.</summary>
+    public PaintPattern Pattern;
+
+    /// <summary>Paint: colour as sRGB bytes, R in the low byte, alpha (opacity) in the high one.</summary>
+    public uint Colour = 0xFF2A2AE6;
+
+    /// <summary>Paint: the band's width across the stroke, 1/1024 m.</summary>
+    public int Width = HullSolid.PositionUnitsPerMetre;
+
+    /// <summary>Paint: the pattern's line width, 1/1024 m.</summary>
+    public int LineWidth = 40;
+
+    public HullBrush Clone() => new()
+    {
+        Kind = Kind, Mesh = Mesh, Spacing = Spacing, Outline = Outline, Anchor = Anchor, Scale = Scale,
+        Pattern = Pattern, Colour = Colour, Width = Width, LineWidth = LineWidth,
+    };
 }
 
 /// <summary>A stroke point on the hull: position (1/1024 m, ship frame), the surface normal (×32767) and the design's size there (per mille).</summary>
@@ -115,15 +137,16 @@ public sealed class HullBrushSet
 {
     public const int MaxBrushes = 64;
     public const int MaxStrokes = 256;
+    private const int BrushBytes = 31;
 
     public readonly List<HullBrush> Brushes = new();
     public readonly List<HullStroke> Strokes = new();
 
     public bool IsEmpty => Brushes.Count == 0 && Strokes.Count == 0;
 
-    /// <summary>Needs the profiles layout (BODY format 10): a sweep, or a size anywhere but the unit.</summary>
+    /// <summary>Needs the profiles layout (BODY format 10): a sweep or paint, or a size anywhere but the unit.</summary>
     public bool NeedsProfiles =>
-        Brushes.Exists(b => b.Kind == BrushKind.Sweep || b.Scale != HullBrush.UnitScale)
+        Brushes.Exists(b => b.Kind != BrushKind.Stamp || b.Scale != HullBrush.UnitScale)
         || Strokes.Exists(s => s.Points.Exists(p => p.Scale != HullBrush.UnitScale));
 
     public HullBrushSet Clone()
@@ -144,14 +167,15 @@ public sealed class HullBrushSet
     // ---- bytes ----
 
     /// <summary>
-    /// Profiles layout: u8 brush count; per brush u8 kind, u16 mesh, i32 spacing, u8 outline, i32 anchor x, y, u16 scale.
+    /// Profiles layout: u8 brush count; per brush u8 kind, u16 mesh, i32 spacing, u8 outline, i32 anchor x, y, u16 scale,
+    /// u8 pattern, u32 colour, i32 width, i32 line width.
     /// u16 stroke count; per stroke u32 id, u16 brush, u8 material, i32 offset, u16 scale, u8 point count, (i32 x, y, z,
     /// i16 nx, ny, nz, u16 scale) each. The inline layout (<paramref name="profiles"/> false, formats 4-9) has per brush u8
     /// kind, u16 mesh, i32 spacing, u8 outline point count (here 0: only stamps of unit size are written so), and no point sizes.
     /// </summary>
     public byte[] ToBytes(bool profiles)
     {
-        var brushBytes = profiles ? 18 : 8;
+        var brushBytes = profiles ? BrushBytes : 8;
         var pointBytes = profiles ? 20 : 18;
         var size = 1 + Brushes.Count * brushBytes + 2 + Strokes.Sum(s => 14 + s.Points.Count * pointBytes);
         var b = new byte[size];
@@ -170,6 +194,10 @@ public sealed class HullBrushSet
                 BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(o + 8), brush.Anchor.X);
                 BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(o + 12), brush.Anchor.Y);
                 BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(o + 16), brush.Scale);
+                b[o + 18] = (byte)brush.Pattern;
+                BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(o + 19), brush.Colour);
+                BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(o + 23), brush.Width);
+                BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(o + 27), brush.LineWidth);
             }
 
             o += brushBytes;
@@ -229,7 +257,7 @@ public sealed class HullBrushSet
 
         for (var i = 0; i < brushes; i++)
         {
-            if (s.Length < o + (profiles ? 18 : 8))
+            if (s.Length < o + (profiles ? BrushBytes : 8))
                 return null;
 
             var brush = new HullBrush
@@ -244,7 +272,11 @@ public sealed class HullBrushSet
                 brush.Outline = s[o + 7];
                 brush.Anchor = new ProfilePoint(BinaryPrimitives.ReadInt32LittleEndian(s[(o + 8)..]), BinaryPrimitives.ReadInt32LittleEndian(s[(o + 12)..]));
                 brush.Scale = BinaryPrimitives.ReadUInt16LittleEndian(s[(o + 16)..]);
-                o += 18;
+                brush.Pattern = (PaintPattern)s[o + 18];
+                brush.Colour = BinaryPrimitives.ReadUInt32LittleEndian(s[(o + 19)..]);
+                brush.Width = BinaryPrimitives.ReadInt32LittleEndian(s[(o + 23)..]);
+                brush.LineWidth = BinaryPrimitives.ReadInt32LittleEndian(s[(o + 27)..]);
+                o += BrushBytes;
             }
             else
             {

@@ -36,6 +36,10 @@ public sealed class DesignerApp : DesignApp
     private readonly PrefabPanel _prefabPanel;
     private readonly InteriorPanel _interiorPanel;
     private readonly WindowsPanel _windowsPanel;
+    private readonly DecalCatalog _decalCatalog;
+    private readonly DecalTextures _decalTextures;
+    private readonly DecalsPanel _decalsPanel;
+    private readonly List<HullProjector> _projectors = new();
     private readonly ProfilesPanel _profilesPanel;
     private readonly Dictionary<ulong, PrefabShape> _shapes = new();
     private readonly List<Document> _docs = new();
@@ -100,7 +104,11 @@ public sealed class DesignerApp : DesignApp
         _baker = new HullBaker(WorkerBudget.Background);
         _surfaceBuilder = new HullSurfaceBuilder(WorkerBudget.Background);
 
-        _hull = new HullRenderer(Renderer);
+        // Decal images are game data only, one texture layer each in catalog order.
+        _decalCatalog = DecalCatalog.Load(dataFolder);
+        _decalTextures = new DecalTextures(Renderer, Enumerable.Range(0, _decalCatalog.All.Count).Select(_decalCatalog.ImagePath).ToList());
+        _decalsPanel = new DecalsPanel(_decalCatalog, _decalTextures.Aspect);
+        _hull = new HullRenderer(Renderer, _decalTextures);
         _lighting = new SceneLighting
         {
             SunDirection = Vector3.Normalize(new Vector3(0.45f, 0.8f, 0.35f)),
@@ -247,6 +255,22 @@ public sealed class DesignerApp : DesignApp
         }
 
         _panels.Strokes.Expanded = expanded;
+
+        // Paint bands, then decals (later ones on top): drawn by the hull shader, nothing baked.
+        _projectors.Clear();
+        _projectors.AddRange(expanded.Projectors);
+
+        if (doc.Decals is not null)
+        {
+            foreach (var decal in doc.Decals.Decals)
+            {
+                if (_decalCatalog.IndexOf(new DefId(decal.Asset)) is var layer and >= 0)
+                    _projectors.Add(decal.Projector(layer));
+            }
+        }
+
+        _hull.SetProjectors(_projectors);
+        (_stats.Projectors, _stats.ProjectorRefs) = (_hull.Projectors, _hull.ProjectorRefs);
         _stats.Generated = expanded.Generated;
         _stats.Unstuck = expanded.Unstuck;
         var densities = _catalog.Densities(doc);
@@ -329,6 +353,7 @@ public sealed class DesignerApp : DesignApp
         _prefabPanel.Selected = 0;
         _interiorPanel.Reset();
         _windowsPanel.Reset();
+        _decalsPanel.Reset();
         _profilesPanel.Reset();
         _seenVersion = -1;
         _bar.Show(document.Key);
@@ -388,6 +413,7 @@ public sealed class DesignerApp : DesignApp
         }
 
         _hull.Upload(bricks);
+        (_stats.Projectors, _stats.ProjectorRefs) = (_hull.Projectors, _hull.ProjectorRefs);
     }
 
     private void PollBake()
@@ -513,8 +539,10 @@ public sealed class DesignerApp : DesignApp
 
             _profilesPanel.Draw(_session);
             _windowsPanel.Draw(_session);
+            _decalsPanel.Draw(_session);
             _interiorPanel.DrawContext(_session, _camera, viewport);
             _windowsPanel.DrawContext(_session, _camera, viewport);
+            _decalsPanel.DrawContext(_session, _camera, viewport);
             _prefabPanel.DrawContext(_session, _camera, viewport);
         }
 
@@ -526,7 +554,7 @@ public sealed class DesignerApp : DesignApp
     /// <summary>A picked node, window, placement or part: it has the gizmo and the menu, not the selected solid.</summary>
     private bool OtherSelected => _active.Component is { } workspace
         ? workspace.SelectedPart != 0 || workspace.SelectedNode >= 0
-        : _interiorPanel.SelectedNode >= 0 || _windowsPanel.Selected != 0 || _prefabPanel.Selected != 0;
+        : _interiorPanel.SelectedNode >= 0 || _windowsPanel.Selected != 0 || _decalsPanel.Selected != 0 || _prefabPanel.Selected != 0;
 
     /// <summary>The Add menu: new things go at the camera target (windows wait for a click on the hull).</summary>
     private void HandleAdd()
@@ -549,6 +577,9 @@ public sealed class DesignerApp : DesignApp
                 break;
             case AddKind.Window:
                 _windowsPanel.StartPlacing();
+                break;
+            case AddKind.Decal:
+                _decalsPanel.StartPlacing();
                 break;
             case AddKind.Chamber or AddKind.Nozzle or AddKind.Injector or AddKind.Igniter when _active.Component is { } component:
                 component.AddPart(_session, _bar.Add switch { AddKind.Chamber => PartKind.Chamber, AddKind.Nozzle => PartKind.Nozzle, AddKind.Injector => PartKind.Injector, _ => PartKind.Igniter });
@@ -590,6 +621,7 @@ public sealed class DesignerApp : DesignApp
         var used = !_tool.Dragging && (workspace is not null
             ? workspace.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
             : _windowsPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
+              || _decalsPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
               || _interiorPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay)
               || _prefabPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay));
         // The interior view leaves the hull alone: no solid picking, gizmos or strokes.
@@ -888,5 +920,6 @@ public sealed class DesignerApp : DesignApp
     {
         _baker.Dispose();
         _hull.Dispose();
+        _decalTextures.Dispose();
     }
 }

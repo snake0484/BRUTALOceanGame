@@ -62,6 +62,8 @@ public enum IssueCode : ushort
     WindowMaterial,
     WallShape,
     RoomWall,
+    DecalCount,
+    DecalShape,
 }
 
 public readonly record struct ValidationIssue(Severity Severity, IssueCode Code, ElementRef Element, int Value);
@@ -124,6 +126,12 @@ public static class PlanValidator
 
                 if (brush.Spacing < HullBrush.MinSpacing || brush.Spacing * HullSolid.MetresPerPositionUnit > PlanLimits.MaxReachMetres)
                     log.Add(Severity.Error, IssueCode.BrushSpacing, default, i);
+            }
+            else if (brush.Kind == BrushKind.Paint)
+            {
+                if (!Enum.IsDefined(brush.Pattern) || brush.Width is < HullBrush.MinPaintUnits or > HullBrush.MaxPaintUnits
+                    || brush.LineWidth is < HullBrush.MinPaintUnits or > HullBrush.MaxPaintUnits || brush.Spacing is < HullBrush.MinPaintUnits or > HullBrush.MaxPaintUnits)
+                    log.Add(Severity.Error, IssueCode.BrushProfile, default, i);
             }
             else if (brush.Kind != BrushKind.Sweep || !IsBrushProfile(doc, brush.Outline)
                 || Math.Abs(brush.Anchor.X) > HullBrush.MaxProfileUnits || Math.Abs(brush.Anchor.Y) > HullBrush.MaxProfileUnits)
@@ -320,6 +328,24 @@ public static class PlanValidator
         }
     }
 
+    /// <summary>Decals: count, a real normal, sizes in range, an image named, within reach.</summary>
+    private static void ValidateDecals(PlanDocument doc, ValidationLog log)
+    {
+        if (doc.Decals is not { } set)
+            return;
+
+        if (set.Decals.Count > HullDecalSet.MaxDecals)
+            log.Add(Severity.Error, IssueCode.DecalCount, default, set.Decals.Count);
+
+        foreach (var d in set.Decals)
+        {
+            if ((d.NX == 0 && d.NY == 0 && d.NZ == 0) || d.Roll >= 24 || d.Asset == 0 || d.Position.Length() > PlanLimits.MaxReachMetres
+                || d.WidthMm is < HullDecal.MinSizeMm or > HullDecal.MaxSizeMm || d.HeightMm is < HullDecal.MinSizeMm or > HullDecal.MaxSizeMm
+                || d.DepthMm is < HullDecal.MinSizeMm or > HullDecal.MaxSizeMm)
+                log.Add(Severity.Error, IssueCode.DecalShape, new ElementRef(ElementKind.Placement, d.Id), d.WidthMm);
+        }
+    }
+
     /// <summary>Windows: count, a real outward normal, sizes in range (0.1-16 m across, pane at least 5 mm, cut at most 8 m deep), within reach, the pane material.</summary>
     private static void ValidateWindows(PlanDocument doc, ValidationLog log)
     {
@@ -449,6 +475,7 @@ public static class PlanValidator
 
         ValidateLayers(doc, log);
         ValidateBrushes(doc, log);
+        ValidateDecals(doc, log);
         ValidateComponents(doc, log);
         ValidateInterior(doc, log);
         ValidateWindows(doc, log);

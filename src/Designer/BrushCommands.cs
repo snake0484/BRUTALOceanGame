@@ -122,6 +122,39 @@ public static class BrushCommands
         return index;
     }
 
+    /// <summary>A new paint brush: a band <paramref name="width"/> metres wide of <paramref name="pattern"/> in <paramref name="colour"/> (sRGB bytes, alpha high); returns its index.</summary>
+    public static int AddPaint(DesignSession session, PaintPattern pattern, uint colour, double width, double spacing, double lineWidth)
+    {
+        var index = -1;
+        Change(session, set =>
+        {
+            index = set.Brushes.Count;
+            set.Brushes.Add(new HullBrush
+            {
+                Kind = BrushKind.Paint,
+                Pattern = pattern,
+                Colour = colour,
+                Width = PaintUnits(width),
+                Spacing = PaintUnits(spacing),
+                LineWidth = PaintUnits(lineWidth),
+            });
+        });
+        return index;
+    }
+
+    /// <summary>Paint brush <paramref name="index"/>'s look: pattern, colour, band width, line spacing and width (metres).</summary>
+    public static bool SetPaint(DesignSession session, int index, PaintPattern pattern, uint colour, double width, double spacing, double lineWidth) =>
+        ChangeBrush(session, index, b =>
+        {
+            b.Pattern = pattern;
+            b.Colour = colour;
+            b.Width = PaintUnits(width);
+            b.Spacing = PaintUnits(spacing);
+            b.LineWidth = PaintUnits(lineWidth);
+        });
+
+    private static int PaintUnits(double metres) => Math.Clamp(Metres(metres), HullBrush.MinPaintUnits, HullBrush.MaxPaintUnits);
+
     /// <summary>Sweep brush <paramref name="index"/> sweeps plan brush profile <paramref name="profile"/> instead.</summary>
     public static bool SetOutline(DesignSession session, int index, int profile) =>
         IsBrushProfile(session, profile) && ChangeBrush(session, index, b => b.Outline = (byte)profile);

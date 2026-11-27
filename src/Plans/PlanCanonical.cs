@@ -60,6 +60,9 @@ public static class PlanCanonical
         if (doc.Windows is { IsEmpty: true })
             doc.Windows = null;
 
+        if (doc.Decals is { IsEmpty: true })
+            doc.Decals = null;
+
         // Prefabs no placement uses are dropped.
         var used = new HashSet<ulong>();
 

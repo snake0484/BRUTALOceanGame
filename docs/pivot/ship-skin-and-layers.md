@@ -53,6 +53,17 @@ outline the stroke runs; the cross in the Brushes panel, or typed) and its **siz
 stroke **point has a size**, blended along the line to the next, so a stroke can taper or swell. Sizes multiply: brush x
 stroke x point. Older plans' inline outlines become plan brush profiles on load, the line at their origin as before.
 
+**Paint and decals (2026-11-27, BODY format 10):** drawn only, never baked, massed or collided. Both are projector boxes
+(`HullProjector`) the hull shader colours the surface with, hull and flair alike, where the surface faces along the box's
+axis. A **paint** brush (pattern: line cross; colour with opacity, band width, line spacing and width) turns a stroke into
+a band: boxes along the stuck path, merged while it runs straight, reaching 1 m out (over raised flair) and 0.1 m in; the
+pattern runs on through the pieces by the distance along the stroke, the strongest paint winning where pieces overlap.
+A **decal** is a game image (`data/decals/decals.json`; players pick only from game data, mods add more) placed like a
+window (Add > Decal, click the hull) with width, height, projection depth, turn and opacity; later decals draw over
+earlier ones and over paint. Images load once into an sRGB texture array (512 px layers, CPU mips). Each brick draw gets
+the list of boxes touching its bounds (built on commit), so a fragment tests only those; the Stats panel shows the box
+and brick-list counts.
+
 ## Interior spaces: hallways (2026-11-27)
 
 User direction: hallways are like pipes, a route of nodes with an area that must fit humanoids, and an adjustable

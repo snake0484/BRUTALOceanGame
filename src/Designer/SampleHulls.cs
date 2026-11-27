@@ -51,6 +51,12 @@ public static class SampleHulls
             [StrokePoint.From(new Vector3d(-6.4, 4.5, -3.5), new Vector3d(-1, 0, 0)), StrokePoint.From(new Vector3d(-6.4, 4.5, 3.5), new Vector3d(-1, 0, 0))], trimMaterial);
         BrushCommands.AddStroke(session, rib,
             [StrokePoint.From(new Vector3d(-1.0, 5.0, 4.2), up), StrokePoint.From(new Vector3d(0, 5.0, 7.0), up), StrokePoint.From(new Vector3d(1.0, 5.0, 9.8), up)], trimMaterial);
+
+        // A band of paint across the top, over the tapered rib, and two decals.
+        var paint = BrushCommands.AddPaint(session, PaintPattern.LineCross, 0xFF1E8CF0, 1.2, 0.2, 0.035);
+        BrushCommands.AddStroke(session, paint, [StrokePoint.From(new Vector3d(-2, 6.4, -2.5), up), StrokePoint.From(new Vector3d(-2, 6.4, 5.0), up)], trimMaterial);
+        DecalCommands.AddDecal(session, new Vector3d(2.5, 6.0, -1.0), up, DefId.FromName("decal.emblem"), new HullDecal { WidthMm = 3000, HeightMm = 3000 });
+        DecalCommands.AddDecal(session, new Vector3d(6.0, 4.0, 0.5), new Vector3d(1, 0, 0), DefId.FromName("decal.roundel"), new HullDecal { WidthMm = 2000, HeightMm = 2000 });
     }
 
     /// <summary>
