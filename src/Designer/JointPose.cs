@@ -27,28 +27,39 @@ public static class JointPose
     /// <summary>Each group's rotation (row-major, 9 per group) and translation; group 0 stays put.</summary>
     public static void Transforms(JointGroups groups, double seconds, double[] rotations, Vector3d[] translations)
     {
-        var done = new bool[groups.Count];
+        Span<double> angles = stackalloc double[groups.Count];
+
+        for (var g = 1; g < groups.Count; g++)
+            angles[g] = Angle(groups.Joints[g - 1], seconds);
+
+        Transforms(groups, angles, rotations, translations);
+    }
+
+    /// <summary>Each group's transform with joint group g at angle <paramref name="angles"/>[g] (radians).</summary>
+    public static void Transforms(JointGroups groups, ReadOnlySpan<double> angles, double[] rotations, Vector3d[] translations)
+    {
+        Span<bool> done = stackalloc bool[groups.Count];
         rotations.AsSpan(0, 9).Clear();
         (rotations[0], rotations[4], rotations[8]) = (1, 1, 1);
         translations[0] = default;
         done[0] = true;
 
         for (var g = 1; g < groups.Count; g++)
-            Resolve(groups, g, seconds, rotations, translations, done, 0);
+            Resolve(groups, g, angles, rotations, translations, done, 0);
     }
 
-    private static void Resolve(JointGroups groups, int g, double seconds, double[] rotations, Vector3d[] translations, bool[] done, int depth)
+    private static void Resolve(JointGroups groups, int g, ReadOnlySpan<double> angles, double[] rotations, Vector3d[] translations, Span<bool> done, int depth)
     {
         if (done[g])
             return;
 
         var joint = groups.Joints[g - 1];
         var parent = depth > HullJointSet.MaxJoints ? 0 : groups.GroupOfJoint(joint.Parent);
-        Resolve(groups, parent, seconds, rotations, translations, done, depth + 1);
+        Resolve(groups, parent, angles, rotations, translations, done, depth + 1);
 
         // Own turn about the pivot: R (p - c) + c.
         Span<double> r = stackalloc double[9];
-        AxisAngle(joint.Axis, Angle(joint, seconds), r);
+        AxisAngle(joint.Axis, angles[g], r);
         var c = joint.Pivot;
         var own = Sub(c, Apply(r, c));
 

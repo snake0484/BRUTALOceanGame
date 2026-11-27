@@ -205,9 +205,12 @@ public sealed partial class DesignerApp
         var count = Math.Min(_groups.Count, HullRenderer.MaxGroups);
 
         if (_poseTranslations.Length != count)
-            (_poseRotations, _poseTranslations) = (new double[count * 9], new Vector3d[count]);
+            (_poseRotations, _poseTranslations, _poseAngles) = (new double[count * 9], new Vector3d[count], new double[count]);
 
-        JointPose.Transforms(_groups, _jointSeconds, _poseRotations, _poseTranslations);
+        for (var g = 1; g < count; g++)
+            _poseAngles[g] = JointPose.Angle(_groups.Joints[g - 1], _jointSeconds);
+
+        JointPose.Transforms(_groups, _poseAngles, _poseRotations, _poseTranslations);
         _hull.SetPose(_poseRotations, _poseTranslations);
     }
 

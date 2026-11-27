@@ -50,6 +50,9 @@ public static class ShipLayout
             [Window][Test bench]
             DockId=0x00000005,6
 
+            [Window][Aero]
+            DockId=0x00000005,7
+
             [Window][Stats]
             DockId=0x00000006,0
 

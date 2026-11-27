@@ -172,6 +172,7 @@ public sealed partial class DesignerApp : DesignApp
     {
         Commit();
         PollBake();
+        PollAero();
         UpdatePose(Math.Clamp(ImGui.GetIO().DeltaTime, 0f, 0.1f));
         _stats.HullGpuMs = _hullScope >= 0 ? Renderer.GpuTimer.Ring(_hullScope).Average : 0f;
 
@@ -575,6 +576,7 @@ public sealed partial class DesignerApp : DesignApp
 
             _profilesPanel.Draw(_session);
             _paintPanel.Draw(_session);
+            DrawAero();
         }
 
         if (ContextBar.BeginShared())
@@ -639,6 +641,9 @@ public sealed partial class DesignerApp : DesignApp
             return;
 
         _hull.SetCutaway(cut.Enabled ? cut.Axis : -1, cut.Offset, cut.Flip);
+
+        if (workspace is null)
+            _aeroPanel.DrawOverlay(_overlay);
         var used = !_tool.Dragging && (workspace is not null
             ? workspace.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
             : _windowsPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
@@ -950,6 +955,7 @@ public sealed partial class DesignerApp : DesignApp
         _surfaceBuilder.Wait();
         _surfaceBuilder.Dispose();
         DisposeGroupBakes();
+        DisposeAero();
         _files.Dispose();
         _profilesPanel.Dispose();
         _paintPanel.Dispose();
