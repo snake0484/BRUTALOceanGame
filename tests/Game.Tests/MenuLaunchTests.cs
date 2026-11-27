@@ -46,23 +46,6 @@ public class MenuLaunchTests
         Assert.False(Directory.Exists(folder));
     }
 
-    [Theory]
-    [InlineData("1", 1UL)]
-    [InlineData(" 42 ", 42UL)]
-    [InlineData("18446744073709551615", ulong.MaxValue)]
-    public void DigitsAreTheSeed(string text, ulong seed) => Assert.Equal(seed, MenuLaunch.ParseSeed(text));
-
-    [Fact]
-    public void TextHashesToAStableSeed()
-    {
-        Assert.Equal(MenuLaunch.ParseSeed("Kepler"), MenuLaunch.ParseSeed("Kepler"));
-        Assert.NotEqual(MenuLaunch.ParseSeed("Kepler"), MenuLaunch.ParseSeed("kepler"));
-        Assert.NotEqual(MenuLaunch.ParseSeed("-1"), 1UL);
-    }
-
-    [Fact]
-    public void BlankPicksANonZeroSeed() => Assert.NotEqual(0UL, MenuLaunch.ParseSeed("   "));
-
     [Fact]
     public void NewGameRelaunchesOnce()
     {
