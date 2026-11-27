@@ -30,8 +30,8 @@ public sealed class CoastBakeTests(ITestOutputHelper output)
 
     internal static readonly SeaTiles Tiles = new(SeaRadius, double3.Normalize(new double3(0.2, 1.0, -0.1)));
 
-    /// <summary>Plane beach across the window at lattice (0, 0): depth falls 1 in 25 along +u to the shoreline 24 m short of its edge.</summary>
-    internal static float BeachDepth(double u) => (float)(0.04 * (1000.0 - u));
+    /// <summary>Plane beach across the window at lattice (0, 0): depth falls 1 in 25 along +u to the shoreline at u = 800, clear of the window's blend.</summary>
+    internal static float BeachDepth(double u) => (float)(0.04 * (800.0 - u));
 
     internal static CoastAtlas Bake(Func<double, double, float> depth, CoastCarrier carrier, int x = 0, int z = 0, CoastBake? bake = null)
     {
@@ -65,7 +65,7 @@ public sealed class CoastBakeTests(ITestOutputHelper output)
         var worst = 0.0;
         var worstDirection = 0.0;
 
-        for (var x = 200f; x <= 800f; x += 100f)
+        for (var x = 100f; x <= 700f; x += 100f)
         {
             var (kx, kz) = Wavevector(atlas, x, 512f);
             var k = Math.Sqrt(kx * kx + kz * kz);
@@ -93,7 +93,7 @@ public sealed class CoastBakeTests(ITestOutputHelper output)
         var worst = 0.0;
         var lagBefore = float.NegativeInfinity;
 
-        for (var x = 100f; x <= 900f; x += 100f)
+        for (var x = 100f; x <= 700f; x += 100f)
         {
             double h = BeachDepth(x);
             var k = Jonswap.WaveNumber(omega, h);
@@ -140,7 +140,7 @@ public sealed class CoastBakeTests(ITestOutputHelper output)
         var started = float.NaN;
         var before = 0f;
 
-        for (var x = 500f; x < 990f; x += 2f)
+        for (var x = 300f; x < 790f; x += 2f)
         {
             atlas.Sample(x, 512f, out var s);
             var raw = SurfCarrier.RawCap(SurfCarrier.Unbroken(carrier.Height, carrier.Omega, s.Depth, s.Amplitude), s.Depth);
@@ -158,19 +158,19 @@ public sealed class CoastBakeTests(ITestOutputHelper output)
             before = s.BreakDistance;
         }
 
-        atlas.Sample(970f, 512f, out var shore);
+        atlas.Sample(770f, 512f, out var shore);
         Assert.False(float.IsNaN(started), "the wave never broke");
-        Assert.Equal(970f - started, shore.BreakDistance, 8f);
+        Assert.Equal(770f - started, shore.BreakDistance, 8f);
     }
 
     [Fact]
     public void BreakerType_FollowsTheBedSlope()
     {
         var carrier = CoastCarrier.From(0f, 0.6f, 1.2f);
-        var gentle = Bake((u, _) => (float)(0.01 * (1000.0 - u)), carrier);
-        var steep = Bake((u, _) => (float)(0.08 * (1000.0 - u)), carrier);
-        gentle.Sample(940f, 512f, out var g);
-        steep.Sample(985f, 512f, out var s);
+        var gentle = Bake((u, _) => (float)(0.01 * (800.0 - u)), carrier);
+        var steep = Bake((u, _) => (float)(0.08 * (800.0 - u)), carrier);
+        gentle.Sample(740f, 512f, out var g);
+        steep.Sample(785f, 512f, out var s);
         output.WriteLine($"plunge: 1 in 100 {g.Plunge:F2} (clock {g.BreakDistance:F0} m), 1 in 12.5 {s.Plunge:F2} (clock {s.BreakDistance:F0} m)");
 
         Assert.True(g.BreakDistance > 1f && s.BreakDistance > 1f);
@@ -216,8 +216,8 @@ public sealed class CoastBakeTests(ITestOutputHelper output)
         bake.Prepare(new PlaneSeabed(Tiles, Tile, (u, _) => BeachDepth(u)), window, key, new CoastAtlas(), breakDepth);
         bake.Run();
         Assert.True(bake.Baked, "a beach");
-        Assert.InRange(bake.ProbeMin, -1.5f, 1f);
-        Assert.InRange(bake.ProbeMax, 38f, 40f);
+        Assert.InRange(bake.ProbeMin, -9f, -7f);
+        Assert.InRange(bake.ProbeMax, 30f, 33f);
 
         bake.Prepare(new PlaneSeabed(Tiles, Tile, (u, _) => BeachDepth(u)), window, key with { Carrier = default }, new CoastAtlas(), breakDepth);
         bake.Run();
