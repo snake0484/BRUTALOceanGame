@@ -24,13 +24,12 @@ data/planets/<body>/
 `body.json` (canonical order, so diffs stay readable):
 ```json
 { "id": "home", "schema": 1, "kind": "temperate-continental", "kindSeed": 1234, "version": 3,
-  "maps":    [ { "name": "uplift", "res": 512, "bind": { "layer": "mountains", "mode": "amplitude", "range": [0, 2] } },
-               { "name": "shape",  "res": 512, "bind": { "mode": "height", "range": [-600, 600] } } ],
+  "maps":    [ { "name": "shape", "mode": "height" } ],
   "sites":   [ { "id": "port-a", "type": "flatten", "pos": [x, y, z], "coreM": 250, "blendM": 150, "heightM": 42.5 } ],
   "markers": [ { "id": "newport", "type": "city", "name": "Newport", "site": "port-a" } ] }
 ```
 
-**Maps.** Per face a vertex grid of (res+1)² u16 values; edge vertices are shared by the two faces (the brush writes both copies), so values are continuous across cube edges. A point picks its face from its position alone (largest axis, fixed tie order), never from the chunk, so every chunk and peer reads the same texels. Stored as 32² tiles; only tiles that differ from the default are written. File: magic `BMAP`, version, res, default, tile count, then (face, tx, ty, 33² u16) per tile; raw, no compression in slice 1 (a fully painted 512 map is 3 MB). res 512 on a 1,000 km body is about 3 km per texel: broad weights and reshaping, not detail.
+**Maps.** Per face a gnomonic vertex grid of (res+1)² int16 codes × scale (0.05 m: ±1.6 km), code 0 = exactly 0; edge vertices are written on both faces, so values are continuous across cube edges. A point picks its face from its position alone (largest axis, fixed tie order), never from the chunk, so every chunk and peer reads the same vertices. File `maps/<name>.bmap`: magic `BMAP`, version, res, scale, tile count, then (face, tx, ty, 32² int16) per non-zero tile, little endian, raw. Built: res 1024 (about 1.5 km per texel on a 1,000 km body; 512 showed bilinear creases under a 10 km brush): broad reshaping, not detail.
 
 Bind modes (decoded value `m` = lerp over `range`, the default code decodes to exactly the neutral value):
 - `amplitude`: the named kind layer's output times `m` (neutral 1). Lets us raise or flatten mountain belts, crater fields, canyons.
