@@ -298,7 +298,7 @@ public static class PlanValidator
             var element = new ElementRef(ElementKind.Solid, wall.Solid);
             var index = doc.Solids.IndexOf(wall.Solid);
 
-            if (!seen.Add(wall.Solid) || index < 0 || !WallGeometry.IsRoom(doc.Solids[index])
+            if (!seen.Add(wall.Solid) || index < 0 || !WallGeometry.IsRoom(doc.Solids[index], doc.Meshes)
                 || wall.Profile >= interior.Profiles.Count || interior.Profiles[wall.Profile].Kind != ProfileKind.Wall || badProfiles.Contains(wall.Profile))
                 log.Add(Severity.Error, IssueCode.RoomWall, element, wall.Profile);
         }

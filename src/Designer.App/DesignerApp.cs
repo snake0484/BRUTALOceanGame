@@ -179,7 +179,7 @@ public sealed class DesignerApp : DesignApp
             ? WindowGeometry.Expand(doc.Windows, new HullSurface(doc.Solids.AsSpan(), doc.Meshes), doc.Layers is not null, doc.Meshes.Count + hallways.Meshes.Count)
             : new WindowGeometry.Expansion();
         // Rooms with a wall profile are cut as their walled shape in their box's place.
-        var walls = WallGeometry.Expand(doc.Interior, doc.Solids.AsSpan(), doc.Meshes.Count + hallways.Meshes.Count + windows.Meshes.Count);
+        var walls = WallGeometry.Expand(doc.Interior, doc.Solids.AsSpan(), doc.Meshes, doc.Meshes.Count + hallways.Meshes.Count + windows.Meshes.Count);
         var meshes = hallways.Meshes.Count + windows.Meshes.Count + walls.Meshes.Count > 0 ? [.. doc.Meshes, .. hallways.Meshes, .. windows.Meshes, .. walls.Meshes] : doc.Meshes;
         var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), meshes, doc.Brushes);
 

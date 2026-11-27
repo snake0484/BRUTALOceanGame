@@ -319,7 +319,7 @@ public sealed class DesignerPanels
                     Designer.LayerCommands.SetRole(session, id, (SolidRole)role);
             }
 
-            if (WallGeometry.IsRoom(solid))
+            if (WallGeometry.IsRoom(solid, session.Doc.Meshes))
                 DrawWalls(session, id);
 
             var material = MaterialSlot(session.Doc, solid.Material);

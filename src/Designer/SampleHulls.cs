@@ -150,18 +150,20 @@ public static class SampleHulls
         InteriorCommands.AddNode(session, id, 1, new Vector3d(1.5, 2.9, 1.5));
     }
 
-    /// <summary>A solid block with a 7 x 3 x 9 m room cut out of it, its walls coved at the ceiling and chamfered at the floor.</summary>
+    /// <summary>A solid block with a 7 x 3 x 6 m room and a 4 m round room cut out of it, walls coved at the ceiling and chamfered at the floor.</summary>
     public static void WallRoom(DesignSession session, DefId alloy)
     {
         const int m = HullSolid.PositionUnitsPerMetre;
         const int h = HullSolid.HalfUnitsPerMetre;
         HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 3 * m, 0, 5 * h, 3 * h, 7 * h, SolidRotation.Identity, alloy);
-        var room = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Subtract, 0, 3 * m, 0, (ushort)(3.5 * h), (ushort)(1.5 * h), (ushort)(4.5 * h), SolidRotation.Identity, alloy);
+        var round = HullCommands.AddSolid(session, SolidShape.Cylinder, SolidOp.Subtract, 0, 3 * m, (int)(3.8 * m), 2 * h, (ushort)(1.5 * h), 2 * h, SolidRotation.Identity, alloy);
+        var room = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Subtract, 0, 3 * m, -3 * m, (ushort)(3.5 * h), (ushort)(1.5 * h), 3 * h, SolidRotation.Identity, alloy);
         var coved = WallGeometry.Preset(WallPreset.Coved, 2.4, 0.6);
         coved[0] = new ProfilePoint(m / 5, 0);
         coved.Insert(1, new ProfilePoint(0, m / 5));
         var wall = InteriorCommands.AddProfile(session, "Coved", coved, kind: ProfileKind.Wall);
         InteriorCommands.SetRoomWall(session, room, wall);
+        InteriorCommands.SetRoomWall(session, round, wall);
     }
 
     private static int FaceAlong(HullMesh mesh, int axis, int sign)

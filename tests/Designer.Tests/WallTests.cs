@@ -92,7 +92,7 @@ public class WallTests
         Assert.DoesNotContain(log.Issues, i => i.Code is IssueCode.RoomWall or IssueCode.WallShape);
 
         // The bake swaps the box for its walled mesh, in place.
-        var expansion = WallGeometry.Expand(back.Interior, back.Solids.AsSpan(), back.Meshes.Count);
+        var expansion = WallGeometry.Expand(back.Interior, back.Solids.AsSpan(), back.Meshes, back.Meshes.Count);
         Assert.Single(expansion.Rooms);
         Assert.Equal((0, room), (expansion.Rooms[0].Index, expansion.Rooms[0].Solid.Id));
         Assert.Equal(SolidShape.Mesh, expansion.Rooms[0].Solid.Shape);
@@ -124,5 +124,81 @@ public class WallTests
         PlanValidator.Validate(doc, log);
         Assert.Contains(log.Issues, i => i.Code == IssueCode.RoomWall && i.Element.Id == 1);
         Assert.Contains(log.Issues, i => i.Code == IssueCode.RoomWall && i.Element.Id == 9);
+    }
+
+    [Fact]
+    public void CylinderRoom_ShrinksItsCircle_OnTheExactSurfacesAngles()
+    {
+        var cylinder = new HullSolid { Shape = SolidShape.Cylinder, Op = SolidOp.Subtract, HalfX = 3 * 256, HalfY = (ushort)(1.5 * 256), HalfZ = 3 * 256, Rotation = SolidRotation.Identity };
+        Assert.True(WallGeometry.IsRoom(cylinder, []));
+        var mesh = WallGeometry.Room(cylinder, WallGeometry.Preset(WallPreset.Chamfered, 2.4, 0.3))!;
+
+        Assert.Equal(MeshIssue.None, MeshValidator.Validate(mesh, out _));
+        var sides = ExactSurface.SidesFor(3.0);
+        Assert.Equal(4 * sides, mesh.Vertices.Length);
+
+        // The floor ring is 0.3 m in; the wall ring is the cylinder itself.
+        var radii = mesh.Vertices.Select(v => Math.Round(Math.Sqrt((double)v.X * v.X + (double)v.Z * v.Z) * K, 2)).Distinct().Order().ToArray();
+        Assert.Equal([2.7, 3.0], radii);
+    }
+
+    /// <summary>An upright L-shaped mesh room 6 x 3 x 6 m (a 3 x 3 notch out of one corner), its floor at local -1.5 m.</summary>
+    private static HullMesh LRoom(int lean = 0)
+    {
+        const int m = HullSolid.PositionUnitsPerMetre;
+        (int X, int Z)[] outline = [(-3 * m, -3 * m), (-3 * m, 3 * m), (0, 3 * m), (0, 0), (3 * m, 0), (3 * m, -3 * m)];
+        var b = new MeshBuilder();
+
+        foreach (var (x, z) in outline)
+            b.AddVertex(new MeshVertex(x, -3 * m / 2, z));
+
+        foreach (var (x, z) in outline)
+            b.AddVertex(new MeshVertex(x + lean, 3 * m / 2, z));
+
+        var n = outline.Length;
+
+        for (var j = 0; j < n; j++)
+            b.AddFace([j, (j + 1) % n, n + (j + 1) % n, n + j], 0);
+
+        b.AddFace(Enumerable.Range(0, n).Reverse().ToArray(), 0);
+        b.AddFace(Enumerable.Range(n, n).ToArray(), 0);
+        return b.Build();
+    }
+
+    [Fact]
+    public void UprightMeshRoom_ShrinksItsOutline_EvenConcave()
+    {
+        var meshes = new List<HullMesh> { LRoom() };
+        Assert.Equal(MeshIssue.None, MeshValidator.Validate(meshes[0], out _));
+        var room = new HullSolid { Shape = SolidShape.Mesh, Op = SolidOp.Subtract, Param = 0, Rotation = SolidRotation.Identity };
+        Assert.True(WallGeometry.IsRoom(room, meshes));
+
+        var mesh = WallGeometry.Room(room, WallGeometry.Preset(WallPreset.Chamfered, 2.4, 0.5), meshes)!;
+        Assert.Equal(MeshIssue.None, MeshValidator.Validate(mesh, out _));
+        Assert.Equal(4 * 6, mesh.Vertices.Length);
+
+        // The floor ring is the L with every wall 0.5 m in: the inner corner steps into the room too.
+        var floor = mesh.Vertices.Where(v => v.Y == mesh.Vertices.Min(w => w.Y)).Select(v => (Math.Round(v.X * K, 2), Math.Round(v.Z * K, 2))).ToHashSet();
+        Assert.Equal([(-2.5, -2.5), (-2.5, 2.5), (-0.5, -0.5), (-0.5, 2.5), (2.5, -2.5), (2.5, -0.5)], floor.Order());
+    }
+
+    [Fact]
+    public void LeaningMesh_IsNoRoom()
+    {
+        var meshes = new List<HullMesh> { LRoom(lean: 512) };
+        var room = new HullSolid { Shape = SolidShape.Mesh, Op = SolidOp.Subtract, Param = 0, Rotation = SolidRotation.Identity };
+        Assert.False(WallGeometry.IsRoom(room, meshes));
+        Assert.False(WallGeometry.IsRoom(room with { Shape = SolidShape.Wedge }, meshes));
+    }
+
+    [Fact]
+    public void TurnedBoxRoom_BakesItsRotation()
+    {
+        var box = new HullSolid { Shape = SolidShape.Box, Op = SolidOp.Subtract, HalfX = 5 * 256, HalfY = 256, HalfZ = 2 * 256, Rotation = SolidRotation.FromSteps(6, 0, 0) };
+        var mesh = WallGeometry.Room(box, WallGeometry.Preset(WallPreset.Straight, 2.0, 0.3))!;
+
+        // Yawed 90 degrees: the 10 m side now runs along Z.
+        Assert.Equal(5.0, mesh.Vertices.Max(v => Math.Abs(v.Z)) * K, 2);
+        Assert.Equal(2.0, mesh.Vertices.Max(v => Math.Abs(v.X)) * K, 2);
     }
 }

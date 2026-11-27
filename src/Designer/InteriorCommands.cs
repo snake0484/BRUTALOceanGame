@@ -224,9 +224,9 @@ public static class InteriorCommands
     /// <summary>Room solid <paramref name="solid"/> (and its mirror partners) uses wall profile <paramref name="profile"/>; -1: plain box walls again.</summary>
     public static bool SetRoomWall(DesignSession session, uint solid, int profile)
     {
-        if (!session.TryGetSolid(solid, out var room) || !WallGeometry.IsRoom(room))
+        if (!session.TryGetSolid(solid, out var room) || !WallGeometry.IsRoom(room, session.Doc.Meshes))
         {
-            LastError = "Only a box room (Room role, or a subtract) can use a wall profile";
+            LastError = "Only an upright room (a box, cylinder or upright mesh with the Room role, or a subtract) can use a wall profile";
             return false;
         }
 

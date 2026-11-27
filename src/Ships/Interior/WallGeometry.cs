@@ -4,8 +4,9 @@ public enum WallPreset : byte { Straight, Chamfered, Coved, Sloped }
 
 /// <summary>
 /// Wall profiles and the rooms that use them, deterministic from the plan. A wall profile is one wall's section from floor
-/// to ceiling (X: how far in from the room's side, Y: height); a box room using one is cut as a stack of rectangles, each
-/// its box inset by the profile at that height, so every wall gets the same section. The profile's lower half keeps to the
+/// to ceiling (X: how far in from the room's side, Y: height); an upright room using one (a box, a cylinder, or a mesh
+/// standing straight up) is cut as a stack of its footprint, each shrunk by the profile at that height, so every wall gets
+/// the same section. The profile's lower half keeps to the
 /// floor and its upper half to the ceiling, so a taller room stretches the middle; a room lower than the profile squeezes
 /// it to fit.
 /// </summary>
@@ -17,6 +18,9 @@ public static class WallGeometry
     /// <summary>The shortest edge a mesh may have (1/1024 m), as the mesh validator wants.</summary>
     private const int MinEdge = 16;
     private const double MinRoomMetres = 0.05;
+
+    /// <summary>The shortest side a shrunk footprint may keep (metres), clear of the mesh edge limit.</summary>
+    private const double MinSide = MinEdge * 1.5 * HullSolid.MetresPerPositionUnit;
 
     /// <summary>2-32 points in range, X ≥ 0, starting on the floor, never going down, ending above it.</summary>
     public static bool IsValid(IReadOnlyList<ProfilePoint> points)
@@ -35,9 +39,17 @@ public static class WallGeometry
         return true;
     }
 
-    /// <summary>A solid that can use a wall profile: a box cut as a room (Room role, or a subtract).</summary>
-    public static bool IsRoom(in HullSolid solid) =>
-        solid.Shape == SolidShape.Box && (SolidRoles.Of(solid) == SolidRole.Room || solid.Op == SolidOp.Subtract);
+    /// <summary>
+    /// A solid that can use a wall profile: cut as a room (Room role, or a subtract) and upright: a box, a cylinder, or a
+    /// mesh standing straight up (<see cref="Prism"/>; <paramref name="meshes"/> is the plan's mesh table).
+    /// </summary>
+    public static bool IsRoom(in HullSolid solid, IReadOnlyList<HullMesh> meshes) =>
+        (SolidRoles.Of(solid) == SolidRole.Room || solid.Op == SolidOp.Subtract) && solid.Shape switch
+        {
+            SolidShape.Box or SolidShape.Cylinder => true,
+            SolidShape.Mesh => solid.Param < meshes.Count && Prism(meshes[solid.Param]) is not null,
+            _ => false,
+        };
 
     /// <summary>A preset wall <paramref name="height"/> metres tall with features <paramref name="size"/> metres across.</summary>
     public static List<ProfilePoint> Preset(WallPreset preset, double height, double size)
@@ -134,7 +146,7 @@ public static class WallGeometry
         return IsValid(wall) ? wall : null;
     }
 
-    /// <summary>The solids every room with a wall profile is cut as instead of its box, keyed by the box's index in <paramref name="solids"/>.</summary>
+    /// <summary>The solids every room with a wall profile is cut as instead of its own shape, keyed by its index in the solid list.</summary>
     public sealed class Expansion
     {
         public readonly List<(int Index, HullSolid Solid)> Rooms = new();
@@ -142,10 +154,11 @@ public static class WallGeometry
     }
 
     /// <summary>
-    /// Each room in <paramref name="interior"/>'s room walls, as a mesh solid in its box's place (same id, op, role, material,
-    /// and position; its rotation baked into the mesh) whose Param indexes a mesh table that already holds <paramref name="meshBase"/> meshes.
+    /// Each room in <paramref name="interior"/>'s room walls, as a mesh solid in its place (same id, op, role, material and
+    /// position; its rotation baked into the mesh) whose Param indexes a mesh table that already holds <paramref name="meshBase"/>
+    /// meshes. <paramref name="meshes"/> is the plan's own table (mesh rooms read their shape from it).
     /// </summary>
-    public static Expansion Expand(HullInterior? interior, ReadOnlySpan<HullSolid> solids, int meshBase)
+    public static Expansion Expand(HullInterior? interior, ReadOnlySpan<HullSolid> solids, IReadOnlyList<HullMesh> meshes, int meshBase)
     {
         var result = new Expansion();
 
@@ -159,7 +172,7 @@ public static class WallGeometry
 
             var index = IndexOf(solids, wall.Solid);
 
-            if (index < 0 || !IsRoom(solids[index]) || Room(solids[index], profile.Points) is not { } mesh)
+            if (index < 0 || !IsRoom(solids[index], meshes) || Room(solids[index], profile.Points, meshes) is not { } mesh)
                 continue;
 
             var solid = solids[index];
@@ -175,16 +188,20 @@ public static class WallGeometry
         return result;
     }
 
-    /// <summary>The room's box inset by <paramref name="wall"/>, about its centre, turned by its rotation. Null when it has no room left.</summary>
-    public static HullMesh? Room(in HullSolid box, IReadOnlyList<ProfilePoint> wall)
+    /// <summary>
+    /// The room inset by <paramref name="wall"/>, about its position, turned by its rotation: a stack of its footprint shrunk
+    /// by the profile at each height. Null when it is not a room shape or has no room left.
+    /// </summary>
+    public static HullMesh? Room(in HullSolid solid, IReadOnlyList<ProfilePoint> wall, IReadOnlyList<HullMesh>? meshes = null)
     {
         const double k = HullSolid.MetresPerPositionUnit;
-        var hx = box.HalfX * HullSolid.MetresPerHalfUnit;
-        var hy = box.HalfY * HullSolid.MetresPerHalfUnit;
-        var hz = box.HalfZ * HullSolid.MetresPerHalfUnit;
-        var room = hy * 2;
+
+        if (Footprint.Of(solid, meshes, wall.Count) is not { } footprint)
+            return null;
+
+        var room = footprint.Ceiling - footprint.Floor;
         var tall = wall[^1].Y * k;
-        var limit = Math.Min(hx, hz) - MinRoomMetres;
+        var limit = footprint.MaxInset;
 
         if (limit <= 0 || room <= 0)
             return null;
@@ -196,7 +213,7 @@ public static class WallGeometry
         {
             var y = p.Y * k;
             var height = room >= tall ? (y <= tall * 0.5 ? y : room - (tall - y)) : y * room / tall;
-            var ring = ((int)Math.Round(Math.Min(p.X * k, limit) / k), (int)Math.Round((height - hy) / k));
+            var ring = ((int)Math.Round(Math.Min(p.X * k, limit) / k), (int)Math.Round((height + footprint.Floor) / k));
 
             if (rings.Count > 0)
             {
@@ -224,41 +241,296 @@ public static class WallGeometry
         if (rings.Count < 2 || rings[^1].Y == rings[0].Y)
             return null;
 
-        // Corners (-X -Z, -X +Z, +X +Z, +X -Z): counter-clockwise seen from above.
         Span<double> m = stackalloc double[9];
-        SolidRotation.Matrix(box.Rotation, m);
+        SolidRotation.Matrix(solid.Rotation, m);
         var builder = new MeshBuilder();
-        var ex = (int)Math.Round(hx / k);
-        var ez = (int)Math.Round(hz / k);
+        var n = footprint.Count;
 
         foreach (var (inset, y) in rings)
         {
-            int x = ex - inset, z = ez - inset;
-            builder.AddVertex(Turned(m, -x, y, -z));
-            builder.AddVertex(Turned(m, -x, y, z));
-            builder.AddVertex(Turned(m, x, y, z));
-            builder.AddVertex(Turned(m, x, y, -z));
+            foreach (var (x, z) in footprint.At(inset * k))
+                builder.AddVertex(Turned(m, (int)Math.Round(x / k), y, (int)Math.Round(z / k)));
         }
 
         for (var r = 0; r + 1 < rings.Count; r++)
         {
-            for (var j = 0; j < 4; j++)
+            for (var j = 0; j < n; j++)
             {
-                var jn = (j + 1) % 4;
-                builder.AddFace([r * 4 + j, r * 4 + jn, (r + 1) * 4 + jn, (r + 1) * 4 + j], 0);
+                var jn = (j + 1) % n;
+                builder.AddFace([r * n + j, r * n + jn, (r + 1) * n + jn, (r + 1) * n + j], 0);
             }
         }
 
-        var top = (rings.Count - 1) * 4;
-        builder.AddFace([3, 2, 1, 0], 0);
-        builder.AddFace([top, top + 1, top + 2, top + 3], 0);
+        var top = (rings.Count - 1) * n;
+        Cap(builder, Enumerable.Range(0, n).Reverse().ToArray());
+        Cap(builder, Enumerable.Range(top, n).ToArray());
         return builder.Build();
+    }
+
+    /// <summary>A cap face, fanned into pieces of at most <see cref="HullMesh.MaxCorners"/> when it has more (only convex footprints do).</summary>
+    private static void Cap(MeshBuilder builder, int[] ring)
+    {
+        if (ring.Length <= HullMesh.MaxCorners)
+        {
+            builder.AddFace(ring, 0);
+            return;
+        }
+
+        for (var a = 1; a < ring.Length - 1;)
+        {
+            var b = Math.Min(a + HullMesh.MaxCorners - 2, ring.Length - 1);
+            var piece = new int[b - a + 2];
+            piece[0] = ring[0];
+
+            for (var i = a; i <= b; i++)
+                piece[i - a + 1] = ring[i];
+
+            builder.AddFace(piece, 0);
+            a = b;
+        }
     }
 
     private static MeshVertex Turned(ReadOnlySpan<double> m, int x, int y, int z) => new(
         (int)Math.Round(m[0] * x + m[1] * y + m[2] * z),
         (int)Math.Round(m[3] * x + m[4] * y + m[5] * z),
         (int)Math.Round(m[6] * x + m[7] * y + m[8] * z));
+
+    /// <summary>
+    /// A room's plan in its own frame (metres): an outline round local Y, wound clockwise in X-Z (as the box's corners
+    /// -X-Z, -X+Z, +X+Z, +X-Z), that shrinks inward by an inset, between floor and ceiling heights. A circle shrinks its
+    /// radius; a polygon moves each side in, corners mitred.
+    /// </summary>
+    private sealed class Footprint
+    {
+        public double Floor;
+        public double Ceiling;
+        public double MaxInset;
+        public double Radius;
+        public int Sides;
+        public (double X, double Z)[]? Outline;
+        private (double X, double Z)[]? _miters;
+
+        public int Count => Outline?.Length ?? Sides;
+
+        public static Footprint? Of(in HullSolid solid, IReadOnlyList<HullMesh>? meshes, int rings)
+        {
+            const double k = HullSolid.MetresPerPositionUnit;
+            var hy = solid.HalfY * HullSolid.MetresPerHalfUnit;
+
+            switch (solid.Shape)
+            {
+                case SolidShape.Box:
+                {
+                    var hx = solid.HalfX * HullSolid.MetresPerHalfUnit;
+                    var hz = solid.HalfZ * HullSolid.MetresPerHalfUnit;
+                    return Polygon([(-hx, -hz), (-hx, hz), (hx, hz), (hx, -hz)], -hy, hy);
+                }
+                case SolidShape.Cylinder:
+                {
+                    // The exact surface's sides, as many as the mesh limits allow for this many rings.
+                    var r = solid.HalfX * HullSolid.MetresPerHalfUnit;
+                    var sides = Math.Min(ExactSurface.SidesFor(r), Math.Min(HullMesh.MaxVertices / rings, (HullMesh.MaxFaces - 64) / Math.Max(1, rings - 1)));
+                    var smallest = Math.Max(MinRoomMetres, MinSide * sides / Math.Tau);
+                    return sides < 8 ? null : new Footprint { Floor = -hy, Ceiling = hy, Radius = r, Sides = sides, MaxInset = r - smallest };
+                }
+                case SolidShape.Mesh when meshes is not null && solid.Param < meshes.Count:
+                {
+                    if (Prism(meshes[solid.Param]) is not { } prism)
+                        return null;
+
+                    var outline = prism.Outline.Select(p => (p.X * k, p.Z * k)).ToArray();
+                    return Polygon(outline, prism.Floor * k, prism.Ceiling * k);
+                }
+                default:
+                    return null;
+            }
+        }
+
+        /// <summary>The outline shrunk by <paramref name="inset"/> metres.</summary>
+        public (double X, double Z)[] At(double inset)
+        {
+            var ring = new (double X, double Z)[Count];
+
+            if (Outline is null)
+            {
+                // The exact cylinder's angles, in the clockwise order.
+                for (var i = 0; i < Sides; i++)
+                {
+                    var angle = (Sides - i) % Sides * Math.Tau / Sides;
+                    ring[i] = (Math.Cos(angle) * (Radius - inset), Math.Sin(angle) * (Radius - inset));
+                }
+
+                return ring;
+            }
+
+            for (var i = 0; i < ring.Length; i++)
+                ring[i] = (Outline[i].X + _miters![i].X * inset, Outline[i].Z + _miters[i].Z * inset);
+
+            return ring;
+        }
+
+        private static Footprint? Polygon((double X, double Z)[] outline, double floor, double ceiling)
+        {
+            var n = outline.Length;
+            var area = 0.0;
+
+            for (var i = 0; i < n; i++)
+                area += outline[i].X * outline[(i + 1) % n].Z - outline[(i + 1) % n].X * outline[i].Z;
+
+            if (Math.Abs(area) < 1e-9)
+                return null;
+
+            if (area > 0)
+                Array.Reverse(outline);
+
+            // Each corner moves along its mitre: inward normals (right of each side) summed over 1 + their dot.
+            var miters = new (double X, double Z)[n];
+
+            for (var i = 0; i < n; i++)
+            {
+                var (ax, az) = Inward(outline[(i + n - 1) % n], outline[i]);
+                var (bx, bz) = Inward(outline[i], outline[(i + 1) % n]);
+                var dot = 1.0 + ax * bx + az * bz;
+
+                if (dot < 1e-3)
+                    return null;
+
+                miters[i] = ((ax + bx) / dot, (az + bz) / dot);
+            }
+
+            var footprint = new Footprint { Floor = floor, Ceiling = ceiling, Outline = outline, _miters = miters };
+            footprint.MaxInset = footprint.Deepest();
+            return footprint;
+        }
+
+        private static (double X, double Z) Inward((double X, double Z) a, (double X, double Z) b)
+        {
+            double dx = b.X - a.X, dz = b.Z - a.Z, length = Math.Sqrt(dx * dx + dz * dz);
+            return length < 1e-9 ? (0, 0) : (dz / length, -dx / length);
+        }
+
+        /// <summary>The deepest inset that keeps every side at least <see cref="MinRoomMetres"/> × 2 long (shorter sides half their length) and the outline simple.</summary>
+        private double Deepest()
+        {
+            var outline = Outline!;
+            var n = outline.Length;
+            var deepest = double.MaxValue;
+
+            for (var i = 0; i < n; i++)
+            {
+                var j = (i + 1) % n;
+                double dx = outline[j].X - outline[i].X, dz = outline[j].Z - outline[i].Z, length = Math.Sqrt(dx * dx + dz * dz);
+                var shrink = -((_miters![j].X - _miters[i].X) * dx + (_miters[j].Z - _miters[i].Z) * dz) / length;
+                var keep = Math.Max(MinSide, Math.Min(MinRoomMetres * 2, length * 0.5));
+
+                if (shrink > 1e-9)
+                    deepest = Math.Min(deepest, Math.Max(0, (length - keep) / shrink));
+            }
+
+            if (deepest == double.MaxValue)
+                deepest = 0;
+
+            // A concave outline can fold over itself before a side runs out: back off until it does not.
+            if (!Simple(At(deepest)))
+            {
+                double lo = 0, hi = deepest;
+
+                for (var step = 0; step < 24; step++)
+                {
+                    var mid = (lo + hi) * 0.5;
+                    (lo, hi) = Simple(At(mid)) ? (mid, hi) : (lo, mid);
+                }
+
+                deepest = lo;
+            }
+
+            return deepest;
+        }
+
+        private static bool Simple((double X, double Z)[] ring)
+        {
+            var n = ring.Length;
+
+            for (var i = 0; i < n; i++)
+            {
+                for (var j = i + 2; j < n; j++)
+                {
+                    if (i == 0 && j == n - 1)
+                        continue;
+
+                    if (Cross(ring[i], ring[(i + 1) % n], ring[j], ring[(j + 1) % n]))
+                        return false;
+                }
+            }
+
+            return true;
+        }
+
+        private static bool Cross((double X, double Z) a, (double X, double Z) b, (double X, double Z) c, (double X, double Z) d)
+        {
+            static double Side((double X, double Z) p, (double X, double Z) q, (double X, double Z) r) => (q.X - p.X) * (r.Z - p.Z) - (q.Z - p.Z) * (r.X - p.X);
+            return Side(a, b, c) * Side(a, b, d) < 0 && Side(c, d, a) * Side(c, d, b) < 0;
+        }
+    }
+
+    /// <summary>
+    /// A mesh standing upright in its own frame, read as a room: every vertex on its floor or ceiling, one floor face and
+    /// one ceiling face, each ceiling corner straight above a floor corner, not smoothed. Its floor outline and heights
+    /// (1/1024 m), or null.
+    /// </summary>
+    public static (List<(int X, int Z)> Outline, int Floor, int Ceiling)? Prism(HullMesh mesh)
+    {
+        if (mesh.SubdivLevels > 0 || mesh.Vertices.Length < 6)
+            return null;
+
+        int floor = int.MaxValue, ceiling = int.MinValue;
+
+        foreach (var v in mesh.Vertices)
+            (floor, ceiling) = (Math.Min(floor, v.Y), Math.Max(ceiling, v.Y));
+
+        if (ceiling - floor < MinEdge)
+            return null;
+
+        int bottom = -1, top = -1;
+
+        for (var f = 0; f < mesh.FaceCount; f++)
+        {
+            var onFloor = true;
+            var onCeiling = true;
+
+            foreach (var c in mesh.Face(f))
+            {
+                onFloor &= mesh.Vertices[c].Y == floor;
+                onCeiling &= mesh.Vertices[c].Y == ceiling;
+            }
+
+            if (onFloor)
+                (bottom, top) = (bottom < 0 ? f : -2, top);
+            else if (onCeiling)
+                (bottom, top) = (bottom, top < 0 ? f : -2);
+        }
+
+        if (bottom < 0 || top < 0)
+            return null;
+
+        var outline = new List<(int X, int Z)>();
+
+        foreach (var c in mesh.Face(bottom))
+            outline.Add((mesh.Vertices[c].X, mesh.Vertices[c].Z));
+
+        var corners = new HashSet<(int, int)>(outline);
+
+        if (corners.Count != outline.Count || mesh.Face(top).Length != outline.Count)
+            return null;
+
+        foreach (var v in mesh.Vertices)
+        {
+            if ((v.Y != floor && v.Y != ceiling) || !corners.Contains((v.X, v.Z)))
+                return null;
+        }
+
+        return (outline, floor, ceiling);
+    }
 
     private static int IndexOf(ReadOnlySpan<HullSolid> solids, uint id)
     {

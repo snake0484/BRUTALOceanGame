@@ -85,7 +85,7 @@ profile; any angle, each hallway with its own gravity (a ship may have several),
   inset by the profile at each height, its rotation baked in). The profile's lower half keeps to the floor and its upper
   half to the ceiling, so taller rooms stretch the middle; lower rooms squeeze it. Presets: straight, chamfered, coved,
   sloped; "Make a wall from half of it" takes a hallway outline's right side. Library files carry the kind.
-  `--demo-walls` shows a coved room.
+  `--demo-walls` shows a coved box room and a round one.
 - **Interior view** (top bar, or I): the hull is drawn see-through (both sides of every face, blended, no depth
   writes, stronger edge on) and locked: hull panels greyed, no solid picking, gizmos, strokes or hull keys. Hallways,
   placed components and parts inside stay editable.
