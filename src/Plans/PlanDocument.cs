@@ -104,6 +104,9 @@ public sealed class PlanDocument
     /// <summary>Interior spaces (hallways); null when there are none.</summary>
     public HullInterior? Interior;
 
+    /// <summary>Windows on the hull; null when there are none.</summary>
+    public HullWindowSet? Windows;
+
     /// <summary>
     /// The component prefabs this plan places, by plan hash, carried inside it so a file or a network send is complete.
     /// Each is a component-level plan, never edited from here (a new design is a new hash).
@@ -150,6 +153,12 @@ public sealed class PlanDocument
             foreach (var h in Interior.Hallways)
                 Meta.NextId = Math.Max(Meta.NextId, h.Id + 1);
         }
+
+        if (Windows is not null)
+        {
+            foreach (var w in Windows.Windows)
+                Meta.NextId = Math.Max(Meta.NextId, w.Id + 1);
+        }
     }
 
     public PlanDocument Clone()
@@ -170,6 +179,7 @@ public sealed class PlanDocument
         copy.Brushes = Brushes?.Clone();
         copy.Components = Components?.Clone();
         copy.Interior = Interior?.Clone();
+        copy.Windows = Windows?.Clone();
 
         // Prefabs are never edited in place: sharing them is safe.
         foreach (var (hash, prefab) in Prefabs)

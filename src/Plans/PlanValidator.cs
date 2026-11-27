@@ -57,6 +57,9 @@ public enum IssueCode : ushort
     HallwayTooSmall,
     HallwayMaterial,
     HallwayShaft,
+    WindowCount,
+    WindowShape,
+    WindowMaterial,
 }
 
 public readonly record struct ValidationIssue(Severity Severity, IssueCode Code, ElementRef Element, int Value);
@@ -252,6 +255,31 @@ public static class PlanValidator
         }
     }
 
+    /// <summary>Windows: count, a real outward normal, sizes in range (0.1-16 m across, pane at least 5 mm, cut at most 8 m deep), within reach, the pane material.</summary>
+    private static void ValidateWindows(PlanDocument doc, ValidationLog log)
+    {
+        var windows = doc.Windows;
+
+        if (windows is null)
+            return;
+
+        if (windows.Windows.Count > HullWindowSet.MaxWindows)
+            log.Add(Severity.Error, IssueCode.WindowCount, default, windows.Windows.Count);
+
+        foreach (var w in windows.Windows)
+        {
+            var element = new ElementRef(ElementKind.Placement, w.Id);
+
+            if ((w.NX == 0 && w.NY == 0 && w.NZ == 0) || !Enum.IsDefined(w.Shape) || w.Roll >= 24
+                || w.WidthMm is < HullWindow.MinSizeMm or > HullWindow.MaxSizeMm || w.HeightMm is < HullWindow.MinSizeMm or > HullWindow.MaxSizeMm
+                || w.ThicknessMm < HullWindow.MinThicknessMm || w.DepthMm > HullWindow.MaxDepthMm || w.Position.Length() > PlanLimits.MaxReachMetres)
+                log.Add(Severity.Error, IssueCode.WindowShape, element, w.WidthMm);
+
+            if (w.Material >= doc.Materials.Count)
+                log.Add(Severity.Error, IssueCode.WindowMaterial, element, w.Material);
+        }
+    }
+
     private static long ProfileArea(List<ProfilePoint> profile)
     {
         var area = 0L;
@@ -358,6 +386,7 @@ public static class PlanValidator
         ValidateBrushes(doc, log);
         ValidateComponents(doc, log);
         ValidateInterior(doc, log);
+        ValidateWindows(doc, log);
         var ids = new HashSet<uint>(solids.Length);
         var inBounds = true;
         var anyAdd = false;

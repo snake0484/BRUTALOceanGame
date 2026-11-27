@@ -62,7 +62,8 @@ public enum PlanFormatError
 /// in the oldest format that holds it, so older plans keep their bytes and hashes. Format 4 (brushes) writes the mesh
 /// table, <c>u8 layered</c> and the layering block when set, then the <see cref="HullBrushSet"/> block. Format 5 (components)
 /// writes <c>u8 flags</c> (1 layered, 2 brushes), those blocks, then the component block and the prefabs. Format 6
-/// (interiors) adds flag 4 and the <see cref="HullInterior"/> block between the brushes and the components.
+/// (interiors) adds flag 4 and the <see cref="HullInterior"/> block between the brushes and the components; format 7
+/// (windows) adds flag 8 and the <see cref="HullWindowSet"/> block after the interior.
 /// </summary>
 public static class PlanFormat
 {
@@ -72,9 +73,11 @@ public static class PlanFormat
     public const ushort BrushFormat = 4;
     public const ushort ComponentFormat = 5;
     public const ushort InteriorFormat = 6;
+    public const ushort WindowFormat = 7;
 
     public static ushort FormatOf(PlanDocument doc) =>
-        doc.Interior is { IsEmpty: false } ? InteriorFormat
+        doc.Windows is { IsEmpty: false } ? WindowFormat
+        : doc.Interior is { IsEmpty: false } ? InteriorFormat
         : doc.Components is { IsEmpty: false } || doc.Prefabs.Count > 0 ? ComponentFormat
         : doc.Brushes is { IsEmpty: false } ? BrushFormat : doc.Layers is not null ? LayerFormat : doc.Meshes.Count > 0 ? MeshFormat : Format;
     public const uint BodyTag = 'B' | ('O' << 8) | ('D' << 16) | ((uint)'Y' << 24);
@@ -97,10 +100,11 @@ public static class PlanFormat
         var format = FormatOf(doc);
         var layers = doc.Layers?.ToBytes() ?? [];
         var brushes = format >= BrushFormat && doc.Brushes is { IsEmpty: false } ? doc.Brushes.ToBytes() : [];
-        var interior = format == InteriorFormat ? doc.Interior!.ToBytes() : [];
+        var interior = format >= InteriorFormat && doc.Interior is { IsEmpty: false } ? doc.Interior.ToBytes() : [];
+        var windows = format == WindowFormat ? doc.Windows!.ToBytes() : [];
         var components = format >= ComponentFormat ? ComponentBlock(doc) : [];
         var bytes = new byte[BodyFixedBytes + doc.Materials.Count * 4 + n * HullSolid.SizeInBytes + (format >= MeshFormat ? 4 + meshBytes : 0)
-            + (format >= BrushFormat ? 1 : 0) + layers.Length + brushes.Length + interior.Length + components.Length];
+            + (format >= BrushFormat ? 1 : 0) + layers.Length + brushes.Length + interior.Length + windows.Length + components.Length];
         var w = new Writer(bytes);
 
         w.U8((byte)doc.Class);
@@ -165,11 +169,12 @@ public static class PlanFormat
         if (format == BrushFormat)
             w.U8(doc.Layers is not null ? (byte)1 : (byte)0);
         else if (format >= ComponentFormat)
-            w.U8((byte)((doc.Layers is not null ? 1 : 0) | (brushes.Length > 0 ? 2 : 0) | (interior.Length > 0 ? 4 : 0)));
+            w.U8((byte)((doc.Layers is not null ? 1 : 0) | (brushes.Length > 0 ? 2 : 0) | (interior.Length > 0 ? 4 : 0) | (windows.Length > 0 ? 8 : 0)));
 
         w.Bytes(layers);
         w.Bytes(brushes);
         w.Bytes(interior);
+        w.Bytes(windows);
         w.Bytes(components);
         return bytes;
     }
@@ -260,7 +265,7 @@ public static class PlanFormat
         if (header.Magic != PlanHeader.MagicValue)
             return PlanFormatError.BadMagic;
 
-        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat or InteriorFormat))
+        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat or InteriorFormat or WindowFormat))
             return PlanFormatError.UnsupportedFormat;
 
         if (header.Level is not (PlanLevel.Ship or PlanLevel.HullChunk or PlanLevel.Component))
@@ -440,6 +445,7 @@ public static class PlanFormat
         var layered = format == LayerFormat;
         var hasBrushes = format == BrushFormat;
         var hasInterior = false;
+        var hasWindows = false;
 
         if (format == BrushFormat)
         {
@@ -450,12 +456,13 @@ public static class PlanFormat
         }
         else if (format >= ComponentFormat)
         {
-            if (!r.U8(out var flags) || flags > (format == InteriorFormat ? 7 : 3))
+            if (!r.U8(out var flags) || flags > (format == WindowFormat ? 15 : format == InteriorFormat ? 7 : 3))
                 return false;
 
             layered = (flags & 1) != 0;
             hasBrushes = (flags & 2) != 0;
             hasInterior = (flags & 4) != 0;
+            hasWindows = (flags & 8) != 0;
         }
 
         if (layered)
@@ -482,6 +489,14 @@ public static class PlanFormat
                 return false;
         }
 
+        if (hasWindows)
+        {
+            doc.Windows = r.Windows();
+
+            if (doc.Windows is null)
+                return false;
+        }
+
         if (format >= ComponentFormat)
         {
             doc.Components = r.Components();
@@ -491,7 +506,7 @@ public static class PlanFormat
 
             for (var i = 0; i < prefabs; i++)
             {
-                if (!r.U16(out var prefabFormat) || !r.U32(out var length) || length > r.Remaining || prefabFormat > InteriorFormat)
+                if (!r.U16(out var prefabFormat) || !r.U32(out var length) || length > r.Remaining || prefabFormat > WindowFormat)
                     return false;
 
                 var body = r.Take((int)length);
@@ -677,6 +692,13 @@ public static class PlanFormat
             var bytes = _bytes.Slice(_offset, length).ToArray();
             _offset += length;
             return bytes;
+        }
+
+        public HullWindowSet? Windows()
+        {
+            var windows = HullWindowSet.Read(_bytes[_offset..], out var consumed);
+            _offset += consumed;
+            return windows;
         }
 
         public HullInterior? Interior()

@@ -9,13 +9,13 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 sunDir;
     vec4 skyZenith;
     vec4 skyHorizon;
-    vec4 palette[32];
+    vec4 palette[32]; // rgb linear albedo, a = opacity (below 1: glazing, drawn in the blended glazing pass)
 } frame;
 
 layout(push_constant) uniform Brick {
     vec4 originScale;
     vec4 clipPlane;   // camera-relative: fragments with dot(xyz, pos) > w are cut away (cutaway view)
-    vec4 ghost;       // x = opacity of the see-through interior view (0: solid)
+    vec4 ghost;       // x = opacity of the see-through interior view (0: solid); y = 1: the glazing pass
 } brick;
 
 layout(location = 0) in vec3 vRelPos;
@@ -48,6 +48,28 @@ void main()
         outColor = vec4(pow(acesFit(tint), vec3(1.0 / 2.2)), clamp(alpha, 0.0, 0.85));
         return;
     }
+
+    // Glazing: the opaque pass leaves it out; the glazing pass draws only it, tinted, with a glint where it turns edge on.
+    float opacity = frame.palette[min(vMaterial, 31u)].a;
+
+    if (brick.ghost.y > 0.5)
+    {
+        if (opacity >= 0.999)
+            discard;
+
+        vec3 gn = normalize(cross(dFdx(vRelPos), dFdy(vRelPos)));
+        vec3 gv = normalize(-vRelPos);
+        float facing = abs(dot(gn, gv));
+        vec3 gl = frame.sunDir.xyz;
+        float glint = pow(max(dot(reflect(-gv, dot(gn, gv) < 0.0 ? -gn : gn), gl), 0.0), 64.0) * frame.sunDir.w;
+        vec3 tint = frame.palette[min(vMaterial, 31u)].rgb * (0.4 + 0.6 * facing) + glint;
+        float alpha = opacity + (1.0 - opacity) * pow(1.0 - facing, 4.0) * 0.6 + glint * 0.5;
+        outColor = vec4(pow(acesFit(tint), vec3(1.0 / 2.2)), clamp(alpha, 0.0, 0.95));
+        return;
+    }
+
+    if (opacity < 0.999)
+        discard;
 
     // Back faces show only through a cutaway: there they cap the cut solid, flat and darkened in the material's colour.
     if (!gl_FrontFacing)

@@ -35,6 +35,7 @@ public sealed class DesignerApp : DesignApp
     private readonly PrefabLibrary _library;
     private readonly PrefabPanel _prefabPanel;
     private readonly InteriorPanel _interiorPanel;
+    private readonly WindowsPanel _windowsPanel;
     private readonly Dictionary<ulong, PrefabShape> _shapes = new();
     private readonly List<Document> _docs = new();
     private readonly List<DocumentTab> _tabs = new();
@@ -92,6 +93,7 @@ public sealed class DesignerApp : DesignApp
         RefreshLibrary();
         _prefabPanel = new PrefabPanel(_library, Shape);
         _interiorPanel = new InteriorPanel(_catalog);
+        _windowsPanel = new WindowsPanel(_catalog);
         _saveOnExit = saveOnExit;
         _baker = new HullBaker(WorkerBudget.Background);
         _surfaceBuilder = new HullSurfaceBuilder(WorkerBudget.Background);
@@ -169,8 +171,20 @@ public sealed class DesignerApp : DesignApp
         _stats.Hash = PlanFormat.HashBody(copy);
         // Hallways become room cuts and stairs after the plan's solids; their meshes follow the plan's in the table.
         var hallways = HallwayGeometry.Expand(doc.Interior, doc.Layers is not null, doc.Meshes.Count);
-        var meshes = hallways.Meshes.Count > 0 ? [.. doc.Meshes, .. hallways.Meshes] : doc.Meshes;
+
+        // Windows stick to the hull: their openings are cuts like the hallways', their panes flair (drawn as built, weighed).
+        var windows = doc.Windows is { IsEmpty: false }
+            ? WindowGeometry.Expand(doc.Windows, new HullSurface(doc.Solids.AsSpan(), doc.Meshes), doc.Layers is not null, doc.Meshes.Count + hallways.Meshes.Count)
+            : new WindowGeometry.Expansion();
+        var meshes = hallways.Meshes.Count + windows.Meshes.Count > 0 ? [.. doc.Meshes, .. hallways.Meshes, .. windows.Meshes] : doc.Meshes;
         var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), meshes, doc.Brushes);
+
+        if (windows.Panes.Count > 0)
+        {
+            expanded.Solids = [.. expanded.Solids, .. windows.Panes];
+            expanded.Generated += windows.Panes.Count;
+        }
+
         var extras = new List<SurfacePolygon>();
         var solids = new List<HullSolid>(doc.Solids.Count + hallways.Solids.Count + 16);
         var palette = new List<DefId>(doc.Materials);
@@ -179,6 +193,7 @@ public sealed class DesignerApp : DesignApp
             solids.Add(s);
 
         solids.AddRange(hallways.Solids);
+        solids.AddRange(windows.Cuts);
 
         _stats.ComponentsKg = 0;
 
@@ -306,6 +321,7 @@ public sealed class DesignerApp : DesignApp
         _meshEdit.Enabled = false;
         _prefabPanel.Selected = 0;
         _interiorPanel.Reset();
+        _windowsPanel.Reset();
         _seenVersion = -1;
         _bar.Show(document.Key);
 
@@ -418,8 +434,8 @@ public sealed class DesignerApp : DesignApp
 
     private void UpdatePalette(IReadOnlyList<DefId> materials)
     {
-        Span<Vector3> colours = stackalloc Vector3[HullRenderer.PaletteSize];
-        colours.Fill(new Vector3(0.6f));
+        Span<Vector4> colours = stackalloc Vector4[HullRenderer.PaletteSize];
+        colours.Fill(new Vector4(0.6f, 0.6f, 0.6f, 1f));
 
         for (var i = 0; i < Math.Min(materials.Count, colours.Length); i++)
         {
@@ -427,7 +443,7 @@ public sealed class DesignerApp : DesignApp
                 continue;
 
             var rgb = material.ColourRgb;
-            colours[i] = new Vector3(Linear((rgb >> 16) & 255), Linear((rgb >> 8) & 255), Linear(rgb & 255));
+            colours[i] = new Vector4(Linear((rgb >> 16) & 255), Linear((rgb >> 8) & 255), Linear(rgb & 255), material.Opacity);
         }
 
         _hull.SetPalette(colours);
@@ -463,7 +479,7 @@ public sealed class DesignerApp : DesignApp
 
         _panels.Locked = InteriorView;
         _panels.Draw(_session, _stats, _meshEdit);
-        _viewOverlay.Draw(_session, _meshEdit, _camera, editable: !InteriorView);
+        _viewOverlay.Draw(_session, _meshEdit, _camera, _panels.Cutaway, editable: !InteriorView);
         var workspace = _active.Component;
         _tool.Mode = _bar.Mode;
         _prefabPanel.Mode = _bar.Mode;
@@ -478,6 +494,7 @@ public sealed class DesignerApp : DesignApp
             _prefabPanel.Draw(_session);
             _interiorPanel.Mode = _bar.Mode;
             _interiorPanel.Draw(_session, _panels.PlaceAt);
+            _windowsPanel.Draw(_session);
         }
     }
 
@@ -503,10 +520,15 @@ public sealed class DesignerApp : DesignApp
     {
         var workspace = _active.Component;
         var cut = _panels.Cutaway;
+
+        if (_viewOverlay.PickingCut && PickCut(io, viewport, mouseFree, cut))
+            return;
+
         _hull.SetCutaway(cut.Enabled ? cut.Axis : -1, cut.Offset, cut.Flip);
         var used = !_tool.Dragging && (workspace is not null
             ? workspace.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
-            : _interiorPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay)
+            : _windowsPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
+              || _interiorPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay)
               || _prefabPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay));
         // The interior view leaves the hull alone: no solid picking, gizmos or strokes.
         if (InteriorView)
@@ -514,6 +536,50 @@ public sealed class DesignerApp : DesignApp
 
         var strokeUsedMouse = !used && !_tool.Dragging && workspace is null && _panels.Strokes.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay);
         _tool.Update(_session, _meshEdit, _camera, viewport, viewProj, mouseFree && !strokeUsedMouse && !used, _overlay);
+    }
+
+    /// <summary>
+    /// The cutaway's Pick: a click on the hull puts the plane just inside the point clicked (on the cut axis). The ray passes
+    /// through hull already cut away, so it lands on what is shown. Esc or a click off the hull cancels.
+    /// </summary>
+    private bool PickCut(ImGuiIOPtr io, Vector2 viewport, bool mouseFree, Cutaway cut)
+    {
+        if (ImGui.IsKeyPressed(ImGuiKey.Escape, false))
+        {
+            _viewOverlay.PickingCut = false;
+            return true;
+        }
+
+        if (!mouseFree || !ImGui.IsMouseClicked(ImGuiMouseButton.Left, false))
+            return false;
+
+        _viewOverlay.PickingCut = false;
+        var surface = new HullSurface(_session.Doc.Solids.AsSpan(), _session.Doc.Meshes);
+        Vector3d origin = _camera.Position;
+        Vector3d ray = _camera.Ray(new Vector2(io.MousePos.X, io.MousePos.Y), viewport);
+        var sign = cut.Flip ? -1.0 : 1.0;
+
+        for (var hop = 0; hop < 32 && surface.Raycast(origin, ray, 4000, out var t, out _); hop++)
+        {
+            var hit = HullSurface.Add(origin, HullSurface.Scale(ray, t));
+            var along = cut.Axis == 0 ? hit.X : cut.Axis == 1 ? hit.Y : hit.Z;
+
+            if (!cut.Enabled || sign * along <= sign * cut.Offset + 1e-6)
+            {
+                // 1 mm into the hull from the point clicked: a face square to the axis is cut away (showing what is
+                // behind it) rather than sitting exactly on the plane and flickering.
+                along -= sign * 1e-3;
+                cut.Offset = (float)along;
+                cut.Enabled = true;
+                _stats.Message = $"Cut at {along:F2} m";
+                return true;
+            }
+
+            origin = HullSurface.Add(hit, HullSurface.Scale(ray, 1e-3));
+        }
+
+        _stats.Message = "Pick missed the hull";
+        return true;
     }
 
     protected override void RecordScene(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj)
@@ -526,6 +592,8 @@ public sealed class DesignerApp : DesignApp
     {
         if (InteriorView)
             _hull.RecordGhost(commands, frameIndex, extent, viewProj, _camera.Position, _lighting, GhostOpacity);
+        else
+            _hull.RecordGlazing(commands, frameIndex, extent, viewProj, _camera.Position, _lighting);
     }
 
     private void HandleFiles()
@@ -642,6 +710,9 @@ public sealed class DesignerApp : DesignApp
         FrameHull();
     }
 
+    /// <summary>--demo-windows: the demo hull with three windows.</summary>
+    public static bool WindowDemo;
+
     /// <summary>--demo-brushes: the demo hull dressed with brush strokes.</summary>
     public static bool BrushDemo;
 
@@ -654,7 +725,9 @@ public sealed class DesignerApp : DesignApp
     {
         var all = _catalog.All;
 
-        if (BrushDemo)
+        if (WindowDemo)
+            SampleHulls.WindowedHull(_session, all[0].Id, all[Math.Min(2, all.Count - 1)].Id, DefId.FromName("mat.glazing.soda"), DefId.FromName("mat.glazing.alon"));
+        else if (BrushDemo)
             SampleHulls.BrushedHull(_session, all[0].Id, all[Math.Min(2, all.Count - 1)].Id);
         else if (mesh)
             SampleHulls.MeshHull(_session, all[0].Id, all[Math.Min(2, all.Count - 1)].Id);

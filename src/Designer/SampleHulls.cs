@@ -130,6 +130,15 @@ public static class SampleHulls
         InteriorCommands.SetHallway(session, id, h => h.Nodes.Add(ComponentCommands.Quantise(new Vector3d(1.5, 2.9, 1.5))));
     }
 
+    /// <summary>The box-and-cylinder hull with windows: a rounded one in the port side, a porthole in the front, and one curving over the cylinder's top.</summary>
+    public static void WindowedHull(DesignSession session, DefId hull, DefId trim, DefId glass, DefId alon)
+    {
+        HollowBoxWithCylinder(session, hull, trim);
+        WindowCommands.AddWindow(session, new Vector3d(-6, 3.2, 0), new Vector3d(-1, 0, 0), glass, new Ships.Interior.HullWindow { Shape = Ships.Interior.WindowShape.Rounded, WidthMm = 3000, HeightMm = 1400 });
+        WindowCommands.AddWindow(session, new Vector3d(3.5, 3.5, -4), new Vector3d(0, 0, -1), glass, new Ships.Interior.HullWindow { Shape = Ships.Interior.WindowShape.Circle, WidthMm = 1200, HeightMm = 1200 });
+        WindowCommands.AddWindow(session, new Vector3d(0, 4.5, 7.5), new Vector3d(0, 1, 0), alon, new Ships.Interior.HullWindow { Shape = Ships.Interior.WindowShape.Rectangle, WidthMm = 2200, HeightMm = 2400, DepthMm = 2000 });
+    }
+
     /// <summary>A solid block (no layers) with the same hallway, so the exact cut and the stairs show in a cutaway.</summary>
     public static void HallwayBlock(DesignSession session, DefId alloy)
     {

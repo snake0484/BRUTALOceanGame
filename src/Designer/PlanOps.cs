@@ -6,7 +6,7 @@ using BrutalGame.Ships.Interior;
 
 namespace BrutalGame.Designer;
 
-public enum OpKind : byte { InsertSolid, RemoveSolid, ModifySolid, AddMaterial, RemoveMaterial, AddMesh, RemoveMesh, SetMesh, SetLayering, SetBrushes, SetComponents, AddPrefab, RemovePrefab, SetInterior }
+public enum OpKind : byte { InsertSolid, RemoveSolid, ModifySolid, AddMaterial, RemoveMaterial, AddMesh, RemoveMesh, SetMesh, SetLayering, SetBrushes, SetComponents, AddPrefab, RemovePrefab, SetInterior, SetWindows }
 
 /// <summary>
 /// One invertible edit, a solid-list diff (ship-hulls "undo = solid list diffs"). Insert and Remove carry the solid and
@@ -31,6 +31,8 @@ public struct PlanOp : IUndoOp<PlanOp, PlanDocument>
     public ComponentData? ComponentsAfter;
     public HullInterior? InteriorBefore;
     public HullInterior? InteriorAfter;
+    public HullWindowSet? WindowsBefore;
+    public HullWindowSet? WindowsAfter;
     public PlanDocument? Prefab;
     public ulong PrefabHash;
 
@@ -43,6 +45,9 @@ public struct PlanOp : IUndoOp<PlanOp, PlanDocument>
 
     /// <summary>Replaces the plan's interior (hallways). Snapshots are never mutated after this.</summary>
     public static PlanOp SetInterior(HullInterior? before, HullInterior? after) => new() { Kind = OpKind.SetInterior, InteriorBefore = before, InteriorAfter = after };
+
+    /// <summary>Replaces the plan's windows. Snapshots are never mutated after this.</summary>
+    public static PlanOp SetWindows(HullWindowSet? before, HullWindowSet? after) => new() { Kind = OpKind.SetWindows, WindowsBefore = before, WindowsAfter = after };
 
     public static PlanOp AddPrefab(ulong hash, PlanDocument prefab) => new() { Kind = OpKind.AddPrefab, PrefabHash = hash, Prefab = prefab };
 
@@ -71,6 +76,7 @@ public struct PlanOp : IUndoOp<PlanOp, PlanDocument>
         OpKind.SetBrushes => SetBrushes(BrushesAfter, BrushesBefore),
         OpKind.SetComponents => SetComponents(ComponentsAfter, ComponentsBefore),
         OpKind.SetInterior => SetInterior(InteriorAfter, InteriorBefore),
+        OpKind.SetWindows => SetWindows(WindowsAfter, WindowsBefore),
         OpKind.AddPrefab => new PlanOp { Kind = OpKind.RemovePrefab, PrefabHash = PrefabHash, Prefab = Prefab },
         OpKind.RemovePrefab => AddPrefab(PrefabHash, Prefab!),
         _ => SetMesh(Index, MeshAfter!, MeshBefore!),
@@ -127,6 +133,17 @@ public struct PlanOp : IUndoOp<PlanOp, PlanDocument>
             case OpKind.SetComponents:
                 Expect(ReferenceEquals(doc.Components, ComponentsBefore));
                 doc.Components = ComponentsAfter;
+                break;
+            case OpKind.SetWindows:
+                Expect(ReferenceEquals(doc.Windows, WindowsBefore));
+                doc.Windows = WindowsAfter;
+
+                if (WindowsAfter is not null)
+                {
+                    foreach (var w in WindowsAfter.Windows)
+                        doc.Meta.NextId = Math.Max(doc.Meta.NextId, w.Id + 1);
+                }
+
                 break;
             case OpKind.SetInterior:
                 Expect(ReferenceEquals(doc.Interior, InteriorBefore));

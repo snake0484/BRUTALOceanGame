@@ -20,28 +20,105 @@ public sealed class ViewportOverlay
 
     private static ImGuiWindowFlags Floating => ViewAxes.Floating;
 
-    /// <summary>Call after the dock space, inside the designer style.</summary>
-    /// <summary>Call after the dock space, inside the designer style. <paramref name="editable"/> false (the interior view) hides the edit mode bar.</summary>
-    public void Draw(DesignSession session, MeshEditState edit, OrbitCamera camera, bool editable = true)
+    private static readonly string[] CutAxes = ["X", "Y", "Z"];
+    private float _barBottom;
+
+    /// <summary>Set while the cutaway's Pick is armed: the next click on the hull puts the cut plane there (the host does the ray).</summary>
+    public bool PickingCut;
+
+    /// <summary>
+    /// Call after the dock space, inside the designer style. <paramref name="editable"/> false (the interior view) hides the
+    /// edit mode bar. The cutaway bar sits under it.
+    /// </summary>
+    public void Draw(DesignSession session, MeshEditState edit, OrbitCamera camera, Cutaway cut, bool editable = true)
     {
         DesignerStyle.CentralRect(out var min, out var max);
+        _barBottom = min.Y + Pad;
 
         if (editable)
-            DrawModes(session, edit, min);
+            _barBottom = DrawModes(session, edit, min) + Px(6f);
 
+        DrawCutaway(cut, new float2(min.X + Pad, _barBottom));
         _axes.Draw(camera);
+    }
+
+    // ---- cutaway bar ----
+
+    /// <summary>Cut (on or off), the axis, flip, the plane's position (drag the number, or Pick and click the hull).</summary>
+    private void DrawCutaway(Cutaway cut, float2 at)
+    {
+        ImGui.SetNextWindowPos(at);
+
+        if (!ImGui.Begin("##cutaway"u8, Floating))
+        {
+            ImGui.End();
+            return;
+        }
+
+        var size = ImGui.GetFrameHeight() * 1.25f;
+
+        if (Toggle("Cut"u8, cut.Enabled, new float2(0, size)))
+        {
+            cut.Enabled = !cut.Enabled;
+            PickingCut &= cut.Enabled;
+        }
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Cutaway: hide the hull past a plane to see inside"u8);
+
+        ImGui.SameLine(0, Px(8f));
+
+        for (var a = 0; a < 3; a++)
+        {
+            if (a > 0)
+                ImGui.SameLine(0, 1f);
+
+            if (Toggle($"{CutAxes[a]}##cutaxis", cut.Axis == a, new float2(size, size)))
+                (cut.Axis, cut.Enabled) = (a, true);
+        }
+
+        ImGui.SameLine(0, Px(8f));
+
+        if (Toggle("Flip"u8, cut.Flip, new float2(0, size)))
+            cut.Flip = !cut.Flip;
+
+        ImGui.SameLine(0, Px(8f));
+        ImGui.SetNextItemWidth(Px(110f));
+        ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, new float2(Px(8f), (size - ImGui.GetFontSize()) * 0.5f));
+
+        if (ImGui.DragFloat("##cutoffset"u8, ref cut.Offset, 0.05f, -2000f, 2000f, "%.2f m"u8, ImGuiSliderFlags.None))
+            cut.Enabled = true;
+
+        ImGui.PopStyleVar(1);
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("The plane's position along the axis: drag, or double-click to type"u8);
+
+        ImGui.SameLine(0, Px(8f));
+
+        if (Toggle("Pick"u8, PickingCut, new float2(0, size)))
+            PickingCut = !PickingCut;
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Click the hull to put the cut there"u8);
+
+        ImGui.End();
+
+        if (PickingCut)
+            ImGui.SetTooltip("Click the hull to place the cut (Esc cancels)"u8);
     }
 
     // ---- edit mode bar ----
 
-    private static void DrawModes(DesignSession session, MeshEditState edit, float2 min)
+    /// <summary>Draws the bar; returns its bottom edge (pixels).</summary>
+    private static float DrawModes(DesignSession session, MeshEditState edit, float2 min)
     {
         ImGui.SetNextWindowPos(new float2(min.X + Pad, min.Y + Pad));
 
         if (!ImGui.Begin("##editmodes"u8, Floating))
         {
             ImGui.End();
-            return;
+            return min.Y + Pad;
         }
 
         var canEdit = session.Selection.Primary != 0;
@@ -78,7 +155,9 @@ public sealed class ViewportOverlay
         }
 
         ImGui.EndDisabled();
+        var bottom = ImGui.GetWindowPos().Y + ImGui.GetWindowSize().Y;
         ImGui.End();
+        return bottom;
     }
 
     private static bool Toggle(ImString label, bool on, float2 size)

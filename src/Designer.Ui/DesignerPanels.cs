@@ -376,7 +376,7 @@ public sealed class DesignerPanels
                 ImGui.Text($"components: {stats.ComponentsKg:F1} kg of parts and pipes");
 
             if (stats.Generated > 0 || stats.Unstuck > 0)
-                ImGui.Text($"brushes: {stats.Generated} pieces, {stats.FlairKg:F0} kg, {stats.Unstuck} points off the hull");
+                ImGui.Text($"brushes and window panes: {stats.Generated} pieces, {stats.FlairKg:F0} kg, {stats.Unstuck} points off the hull");
 
             ImGui.Checkbox("Show grid mesh (debug)"u8, ref stats.ShowGrid);
             ImGui.Text($"plan hash {stats.Hash}  undo {session.Undo.UndoCount} redo {session.Undo.RedoCount}");

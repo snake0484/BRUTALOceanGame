@@ -75,6 +75,33 @@ profile; any angle, each hallway with its own gravity (a ship may have several),
   writes, stronger edge on) and locked: hull panels greyed, no solid picking, gizmos, strokes or hull keys. Hallways,
   placed components and parts inside stay editable.
 
+## Windows (2026-11-27)
+
+User direction: windows deform to the hull shape, cut away the hull to the interior spaces, and come in different
+materials.
+
+- **Data** (`Ships/Interior/HullWindows.cs`, plan BODY format 7, flag 8 after the interior): per window an id, centre
+  (1/1024 m), outward normal, shape (rectangle, rounded, circle, arch), width and height, roll (15° steps), cut depth,
+  pane thickness (at least 16 mm, the mesh's shortest edge) and pane material.
+- **Expansion** (`WindowGeometry.Expand`, deterministic): the centre sticks to the hull along the normal each rebuild
+  (cast back from 2 m out, like strokes). The opening is a straight prism of the outline from 0.5 m outside to the cut
+  depth in: Room role on a layered hull (it reaches the interior with its own wall stack), Subtract otherwise, with the
+  hallway cuts. The pane is rings of the outline (one per 0.2 m of half size, thinned so the smallest keeps 2 cm edges),
+  every point cast onto the hull, thickened inward, closed, triangles only: its outer face is the hull's own shape. Panes
+  are flair: drawn from their own geometry and weighed (volume x density), not cut and not in the grid.
+- **Glazing:** materials carry an `opacity` (data); below 1 they are see-through. Window glass, borosilicate,
+  polycarbonate, transparent aluminium (ALON) and sapphire use handbook densities and strengths. The opaque pass skips
+  them; a blended pass after it draws them tinted, stronger edge on, with a sun glint. Any material can be a pane.
+- **Designer:** the Windows panel (ship tabs): Place window, then click the hull (a live outline shows where); list;
+  shape, size, cut depth, pane thickness, turn, material (glazings first), Move (click the hull again), Delete. The
+  outline is drawn on the hull. `--demo-windows`: a rounded side window, a porthole and one curving over the cylinder.
+
+## Cutaway bar (2026-11-27)
+
+The cutaway moved from the Hull layers panel into the view, under the edit mode bar: Cut, X / Y / Z, Flip, the position
+(drag, or double-click to type) and Pick: click the hull and the plane goes 1 mm inside the point clicked (the ray goes
+through hull already cut away, so it lands on what is shown).
+
 ## Limits of this slice
 
 - Depth comes from the solids' combined distance field: where two skin solids only touch (not overlap), a thin
@@ -87,3 +114,5 @@ profile; any angle, each hallway with its own gravity (a ship may have several),
 - Strokes are not mirrored by the mirror modes yet.
 - Hallways: no ladders or zero-g crawlways for shafts yet; doors and hatches where a hallway meets a room are the next
   step; the room graph (atmosphere, crew nav) does not read hallways yet.
+- Windows: panes are not in the grid yet (no collision or air seal from them); the opening's depth is set by hand, not
+  found from the interior; mirror modes do not mirror windows.

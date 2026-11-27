@@ -92,11 +92,20 @@ public sealed unsafe class HullRenderer : IDisposable
     private static int UniformStride => (sizeof(FrameUniforms) + UniformAlignment - 1) / UniformAlignment * UniformAlignment;
 
     /// <summary>Linear albedo per plan material index; entries past <see cref="PaletteSize"/> are ignored.</summary>
-    public void SetPalette(ReadOnlySpan<Vector3> colours)
+    /// <summary>Linear albedo and opacity per plan material index (opacity below 1: glazing, drawn by <see cref="RecordGlazing"/>).</summary>
+    public void SetPalette(ReadOnlySpan<Vector4> colours)
     {
+        HasGlazing = false;
+
         for (var i = 0; i < Math.Min(colours.Length, PaletteSize); i++)
-            _palette[i] = new Vector4(colours[i], 1f);
+        {
+            _palette[i] = colours[i];
+            HasGlazing |= colours[i].W < 0.999f;
+        }
     }
+
+    /// <summary>Some palette entry is see-through, so the glazing pass has something to draw.</summary>
+    public bool HasGlazing { get; private set; }
 
     /// <summary>Replaces the drawn bricks. Waits for the device: call on commit only.</summary>
     public void Upload(IReadOnlyList<HullBrick> bricks)
@@ -158,7 +167,14 @@ public sealed unsafe class HullRenderer : IDisposable
     public void RecordGhost(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, double3 camera, in SceneLighting lighting, float opacity) =>
         Record(commands, frameIndex, extent, viewProj, camera, lighting, Math.Max(opacity, 1e-3f));
 
-    private void Record(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, double3 camera, in SceneLighting lighting, float ghost)
+    /// <summary>Windows and other glazing: blended, writing no depth, after the opaque hull in the second scene pass.</summary>
+    public void RecordGlazing(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, double3 camera, in SceneLighting lighting)
+    {
+        if (HasGlazing)
+            Record(commands, frameIndex, extent, viewProj, camera, lighting, 0f, glazing: true);
+    }
+
+    private void Record(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, double3 camera, in SceneLighting lighting, float ghost, bool glazing = false)
     {
         if (_draws.Count == 0)
             return;
@@ -172,7 +188,7 @@ public sealed unsafe class HullRenderer : IDisposable
         for (var p = 0; p < PaletteSize; p++)
             uniforms->Colours[p] = _palette[p];
 
-        commands.BindPipeline(VkPipelineBindPoint.Graphics, ghost > 0f ? _ghostPipeline : _pipeline);
+        commands.BindPipeline(VkPipelineBindPoint.Graphics, ghost > 0f || glazing ? _ghostPipeline : _pipeline);
         commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex]], []);
         commands.SetViewport(0, [new VkViewport { Width = extent.Width, Height = extent.Height, MaxDepth = 1f }]);
         commands.SetScissor(0, [new VkRect2D { Extent = extent }]);
@@ -193,7 +209,7 @@ public sealed unsafe class HullRenderer : IDisposable
 
         var push = stackalloc Vector4[3];
         push[1] = clip;
-        push[2] = new Vector4(ghost, 0f, 0f, 0f);
+        push[2] = new Vector4(ghost, glazing ? 1f : 0f, 0f, 0f);
 
         foreach (var draw in _draws)
         {
