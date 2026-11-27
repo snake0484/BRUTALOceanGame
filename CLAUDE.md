@@ -62,7 +62,8 @@ Core pillars, in priority order:
 
 - Cartesian voxels axis-aligned in the rotating planet frame: 1 m voxels, 32³ chunks, the existing octree, Surface Nets, skirts, 12 B packed vertex. Only the SDF changes (local height − radial altitude).
 - Voxels only in a shell around the surface; one octree to LOD 12, then a baked cube-sphere impostor.
-- The untouched surface is a pure function of seed + position: no edits, no storage. Nothing stored but edits (op replay, as now); busy chunks compact to snapshots.
+- **The world is authored (D83).** Each body's seed is fixed by us, never entered by the player. The seed gives the generated layout; we then change it by hand (cities, mining outposts, reshaped land) and ship that as an authored layer in `data/`.
+- The untouched surface is a pure function of seed + authored layer + position: no storage beyond the shipped layer, and it shows at every level of detail. Player edits are a separate layer on top: nothing stored but edits (op replay, as now); busy chunks compact to snapshots.
 - Detail ladder by distance: point of light > disc > impostor with atmosphere and rough outline > function terrain (each LOD evaluates only the noise octaves it can show) > edits, applied only close up (op radius ≥ 2 voxels at that LOD, within the edit radius).
 - Radial gravity, per-position up. Atmosphere: exponential density per body for drag.
 
