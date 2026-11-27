@@ -450,10 +450,20 @@ public sealed class DesignerApp : DesignApp
         _bar.Draw(_tabs, _active.Key);
     }
 
+    /// <summary>The interior view: the hull see-through and locked, the things inside it (hallways, placements, parts) still editable.</summary>
+    private bool InteriorView => _bar.InteriorView;
+
+    /// <summary>Opacity of the hull in the interior view.</summary>
+    private const float GhostOpacity = 0.18f;
+
     protected override void DrawPanels(ImGuiIOPtr io)
     {
+        if (InteriorView)
+            _meshEdit.Enabled = false;
+
+        _panels.Locked = InteriorView;
         _panels.Draw(_session, _stats, _meshEdit);
-        _viewOverlay.Draw(_session, _meshEdit, _camera);
+        _viewOverlay.Draw(_session, _meshEdit, _camera, editable: !InteriorView);
         var workspace = _active.Component;
         _tool.Mode = _bar.Mode;
         _prefabPanel.Mode = _bar.Mode;
@@ -498,12 +508,25 @@ public sealed class DesignerApp : DesignApp
             ? workspace.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
             : _interiorPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay)
               || _prefabPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay));
+        // The interior view leaves the hull alone: no solid picking, gizmos or strokes.
+        if (InteriorView)
+            return;
+
         var strokeUsedMouse = !used && !_tool.Dragging && workspace is null && _panels.Strokes.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay);
         _tool.Update(_session, _meshEdit, _camera, viewport, viewProj, mouseFree && !strokeUsedMouse && !used, _overlay);
     }
 
-    protected override void RecordScene(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj) =>
-        _hull.Record(commands, frameIndex, extent, viewProj, _camera.Position, _lighting);
+    protected override void RecordScene(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj)
+    {
+        if (!InteriorView)
+            _hull.Record(commands, frameIndex, extent, viewProj, _camera.Position, _lighting);
+    }
+
+    protected override void RecordAfterScene(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj)
+    {
+        if (InteriorView)
+            _hull.RecordGhost(commands, frameIndex, extent, viewProj, _camera.Position, _lighting, GhostOpacity);
+    }
 
     private void HandleFiles()
     {
@@ -684,10 +707,16 @@ public sealed class DesignerApp : DesignApp
             PickAndOpen();
         else if (!ctrl && key is GlfwKey.W or GlfwKey.E or GlfwKey.R)
             _bar.Mode = key == GlfwKey.W ? GizmoMode.Move : key == GlfwKey.E ? GizmoMode.Rotate : GizmoMode.Scale;
+        else if (!ctrl && key == GlfwKey.I)
+            _bar.InteriorView = !_bar.InteriorView;
         else if (key == GlfwKey.Delete && _active.Component is { } component)
         {
-            if (!component.DeleteSelected(_session))
+            if (!component.DeleteSelected(_session) && !InteriorView)
                 HullCommands.DeleteSelected(_session);
+        }
+        else if (InteriorView && (key is GlfwKey.Delete or GlfwKey.Tab or GlfwKey.Number1 or GlfwKey.Number2 or GlfwKey.Number3 || (ctrl && key == GlfwKey.D)))
+        {
+            // The hull is locked in the interior view.
         }
         else if (ctrl && key == GlfwKey.Z)
             _session.UndoLast();

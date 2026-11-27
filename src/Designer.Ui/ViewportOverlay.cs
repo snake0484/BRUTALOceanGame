@@ -21,10 +21,14 @@ public sealed class ViewportOverlay
     private static ImGuiWindowFlags Floating => ViewAxes.Floating;
 
     /// <summary>Call after the dock space, inside the designer style.</summary>
-    public void Draw(DesignSession session, MeshEditState edit, OrbitCamera camera)
+    /// <summary>Call after the dock space, inside the designer style. <paramref name="editable"/> false (the interior view) hides the edit mode bar.</summary>
+    public void Draw(DesignSession session, MeshEditState edit, OrbitCamera camera, bool editable = true)
     {
         DesignerStyle.CentralRect(out var min, out var max);
-        DrawModes(session, edit, min);
+
+        if (editable)
+            DrawModes(session, edit, min);
+
         _axes.Draw(camera);
     }
 

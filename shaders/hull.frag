@@ -15,6 +15,7 @@ layout(set = 0, binding = 0, std140) uniform Frame {
 layout(push_constant) uniform Brick {
     vec4 originScale;
     vec4 clipPlane;   // camera-relative: fragments with dot(xyz, pos) > w are cut away (cutaway view)
+    vec4 ghost;       // x = opacity of the see-through interior view (0: solid)
 } brick;
 
 layout(location = 0) in vec3 vRelPos;
@@ -35,6 +36,18 @@ void main()
 {
     if (dot(brick.clipPlane.xyz, vRelPos) > brick.clipPlane.w)
         discard;
+
+    // Interior view: every face, front or back, faint and lit by the view, stronger where the surface turns edge on, so
+    // walls, rooms and hallways read as outlines one can see through.
+    if (brick.ghost.x > 0.0)
+    {
+        vec3 g = normalize(cross(dFdx(vRelPos), dFdy(vRelPos)));
+        float facing = abs(dot(g, normalize(-vRelPos)));
+        vec3 tint = frame.palette[min(vMaterial, 31u)].rgb * (0.35 + 0.65 * facing) + vec3(0.12, 0.16, 0.2);
+        float alpha = brick.ghost.x * (0.45 + 1.4 * pow(1.0 - facing, 3.0));
+        outColor = vec4(pow(acesFit(tint), vec3(1.0 / 2.2)), clamp(alpha, 0.0, 0.85));
+        return;
+    }
 
     // Back faces show only through a cutaway: there they cap the cut solid, flat and darkened in the material's colour.
     if (!gl_FrontFacing)

@@ -21,6 +21,9 @@ public sealed class DocumentBar
 
     public GizmoMode Mode;
 
+    /// <summary>The interior view: the hull see-through and locked, so what is inside can be reached and edited.</summary>
+    public bool InteriorView;
+
     /// <summary>The File menu's pick this frame.</summary>
     public FileRequest Request { get; private set; }
 
@@ -67,6 +70,11 @@ public sealed class DocumentBar
             ModeItem("Move"u8, "W"u8, GizmoMode.Move);
             ModeItem("Rotate"u8, "E"u8, GizmoMode.Rotate);
             ModeItem("Scale"u8, "R"u8, GizmoMode.Scale);
+            ImGui.Separator();
+
+            if (ImGui.MenuItem("Interior view"u8, "I"u8, InteriorView))
+                InteriorView = !InteriorView;
+
             ImGui.Separator();
             DrawTabs(activeKey);
             ImGui.EndMainMenuBar();

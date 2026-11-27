@@ -91,17 +91,24 @@ public sealed class DesignerPanels
     /// <summary>Where new solids go: the host sets it to the camera target.</summary>
     public double3 PlaceAt;
 
+    /// <summary>The interior view: the hull's panels are shown but cannot change anything.</summary>
+    public bool Locked;
+
     public void Draw(DesignSession session, DesignStats stats, MeshEditState meshEdit)
     {
+        ImGui.BeginDisabled(Locked);
         DrawTools(session, stats);
         DrawSolidList(session);
         DrawProperties(session, meshEdit);
         _meshPanel.Draw(session, meshEdit);
+
         if (Workspace == Workspace.Ship)
         {
             _layersPanel.Draw(session);
             _brushesPanel.Draw(session, Strokes);
         }
+
+        ImGui.EndDisabled();
         DrawStats(session, stats);
     }
 

@@ -71,6 +71,9 @@ profile; any angle, each hallway with its own gravity (a ship may have several),
   0.8 × 1.9 m lane per person abreast. Gravity: yaw, pitch, roll steps, or select a node and turn the rings (E). Nodes
   move with the arrows (W); each run reads level, ramp, stairs or shaft. `--demo-hallway` (layered hull) and
   `--demo-hallway-plain` (solid block) show one.
+- **Interior view** (top bar, or I): the hull is drawn see-through (both sides of every face, blended, no depth
+  writes, stronger edge on) and locked: hull panels greyed, no solid picking, gizmos, strokes or hull keys. Hallways,
+  placed components and parts inside stay editable.
 
 ## Limits of this slice
 

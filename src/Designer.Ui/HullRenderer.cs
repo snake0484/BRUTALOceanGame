@@ -22,7 +22,7 @@ public sealed unsafe class HullRenderer : IDisposable
 {
     public const int PaletteSize = 32;
     private const int UniformAlignment = 256;
-    private const int PushConstantSize = 32;
+    private const int PushConstantSize = 48;
     private const int VertexStride = PackedTerrainVertex.SizeInBytes;
 
     private readonly Renderer _renderer;
@@ -33,6 +33,7 @@ public sealed unsafe class HullRenderer : IDisposable
     private readonly VkDescriptorSet[] _sets = new VkDescriptorSet[Renderer.FramesInFlight];
     private readonly VkPipelineLayout _layout;
     private readonly VkPipeline _pipeline;
+    private readonly VkPipeline _ghostPipeline;
     private readonly List<Draw> _draws = new();
     private readonly Vector4[] _palette = new Vector4[PaletteSize];
     private GpuBuffer? _vertices;
@@ -77,7 +78,8 @@ public sealed unsafe class HullRenderer : IDisposable
             new VkPushConstantRange { StageFlags = VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit, Size = (ByteSize32)PushConstantSize },
         ];
         _layout = _device.CreatePipelineLayout([_setLayout], push, null);
-        _pipeline = CreatePipeline(context.Pipelines, renderer.RenderPass);
+        _pipeline = CreatePipeline(context.Pipelines, renderer.RenderPass, ghost: false);
+        _ghostPipeline = CreatePipeline(context.Pipelines, renderer.RenderPass, ghost: true);
         _palette.AsSpan().Fill(new Vector4(0.6f, 0.6f, 0.6f, 1f));
     }
 
@@ -146,7 +148,17 @@ public sealed unsafe class HullRenderer : IDisposable
     private bool _clipFlip;
 
     /// <summary>Inside the opaque pass. <paramref name="viewProj"/> has no translation; <paramref name="camera"/> is in ship metres.</summary>
-    public void Record(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, double3 camera, in SceneLighting lighting)
+    public void Record(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, double3 camera, in SceneLighting lighting) =>
+        Record(commands, frameIndex, extent, viewProj, camera, lighting, 0f);
+
+    /// <summary>
+    /// The interior view: the hull see-through at <paramref name="opacity"/>, both sides of every face, blended and writing
+    /// no depth. In the second scene pass (after the opaque one), instead of <see cref="Record(CommandBuffer, int, VkExtent2D, in Matrix4x4, double3, in SceneLighting)"/>.
+    /// </summary>
+    public void RecordGhost(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, double3 camera, in SceneLighting lighting, float opacity) =>
+        Record(commands, frameIndex, extent, viewProj, camera, lighting, Math.Max(opacity, 1e-3f));
+
+    private void Record(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj, double3 camera, in SceneLighting lighting, float ghost)
     {
         if (_draws.Count == 0)
             return;
@@ -160,7 +172,7 @@ public sealed unsafe class HullRenderer : IDisposable
         for (var p = 0; p < PaletteSize; p++)
             uniforms->Colours[p] = _palette[p];
 
-        commands.BindPipeline(VkPipelineBindPoint.Graphics, _pipeline);
+        commands.BindPipeline(VkPipelineBindPoint.Graphics, ghost > 0f ? _ghostPipeline : _pipeline);
         commands.BindDescriptorSets(VkPipelineBindPoint.Graphics, _layout, 0, [_sets[frameIndex]], []);
         commands.SetViewport(0, [new VkViewport { Width = extent.Width, Height = extent.Height, MaxDepth = 1f }]);
         commands.SetScissor(0, [new VkRect2D { Extent = extent }]);
@@ -179,8 +191,9 @@ public sealed unsafe class HullRenderer : IDisposable
             clip = new Vector4(_clipAxis == 0 ? sign : 0f, _clipAxis == 1 ? sign : 0f, _clipAxis == 2 ? sign : 0f, (float)(sign * (_clipOffset - cam)));
         }
 
-        var push = stackalloc Vector4[2];
+        var push = stackalloc Vector4[3];
         push[1] = clip;
+        push[2] = new Vector4(ghost, 0f, 0f, 0f);
 
         foreach (var draw in _draws)
         {
@@ -260,7 +273,7 @@ public sealed unsafe class HullRenderer : IDisposable
         }
     }
 
-    private VkPipeline CreatePipeline(PipelineCache pipelines, VkRenderPass renderPass)
+    private VkPipeline CreatePipeline(PipelineCache pipelines, VkRenderPass renderPass, bool ghost)
     {
         var vert = ShaderLoader.Load(_device, "hull.vert", ShaderKind.VertexShader);
         var frag = ShaderLoader.Load(_device, "hull.frag", ShaderKind.FragmentShader);
@@ -306,11 +319,18 @@ public sealed unsafe class HullRenderer : IDisposable
                 var depth = new VkPipelineDepthStencilStateCreateInfo
                 {
                     DepthTestEnable = true,
-                    DepthWriteEnable = true,
+                    DepthWriteEnable = !ghost,
                     DepthCompareOp = VkCompareOp.Greater,
                 };
                 var blendAttachment = new VkPipelineColorBlendAttachmentState
                 {
+                    BlendEnable = ghost,
+                    SrcColorBlendFactor = VkBlendFactor.SrcAlpha,
+                    DstColorBlendFactor = VkBlendFactor.OneMinusSrcAlpha,
+                    ColorBlendOp = VkBlendOp.Add,
+                    SrcAlphaBlendFactor = VkBlendFactor.One,
+                    DstAlphaBlendFactor = VkBlendFactor.OneMinusSrcAlpha,
+                    AlphaBlendOp = VkBlendOp.Add,
                     ColorWriteMask = VkColorComponentFlags.RBit | VkColorComponentFlags.GBit | VkColorComponentFlags.BBit | VkColorComponentFlags.ABit,
                 };
                 var blend = new VkPipelineColorBlendStateCreateInfo { AttachmentCount = 1, Attachments = &blendAttachment };
@@ -347,6 +367,7 @@ public sealed unsafe class HullRenderer : IDisposable
     {
         _device.WaitIdle();
         _device.DestroyPipeline(_pipeline, null);
+        _device.DestroyPipeline(_ghostPipeline, null);
         _device.DestroyPipelineLayout(_layout, null);
         _device.DestroyDescriptorPool(_pool, null);
         _device.DestroyDescriptorSetLayout(_setLayout, null);

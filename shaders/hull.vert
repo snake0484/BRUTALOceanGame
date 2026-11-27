@@ -13,6 +13,7 @@ layout(set = 0, binding = 0, std140) uniform Frame {
 layout(push_constant) uniform Brick {
     vec4 originScale; // xyz camera-relative brick origin, w = cell size / PackedTerrainVertex.StepsPerVoxel
     vec4 clipPlane;   // cutaway, used by hull.frag
+    vec4 ghost;       // x = opacity of the see-through interior view (0: solid), used by hull.frag
 } brick;
 
 // PackedTerrainVertex.OffsetVoxels * StepsPerVoxel.
