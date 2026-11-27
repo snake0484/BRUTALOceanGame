@@ -10,7 +10,7 @@ using BrutalGame.Weather;
 
 namespace BrutalGame.Sim.Tests;
 
-public class SimBoundaryTests
+public class SimBoundaryTests(Xunit.Abstractions.ITestOutputHelper output)
 {
     /// <summary>The nearest point to the spawn, out along 16 bearings of the sea frame, where the sea is this deep over open seabed (the coast is the planet kind's).</summary>
     private static double3 Offshore(SimWorld sim, float depth)
@@ -297,6 +297,42 @@ public class SimBoundaryTests
         }
 
         Assert.InRange(wet, 1, n * n - 1);
+    }
+
+    /// <summary>The spawn coast's region baked from the planet's own ground: worker time against the brief's 30 ms.</summary>
+    [Fact]
+    [Trait("Category", "Perf")]
+    public void CoastBake_CostOnThePlanet()
+    {
+        using var sim = new SimWorld(seed: 1, workerThreads: 1);
+        var tiles = sim.Ocean.Tiles;
+        var spawn = double3.Normalize(sim.Bubble.Origin);
+        tiles.Locate(spawn, out var blend);
+        int tile;
+
+        unsafe
+        {
+            tile = blend.Tile[0];
+        }
+
+        tiles.Plane(tile, spawn, out var u, out var v);
+        var key = new CoastRegionKey(tile, (short)CoastWindow.Index(u), (short)CoastWindow.Index(v), CoastCarrier.From(0.6f, 0.5f, 1.2f));
+        var bake = new CoastBake();
+        var atlas = new CoastAtlas();
+        var best = float.MaxValue;
+        var depth = 0f;
+
+        for (var i = 0; i < 6; i++)
+        {
+            bake.Prepare(sim.CoastDepth, new CoastWindow(tiles, key), key, atlas, CoastBake.BreakDepth(1.5f));
+            bake.Run();
+            Assert.True(bake.Baked);
+
+            if (bake.Ms < best)
+                (best, depth) = (bake.Ms, bake.DepthMs);
+        }
+
+        output.WriteLine($"bake {best:F1} ms, depth sampling {depth:F1} ms of it; probe depths {bake.ProbeMin:F1} .. {bake.ProbeMax:F1} m");
     }
 
     /// <summary>

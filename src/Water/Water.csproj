@@ -3,6 +3,7 @@
     <RootNamespace>BrutalGame.Water</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Ahwoo.BRUTAL.Concurrency" />
     <PackageReference Include="Ahwoo.BRUTAL.Numerics" />
   </ItemGroup>
   <ItemGroup>
