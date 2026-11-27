@@ -29,6 +29,24 @@ public sealed partial class DesignerApp
         (AddKind.Opening, "Doorway"), (AddKind.PortFace, "Docking port face"), (AddKind.Rotor, "Rotor"), (AddKind.Hinge, "Hinge"), (AddKind.Slider, "Slider"),
     ];
 
+    /// <summary>The Add menu's tree: things grouped by type.</summary>
+    private static readonly (string Group, AddKind[] Kinds)[] ShipGroups =
+    [
+        ("Shapes", [AddKind.Box, AddKind.Wedge, AddKind.Cylinder]),
+        ("Interior", [AddKind.Hallway]),
+        ("Surface", [AddKind.Window, AddKind.Decal, AddKind.Stroke]),
+        ("Components", [AddKind.Component, AddKind.Door, AddKind.DockingPort]),
+        ("Moving parts", [AddKind.Rotor, AddKind.Hinge, AddKind.Slider]),
+    ];
+
+    private static readonly (string Group, AddKind[] Kinds)[] ComponentGroups =
+    [
+        ("Shapes", [AddKind.Box, AddKind.Wedge, AddKind.Cylinder]),
+        ("Engine parts", [AddKind.Chamber, AddKind.Nozzle, AddKind.Injector, AddKind.Igniter, AddKind.Pipe]),
+        ("Openings", [AddKind.Opening, AddKind.PortFace]),
+        ("Moving parts", [AddKind.Rotor, AddKind.Hinge, AddKind.Slider]),
+    ];
+
     private readonly ObjectTree _tree = new();
     private (uint, uint, uint, uint, uint, uint, uint) _lastSelection;
 
@@ -233,16 +251,27 @@ public sealed partial class DesignerApp
         ContextBar.Section("add");
         ImGui.TextDisabled(_addOnSurface ? "Add here"u8 : "Add"u8);
         var items = _active.Component is null ? ShipAdds : ComponentAdds;
+        var groups = _active.Component is null ? ShipGroups : ComponentGroups;
 
-        foreach (var (kind, label) in items)
+        foreach (var (group, kinds) in groups)
         {
-            if (!ContextBar.Button($"{label}##add{kind}", _addOnSurface ? "Add it where you right-clicked" : "Add it at the camera target"))
+            if (!ImGui.TreeNodeEx($"{group}##addgroup", ImGuiTreeNodeFlags.SpanAvailWidth))
                 continue;
 
-            if (kind is AddKind.Chamber or AddKind.Nozzle or AddKind.Injector or AddKind.Igniter or AddKind.Pipe)
-                _pendingAdd = kind;
-            else
-                _adding = kind;
+            foreach (var kind in kinds)
+            {
+                var label = Array.Find(items, a => a.Kind == kind).Label ?? $"{kind}";
+
+                if (!ContextBar.Button($"{label}##add{kind}", _addOnSurface ? "Add it where you right-clicked" : "Add it at the camera target"))
+                    continue;
+
+                if (kind is AddKind.Chamber or AddKind.Nozzle or AddKind.Injector or AddKind.Igniter or AddKind.Pipe)
+                    _pendingAdd = kind;
+                else
+                    _adding = kind;
+            }
+
+            ImGui.TreePop();
         }
     }
 

@@ -40,8 +40,11 @@ public sealed class StrokeTool
     /// <summary>The selected stroke's id, or 0.</summary>
     public uint Selected;
 
-    /// <summary>The selected stroke's point last grabbed in the view (its size is edited in the panel), or -1.</summary>
+    /// <summary>The selected stroke's point last grabbed in the view (its size is edited in the panel), or -1: then the whole stroke has the gizmo.</summary>
     public int Point = -1;
+
+    private readonly TransformGizmo _gizmo = new();
+    private uint _lastSelected;
 
     /// <summary>Result of the last expansion (the host sets it after each bake starts): stuck paths to draw.</summary>
     public ExpandedHull? Expanded;
@@ -95,10 +98,80 @@ public sealed class StrokeTool
         if (Drawing)
             return UpdateDrawing(camera, origin, ray, mouseFree, overlay);
 
-        if (Selected == 0 || set is null || Expanded is null)
+        // A stroke picked anew (here or in the tree) starts whole.
+        if (Selected != _lastSelected)
+            (_lastSelected, Point) = (Selected, -1);
+
+        if (set is null || Expanded is null)
             return false;
 
-        return UpdateHandles(session, set, camera, viewport, viewProj, origin, ray, mouse, mouseFree, io.MouseDown[0], overlay);
+        if (Selected != 0 && Point < 0 && UpdateWhole(session, set, camera, viewport, viewProj, mouse, mouseFree, io.MouseDown[0], overlay))
+            return true;
+
+        if (Selected != 0 && UpdateHandles(session, set, camera, viewport, viewProj, origin, ray, mouse, mouseFree, io.MouseDown[0], overlay))
+            return true;
+
+        // A click on a stroke's line picks the whole stroke.
+        if (!mouseFree || !ImGui.IsMouseClicked(ImGuiMouseButton.Left, false))
+            return false;
+
+        var picked = 0u;
+        var best = WholeTransform.LinePixels;
+
+        for (var s = 0; s < set.Strokes.Count && s < Expanded.Paths.Count; s++)
+        {
+            var path = Expanded.Paths[s];
+
+            for (var i = 1; i < path.Points.Count; i++)
+            {
+                if (WholeTransform.ToLine(camera, viewProj, viewport, mouse, path.Points[i - 1], path.Points[i]) is var d && d < best)
+                    (best, picked) = (d, set.Strokes[s].Id);
+            }
+        }
+
+        if (picked == 0)
+            return false;
+
+        (Selected, _lastSelected, Point) = (picked, picked, -1);
+        return true;
+    }
+
+    /// <summary>The whole selected stroke: every point moves, or turns (with its normal) about the middle of its points.</summary>
+    private bool UpdateWhole(DesignSession session, HullBrushSet set, OrbitCamera camera, Vector2 viewport, in Matrix4x4 viewProj, Vector2 mouse, bool mouseFree, bool mouseDown, OverlayRenderer overlay)
+    {
+        var index = set.IndexOfStroke(Selected);
+
+        if (index < 0)
+            return false;
+
+        var stroke = set.Strokes[index];
+        var points = new Vector3d[stroke.Points.Count];
+
+        for (var i = 0; i < points.Length; i++)
+            points[i] = stroke.Points[i].Position;
+
+        var centre = WholeTransform.Centre(points);
+
+        if (WholeTransform.Update(_gizmo, centre, true, camera, viewProj, viewport, mouse, mouseFree, mouseDown, ImGui.IsMouseClicked(ImGuiMouseButton.Left, false), session.Snap.StepMetres, overlay))
+        {
+            Span<double> m = stackalloc double[9];
+            WholeTransform.Turn(_gizmo, m);
+            var moved = new StrokePoint[points.Length];
+
+            for (var i = 0; i < points.Length; i++)
+            {
+                var p = stroke.Points[i];
+                moved[i] = StrokePoint.From(WholeTransform.Apply(_gizmo, m, centre, p.Position), WholeTransform.Direction(_gizmo, m, p.Normal)) with { Scale = p.Scale };
+            }
+
+            BrushCommands.SetStroke(session, Selected, s =>
+            {
+                for (var i = 0; i < moved.Length && i < s.Points.Count; i++)
+                    s.Points[i] = moved[i];
+            });
+        }
+
+        return _gizmo.Dragging || _gizmo.Hovered;
     }
 
     private bool UpdateDrawing(OrbitCamera camera, Vector3d origin, Vector3d ray, bool mouseFree, OverlayRenderer overlay)

@@ -630,8 +630,8 @@ public sealed partial class DesignerApp : DesignApp
 
     /// <summary>A picked node, window, placement or part: it has the gizmo and the menu, not the selected solid.</summary>
     private bool OtherSelected => _active.Component is { } workspace
-        ? workspace.SelectedPart != 0 || workspace.SelectedNode >= 0 || _jointsPanel.Selected != 0 || _openingsPanel.Selected != 0
-        : _interiorPanel.SelectedNode >= 0 || _windowsPanel.Selected != 0 || _decalsPanel.Selected != 0 || _jointsPanel.Selected != 0 || _prefabPanel.Selected != 0;
+        ? workspace.SelectedPart != 0 || workspace.SelectedPipe != 0 || _jointsPanel.Selected != 0 || _openingsPanel.Selected != 0
+        : _interiorPanel.Selected != 0 || _panels.Strokes.Selected != 0 || _windowsPanel.Selected != 0 || _decalsPanel.Selected != 0 || _jointsPanel.Selected != 0 || _prefabPanel.Selected != 0;
 
     protected override void AfterPanels(ImGuiIOPtr io)
     {
