@@ -6,7 +6,7 @@ namespace BrutalGame.Designer.Ui;
 public enum AddKind { None, Box, Wedge, Cylinder, Hallway, Window, Decal, Stroke, Component, Door, DockingPort, Rotor, Hinge, Slider, Opening, PortFace, Chamber, Nozzle, Injector, Igniter, Pipe }
 
 /// <summary>One open plan as the tab bar shows it. <see cref="Key"/> stays the same while the tab lives.</summary>
-public readonly record struct DocumentTab(int Key, string Title, bool Modified, bool Component);
+public readonly record struct DocumentTab(int Key, string Title, bool Modified, bool Component, bool Building = false);
 
 /// <summary>
 /// The bar across the top: the File menu, the interior view and a tab per open ship or
@@ -100,10 +100,16 @@ public sealed class DocumentBar
         if (ImGui.MenuItem("New component"u8))
             Request = FileRequest.NewComponent;
 
+        if (ImGui.MenuItem("New building"u8))
+            Request = FileRequest.NewBuilding;
+
         ImGui.Separator();
 
         if (ImGui.MenuItem("Open..."u8, "Ctrl+O"u8))
             Request = FileRequest.Open;
+
+        if (ImGui.MenuItem("Open building..."u8))
+            Request = FileRequest.OpenBuilding;
 
         if (ImGui.MenuItem("Save"u8, "Ctrl+S"u8))
             Request = FileRequest.Save;
@@ -133,7 +139,7 @@ public sealed class DocumentBar
                 flags |= ImGuiTabItemFlags.SetSelected;
 
             // ### keeps the tab's id fixed while its title changes (saving renames it).
-            if (ImGui.BeginTabItem($"{(tab.Component ? "Component: " : "")}{tab.Title}###doc{tab.Key}", ref open, flags))
+            if (ImGui.BeginTabItem($"{(tab.Component ? "Component: " : tab.Building ? "Building: " : "")}{tab.Title}###doc{tab.Key}", ref open, flags))
             {
                 // A forced tab takes a frame to come to the front: until it has, the old front tab is not a pick.
                 if (_forceKey < 0 && tab.Key != activeKey)

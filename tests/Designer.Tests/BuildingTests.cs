@@ -3,7 +3,7 @@ using BrutalGame.Designer;
 using BrutalGame.Plans;
 using BrutalGame.Ships;
 
-namespace BrutalGame.BuildingDesigner.Tests;
+namespace BrutalGame.Designer.Tests;
 
 public class BuildingTests
 {

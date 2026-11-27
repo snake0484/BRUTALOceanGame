@@ -1,8 +1,7 @@
 using BrutalGame.Buildings;
-using BrutalGame.Designer;
 using BrutalGame.Plans;
 
-namespace BrutalGame.BuildingDesigner;
+namespace BrutalGame.Designer;
 
 /// <summary>
 /// One open building: the structure is a ship designer <see cref="DesignSession"/>, so every hull tool works on it as is;
@@ -19,6 +18,17 @@ public sealed class BuildingSession
     {
         Plan = new DesignSession();
         Open(NewPlan(), BuildingInfo.Default, "");
+    }
+
+    /// <summary>Adopts a designer tab's open session as a building with <paramref name="info"/> at its current history position.</summary>
+    public BuildingSession(DesignSession plan, in BuildingInfo info)
+    {
+        Plan = plan;
+        Info = info;
+        _seenUndo = plan.Undo.UndoCount;
+
+        for (var k = 0; k <= _seenUndo; k++)
+            _infoAt.Add(info);
     }
 
     public DesignSession Plan { get; }

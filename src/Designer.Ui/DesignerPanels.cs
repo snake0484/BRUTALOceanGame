@@ -7,10 +7,13 @@ using BrutalGame.Ships.Interior;
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>What the File menu asks the host to do this frame (file dialogs and disk live in the host).</summary>
-public enum FileRequest { None, New, NewComponent, Open, Save, SaveAs }
+public enum FileRequest { None, New, NewComponent, Open, Save, SaveAs, NewBuilding, OpenBuilding }
 
-/// <summary>What the open tab is: a ship, or a component (its own plan, made into a prefab by saving it).</summary>
-public enum Workspace { Ship, Component }
+/// <summary>
+/// What the open tab is: a ship, a component (its own plan, made into a prefab by saving it), or a building (a ship plan
+/// standing on the ground, with every ship tool).
+/// </summary>
+public enum Workspace { Ship, Component, Building }
 
 /// <summary>Numbers the stats panel shows; the host fills them after each bake and validation.</summary>
 public sealed class DesignStats
@@ -95,6 +98,12 @@ public sealed class DesignerPanels
     /// <summary>What the open tab is (the host sets it); a ship shows hull layers and brushes.</summary>
     public Workspace Workspace;
 
+    /// <summary>
+    /// Set by a host that keeps more than the plan on the plan's history (a building's pad): the Undo and Redo buttons
+    /// call these instead of the session's own.
+    /// </summary>
+    public Func<bool>? UndoHook, RedoHook;
+
     /// <summary>Where new solids go: the host sets it to the camera target.</summary>
     public double3 PlaceAt;
 
@@ -124,7 +133,7 @@ public sealed class DesignerPanels
         DrawProperties(session, meshEdit);
         _meshPanel.Draw(session, meshEdit);
 
-        if (Workspace == Workspace.Ship)
+        if (Workspace != Workspace.Component)
         {
             _layersPanel.Draw(session);
             _brushesPanel.Draw(session, Strokes);
@@ -142,7 +151,7 @@ public sealed class DesignerPanels
         if (ImGui.Begin("Designer"u8))
         {
             var name = session.Path.Length > 0 ? Path.GetFileName(session.Path) : "not saved yet";
-            ImGui.Text($"{(Workspace == Workspace.Component ? "Component" : "Ship")}: {name}{(session.Modified ? " *" : "")}  ({session.Doc.Solids.Count} solids)");
+            ImGui.Text($"{(Workspace switch { Workspace.Component => "Component", Workspace.Building => "Building", _ => "Ship" })}: {name}{(session.Modified ? " *" : "")}  ({session.Doc.Solids.Count} solids)");
 
             if (session.Path.Length > 0 && ImGui.IsItemHovered())
                 ImGui.SetTooltip($"{session.Path}");
@@ -183,14 +192,24 @@ public sealed class DesignerPanels
             ImGui.BeginDisabled(session.Undo.UndoCount == 0);
 
             if (ImGui.Button("Undo"u8))
-                session.UndoLast();
+            {
+                if (UndoHook is null)
+                    session.UndoLast();
+                else
+                    UndoHook();
+            }
 
             ImGui.EndDisabled();
             ImGui.SameLine();
             ImGui.BeginDisabled(session.Undo.RedoCount == 0);
 
             if (ImGui.Button("Redo"u8))
-                session.RedoNext();
+            {
+                if (RedoHook is null)
+                    session.RedoNext();
+                else
+                    RedoHook();
+            }
 
             ImGui.EndDisabled();
             ImGui.TextDisabled("RMB orbit, MMB/Shift+RMB pan, wheel zoom, LMB pick (Ctrl adds)"u8);

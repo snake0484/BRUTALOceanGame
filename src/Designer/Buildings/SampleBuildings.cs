@@ -1,8 +1,7 @@
-using BrutalGame.Designer;
 using BrutalGame.Plans;
 using BrutalGame.Ships;
 
-namespace BrutalGame.BuildingDesigner;
+namespace BrutalGame.Designer;
 
 /// <summary>Reference buildings made through the ship designer's commands, as the UI makes them.</summary>
 public static class SampleBuildings
