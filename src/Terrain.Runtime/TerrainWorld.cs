@@ -238,6 +238,9 @@ public sealed class TerrainWorld : IDisposable
 
     public int LastSelectVisits => _desired.Visits;
 
+    /// <summary>Nodes the last selection had to bound: the rest it remembered.</summary>
+    public int LastSelectClassified => _desired.Classified;
+
     /// <summary>Leaf selections swapped in so far.</summary>
     public int Selects { get; private set; }
 

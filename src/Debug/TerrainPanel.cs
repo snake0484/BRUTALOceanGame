@@ -27,7 +27,7 @@ public sealed class TerrainPanel(TerrainWorld world, TerrainRenderer renderer, P
         {
             ImGui.Text($"chunks loaded {world.LoadedChunks}  meshed {renderer.ChunkCount}  drawn {renderer.DrawnLastFrame}");
             var lods = world.LeavesPerLod;
-            ImGui.Text($"leaves {world.DesiredLeaves}  select {world.LastSelectMs:F2} ms (worker, {world.LastSelectVisits} nodes)  speed lod {world.MinLod}");
+            ImGui.Text($"leaves {world.DesiredLeaves}  select {world.LastSelectMs:F2} ms (worker, {world.LastSelectVisits} nodes, {world.LastSelectClassified} bounded)  speed lod {world.MinLod}");
             ImGui.Text($"lod 0-6:  {lods[0]} {lods[1]} {lods[2]} {lods[3]} {lods[4]} {lods[5]} {lods[6]}");
             ImGui.Text($"lod 7-12: {lods[7]} {lods[8]} {lods[9]} {lods[10]} {lods[11]} {lods[12]}");
             ImGui.Text($"jobs pending {world.PendingJobs}  last batch {world.LastBatchChunks} in {world.LastBatchMs:F1} ms");
