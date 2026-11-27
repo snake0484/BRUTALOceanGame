@@ -254,6 +254,32 @@ public sealed class CoastRegionSet : IDisposable
         }
     }
 
+    /// <summary>The surf carrier at unit direction <paramref name="direction"/> in the heaviest region drawn there; false where there is none.</summary>
+    public bool CarrierAt(in double3 direction, double time, out SurfCarrierPoint point)
+    {
+        point = default;
+        var best = 0f;
+
+        for (var i = 0; i < Capacity; i++)
+        {
+            ref readonly var region = ref _regions[i];
+
+            if (!region.Drawn)
+                continue;
+
+            region.Window.ToLocal(direction, out var x, out var z);
+            var weight = region.Weight * CoastWindow.Weight((float)x / CoastWindow.CellSize, (float)z / CoastWindow.CellSize);
+
+            if (weight <= best)
+                continue;
+
+            best = weight;
+            point = SurfCarrier.At(_atlases[i], (float)x, (float)z, _atlases[i].PhaseAt(time));
+        }
+
+        return best > 0f;
+    }
+
     private void Collect()
     {
         if (_running == Work.None || _scheduler.IsExecuting)

@@ -29,45 +29,63 @@ public struct BreakerStability
     {
         var weight = CoastWindow.Weight(x / CoastWindow.CellSize, z / CoastWindow.CellSize);
         BreakerFace.Apply(atlas, x, z, atlas.PhaseAt(firstTick * tickSeconds), out var before);
-        Normal(before, weight, out var bx, out var by, out var bz);
+        Scale(ref before, weight);
 
         for (var i = 1; i <= ticks; i++)
         {
             BreakerFace.Apply(atlas, x, z, atlas.PhaseAt((firstTick + i) * tickSeconds), out var face);
-            Normal(face, weight, out var nx, out var ny, out var nz);
-            var height = weight * MathF.Abs(face.Height - before.Height);
-            var shift = weight * MathF.Sqrt((face.Dx - before.Dx) * (face.Dx - before.Dx) + (face.Dz - before.Dz) * (face.Dz - before.Dz));
-            var turn = MathF.Acos(Math.Clamp(nx * bx + ny * by + nz * bz, -1f, 1f));
-            var foam = weight * MathF.Abs(face.Foam - before.Foam);
-
-            Samples++;
-            HeightJumps += height > HeightJump ? 1 : 0;
-            SlopeJumps += turn > NormalJump ? 1 : 0;
-            FoamJumps += foam > FoamJump ? 1 : 0;
-            MaxHeightStep = MathF.Max(MaxHeightStep, height);
-            MaxShiftStep = MathF.Max(MaxShiftStep, shift);
-            MaxNormalStep = MathF.Max(MaxNormalStep, turn);
-            MaxFoamStep = MathF.Max(MaxFoamStep, foam);
-            MaxHeight = MathF.Max(MaxHeight, weight * face.Height);
-            MaxFoam = MathF.Max(MaxFoam, weight * face.Foam);
-            (before, bx, by, bz) = (face, nx, ny, nz);
+            Scale(ref face, weight);
+            Step(before, face);
+            before = face;
         }
+    }
+
+    /// <summary>One tick's change of the drawn face at a rest point.</summary>
+    public void Step(in FacePoint before, in FacePoint face)
+    {
+        Normal(before, out var bx, out var by, out var bz);
+        Normal(face, out var nx, out var ny, out var nz);
+        var height = MathF.Abs(face.Height - before.Height);
+        var shift = MathF.Sqrt((face.Dx - before.Dx) * (face.Dx - before.Dx) + (face.Dz - before.Dz) * (face.Dz - before.Dz));
+        var turn = MathF.Acos(Math.Clamp(nx * bx + ny * by + nz * bz, -1f, 1f));
+        var foam = MathF.Abs(face.Foam - before.Foam);
+
+        Samples++;
+        HeightJumps += height > HeightJump ? 1 : 0;
+        SlopeJumps += turn > NormalJump ? 1 : 0;
+        FoamJumps += foam > FoamJump ? 1 : 0;
+        MaxHeightStep = MathF.Max(MaxHeightStep, height);
+        MaxShiftStep = MathF.Max(MaxShiftStep, shift);
+        MaxNormalStep = MathF.Max(MaxNormalStep, turn);
+        MaxFoamStep = MathF.Max(MaxFoamStep, foam);
+        MaxHeight = MathF.Max(MaxHeight, face.Height);
+        MaxFoam = MathF.Max(MaxFoam, face.Foam);
+    }
+
+    private static void Scale(ref FacePoint p, float weight)
+    {
+        p.Height *= weight;
+        p.SlopeX *= weight;
+        p.SlopeZ *= weight;
+        p.Dx *= weight;
+        p.Dz *= weight;
+        p.DxX *= weight;
+        p.DzZ *= weight;
+        p.DxZ *= weight;
+        p.Foam *= weight;
     }
 
     public override readonly string ToString() =>
         $"{Samples} samples: height step max {MaxHeightStep:F3} m ({HeightJumps} over {HeightJump}), shift step max {MaxShiftStep:F3} m, normal turn max {MaxNormalStep:F3} rad ({SlopeJumps} over {NormalJump}), foam step max {MaxFoamStep:F3} ({FoamJumps} over {FoamJump}); peak height {MaxHeight:F2} m, foam {MaxFoam:F2}";
 
     /// <summary>The displaced surface's normal from the face alone (ocean.frag's contract form).</summary>
-    private static void Normal(in FacePoint p, float weight, out float x, out float y, out float z)
+    private static void Normal(in FacePoint p, out float x, out float y, out float z)
     {
-        var dxx = 1f + weight * p.DxX;
-        var dzz = 1f + weight * p.DzZ;
-        var dxz = weight * p.DxZ;
-        var hx = weight * p.SlopeX;
-        var hz = weight * p.SlopeZ;
-        x = hz * dxz - dzz * hx;
-        y = dzz * dxx - dxz * dxz;
-        z = dxz * hx - hz * dxx;
+        var dxx = 1f + p.DxX;
+        var dzz = 1f + p.DzZ;
+        x = p.SlopeZ * p.DxZ - dzz * p.SlopeX;
+        y = dzz * dxx - p.DxZ * p.DxZ;
+        z = p.DxZ * p.SlopeX - p.SlopeZ * dxx;
         var length = MathF.Max(MathF.Sqrt(x * x + y * y + z * z), 1e-6f);
         (x, y, z) = (x / length, y / length, z / length);
     }
