@@ -75,10 +75,10 @@ The authored ops are part of the program, so everything that evaluates the progr
 
 (a) format, loader, compiler support, empty layer bit-exact. (b) one `amplitude` or `height` map and `flatten` sites end to end, tests: bounds hold (10⁴ samples per LOD), determinism, scalar == SIMD, seams on a site across a cube edge, ns per point per LOD. (c) the tool: view, paint, place and move a site, undo, save. (d) the game loads `data/planets/<body>/` and shows it orbit to ground. One commit each.
 
-## 8. Open questions (yours)
+## 8. Answers (2026-11-27, D84, D85)
 
-1. **City or outpost at this stage:** a flattened site plus a named marker, or actual buildings (placed blueprints from the ship designer)? Recommended: site + marker now, buildings as placements later.
-2. **Tool home:** standalone `BRUTALPlanetDesigner` (recommended), a mode of `BRUTALDesigner`, or a mode of the game?
-3. **Bodies:** which bodies exist to author, and their ids and names? Today it is the test system (one planet `temperate-continental`, one moon `barren-cratered`) from a random system seed. Slice 1 would fix its seeds in a `data/systems/<id>.json` and author `home` and `home-moon`, unless you name them.
-4. **Upgrade overlaps:** where a newer authored item lands on a player's edits, should the player's edits win (kept as they are), should the authored item clear edits inside its core, or should each item say which?
-5. **Slice 1 channel:** `height` map (reshape land broadly) or `amplitude` map (scale a kind layer)? Biomes wait for materials.
+1. Settlements: site + marker now. Buildings later, from a structure/city editor like the ship editor.
+2. Tool: standalone `BRUTALPlanetDesigner`.
+3. Bodies: the test system with fixed seeds in `data/systems/test.json`; planet `home`, moon `home-moon`.
+4. Upgrade overlaps: the authored site wins. On loading a save made on an older version, player edits inside the core of a site whose `since` is newer than the save are dropped; everywhere else the edit log replays unchanged.
+5. Slice 1 channel: a `height` map (our call; `amplitude` follows).
