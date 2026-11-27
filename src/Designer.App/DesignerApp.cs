@@ -46,6 +46,7 @@ public sealed class DesignerApp : IDisposable
     private readonly List<Document> _docs = new();
     private readonly List<DocumentTab> _tabs = new();
     private readonly DocumentBar _bar = new();
+    private readonly ViewportOverlay _viewOverlay = new();
     private Document _active = null!;
     private int _nextKey;
     private int _shipCount;
@@ -506,6 +507,7 @@ public sealed class DesignerApp : IDisposable
         var io = ImGui.GetIO();
         var output = _renderer.OutputExtent;
         var viewport = new Vector2(output.Width, output.Height);
+        _camera.Step(Math.Min(io.DeltaTime, 0.1));
         UpdateCamera(io, viewport.Y);
         _panels.PlaceAt = _camera.Target;
         _style.Begin(io.DisplaySize.Y, _window.ContentScale.X);
@@ -517,6 +519,7 @@ public sealed class DesignerApp : IDisposable
         _bar.Draw(_tabs, _active.Key);
         DesignerStyle.DockSpace();
         _panels.Draw(_session, _stats, _meshEdit);
+        _viewOverlay.Draw(_session, _meshEdit, _camera);
         var workspace = _active.Component;
         _tool.Mode = _bar.Mode;
         _prefabPanel.Mode = _bar.Mode;

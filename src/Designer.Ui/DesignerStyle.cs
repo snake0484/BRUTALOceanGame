@@ -140,6 +140,23 @@ public sealed class DesignerStyle
     }
 
     /// <summary>The dockspace over the whole window; its empty middle passes the mouse through to the 3D view.</summary>
+    /// <summary>The 3D view's free area: the dock space's central node (after <see cref="DockSpace"/> this frame), else the whole window.</summary>
+    public static void CentralRect(out float2 min, out float2 max)
+    {
+        var node = ImGui.Internal.DockBuilderGetCentralNode(new ImGuiID(DockSpaceId));
+
+        if (!node.IsNull())
+        {
+            min = node.Pos;
+            max = new float2(node.Pos.X + node.Size.X, node.Pos.Y + node.Size.Y);
+            return;
+        }
+
+        var viewport = ImGui.GetMainViewport();
+        min = viewport.WorkPos;
+        max = new float2(viewport.WorkPos.X + viewport.WorkSize.X, viewport.WorkPos.Y + viewport.WorkSize.Y);
+    }
+
     public static void DockSpace() =>
         ImGui.DockSpaceOverViewport(new ImGuiID(DockSpaceId), ImGui.GetMainViewport(), ImGuiDockNodeFlags.PassthruCentralNode, default);
 

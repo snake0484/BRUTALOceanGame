@@ -33,8 +33,41 @@ public sealed class OrbitCamera
 
     public Matrix4x4 ViewProjection(float aspect) => CameraProjection.View(Rotation) * CameraProjection.Projection(FovY, aspect, Near);
 
+    private double _goalYaw;
+    private double _goalPitch;
+    private bool _turning;
+
+    /// <summary>Starts a smooth turn to look from yaw and pitch (radians); <see cref="Step"/> runs it.</summary>
+    public void TurnTo(double yaw, double pitch)
+    {
+        (_goalYaw, _goalPitch, _turning) = (yaw, Math.Clamp(pitch, -MaxPitch, MaxPitch), true);
+    }
+
+    /// <summary>Each frame: eases a turn started by <see cref="TurnTo"/> (the short way round), about a fifth of a second.</summary>
+    public void Step(double dt)
+    {
+        if (!_turning)
+            return;
+
+        var k = 1.0 - Math.Exp(-dt * 16.0);
+        var yaw = Math.IEEERemainder(_goalYaw - Yaw, Math.Tau);
+        var pitch = _goalPitch - Pitch;
+
+        if (Math.Abs(yaw) < 1e-4 && Math.Abs(pitch) < 1e-4)
+        {
+            Yaw += yaw;
+            Pitch = _goalPitch;
+            _turning = false;
+            return;
+        }
+
+        Yaw += yaw * k;
+        Pitch += pitch * k;
+    }
+
     public void Orbit(double dx, double dy)
     {
+        _turning = false;
         Yaw -= dx * OrbitPerPixel;
         Pitch = Math.Clamp(Pitch + dy * OrbitPerPixel, -MaxPitch, MaxPitch);
     }
