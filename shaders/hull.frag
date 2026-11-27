@@ -4,7 +4,8 @@
 // interpolated normal leans more than CREASE_COS from the triangle's own normal the face normal is used: flat faces and
 // hard edges stay hard, curved surfaces stay smooth.
 // Paint: the plan has paint slots (a finish texture set in a colour). The hull's slot, when set, paints every opaque
-// surface; projector boxes listed per brick (push z = first, w = count) then lay, in order: brush strokes' own paint
+// surface; projector boxes listed per cell of the brick's grid (push ghost.z = the cell table, ghost.w = grid dimensions
+// packed 5 bits each, cells = grid origin and size) then lay, in order: brush strokes' own paint
 // (fills), paint shapes and decal images, and pattern paint. Finishes are sampled triplanar in ship space (the hull has no
 // UVs), with whiteout-blended normals; the paint's colour replaces the finish's own, keeping its light and dark, except
 // where the finish is scratched to bare metal. Without a hull slot, surfaces keep the structural materials' colours.
@@ -24,7 +25,8 @@ layout(set = 0, binding = 0, std140) uniform Frame {
 layout(push_constant) uniform Brick {
     vec4 originScale;
     vec4 clipPlane;   // camera-relative: fragments with dot(xyz, pos) > w are cut away (cutaway view)
-    vec4 ghost;       // x = opacity of the see-through interior view (0: solid); y = 1: the glazing pass; z, w = projector list
+    vec4 ghost;       // x = opacity of the see-through interior view (0: solid); y = 1: the glazing pass; z = cell table, w = grid dims
+    vec4 cells;       // xyz camera-relative grid origin, w cell size (metres)
 } brick;
 
 struct Projector {
@@ -164,11 +166,17 @@ Surface decorate(Surface s, vec3 rel, vec3 n)
     if (hull >= 0)
         s = blend(s, paintAt(hull, p, n, dx, dy), 1.0);
 
-    int first = int(brick.ghost.z);
-    int count = int(brick.ghost.w);
+    int dims = int(brick.ghost.w);
 
-    if (count == 0)
+    if (dims == 0)
         return s;
+
+    // This fragment's cell: its (first, count) in the table, then that many box indices.
+    ivec3 grid = ivec3(dims & 31, (dims >> 5) & 31, (dims >> 10) & 31);
+    ivec3 c = clamp(ivec3(floor((rel - brick.cells.xyz) / brick.cells.w)), ivec3(0), grid - 1);
+    int entry = int(brick.ghost.z) + (c.x + grid.x * (c.y + grid.y * c.z)) * 2;
+    int first = int(lists[entry]);
+    int count = int(lists[entry + 1]);
 
     float pixel = max(length(dx), length(dy));
     float pattern = 0.0;

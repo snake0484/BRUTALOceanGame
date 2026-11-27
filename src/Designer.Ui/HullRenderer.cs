@@ -18,16 +18,20 @@ namespace BrutalGame.Designer.Ui;
 /// (on commit), waits for the device and rewrites both buffers; nothing is uploaded per frame. Moves to Ships.Rendering
 /// with the indirect brick arena once ships draw in game.
 /// <para>
-/// Paint and decals are <see cref="HullProjector"/> boxes the fragment shader colours the surface with. Each brick has the
-/// list of boxes that touch its bounds (built on commit), so a fragment tests only those; the boxes themselves are written
-/// camera-relative each frame (centres in double, then cast), a few kilobytes.
+/// Paint and decals are <see cref="HullProjector"/> boxes the fragment shader colours the surface with. Each brick has a
+/// grid of about 2 m cells listing the boxes that reach them (built on commit), so a fragment tests only its cell's; the
+/// boxes themselves are written camera-relative each frame (centres in double, then cast), a few kilobytes.
 /// </para>
 /// </summary>
 public sealed unsafe class HullRenderer : IDisposable
 {
     public const int PaletteSize = 32;
     private const int UniformAlignment = 256;
-    private const int PushConstantSize = 48;
+    private const int PushConstantSize = 64;
+
+    /// <summary>Projector cells: about this size, and at most this many along each axis of a brick.</summary>
+    private const double CellMetres = 2.0;
+    private const int MaxCellsPerAxis = 16;
     private const int VertexStride = PackedTerrainVertex.SizeInBytes;
     private const int MaxProjectors = StrokeExpansion.MaxProjectors + 256;
     private const int ProjectorRegion = MaxProjectors * 96;
@@ -49,6 +53,8 @@ public sealed unsafe class HullRenderer : IDisposable
     private GpuBuffer _lists;
     private readonly List<HullProjector> _boxes = new();
     private readonly List<uint> _listScratch = new();
+    private readonly List<int> _brickBoxes = new();
+    private readonly List<List<uint>> _buckets = new();
     private readonly DecalTextures _decals;
     private readonly FinishTextures _finishes;
     private readonly Vector4[] _slotFinish = new Vector4[PaletteSize];
@@ -63,8 +69,14 @@ public sealed unsafe class HullRenderer : IDisposable
         public int VertexOffset;
         public Vector3d Min;
         public Vector3d Max;
-        public int FirstBox;
-        public int BoxCount;
+
+        /// <summary>Where the brick's cell table starts in the lists buffer.</summary>
+        public int Table;
+
+        /// <summary>Cell grid dimensions packed 5 bits each (x, y, z); 0 when no box reaches the brick.</summary>
+        public int Cells;
+
+        public double CellSize;
     }
 
     /// <summary>A projector as the shader reads it (std430, six vec4).</summary>
@@ -246,11 +258,15 @@ public sealed unsafe class HullRenderer : IDisposable
         max = new Vector3d(o.X + (x1 - offset) * scale, o.Y + (y1 - offset) * scale, o.Z + (z1 - offset) * scale);
     }
 
-    /// <summary>Each brick's list of the boxes touching its bounds, in box order (decals later in the list draw on top).</summary>
+    /// <summary>
+    /// Each brick's grid of cells (about <see cref="CellMetres"/> across, at most <see cref="MaxCellsPerAxis"/> a side), each
+    /// listing the boxes whose bounds reach it, in box order (decals later in the list draw on top). Laid out per brick as a
+    /// table of (first, count) per cell followed by the cells' box indices; a fragment reads only its own cell's list.
+    /// </summary>
     private void BuildLists()
     {
         _listScratch.Clear();
-        Span<(Vector3d Min, Vector3d Max)> bounds = _boxes.Count <= 1024 ? stackalloc (Vector3d, Vector3d)[_boxes.Count] : new (Vector3d, Vector3d)[_boxes.Count];
+        var bounds = new (Vector3d Min, Vector3d Max)[_boxes.Count];
 
         for (var b = 0; b < _boxes.Count; b++)
         {
@@ -261,17 +277,21 @@ public sealed unsafe class HullRenderer : IDisposable
         for (var d = 0; d < _draws.Count; d++)
         {
             var draw = _draws[d];
-            draw.FirstBox = _listScratch.Count;
+            _brickBoxes.Clear();
 
             for (var b = 0; b < _boxes.Count; b++)
             {
                 var (min, max) = bounds[b];
 
                 if (min.X <= draw.Max.X && max.X >= draw.Min.X && min.Y <= draw.Max.Y && max.Y >= draw.Min.Y && min.Z <= draw.Max.Z && max.Z >= draw.Min.Z)
-                    _listScratch.Add((uint)b);
+                    _brickBoxes.Add(b);
             }
 
-            draw.BoxCount = _listScratch.Count - draw.FirstBox;
+            draw.Cells = 0;
+
+            if (_brickBoxes.Count > 0)
+                Grid(ref draw, bounds);
+
             _draws[d] = draw;
         }
 
@@ -293,6 +313,59 @@ public sealed unsafe class HullRenderer : IDisposable
 
         CollectionsMarshal.AsSpan(_listScratch).CopyTo(_lists.AsSpan<uint>());
     }
+
+    /// <summary>The brick's cell grid over its bounds and the lists of <see cref="_brickBoxes"/> in each cell.</summary>
+    private void Grid(ref Draw draw, (Vector3d Min, Vector3d Max)[] bounds)
+    {
+        var extent = Sub(draw.Max, draw.Min);
+        var cell = Math.Max(CellMetres, Math.Max(extent.X, Math.Max(extent.Y, extent.Z)) / MaxCellsPerAxis);
+        int nx = Dim(extent.X), ny = Dim(extent.Y), nz = Dim(extent.Z);
+        var cells = nx * ny * nz;
+
+        while (_buckets.Count < cells)
+            _buckets.Add(new List<uint>());
+
+        for (var c = 0; c < cells; c++)
+            _buckets[c].Clear();
+
+        foreach (var b in _brickBoxes)
+        {
+            var (min, max) = bounds[b];
+            int x0 = Index(min.X - draw.Min.X, nx), x1 = Index(max.X - draw.Min.X, nx);
+            int y0 = Index(min.Y - draw.Min.Y, ny), y1 = Index(max.Y - draw.Min.Y, ny);
+            int z0 = Index(min.Z - draw.Min.Z, nz), z1 = Index(max.Z - draw.Min.Z, nz);
+
+            for (var z = z0; z <= z1; z++)
+            {
+                for (var y = y0; y <= y1; y++)
+                {
+                    for (var x = x0; x <= x1; x++)
+                        _buckets[x + nx * (y + ny * z)].Add((uint)b);
+                }
+            }
+        }
+
+        // The table, then each cell's list.
+        draw.Table = _listScratch.Count;
+        draw.Cells = nx | (ny << 5) | (nz << 10);
+        draw.CellSize = cell;
+
+        for (var c = 0; c < cells * 2; c++)
+            _listScratch.Add(0);
+
+        for (var c = 0; c < cells; c++)
+        {
+            _listScratch[draw.Table + c * 2] = (uint)_listScratch.Count;
+            _listScratch[draw.Table + c * 2 + 1] = (uint)_buckets[c].Count;
+            _listScratch.AddRange(_buckets[c]);
+        }
+
+        int Dim(double size) => Math.Clamp((int)Math.Ceiling(size / cell), 1, MaxCellsPerAxis);
+
+        int Index(double offset, int n) => Math.Clamp((int)Math.Floor(offset / cell), 0, n - 1);
+    }
+
+    private static Vector3d Sub(Vector3d a, Vector3d b) => new(a.X - b.X, a.Y - b.Y, a.Z - b.Z);
 
     /// <summary>This frame's boxes, camera-relative.</summary>
     private void WriteProjectors(int frameIndex, double3 camera)
@@ -400,15 +473,17 @@ public sealed unsafe class HullRenderer : IDisposable
             clip = new Vector4(_clipAxis == 0 ? sign : 0f, _clipAxis == 1 ? sign : 0f, _clipAxis == 2 ? sign : 0f, (float)(sign * (_clipOffset - cam)));
         }
 
-        var push = stackalloc Vector4[3];
+        var push = stackalloc Vector4[4];
         push[1] = clip;
         push[2] = new Vector4(ghost, glazing ? 1f : 0f, 0f, 0f);
 
         foreach (var draw in _draws)
         {
             push[0] = new Vector4((float)(draw.Origin.X - camera.X), (float)(draw.Origin.Y - camera.Y), (float)(draw.Origin.Z - camera.Z), scale);
-            push[2].Z = ghost > 0f || glazing ? 0f : draw.FirstBox;
-            push[2].W = ghost > 0f || glazing ? 0f : draw.BoxCount;
+            var boxes = ghost <= 0f && !glazing && draw.Cells != 0;
+            push[2].Z = boxes ? draw.Table : 0f;
+            push[2].W = boxes ? draw.Cells : 0f;
+            push[3] = new Vector4((float)(draw.Min.X - camera.X), (float)(draw.Min.Y - camera.Y), (float)(draw.Min.Z - camera.Z), (float)draw.CellSize);
             commands.PushConstants(_layout, VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit, 0, new ReadOnlySpan<byte>(push, PushConstantSize));
             commands.DrawIndexed(draw.IndexCount, 1, draw.FirstIndex, draw.VertexOffset, 0);
         }

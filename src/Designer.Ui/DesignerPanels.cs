@@ -431,7 +431,7 @@ public sealed class DesignerPanels
             ImGui.Text($"hull draw {stats.HullGpuMs:F3} ms gpu");
 
             if (stats.Projectors > 0)
-                ImGui.Text($"paint and decals: {stats.Projectors} boxes, {stats.ProjectorRefs} brick refs");
+                ImGui.Text($"paint and decals: {stats.Projectors} boxes, {stats.ProjectorRefs} cell list entries");
 
             ImGui.Checkbox("Show grid mesh (debug)"u8, ref stats.ShowGrid);
             ImGui.Text($"plan hash {stats.Hash}  undo {session.Undo.UndoCount} redo {session.Undo.RedoCount}");

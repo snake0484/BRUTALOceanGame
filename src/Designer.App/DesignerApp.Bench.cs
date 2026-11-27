@@ -66,7 +66,7 @@ public sealed partial class DesignerApp
         var (round, state) = (_benchStep / 4, _benchStep % 4);
         _benchHull[round, state] = _benchHullSum / BenchFrames;
         _benchTotal[round, state] = _benchFrameSum / BenchFrames;
-        Console.WriteLine($"bench-paint round {round + 1} {BenchStates[state]}: hull {_benchHull[round, state]:F3} ms, frame {_benchTotal[round, state]:F3} ms gpu ({_hull.Projectors} boxes, {_hull.ProjectorRefs} brick refs)");
+        Console.WriteLine($"bench-paint round {round + 1} {BenchStates[state]}: hull {_benchHull[round, state]:F3} ms, frame {_benchTotal[round, state]:F3} ms gpu ({_hull.Projectors} boxes, {_hull.ProjectorRefs} list entries)");
 
         if (_benchStep + 1 < 8)
         {
