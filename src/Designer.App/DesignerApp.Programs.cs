@@ -8,7 +8,9 @@ namespace BrutalGame.Designer.App;
 /// Component programmes in the designer: the component editor's preview run, and one run per placed component that has a
 /// programme (kept while its prefab is the same, started at rest otherwise). They step on a 60 Hz tick of their own; each
 /// frame the parts they drive are posed from the runs' state records (closed form, between two ticks), in place of the
-/// joints preview.
+/// joints preview. Each run has its component's cores laid out (rebuilt with the plan); the component editor's run
+/// looks at the Programme panel's test object and follows its power switch, placed runs see nothing yet (the game's
+/// world query is not wired).
 /// </summary>
 public sealed partial class DesignerApp
 {
@@ -18,6 +20,17 @@ public sealed partial class DesignerApp
     private readonly Dictionary<uint, PlacedRun> _placedRuns = new();
     private long _programTick;
     private double _programClock;
+    private CoreCatalog _coreCatalog = new();
+    private HullCoreSet? _componentCores;
+    private readonly TestObject _testObject = new();
+
+    /// <summary>The bench's test object: something straight ahead of every sensor, at the panel's distance.</summary>
+    private sealed class TestObject : ISensorWorld
+    {
+        public double Distance = double.PositiveInfinity;
+
+        public double Nearest(Vector3d origin, Vector3d direction, double halfAngleRadians, double range) => Distance;
+    }
 
     private sealed class PlacedRun(HullProgram program, List<HullJoint> joints)
     {
@@ -28,7 +41,8 @@ public sealed partial class DesignerApp
 
     private void InitPrograms(string dataFolder)
     {
-        _programPanel = new ProgramPanel(new InterfaceLibrary(dataFolder, InterfaceLibrary.DefaultFolder));
+        _coreCatalog = CoreCatalog.Load(dataFolder);
+        _programPanel = new ProgramPanel(new InterfaceLibrary(dataFolder, InterfaceLibrary.DefaultFolder)) { Catalog = _coreCatalog };
         _prefabPanel.ProgramState = id =>
             _placedRuns.TryGetValue(id, out var r) && r.Run.State < r.Program.Interface.States.Count
                 ? r.Program.Interface.States[r.Run.State] + (r.Run.Held ? " (stopped)" : "")
@@ -56,10 +70,14 @@ public sealed partial class DesignerApp
 
         if (_active.Component is not null && doc.Program is { } program)
         {
-            if (_componentProgram is null || _componentProgram.Interface.Key != program.Interface.Key || _componentRun.State >= program.Interface.States.Count)
+            _componentRun.Cores = CoreLayout.Build(doc.Cores, _coreCatalog, joints);
+            _componentRun.World = _testObject;
+
+            if (_componentProgram is null || _componentProgram.Interface.Key != program.Interface.Key || _componentRun.State >= program.Interface.States.Count
+                || !ReferenceEquals(_componentCores, doc.Cores))
                 ProgramRunner.Reset(program, joints, _componentRun, _programTick);
 
-            _componentProgram = program;
+            (_componentProgram, _componentCores) = (program, doc.Cores);
         }
         else
         {
@@ -72,7 +90,7 @@ public sealed partial class DesignerApp
         {
             foreach (var placement in components.Placements)
             {
-                if (!doc.Prefabs.TryGetValue(placement.Prefab, out var prefab) || prefab.Program is not { } p || prefab.Joints is not { Joints.Count: > 0 } set)
+                if (!doc.Prefabs.TryGetValue(placement.Prefab, out var prefab) || prefab.Program is not { } p)
                     continue;
 
                 seen.Add(placement.Id);
@@ -80,7 +98,8 @@ public sealed partial class DesignerApp
                 if (_placedRuns.TryGetValue(placement.Id, out var run) && ReferenceEquals(run.Program, p))
                     continue;
 
-                run = new PlacedRun(p, set.Joints);
+                run = new PlacedRun(p, prefab.Joints?.Joints ?? []);
+                run.Run.Cores = CoreLayout.Build(prefab.Cores, _coreCatalog, run.Joints);
                 ProgramRunner.Reset(p, run.Joints, run.Run, _programTick);
                 _placedRuns[placement.Id] = run;
             }
@@ -104,6 +123,8 @@ public sealed partial class DesignerApp
                 ProgramRunner.Call(program, _componentRun, _programPanel.CallRequest);
 
             _componentRun.Obstructed = _programPanel.Jammed;
+            _componentRun.Unpowered = !_programPanel.Powered;
+            _testObject.Distance = _programPanel.ProbeDistance >= ProgramPanel.ProbeNone ? double.PositiveInfinity : _programPanel.ProbeDistance;
         }
 
         (_programPanel.ResetRequest, _programPanel.CallRequest) = (false, -1);

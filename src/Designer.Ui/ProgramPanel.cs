@@ -12,8 +12,9 @@ namespace BrutalGame.Designer.Ui;
 /// next node; drag a node's title to move it, drag from an output onto a node to link it, right-click an output to cut
 /// it, right-click a node to delete it, right-click empty space to add one, middle-drag to pan; a condition node's orange
 /// output goes to the "when" input of a Wait until or If); each state's pose (where every joint stands in it, or holds);
-/// and the preview (a button per call, "Jam the moving parts" to stop them as something in the way would, the state it
-/// is in, the node running, highlighted).
+/// and the preview (a button per call, "Jam the moving parts" to stop them as something in the way would, power, a test
+/// object for its sensors, the state it is in, the node running, highlighted, and every signal live). Its sensors and
+/// effectors (D88) are listed and added here too: catalog cores, each on a joint or at a point of the component.
 /// </summary>
 public sealed class ProgramPanel
 {
@@ -57,14 +58,26 @@ public sealed class ProgramPanel
     /// <summary>The preview's "Jam the moving parts": they stop where they are, as if something were in the way.</summary>
     public bool Jammed;
 
+    /// <summary>The preview's power switch, and how far in front of its sensors the test object is (metres; past <see cref="ProbeNone"/>: none).</summary>
+    public bool Powered = true;
+    public float ProbeDistance = ProbeNone;
+    public const float ProbeNone = 15f;
+
+    /// <summary>The catalog's cores (set by the host).</summary>
+    public CoreCatalog Catalog = new();
+
+    private int _newCore;
+
     public ProgramPanel(InterfaceLibrary library) => _library = library;
 
     /// <summary>The nodes the Add menu offers, in its order (older kinds still run but are not offered).</summary>
     private static readonly NodeKind[] Offered =
     [
-        NodeKind.OnCall, NodeKind.SetState, NodeKind.WaitUntil, NodeKind.Wait, NodeKind.If, NodeKind.IfState,
-        NodeKind.JointAt, NodeKind.StateIs, NodeKind.InPose,
+        NodeKind.OnCall, NodeKind.OnStart, NodeKind.SetState, NodeKind.SetInput, NodeKind.WaitUntil, NodeKind.Wait, NodeKind.If, NodeKind.IfState,
+        NodeKind.JointAt, NodeKind.StateIs, NodeKind.InPose, NodeKind.SignalIs,
     ];
+
+    private static readonly string[] CompareNames = ["=", "!=", "<", ">", "<=", ">="];
 
     public static string NodeName(NodeKind kind) => kind switch
     {
@@ -78,6 +91,9 @@ public sealed class ProgramPanel
         NodeKind.If => "If",
         NodeKind.StateIs => "State is",
         NodeKind.JointAt => "Joint is at",
+        NodeKind.OnStart => "On start",
+        NodeKind.SetInput => "Set input",
+        NodeKind.SignalIs => "Signal is",
         _ => "Joints in pose",
     };
 
@@ -86,14 +102,14 @@ public sealed class ProgramPanel
         NodeKind.WaitArrived => ["in place", "stopped"],
         NodeKind.WaitUntil => ["got there", "timed out"],
         NodeKind.IfState or NodeKind.IfBlocked or NodeKind.If => ["yes", "no"],
-        NodeKind.StateIs or NodeKind.JointAt or NodeKind.InPose => [],
+        NodeKind.StateIs or NodeKind.JointAt or NodeKind.InPose or NodeKind.SignalIs => [],
         _ => ["then"],
     };
 
     /// <summary>How many rows of settings a node has.</summary>
     private static int ParamRows(NodeKind kind) => kind switch
     {
-        NodeKind.JointAt => 2,
+        NodeKind.JointAt or NodeKind.SetInput or NodeKind.SignalIs => 2,
         NodeKind.OnCall or NodeKind.SetState or NodeKind.IfState or NodeKind.Wait or NodeKind.WaitUntil or NodeKind.StateIs => 1,
         _ => 0,
     };
@@ -132,12 +148,13 @@ public sealed class ProgramPanel
         }
 
         DrawPreview(program, run);
+        DrawCores(session, run);
         ImGui.SeparatorText("Sequence"u8);
 
         if (ImGui.Button("Start from the standard door sequence"u8))
         {
             var ok = true;
-            ProgramCommands.Set(session, p => ok = ProgramCommands.StandardDoor(p, session.Doc.Joints?.Joints ?? []));
+            ProgramCommands.Set(session, p => ok = ProgramCommands.StandardDoor(p, session.Doc.Joints?.Joints ?? [], session.Doc.Cores));
             _message = ok ? "" : "The standard door sequence needs a door's calls (Open, Close, Lock, Unlock) and states (Closed, Opening, Open, Closing, Locked, Blocked).";
         }
 
@@ -246,8 +263,179 @@ public sealed class ProgramPanel
         ImGui.SameLine();
         ImGui.TextDisabled("(they stop where they are, as if something were in the way)"u8);
 
+        ImGui.Checkbox("Power"u8, ref Powered);
+        ImGui.SameLine();
+        DesignerStyle.ItemWidth(200f);
+        ImGui.SliderFloat("Test object"u8, ref ProbeDistance, 0f, ProbeNone, ProbeDistance >= ProbeNone ? "none" : "%.2f m ahead", ImGuiSliderFlags.None);
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Something in front of every proximity sensor, this far away (all the way right: nothing)"u8);
+
         if (run is not null && run.State < program.Interface.States.Count)
             ImGui.Text($"State: {program.Interface.States[run.State]}{(run.Held ? " (stopped)" : "")}{(run.Node != 0 ? $", running node {run.Node}" : "")}");
+
+        if (run?.Cores is { Entries.Count: > 0 } cores)
+            DrawSignals(cores, run);
+    }
+
+    /// <summary>Every core's signals as they are now: value in its unit, or dead (no power, no reading yet).</summary>
+    private static void DrawSignals(CoreLayout cores, ProgramInstance run)
+    {
+        if (!ImGui.BeginTable("##signals"u8, 3, ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingStretchProp))
+            return;
+
+        ImGui.TableSetupColumn("Core"u8, ImGuiTableColumnFlags.WidthStretch, 1.4f);
+        ImGui.TableSetupColumn("Signal"u8, ImGuiTableColumnFlags.WidthStretch, 1f);
+        ImGui.TableSetupColumn("Value"u8, ImGuiTableColumnFlags.WidthStretch, 1f);
+        ImGui.TableHeadersRow();
+
+        foreach (var e in cores.Entries)
+        {
+            for (var s = 0; s < e.Def.Signals.Count; s++)
+            {
+                var signal = e.Def.Signals[s];
+                ImGui.TableNextRow();
+                ImGui.TableNextColumn();
+
+                if (s == 0)
+                    ImGui.Text($"{e.Def.Name} #{e.Id}");
+
+                ImGui.TableNextColumn();
+                ImGui.TextDisabled($"{signal.Name}{(signal.Input ? " (in)" : "")}");
+                ImGui.TableNextColumn();
+
+                if (run.IsLive(e.SignalBase + s))
+                    ImGui.Text($"{Show(signal, run.Signals[e.SignalBase + s])}");
+                else
+                    ImGui.TextDisabled("dead"u8);
+            }
+        }
+
+        ImGui.EndTable();
+        ImGui.TextDisabled($"{cores.PowerW:0.#} W, declared {cores.TickCostNs} ns a tick{(cores.Missing > 0 ? $", {cores.Missing} core(s) missing from the catalog or their joint" : "")}");
+    }
+
+    /// <summary>A signal's value in counts, shown in its unit (a 0..1 signal as yes or no).</summary>
+    private static string Show(CoreSignal signal, int counts) =>
+        signal is { Min: 0, Max: 1, Step: 1 } ? counts != 0 ? "yes" : "no" : $"{counts * signal.Step:0.###} {(signal.Unit == "joint" ? "" : signal.Unit)}";
+
+    // ---- sensors and effectors ----
+
+    private void DrawCores(DesignSession session, ProgramInstance? run)
+    {
+        ImGui.SeparatorText("Sensors and effectors"u8);
+        ImGui.TextDisabled("Catalog cores: sensors measure, effectors act through their inputs. A joint's motor drives it to each state's pose."u8);
+        var all = Catalog.All;
+
+        if (all.Count == 0)
+        {
+            ImGui.TextDisabled("No cores in the catalog (data/sensors, data/effectors)."u8);
+            return;
+        }
+
+        _newCore = Math.Clamp(_newCore, 0, all.Count - 1);
+        DesignerStyle.ItemWidth(220f);
+
+        if (ImGui.BeginCombo("##newcore"u8, $"{(all[_newCore].IsSensor ? "Sensor" : "Effector")}: {all[_newCore].Name}", ImGuiComboFlags.None))
+        {
+            for (var i = 0; i < all.Count; i++)
+            {
+                if (ImGui.Selectable($"{(all[i].IsSensor ? "Sensor" : "Effector")}: {all[i].Name}##def{i}", i == _newCore, ImGuiSelectableFlags.None, default))
+                    _newCore = i;
+            }
+
+            ImGui.EndCombo();
+        }
+
+        ImGui.SameLine();
+
+        if (ImGui.Button("Add"u8))
+        {
+            var def = all[_newCore];
+            var joint = def.NeedsJoint ? session.Doc.Joints?.Joints.FirstOrDefault()?.Id ?? 0 : 0;
+
+            if (def.NeedsJoint && joint == 0)
+                _message = $"{def.Name} reads or drives a joint: add a hinge or slider first.";
+            else if (CoreCommands.Add(session, def.Key, joint, default, new Vector3d(0, 0, 1)) == 0)
+                _message = $"At most {HullCoreSet.MaxCores} cores.";
+        }
+
+        if (session.Doc.Cores is not { } set)
+            return;
+
+        foreach (var core in set.Cores)
+        {
+            ImGui.PushID((int)core.Id);
+            var known = Catalog.TryGet(core.Def, out var def);
+            ImGui.Text($"{(known ? def.Name : "Unknown core")} #{core.Id}");
+            ImGui.SameLine();
+
+            if (ImGui.SmallButton("Remove"u8))
+            {
+                CoreCommands.Remove(session, core.Id);
+                ImGui.PopID();
+                break;
+            }
+
+            if (known && def.NeedsJoint)
+                CoreJoint(session, core, def);
+            else if (known)
+                CorePlace(session, core);
+
+            ImGui.PopID();
+        }
+    }
+
+    /// <summary>The joint a core reads or drives, and a limit switch's trip position.</summary>
+    private static void CoreJoint(DesignSession session, HullCore core, CoreDef def)
+    {
+        var joints = session.Doc.Joints?.Joints;
+        var joint = joints?.Find(j => j.Id == core.Joint);
+        var id = core.Id;
+        DesignerStyle.ItemWidth(150f);
+
+        if (ImGui.BeginCombo("Joint"u8, joint is null ? "(pick a joint)" : $"{JointsPanel.KindName(joint.Kind)} #{joint.Id}", ImGuiComboFlags.None))
+        {
+            foreach (var j in joints ?? [])
+            {
+                var pick = j.Id;
+
+                if (ImGui.Selectable($"{JointsPanel.KindName(j.Kind)} #{j.Id}", j.Id == core.Joint, ImGuiSelectableFlags.None, default))
+                    CoreCommands.Set(session, id, c => c.Joint = pick);
+            }
+
+            ImGui.EndCombo();
+        }
+
+        if (def.Kind != CoreKind.JointLimit)
+            return;
+
+        ImGui.SameLine();
+        var unit = joint?.Kind == JointKind.Slider ? 1000f : 10f;
+        var at = core.At / unit;
+        DesignerStyle.ItemWidth(110f);
+        ImGui.InputFloat("Trips at"u8, ref at, 0f, 0f, joint?.Kind == JointKind.Slider ? "%.3f m" : "%.1f deg", ImGuiInputTextFlags.None);
+
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            var stored = (short)Math.Clamp((int)MathF.Round(at * unit), short.MinValue, short.MaxValue);
+            CoreCommands.Set(session, id, c => c.At = stored);
+        }
+    }
+
+    /// <summary>Where a core without a joint sits (metres, component space); it faces the way it was placed.</summary>
+    private static void CorePlace(DesignSession session, HullCore core)
+    {
+        var p = core.Position;
+        var v = new float3((float)p.X, (float)p.Y, (float)p.Z);
+        DesignerStyle.ItemWidth(260f);
+        ImGui.DragFloat3("At (m)"u8, ref v, 0.01f, -100f, 100f, "%.2f", ImGuiSliderFlags.None);
+
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            var (x, y, z) = ComponentCommands.Quantise(new Vector3d(v.X, v.Y, v.Z));
+            CoreCommands.Set(session, core.Id, c => (c.X, c.Y, c.Z) = (x, y, z));
+        }
     }
 
     // ---- the graph ----
@@ -380,7 +568,8 @@ public sealed class ProgramPanel
                     Id = p.NextNodeId(), Kind = kind, X = (short)Math.Clamp(at.X, short.MinValue, short.MaxValue), Y = (short)Math.Clamp(at.Y, short.MinValue, short.MaxValue),
                     B = kind switch { NodeKind.Wait => (short)ProgramRunner.TicksPerSecond, NodeKind.WaitUntil => (short)(5 * ProgramRunner.TicksPerSecond), _ => (short)0 },
                     A = kind == NodeKind.JointAt ? ProgramCommands.PositionTolerance : (byte)0,
-                    Joint = kind == NodeKind.JointAt ? session.Doc.Joints?.Joints.FirstOrDefault()?.Id ?? 0 : 0,
+                    Joint = kind == NodeKind.JointAt ? session.Doc.Joints?.Joints.FirstOrDefault()?.Id ?? 0
+                        : kind is NodeKind.SetInput or NodeKind.SignalIs ? session.Doc.Cores?.Cores.FirstOrDefault()?.Id ?? 0 : 0,
                 }));
             }
 
@@ -574,6 +763,102 @@ public sealed class ProgramPanel
             case NodeKind.JointAt:
                 JointAt(session, node, p);
                 break;
+            case NodeKind.SetInput or NodeKind.SignalIs:
+                CoreParam(session, node, p);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// A Set input or Signal is: which core, then which of its inputs and the value (Set input), or which signal, the
+    /// comparison and the value (Signal is); values in the signal's unit, stored as counts of its step.
+    /// </summary>
+    private void CoreParam(DesignSession session, ProgramNode node, float2 p)
+    {
+        var id = node.Id;
+        var cores = session.Doc.Cores?.Cores;
+        var core = cores?.Find(c => c.Id == node.Joint);
+        var def = core is not null && Catalog.TryGet(core.Def, out var d) ? d : null;
+
+        if (ImGui.BeginCombo("##core"u8, def is null ? "(pick a core)" : $"{def.Name} #{core!.Id}", ImGuiComboFlags.None))
+        {
+            foreach (var c in cores ?? [])
+            {
+                var pick = c.Id;
+                var name = Catalog.TryGet(c.Def, out var cd) ? cd.Name : "Unknown core";
+
+                if (ImGui.Selectable($"{name} #{c.Id}", c.Id == node.Joint, ImGuiSelectableFlags.None, default))
+                    ProgramCommands.Set(session, pr => Edit(pr, id, n => n with { Joint = pick, A = 0 }));
+            }
+
+            ImGui.EndCombo();
+        }
+
+        if (def is null)
+            return;
+
+        // The signals this node can name: a Set input only the core's inputs (A counts inputs); a Signal is any (A & 15).
+        var setting = node.Kind == NodeKind.SetInput;
+        var names = new List<(string Name, int Signal)>();
+
+        for (var s = 0; s < def.Signals.Count; s++)
+        {
+            if (!setting || def.Signals[s].Input)
+                names.Add((def.Signals[s].Name, s));
+        }
+
+        var current = setting ? node.A : node.A & 15;
+        ImGui.SetCursorScreenPos(new float2(p.X + 6, p.Y + TitleHeight + ParamHeight + 2));
+        ImGui.SetNextItemWidth((NodeWidth - 24) * (setting ? 0.5f : 0.4f));
+
+        if (ImGui.BeginCombo("##signal"u8, current < names.Count ? names[current].Name : "(none)", ImGuiComboFlags.None))
+        {
+            for (var i = 0; i < names.Count; i++)
+            {
+                if (!ImGui.Selectable($"{names[i].Name}##s{i}", i == current, ImGuiSelectableFlags.None, default))
+                    continue;
+
+                var pick = (byte)i;
+                ProgramCommands.Set(session, pr => Edit(pr, id, n => n with { A = setting ? pick : (byte)((n.A & 0xF0) | pick) }));
+            }
+
+            ImGui.EndCombo();
+        }
+
+        if (!setting)
+        {
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth((NodeWidth - 24) * 0.22f);
+            var op = node.A >> 4;
+
+            if (ImGui.BeginCombo("##op"u8, op < CompareNames.Length ? CompareNames[op] : "?", ImGuiComboFlags.NoArrowButton))
+            {
+                for (var i = 0; i < CompareNames.Length; i++)
+                {
+                    if (!ImGui.Selectable(CompareNames[i], i == op, ImGuiSelectableFlags.None, default))
+                        continue;
+
+                    var pick = (byte)(i << 4);
+                    ProgramCommands.Set(session, pr => Edit(pr, id, n => n with { A = (byte)((n.A & 15) | pick) }));
+                }
+
+                ImGui.EndCombo();
+            }
+        }
+
+        if (current >= names.Count)
+            return;
+
+        var signal = def.Signals[names[current].Signal];
+        var value = (float)(node.B * signal.Step);
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(-1);
+        ImGui.InputFloat("##value"u8, ref value, 0f, 0f, signal.Step >= 1 ? "%.0f" : "%.2f", ImGuiInputTextFlags.None);
+
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            var counts = (short)Math.Clamp(ProgramRunner.Quantise(value, signal.Step), short.MinValue, short.MaxValue);
+            ProgramCommands.Set(session, pr => Edit(pr, id, n => n with { B = counts }));
         }
     }
 
@@ -661,7 +946,9 @@ public sealed class ProgramPanel
         NodeKind.OnCall => new ImColor8(70, 120, 200, 255),
         NodeKind.SetState => new ImColor8(70, 150, 100, 255),
         NodeKind.WaitArrived or NodeKind.Wait or NodeKind.WaitUntil => new ImColor8(150, 110, 60, 255),
-        NodeKind.StateIs or NodeKind.JointAt or NodeKind.InPose => new ImColor8(170, 100, 40, 255),
+        NodeKind.StateIs or NodeKind.JointAt or NodeKind.InPose or NodeKind.SignalIs => new ImColor8(170, 100, 40, 255),
+        NodeKind.OnStart => new ImColor8(70, 120, 200, 255),
+        NodeKind.SetInput => new ImColor8(60, 140, 140, 255),
         _ => new ImColor8(120, 80, 150, 255),
     };
 

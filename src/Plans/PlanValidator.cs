@@ -73,6 +73,7 @@ public enum IssueCode : ushort
     OpeningShape,
     ProgramShape,
     ProgramCall,
+    CoreShape,
 }
 
 public readonly record struct ValidationIssue(Severity Severity, IssueCode Code, ElementRef Element, int Value);
@@ -403,6 +404,7 @@ public static class PlanValidator
                 Ships.Logic.NodeKind.OnCall => n.A < face.Calls.Count,
                 Ships.Logic.NodeKind.SetState or Ships.Logic.NodeKind.IfState or Ships.Logic.NodeKind.StateIs => n.A < face.States.Count,
                 Ships.Logic.NodeKind.JointAt => doc.Joints?.IndexOf(n.Joint) >= 0,
+                Ships.Logic.NodeKind.SetInput or Ships.Logic.NodeKind.SignalIs => doc.Cores?.IndexOf(n.Joint) >= 0,
                 _ => true,
             };
 
@@ -410,7 +412,8 @@ public static class PlanValidator
             bool Flow(ushort to) => to == 0 || (program.IndexOf(to) is var i and >= 0 && !program.Nodes[i].IsCondition);
             var condition = n.In == 0 || (program.IndexOf(n.In) is var c and >= 0 && program.Nodes[c].IsCondition && n.TakesCondition);
 
-            if (n.Id == 0 || !ids.Add(n.Id) || !Enum.IsDefined(n.Kind) || !named || (n.Kind != Ships.Logic.NodeKind.JointAt && n.B < 0)
+            if (n.Id == 0 || !ids.Add(n.Id) || !Enum.IsDefined(n.Kind) || !named || (n.Kind is not (Ships.Logic.NodeKind.JointAt or Ships.Logic.NodeKind.SetInput or Ships.Logic.NodeKind.SignalIs) && n.B < 0)
+                || (n.Kind == Ships.Logic.NodeKind.SignalIs && n.A >> 4 > (int)Ships.Logic.Compare.GreaterOrEqual)
                 || !Flow(n.Out0) || !Flow(n.Out1) || !condition)
                 log.Add(Severity.Error, IssueCode.ProgramShape, default, n.Id);
         }
@@ -429,6 +432,32 @@ public static class PlanValidator
         {
             if (!program.Nodes.Exists(n => n.Kind == Ships.Logic.NodeKind.OnCall && n.A == c))
                 log.Add(Severity.Warning, IssueCode.ProgramCall, default, c);
+        }
+    }
+
+    /// <summary>
+    /// Cores: at most <see cref="Ships.Logic.HullCoreSet.MaxCores"/>, unique non-zero ids, each joint it names one of the
+    /// plan's (0: none), within reach. Whether its def exists and needs a joint is the catalog's to say, at load.
+    /// </summary>
+    private static void ValidateCores(PlanDocument doc, ValidationLog log)
+    {
+        if (doc.Cores is not { } set)
+            return;
+
+        if (set.Cores.Count > Ships.Logic.HullCoreSet.MaxCores)
+        {
+            log.Add(Severity.Error, IssueCode.CoreShape, default, 0);
+            return;
+        }
+
+        var ids = new HashSet<uint>();
+        const int reach = 1 << 30;
+
+        foreach (var c in set.Cores)
+        {
+            if (c.Id == 0 || !ids.Add(c.Id) || (c.Joint != 0 && (doc.Joints?.IndexOf(c.Joint) ?? -1) < 0)
+                || Math.Abs((long)c.X) >= reach || Math.Abs((long)c.Y) >= reach || Math.Abs((long)c.Z) >= reach)
+                log.Add(Severity.Error, IssueCode.CoreShape, default, (int)c.Id);
         }
     }
 
@@ -623,6 +652,7 @@ public static class PlanValidator
         ValidateJoints(doc, log);
         ValidateOpenings(doc, log);
         ValidateProgram(doc, log);
+        ValidateCores(doc, log);
         ValidateComponents(doc, log);
         ValidateInterior(doc, log);
         ValidateWindows(doc, log);

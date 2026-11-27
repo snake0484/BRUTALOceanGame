@@ -32,6 +32,14 @@ public sealed class InterfaceLibrary
         States = ["Closed", "Opening", "Open", "Closing", "Locked", "Blocked"],
     };
 
+    /// <summary>The built-in Lamp interface (<c>data/interfaces/lamp.json</c>): Auto follows its sensor, On and Off override it.</summary>
+    public static ComponentInterface Lamp => new()
+    {
+        Name = "Lamp",
+        Calls = ["Auto", "On", "Off"],
+        States = ["Auto", "On", "Off"],
+    };
+
     public static string DefaultFolder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "BRUTALGame", "Interfaces");
 
     public void Refresh()
@@ -143,7 +151,7 @@ public static class ProgramCommands
     /// </list>
     /// False when a name is missing.
     /// </summary>
-    public static bool StandardDoor(HullProgram program, IReadOnlyList<HullJoint> joints)
+    public static bool StandardDoor(HullProgram program, IReadOnlyList<HullJoint> joints, HullCoreSet? cores = null)
     {
         var face = program.Interface;
         int Call(string n) => face.Calls.FindIndex(c => c.Equals(n, StringComparison.OrdinalIgnoreCase));
@@ -185,11 +193,21 @@ public static class ProgramCommands
             program.Nodes[i] = change(program.Nodes[i]);
         }
 
-        // "The leaf is at its end" (or, with no leaf, "in pose"), placed under the wait that tests it.
+        // "The leaf is at its end": its limit switch there pressed, else the joint within tolerance (with no leaf, "in pose"); placed under the wait that tests it.
         ushort At(bool shut, int col, double row)
         {
             if (leaf is null)
                 return Add(NodeKind.InPose, col, row);
+
+            var end = shut ? shutAt : openAt;
+
+            if (cores?.Cores.Find(c => c.Def == CoreIds.LimitSwitch && c.Joint == leaf.Id && c.At == end) is { } limit)
+            {
+                var pressed = Add(NodeKind.SignalIs, col, row, (int)Compare.Equal << 4, 1);
+                var core = limit.Id;
+                Set(pressed, n => n with { Joint = core });
+                return pressed;
+            }
 
             var c = Add(NodeKind.JointAt, col, row, PositionTolerance, shut ? shutAt : openAt);
             var joint = leaf.Id;
@@ -247,6 +265,78 @@ public static class ProgramCommands
         var unlockIt = Add(NodeKind.SetState, 2, 6.8, closed);
         Link(onUnlock, 0, isLocked2);
         Link(isLocked2, 0, unlockIt);
+        return true;
+    }
+
+    /// <summary>
+    /// Replaces the graph with the lamp sequence (the Lamp interface): on start and on Auto, full brightness and then
+    /// for ever: wait until <paramref name="sensor"/> detects something, light <paramref name="lamp"/>, wait until it
+    /// detects nothing, put it out. On and Off set the lamp and stop following the sensor. False when a name is missing.
+    /// </summary>
+    public static bool LampSequence(HullProgram program, uint sensor, uint lamp)
+    {
+        var face = program.Interface;
+        int Call(string n) => face.Calls.FindIndex(c => c.Equals(n, StringComparison.OrdinalIgnoreCase));
+        int State(string n) => face.States.FindIndex(c => c.Equals(n, StringComparison.OrdinalIgnoreCase));
+        int auto = Call("Auto"), on = Call("On"), off = Call("Off"), autoState = State("Auto"), onState = State("On"), offState = State("Off");
+
+        if (Math.Min(Math.Min(auto, on), Math.Min(Math.Min(off, autoState), Math.Min(onState, offState))) < 0)
+            return false;
+
+        program.Nodes.Clear();
+        ushort id = 0;
+
+        ushort Add(NodeKind kind, int col, double row, int a = 0, short b = 0, uint core = 0)
+        {
+            program.Nodes.Add(new ProgramNode { Id = ++id, Kind = kind, X = (short)(20 + col * ColumnPixels), Y = (short)(20 + row * RowPixels), A = (byte)a, B = b, Joint = core });
+            return id;
+        }
+
+        void Link(ushort from, int output, ushort to)
+        {
+            var i = program.IndexOf(from);
+            program.Nodes[i] = output == 0 ? program.Nodes[i] with { Out0 = to } : program.Nodes[i] with { Out1 = to };
+        }
+
+        void Test(ushort wait, ushort condition)
+        {
+            var i = program.IndexOf(wait);
+            program.Nodes[i] = program.Nodes[i] with { In = condition };
+        }
+
+        // Lamp inputs: 0 On, 1 Brightness. Sensor signals: 0 Detected.
+        var onStart = Add(NodeKind.OnStart, 0, 0);
+        var onAuto = Add(NodeKind.OnCall, 0, 1, auto);
+        var setAuto = Add(NodeKind.SetState, 1, 0, autoState);
+        var bright = Add(NodeKind.SetInput, 2, 0, 1, 100, lamp);
+        var waitSeen = Add(NodeKind.WaitUntil, 3, 0);
+        var light = Add(NodeKind.SetInput, 4, 0, 0, 1, lamp);
+        var waitGone = Add(NodeKind.WaitUntil, 5, 0);
+        var dark = Add(NodeKind.SetInput, 6, 0, 0, 0, lamp);
+        Test(waitSeen, Add(NodeKind.SignalIs, 3, 1, (int)Compare.Equal << 4, 1, sensor));
+        Test(waitGone, Add(NodeKind.SignalIs, 5, 1, (int)Compare.Equal << 4, 0, sensor));
+        Link(onStart, 0, setAuto);
+        Link(onAuto, 0, setAuto);
+        Link(setAuto, 0, bright);
+        Link(bright, 0, waitSeen);
+        Link(waitSeen, 0, light);
+        Link(light, 0, waitGone);
+        Link(waitGone, 0, dark);
+        Link(dark, 0, waitSeen);
+
+        var onOn = Add(NodeKind.OnCall, 0, 2.5, on);
+        var setOn = Add(NodeKind.SetState, 1, 2.5, onState);
+        var fullOn = Add(NodeKind.SetInput, 2, 2.5, 1, 100, lamp);
+        var lightOn = Add(NodeKind.SetInput, 3, 2.5, 0, 1, lamp);
+        Link(onOn, 0, setOn);
+        Link(setOn, 0, fullOn);
+        Link(fullOn, 0, lightOn);
+
+        var onOff = Add(NodeKind.OnCall, 0, 3.5, off);
+        var setOff = Add(NodeKind.SetState, 1, 3.5, offState);
+        var darkOff = Add(NodeKind.SetInput, 2, 3.5, 0, 0, lamp);
+        Link(onOff, 0, setOff);
+        Link(setOff, 0, darkOff);
         return true;
     }
 

@@ -95,12 +95,14 @@ public static class PlanFormat
     public const ushort OpeningFormat = 14;
     public const ushort ProgramFormat = 15;
     public const ushort ConditionFormat = 16;
+    public const ushort CoreFormat = 17;
 
     /// <summary>The newest format this build writes; bodies up to it can be read.</summary>
-    public const ushort Newest = ConditionFormat;
+    public const ushort Newest = CoreFormat;
 
     public static ushort FormatOf(PlanDocument doc) =>
-        doc.Program is not null || doc.Prefabs.Values.Any(p => FormatOf(p) >= ProgramFormat) ? ConditionFormat
+        doc.Cores is { IsEmpty: false } || doc.Program is { } pr && pr.Nodes.Exists(n => n.NeedsCores) || doc.Prefabs.Values.Any(p => FormatOf(p) >= CoreFormat) ? CoreFormat
+        : doc.Program is not null || doc.Prefabs.Values.Any(p => FormatOf(p) >= ProgramFormat) ? ConditionFormat
         : doc.Openings is { IsEmpty: false } || doc.Interior is { } i && i.Profiles.Exists(p => p.Kind == ProfileKind.Door)
             || doc.Joints is { } j && j.Joints.Exists(x => x.Kind == JointKind.Slider) || doc.Prefabs.Values.Any(p => FormatOf(p) >= OpeningFormat) ? OpeningFormat
         : doc.Joints is { IsEmpty: false } || doc.Prefabs.Values.Any(p => FormatOf(p) >= JointFormat) ? JointFormat
@@ -139,9 +141,10 @@ public static class PlanFormat
         var joints = format >= JointFormat && doc.Joints is { IsEmpty: false } ? doc.Joints.ToBytes() : [];
         var openings = format >= OpeningFormat && doc.Openings is { IsEmpty: false } ? doc.Openings.ToBytes() : [];
         var program = format >= ProgramFormat && doc.Program is not null ? doc.Program.ToBytes() : [];
+        var cores = format >= CoreFormat && doc.Cores is { IsEmpty: false } ? doc.Cores.ToBytes() : [];
         var components = format >= ComponentFormat ? ComponentBlock(doc) : [];
         var bytes = new byte[BodyFixedBytes + doc.Materials.Count * 4 + n * HullSolid.SizeInBytes + (format >= MeshFormat ? 4 + meshBytes : 0)
-            + (format >= BrushFormat ? 1 : 0) + layers.Length + brushes.Length + interior.Length + windows.Length + decals.Length + paint.Length + joints.Length + openings.Length + (format >= ProgramFormat ? 1 : 0) + program.Length + components.Length];
+            + (format >= BrushFormat ? 1 : 0) + layers.Length + brushes.Length + interior.Length + windows.Length + decals.Length + paint.Length + joints.Length + openings.Length + (format >= ProgramFormat ? 1 : 0) + program.Length + cores.Length + components.Length];
         var w = new Writer(bytes);
 
         w.U8((byte)doc.Class);
@@ -209,7 +212,7 @@ public static class PlanFormat
             w.U8((byte)((doc.Layers is not null ? 1 : 0) | (brushes.Length > 0 ? 2 : 0) | (interior.Length > 0 ? 4 : 0) | (windows.Length > 0 ? 8 : 0) | (decals.Length > 0 ? 16 : 0) | (paint.Length > 0 ? 32 : 0) | (joints.Length > 0 ? 64 : 0) | (openings.Length > 0 ? 128 : 0)));
 
         if (format >= ProgramFormat)
-            w.U8((byte)(program.Length > 0 ? 1 : 0));
+            w.U8((byte)((program.Length > 0 ? 1 : 0) | (cores.Length > 0 ? 2 : 0)));
 
         w.Bytes(layers);
         w.Bytes(brushes);
@@ -220,6 +223,7 @@ public static class PlanFormat
         w.Bytes(joints);
         w.Bytes(openings);
         w.Bytes(program);
+        w.Bytes(cores);
         w.Bytes(components);
         return bytes;
     }
@@ -310,7 +314,7 @@ public static class PlanFormat
         if (header.Magic != PlanHeader.MagicValue)
             return PlanFormatError.BadMagic;
 
-        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat or InteriorFormat or WindowFormat or RouteFormat or WallFormat or BrushProfileFormat or PaintFormat or RepeatFormat or JointFormat or OpeningFormat or ProgramFormat or ConditionFormat))
+        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat or InteriorFormat or WindowFormat or RouteFormat or WallFormat or BrushProfileFormat or PaintFormat or RepeatFormat or JointFormat or OpeningFormat or ProgramFormat or ConditionFormat or CoreFormat))
             return PlanFormatError.UnsupportedFormat;
 
         if (header.Level is not (PlanLevel.Ship or PlanLevel.HullChunk or PlanLevel.Component))
@@ -496,6 +500,7 @@ public static class PlanFormat
         var hasJoints = false;
         var hasOpenings = false;
         var hasProgram = false;
+        var hasCores = false;
 
         if (format == BrushFormat)
         {
@@ -520,10 +525,11 @@ public static class PlanFormat
 
             if (format >= ProgramFormat)
             {
-                if (!r.U8(out var more) || more > 1)
+                if (!r.U8(out var more) || more > (format >= CoreFormat ? 3 : 1))
                     return false;
 
                 hasProgram = (more & 1) != 0;
+                hasCores = (more & 2) != 0;
             }
         }
 
@@ -601,6 +607,14 @@ public static class PlanFormat
             doc.Program = r.Program(narrow: format == ProgramFormat);
 
             if (doc.Program is null)
+                return false;
+        }
+
+        if (hasCores)
+        {
+            doc.Cores = r.Cores();
+
+            if (doc.Cores is null)
                 return false;
         }
 
@@ -840,6 +854,13 @@ public static class PlanFormat
             var joints = HullJointSet.Read(_bytes[_offset..], out var consumed);
             _offset += consumed;
             return joints;
+        }
+
+        public Ships.Logic.HullCoreSet? Cores()
+        {
+            var cores = Ships.Logic.HullCoreSet.Read(_bytes[_offset..], out var consumed);
+            _offset += consumed;
+            return cores;
         }
 
         public Ships.Logic.HullProgram? Program(bool narrow)

@@ -1,0 +1,34 @@
+{
+  "id": "effector.linear-motor",
+  "name": "Linear motor",
+  "kind": "JointMotor",
+  "rateHz": 60,
+  "powerW": 150,
+  "tickCostNs": 60,
+  "signals": [
+    {
+      "name": "Target",
+      "unit": "joint",
+      "step": 1,
+      "min": -10000,
+      "max": 10000,
+      "input": true
+    },
+    {
+      "name": "Moving",
+      "unit": "",
+      "step": 1,
+      "min": 0,
+      "max": 1,
+      "input": false
+    },
+    {
+      "name": "Jammed",
+      "unit": "",
+      "step": 1,
+      "min": 0,
+      "max": 1,
+      "input": false
+    }
+  ]
+}
