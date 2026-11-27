@@ -298,9 +298,6 @@ public sealed class DesignerApp : DesignApp
         _meshEdit.Enabled = false;
         _prefabPanel.Selected = 0;
         _seenVersion = -1;
-        _panels.PathText = _session.Path.Length > 0 ? _session.Path : component
-            ? Path.Combine(_library.UserFolder, "component." + FilePlanHost.Extension)
-            : Path.Combine(_files.LibraryFolder, "hull." + FilePlanHost.Extension);
         _bar.Show(document.Key);
 
         if (!document.Framed)
@@ -498,9 +495,7 @@ public sealed class DesignerApp : DesignApp
 
     private void HandleFiles()
     {
-        var request = _bar.Request != FileRequest.None ? _bar.Request : _panels.Request;
-
-        switch (request)
+        switch (_bar.Request)
         {
             case FileRequest.New:
                 NewDocument(component: false);
@@ -511,37 +506,43 @@ public sealed class DesignerApp : DesignApp
                 _stats.Message = "New component: add parts in the Parts panel";
                 break;
             case FileRequest.Open:
-                if (_files.PickOpen() is { } open)
-                    Open(open);
-                else if (!_files.HasDialogs)
-                    _stats.Message = "No file dialog: type a path and use Load path";
-
-                break;
-            case FileRequest.OpenPath:
-                Open(_panels.PathText);
+                PickAndOpen();
                 break;
             case FileRequest.Save:
-                if (_session.Path.Length > 0)
-                    Save(_session.Path);
-                else
-                    SaveAs();
-
+                SaveCurrent();
                 break;
             case FileRequest.SaveAs:
                 SaveAs();
                 break;
-            case FileRequest.SavePath:
-                Save(_panels.PathText);
-                break;
         }
+    }
+
+    /// <summary>Where the dialogs start for the open tab: components in the prefab library, ships in the plans folder.</summary>
+    private string DialogFolder => _active.Component is not null ? _library.UserFolder : _files.LibraryFolder;
+
+    private void PickAndOpen()
+    {
+        if (_files.PickOpen(DialogFolder) is { } open)
+            Open(open);
+        else if (!_files.HasDialogs)
+            _stats.Message = "File dialogs are unavailable on this system (nfd.dll missing)";
+    }
+
+    /// <summary>Saves to the tab's file; a plan never saved asks where first.</summary>
+    private void SaveCurrent()
+    {
+        if (_session.Path.Length > 0)
+            Save(_session.Path);
+        else
+            SaveAs();
     }
 
     private void SaveAs()
     {
-        if (_files.PickSave(_session.Path) is { } path)
+        if (_files.PickSave(_session.Path, DialogFolder) is { } path)
             Save(path);
         else if (!_files.HasDialogs)
-            _stats.Message = "No file dialog: type a path and use Save path";
+            _stats.Message = "File dialogs are unavailable on this system (nfd.dll missing)";
     }
 
     private void Save(string path)
@@ -553,7 +554,7 @@ public sealed class DesignerApp : DesignApp
 
             if (_session.Doc.Level == PlanLevel.Component)
                 RefreshLibrary();
-            _panels.PathText = path;
+
             _stats.Message = $"Saved {Path.GetFileName(path)} ({hash})";
             Console.WriteLine($"saved {path}: {_session.Doc.Solids.Count} solids, hash {hash}");
         }
@@ -656,10 +657,7 @@ public sealed class DesignerApp : DesignApp
         else if (ctrl && key == GlfwKey.N)
             NewDocument(component: false);
         else if (ctrl && key == GlfwKey.O)
-        {
-            if (_files.PickOpen() is { } open)
-                Open(open);
-        }
+            PickAndOpen();
         else if (!ctrl && key is GlfwKey.W or GlfwKey.E or GlfwKey.R)
             _bar.Mode = key == GlfwKey.W ? GizmoMode.Move : key == GlfwKey.E ? GizmoMode.Rotate : GizmoMode.Scale;
         else if (key == GlfwKey.Delete && _active.Component is { } component)
@@ -674,7 +672,7 @@ public sealed class DesignerApp : DesignApp
         else if (ctrl && key == GlfwKey.D && _session.Selection.Primary != 0)
             HullCommands.Duplicate(_session, _session.Selection.Primary);
         else if (ctrl && key == GlfwKey.S)
-            Save(_session.Path.Length > 0 ? _session.Path : _panels.PathText);
+            SaveCurrent();
         else if (key == GlfwKey.Delete)
             HullCommands.DeleteSelected(_session);
         else if (key == GlfwKey.F)

@@ -5,8 +5,8 @@ using BrutalGame.Ships;
 
 namespace BrutalGame.Designer.Ui;
 
-/// <summary>What the panels ask the host to do this frame (file dialogs and disk live in the host).</summary>
-public enum FileRequest { None, New, NewComponent, Open, Save, SaveAs, OpenPath, SavePath }
+/// <summary>What the File menu asks the host to do this frame (file dialogs and disk live in the host).</summary>
+public enum FileRequest { None, New, NewComponent, Open, Save, SaveAs }
 
 /// <summary>What the open tab is: a ship, or a component (its own plan, made into a prefab by saving it).</summary>
 public enum Workspace { Ship, Component }
@@ -52,7 +52,6 @@ public sealed class DesignerPanels
     private static readonly string[] StepNames = ["1/8 m", "1/4 m", "1/2 m", "1 m"];
 
     private readonly HullMaterialCatalog _catalog;
-    private readonly byte[] _pathBuffer = new byte[512];
     private Draft _draft;
     private uint _draftId;
     private int _draftVersion = -1;
@@ -86,32 +85,14 @@ public sealed class DesignerPanels
         _brushesPanel = new BrushesPanel(catalog);
     }
 
-    public FileRequest Request { get; private set; }
-
     /// <summary>What the open tab is (the host sets it); a ship shows hull layers and brushes.</summary>
     public Workspace Workspace;
-
-    /// <summary>The path field's text (fallback when no file dialog is available).</summary>
-    public string PathText
-    {
-        get
-        {
-            var length = Array.IndexOf(_pathBuffer, (byte)0);
-            return System.Text.Encoding.UTF8.GetString(_pathBuffer, 0, length < 0 ? _pathBuffer.Length : length);
-        }
-        set
-        {
-            Array.Clear(_pathBuffer);
-            System.Text.Encoding.UTF8.GetBytes(value.AsSpan(0, Math.Min(value.Length, _pathBuffer.Length / 4)), _pathBuffer);
-        }
-    }
 
     /// <summary>Where new solids go: the host sets it to the camera target.</summary>
     public double3 PlaceAt;
 
     public void Draw(DesignSession session, DesignStats stats, MeshEditState meshEdit)
     {
-        Request = FileRequest.None;
         DrawTools(session, stats);
         DrawSolidList(session);
         DrawProperties(session, meshEdit);
@@ -131,25 +112,14 @@ public sealed class DesignerPanels
             var name = session.Path.Length > 0 ? Path.GetFileName(session.Path) : "not saved yet";
             ImGui.Text($"{(Workspace == Workspace.Component ? "Component" : "Ship")}: {name}{(session.Modified ? " *" : "")}  ({session.Doc.Solids.Count} solids)");
 
+            if (session.Path.Length > 0 && ImGui.IsItemHovered())
+                ImGui.SetTooltip($"{session.Path}");
+
             if (Workspace == Workspace.Component)
                 ImGui.TextDisabled("Save it to make it a prefab the ship tabs can place."u8);
 
             if (stats.Message.Length > 0)
                 ImGui.TextWrapped($"{stats.Message}");
-
-            if (ImGui.CollapsingHeader("Load or save by path"u8, ImGuiTreeNodeFlags.None))
-            {
-                ImGui.SetNextItemWidth(-1f);
-                ImGui.InputText("##path"u8, _pathBuffer, ImGuiInputTextFlags.None, (ImGuiInputTextCallback?)null, default);
-
-                if (ImGui.Button("Load path"u8))
-                    Request = FileRequest.OpenPath;
-
-                ImGui.SameLine();
-
-                if (ImGui.Button("Save path"u8))
-                    Request = FileRequest.SavePath;
-            }
 
             ImGui.SeparatorText("Add solid"u8);
             ImGui.Checkbox("Subtract"u8, ref _newSubtract);

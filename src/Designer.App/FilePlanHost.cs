@@ -19,9 +19,9 @@ public sealed class FilePlanHost : IDisposable
 
     public bool HasDialogs => _dialogs.HasDialogs;
 
-    public string? PickOpen() => _dialogs.PickOpen();
+    public string? PickOpen(string? folder = null) => _dialogs.PickOpen(folder);
 
-    public string? PickSave(string currentPath) => _dialogs.PickSave(currentPath);
+    public string? PickSave(string currentPath, string? folder = null) => _dialogs.PickSave(currentPath, folder);
 
     /// <summary>Writes the canonical bytes of a copy of <paramref name="doc"/>; returns its plan hash.</summary>
     public static PlanHash Save(PlanDocument doc, string path)
