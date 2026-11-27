@@ -125,6 +125,10 @@ public sealed class CoastRegionSet : IDisposable
     private int _desiredCount;
     private Work _running;
     private int _bakeSlot;
+    private readonly double[] _handPhase = new double[Capacity];
+    private readonly int[] _handTiles = new int[MaxTiles];
+    private readonly int[] _handTurns = new int[MaxTiles];
+    private int _handCount;
     private CoastCarrier _carrier;
     private CoastCarrier _baked;
     private float _breakDepth;
@@ -187,6 +191,7 @@ public sealed class CoastRegionSet : IDisposable
         if (!Keeps(_baked, carrier))
         {
             _baked = carrier;
+            _handCount = 0;
             _dirty = true;
         }
 
@@ -212,6 +217,7 @@ public sealed class CoastRegionSet : IDisposable
         if (_running == Work.None)
             Start();
 
+        Match(camera);
         Settled = _running == Work.None && !Fading();
     }
 
@@ -263,13 +269,13 @@ public sealed class CoastRegionSet : IDisposable
 
     /// <summary>
     /// The face the loaded regions draw on the sea at unit direction <paramref name="direction"/> at
-    /// <paramref name="time"/> (s): each region's <see cref="BreakerFace"/> by its window, fade and tile weight. Vector
-    /// parts are in the regions' tile planes, which differ where tiles blend.
+    /// <paramref name="time"/> (s): each region's <see cref="BreakerFace"/> by its window, fade and its tile's share of
+    /// the carrier there (<see cref="SeaTiles.Hand"/>). Vector parts are in the plane of the tile the direction is in.
     /// </summary>
     public unsafe void Sample(in double3 direction, double time, out FacePoint p)
     {
         p = default;
-        _tiles.Locate(direction, out var blend);
+        _tiles.Hand(direction, out var hand);
 
         for (var i = 0; i < Capacity; i++)
         {
@@ -278,41 +284,38 @@ public sealed class CoastRegionSet : IDisposable
             if (!region.Drawn)
                 continue;
 
-            var tile = 0f;
-
-            for (var k = 0; k < blend.Count; k++)
-            {
-                if (blend.Tile[k] == region.Key.Tile)
-                    tile = blend.Weight[k] * blend.Weight[k];
-            }
-
-            if (tile <= 0f)
-                continue;
-
-            region.Window.ToLocal(direction, out var x, out var z);
-            var weight = tile * region.Weight * CoastWindow.Weight((float)x / CoastWindow.CellSize, (float)z / CoastWindow.CellSize);
+            var weight = Share(hand, region.Key.Tile) * Weight(region, direction, out var x, out var z);
 
             if (weight <= 0f)
                 continue;
 
-            var atlas = _atlases[i];
-            BreakerFace.Apply(atlas, (float)x, (float)z, atlas.PhaseAt(time), out var face);
-            p.Height += weight * face.Height;
-            p.SlopeX += weight * face.SlopeX;
-            p.SlopeZ += weight * face.SlopeZ;
-            p.Dx += weight * face.Dx;
-            p.Dz += weight * face.Dz;
-            p.DxX += weight * face.DxX;
-            p.DzZ += weight * face.DzZ;
-            p.DxZ += weight * face.DxZ;
-            p.Foam += weight * face.Foam;
+            BreakerFace.Apply(_atlases[i], x, z, PhaseAt(i, time), out var face);
+            Add(ref p, face, weight, region.Key.Tile, hand.Tile[0], direction);
         }
+    }
+
+    /// <summary>The loaded regions' weights at unit direction <paramref name="direction"/>, summed: 1 where the coast is covered and nothing is fading.</summary>
+    public float Coverage(in double3 direction)
+    {
+        _tiles.Hand(direction, out var hand);
+        var sum = 0f;
+
+        for (var i = 0; i < Capacity; i++)
+        {
+            ref readonly var region = ref _regions[i];
+
+            if (region.Drawn)
+                sum += Share(hand, region.Key.Tile) * Weight(region, direction, out _, out _);
+        }
+
+        return sum;
     }
 
     /// <summary>The surf carrier at unit direction <paramref name="direction"/> in the heaviest region drawn there; false where there is none.</summary>
     public bool CarrierAt(in double3 direction, double time, out SurfCarrierPoint point)
     {
         point = default;
+        _tiles.Hand(direction, out var hand);
         var best = 0f;
 
         for (var i = 0; i < Capacity; i++)
@@ -322,17 +325,147 @@ public sealed class CoastRegionSet : IDisposable
             if (!region.Drawn)
                 continue;
 
-            region.Window.ToLocal(direction, out var x, out var z);
-            var weight = region.Weight * CoastWindow.Weight((float)x / CoastWindow.CellSize, (float)z / CoastWindow.CellSize);
+            var weight = Share(hand, region.Key.Tile) * Weight(region, direction, out var x, out var z);
 
             if (weight <= best)
                 continue;
 
             best = weight;
-            point = SurfCarrier.At(_atlases[i], (float)x, (float)z, _atlases[i].PhaseAt(time));
+            point = SurfCarrier.At(_atlases[i], x, z, PhaseAt(i, time));
         }
 
         return best > 0f;
+    }
+
+    /// <summary>
+    /// A slot's map's phase at <paramref name="time"/> (s), wrapped (<see cref="CoastAtlas.PhaseAt"/>), with its tile's
+    /// carrier matched to the others' at the sea point under the camera (<see cref="Match"/>).
+    /// </summary>
+    public float PhaseAt(int slot, double time) => _atlases[slot].PhaseAt(time, _handPhase[slot]);
+
+    private static float Weight(in CoastRegion region, in double3 direction, out float x, out float z)
+    {
+        region.Window.ToLocal(direction, out var localX, out var localZ);
+        (x, z) = ((float)localX, (float)localZ);
+        return region.Weight * CoastWindow.Weight(x / CoastWindow.CellSize, z / CoastWindow.CellSize);
+    }
+
+    private static unsafe float Share(in SeaBlend hand, int tile)
+    {
+        for (var k = 0; k < hand.Count; k++)
+        {
+            if (hand.Tile[k] == tile)
+                return hand.Weight[k];
+        }
+
+        return 0f;
+    }
+
+    /// <summary>Adds a region's face by its weight, its vector parts turned from its tile's plane into another's at the direction.</summary>
+    private void Add(ref FacePoint p, in FacePoint face, float weight, int tile, int into, in double3 direction)
+    {
+        var (a, b, c, d) = (1f, 0f, 0f, 1f);
+
+        if (tile != into)
+        {
+            _tiles.Lift(tile, direction, out var e1, out var e2);
+            _tiles.Axes(into, out var east, out _, out var south);
+            (a, b, c, d) = ((float)double3.Dot(e1, east), (float)double3.Dot(e2, east), (float)double3.Dot(e1, south), (float)double3.Dot(e2, south));
+        }
+
+        var jx = a * face.DxX + b * face.DxZ;
+        var jz = a * face.DxZ + b * face.DzZ;
+        var kx = c * face.DxX + d * face.DxZ;
+        var kz = c * face.DxZ + d * face.DzZ;
+        p.Height += weight * face.Height;
+        p.SlopeX += weight * (a * face.SlopeX + b * face.SlopeZ);
+        p.SlopeZ += weight * (c * face.SlopeX + d * face.SlopeZ);
+        p.Dx += weight * (a * face.Dx + b * face.Dz);
+        p.Dz += weight * (c * face.Dx + d * face.Dz);
+        p.DxX += weight * (a * jx + b * jz);
+        p.DzZ += weight * (c * kx + d * kz);
+        p.DxZ += weight * (c * jx + d * jz);
+        p.Foam += weight * face.Foam;
+    }
+
+    /// <summary>
+    /// Tiles' carriers are plane waves in their own planes, unrelated in phase. Where a wave is handed from one tile to
+    /// the next (<see cref="SeaTiles.Hand"/>) every map's phase is shifted so the tiles agree at the sea point under the
+    /// camera: by the camera's tiles' plane phases there, each a whole number of turns off so they lie together, less
+    /// the map's own tile's. A tile keeps its turns while it has a share, so nothing steps as the camera crosses; the
+    /// tile the camera is wholly in is left as it is.
+    /// </summary>
+    private unsafe void Match(in double3 camera)
+    {
+        var dir = double3.Normalize(camera);
+        _tiles.Hand(dir, out var hand);
+        Span<double> u = stackalloc double[MaxTiles];
+        Span<double> v = stackalloc double[MaxTiles];
+        Span<int> turns = stackalloc int[MaxTiles];
+        var reference = double.NaN;
+
+        for (var k = 0; k < hand.Count; k++)
+        {
+            _tiles.Plane(hand.Tile[k], dir, out u[k], out v[k]);
+            turns[k] = int.MinValue;
+
+            for (var before = 0; before < _handCount && hand.Weight[k] > 0f; before++)
+            {
+                if (_handTiles[before] != hand.Tile[k])
+                    continue;
+
+                turns[k] = _handTurns[before];
+                reference = PlanePhase(_baked, u[k], v[k]) - Math.Tau * turns[k];
+            }
+        }
+
+        _handCount = 0;
+
+        for (var k = 0; k < hand.Count; k++)
+        {
+            if (hand.Weight[k] <= 0f)
+                continue;
+
+            if (turns[k] == int.MinValue)
+            {
+                var phase = PlanePhase(_baked, u[k], v[k]);
+                turns[k] = double.IsNaN(reference) ? 0 : (int)Math.Round((phase - reference) / Math.Tau);
+
+                if (double.IsNaN(reference))
+                    reference = phase;
+            }
+
+            _handTiles[_handCount] = hand.Tile[k];
+            _handTurns[_handCount++] = turns[k];
+        }
+
+        for (var i = 0; i < Capacity; i++)
+        {
+            ref readonly var region = ref _regions[i];
+
+            if (region.State is not (CoastRegionState.Live or CoastRegionState.Retiring))
+                continue;
+
+            var carrier = region.Key.Carrier;
+            var shared = 0.0;
+
+            for (var k = 0; k < hand.Count; k++)
+            {
+                if (hand.Weight[k] > 0f)
+                    shared += hand.Weight[k] * (PlanePhase(carrier, u[k], v[k]) - Math.Tau * turns[k]);
+            }
+
+            _tiles.Plane(region.Key.Tile, dir, out var ownU, out var ownV);
+            _handPhase[i] = shared - PlanePhase(carrier, ownU, ownV);
+        }
+    }
+
+    /// <summary>The carrier's open phase k₀ d̂·(u, v) at a point of a tile's plane (rad, not wrapped).</summary>
+    private static double PlanePhase(CoastCarrier carrier, double u, double v)
+    {
+        var (sin, cos) = Math.SinCos((double)carrier.Direction);
+        var omega = (double)carrier.Omega;
+        return omega * omega / 9.81 * (cos * u + sin * v);
     }
 
     private void Collect()
@@ -489,13 +622,7 @@ public sealed class CoastRegionSet : IDisposable
         if (distance > limit)
             return;
 
-        _tiles.Locate(centre, out var blend);
-        var owns = false;
-
-        for (var k = 0; k < blend.Count; k++)
-            owns |= blend.Tile[k] == tile;
-
-        if (!owns)
+        if (!Owns(tile, centre, window))
             return;
 
         var candidate = new Candidate { Tile = tile, X = x, Z = z, Rank = distance - stickiness };
@@ -517,6 +644,24 @@ public sealed class CoastRegionSet : IDisposable
             _desired[i] = _desired[i - 1];
 
         _desired[at] = candidate;
+    }
+
+    /// <summary>The tile has a share of the carrier (<see cref="SeaTiles.Hand"/>) somewhere in the window: at its centre, or near a tile edge at a corner.</summary>
+    private unsafe bool Owns(int tile, in double3 centre, in CoastWindow window)
+    {
+        _tiles.Locate(centre, out var blend);
+
+        if (blend.Count == 1)
+            return blend.Tile[0] == tile;
+
+        return Shares(tile, centre) || Shares(tile, window.Direction(0.0, 0.0)) || Shares(tile, window.Direction(CoastWindow.Size, 0.0))
+            || Shares(tile, window.Direction(0.0, CoastWindow.Size)) || Shares(tile, window.Direction(CoastWindow.Size, CoastWindow.Size));
+    }
+
+    private bool Shares(int tile, in double3 direction)
+    {
+        _tiles.Hand(direction, out var hand);
+        return Share(hand, tile) > 0f;
     }
 
     /// <summary>The probes' table has the window as a coast; one it does not know is queued for a probe.</summary>

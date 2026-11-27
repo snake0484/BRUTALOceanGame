@@ -698,7 +698,7 @@ public sealed unsafe class OceanRenderer : IDisposable
             to[0] = placement.CellX with { W = placement.Slot };
             to[1] = placement.CellZ with { W = slot };
             var atlas = coast.Atlas(slot);
-            to[2] = new Vector4(atlas.PhaseAt(renderTime), carrier.Omega, atlas.Height, region.Weight);
+            to[2] = new Vector4(coast.PhaseAt(slot, renderTime), carrier.Omega, atlas.Height, region.Weight);
         }
 
         return count;

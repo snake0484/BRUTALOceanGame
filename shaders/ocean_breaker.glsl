@@ -348,7 +348,8 @@ float coastRamp(float c)
 }
 
 // Region r's weight at its cell coordinates c over x0: its window's (neighbours cross-fade over the cells they share),
-// its fade (load, unload, rebake) and its tile's share of the sea there. 0 outside the window.
+// its fade (load, unload, rebake) and its tile's share of a coherent wave there (slotShares: the carrier is one tile's
+// but for a narrow hand-over at an edge, where CoastRegionSet matches the tiles' phases). 0 outside the window.
 float coastWeight(int r, vec2 c, vec2 x0, inout bool weighed, inout float tiles[MAX_SLOTS])
 {
     if (c.x <= 0.0 || c.y <= 0.0 || c.x >= COAST_CELLS || c.y >= COAST_CELLS)
@@ -356,12 +357,12 @@ float coastWeight(int r, vec2 c, vec2 x0, inout bool weighed, inout float tiles[
 
     if (!weighed)
     {
-        slotWeights(x0, tiles);
+        slotShares(x0, tiles);
         weighed = true;
     }
 
     int s = int(frame.coast[r].cellX.w);
-    return coastRamp(c.x) * coastRamp(c.y) * frame.coast[r].wave.w * tiles[s] * tiles[s];
+    return coastRamp(c.x) * coastRamp(c.y) * frame.coast[r].wave.w * tiles[s];
 }
 
 vec2 coastCell(int r, vec2 x0)

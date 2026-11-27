@@ -348,6 +348,36 @@ void slotWeights(vec2 x0, out float w[MAX_SLOTS])
     }
 }
 
+const float HAND_WIDTH = 0.1; // SeaTiles.HandWidth
+
+float handShare(float squaredWeight)
+{
+    return smoothstep(0.5 - HAND_WIDTH, 0.5 + HAND_WIDTH, squaredWeight);
+}
+
+// Each sea tile slot's share of a coherent wave at x0 (SeaTiles.Hand through SeaSlots), summing to 1: all but a narrow
+// band at a tile edge is one tile's.
+void slotShares(vec2 x0, out float w[MAX_SLOTS])
+{
+    float row = handShare(smooth01(0.5 + 0.5 * (dot(frame.bandRow.xy, x0) + frame.bandRow.z)));
+    float cell[2];
+    cell[0] = handShare(smooth01(0.5 + 0.5 * (dot(frame.bandCell[0].xy, x0) + frame.bandCell[0].z)));
+    cell[1] = handShare(smooth01(0.5 + 0.5 * (dot(frame.bandCell[1].xy, x0) + frame.bandCell[1].z)));
+
+    for (int s = 0; s < MAX_SLOTS; ++s)
+    {
+        w[s] = 0.0;
+        if (s >= frame.slotCount)
+            continue;
+
+        vec3 side = frame.slotSide[s].xyz;
+        float c = cell[int(side.z)];
+        float wr = side.x == 0.0 ? 1.0 : (side.x > 0.0 ? row : 1.0 - row);
+        float wc = side.y == 0.0 ? 1.0 : (side.y > 0.0 ? c : 1.0 - c);
+        w[s] = wr * wc;
+    }
+}
+
 #include "ocean_breaker.glsl"
 
 // The swell (OceanSurface.Sample) anti-aliased over [lo, hi], every component scaled by cap: each slot's tile field,

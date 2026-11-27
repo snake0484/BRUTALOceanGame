@@ -179,7 +179,7 @@ public sealed class SurfBeachTest
                     continue;
 
                 var atlas = _coast.Atlas(slot);
-                var point = SurfCarrier.At(atlas, (float)x, (float)lz, atlas.PhaseAt(time));
+                var point = SurfCarrier.At(atlas, (float)x, (float)lz, _coast.PhaseAt(slot, time));
 
                 if (count++ == 0)
                     a = point;
