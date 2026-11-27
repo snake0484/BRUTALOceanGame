@@ -51,6 +51,11 @@ for (var i = 0; i < args.Length; i++)
         DesignerApp.PlaceEngine = true;
     else if (args[i] == "--demo-layered")
         demoLayered = true;
+    else if (args[i] == "--demo-walls")
+    {
+        demoLayered = true;
+        DesignerApp.WallDemo = true;
+    }
     else if (args[i] is "--demo-hallway" or "--demo-hallway-plain")
     {
         DesignerApp.HallwayPlain = args[i] == "--demo-hallway-plain";

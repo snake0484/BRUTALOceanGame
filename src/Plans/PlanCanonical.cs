@@ -47,6 +47,13 @@ public static class PlanCanonical
         if (doc.Components is { IsEmpty: true })
             doc.Components = null;
 
+        // Room walls of solids that are gone are dropped; the rest go in solid id order.
+        if (doc.Interior is { RoomWalls.Count: > 0 } walls)
+        {
+            walls.RoomWalls.RemoveAll(w => doc.Solids.IndexOf(w.Solid) < 0);
+            walls.RoomWalls.Sort((a, b) => a.Solid.CompareTo(b.Solid));
+        }
+
         if (doc.Interior is { IsEmpty: true })
             doc.Interior = null;
 

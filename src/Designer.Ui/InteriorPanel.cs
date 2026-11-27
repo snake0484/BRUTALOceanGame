@@ -110,6 +110,9 @@ public sealed class InteriorPanel
         {
             for (var i = 0; i < interior.Profiles.Count; i++)
             {
+                if (interior.Profiles[i].Kind != ProfileKind.Hallway)
+                    continue;
+
                 if (ImGui.Selectable($"{interior.Profiles[i].Name}##pick{i}", i == hallway.Profile, ImGuiSelectableFlags.None, default) && i != hallway.Profile)
                     InteriorCommands.SetHallwayProfile(session, hallway.Id, i);
             }

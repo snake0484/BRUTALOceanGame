@@ -1,6 +1,7 @@
 using BrutalGame.Designer.Mesh;
 using BrutalGame.Plans;
 using BrutalGame.Ships;
+using BrutalGame.Ships.Interior;
 
 namespace BrutalGame.Designer;
 
@@ -147,6 +148,20 @@ public static class SampleHulls
         HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 3 * m, 0, 5 * h, 3 * h, 7 * h, SolidRotation.Identity, alloy);
         var id = InteriorCommands.AddHallway(session, new Vector3d(-2.5, 0.9, -4.5), new Vector3d(-2.5, 0.9, 1.5), alloy);
         InteriorCommands.AddNode(session, id, 1, new Vector3d(1.5, 2.9, 1.5));
+    }
+
+    /// <summary>A solid block with a 7 x 3 x 9 m room cut out of it, its walls coved at the ceiling and chamfered at the floor.</summary>
+    public static void WallRoom(DesignSession session, DefId alloy)
+    {
+        const int m = HullSolid.PositionUnitsPerMetre;
+        const int h = HullSolid.HalfUnitsPerMetre;
+        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 3 * m, 0, 5 * h, 3 * h, 7 * h, SolidRotation.Identity, alloy);
+        var room = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Subtract, 0, 3 * m, 0, (ushort)(3.5 * h), (ushort)(1.5 * h), (ushort)(4.5 * h), SolidRotation.Identity, alloy);
+        var coved = WallGeometry.Preset(WallPreset.Coved, 2.4, 0.6);
+        coved[0] = new ProfilePoint(m / 5, 0);
+        coved.Insert(1, new ProfilePoint(0, m / 5));
+        var wall = InteriorCommands.AddProfile(session, "Coved", coved, kind: ProfileKind.Wall);
+        InteriorCommands.SetRoomWall(session, room, wall);
     }
 
     private static int FaceAlong(HullMesh mesh, int axis, int sign)

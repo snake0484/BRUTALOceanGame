@@ -76,7 +76,16 @@ profile; any angle, each hallway with its own gravity (a ship may have several),
   height), then drag points (0.05 m snap), double-click an edge to add one, right-click to remove; it shows one
   0.8 × 1.9 m lane per person abreast. In the view: select a node; the bar beside it adds a node (extends or branches),
   deletes the node or the hallway; the marker mid-run splits it; arrows (W) move it, rings (E) turn gravity. `--demo-hallway` (layered hull) and
-  `--demo-hallway-plain` (solid block) show one.
+  `--demo-hallway-plain` (solid block) show one. The selection's menu opens on a right-click in the view (a right-drag
+  still orbits).
+- **Wall profiles (2026-11-27, BODY format 9; plans without them keep format 8):** half a hallway profile, for rooms. A
+  profile's kind is hallway or wall; a wall is an open line from floor to ceiling, X how far it stands in from the
+  room's side, Y height (never going down). A box room (Room role, or a subtract) picks one under Walls in Properties;
+  mirror partners follow. The bake swaps the box for its walled mesh in place (`WallGeometry.Expand`: a stack of the box
+  inset by the profile at each height, its rotation baked in). The profile's lower half keeps to the floor and its upper
+  half to the ceiling, so taller rooms stretch the middle; lower rooms squeeze it. Presets: straight, chamfered, coved,
+  sloped; "Make a wall from half of it" takes a hallway outline's right side. Library files carry the kind.
+  `--demo-walls` shows a coved room.
 - **Interior view** (top bar, or I): the hull is drawn see-through (both sides of every face, blended, no depth
   writes, stronger edge on) and locked: hull panels greyed, no solid picking, gizmos, strokes or hull keys. Hallways,
   placed components and parts inside stay editable.

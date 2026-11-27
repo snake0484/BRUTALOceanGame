@@ -60,6 +60,8 @@ public enum IssueCode : ushort
     WindowCount,
     WindowShape,
     WindowMaterial,
+    WallShape,
+    RoomWall,
 }
 
 public readonly record struct ValidationIssue(Severity Severity, IssueCode Code, ElementRef Element, int Value);
@@ -222,12 +224,23 @@ public static class PlanValidator
         if (interior.Hallways.Count > HullInterior.MaxHallways || interior.Profiles.Count > HullInterior.MaxProfiles)
             log.Add(Severity.Error, IssueCode.HallwayCount, default, interior.Hallways.Count);
 
-        // Profiles: a real outline in range with its floor at Y = 0. The value is the profile's index.
+        // Profiles: a real outline in range with its floor at Y = 0 (a wall: see WallGeometry.IsValid). The value is the profile's index.
         var badProfiles = new HashSet<int>();
 
         for (var i = 0; i < interior.Profiles.Count; i++)
         {
             var points = interior.Profiles[i].Points;
+
+            if (interior.Profiles[i].Kind == ProfileKind.Wall)
+            {
+                if (!WallGeometry.IsValid(points))
+                {
+                    log.Add(Severity.Error, IssueCode.WallShape, default, i);
+                    badProfiles.Add(i);
+                }
+
+                continue;
+            }
 
             if (points.Count is < HullProfile.MinPoints or > HullProfile.MaxPoints || HallwayGeometry.Area2(points) == 0
                 || points.Any(p => Math.Abs(p.X) > HullProfile.MaxUnits || Math.Abs(p.Y) > HullProfile.MaxUnits))
@@ -247,7 +260,7 @@ public static class PlanValidator
 
             if (hallway.Nodes.Count is < 2 or > HullHallway.MaxNodes || hallway.Runs.Count is 0 or > HullHallway.MaxRuns
                 || hallway.Runs.Any(r => r.A == r.B || r.A >= hallway.Nodes.Count || r.B >= hallway.Nodes.Count)
-                || hallway.Profile >= interior.Profiles.Count || badProfiles.Contains(hallway.Profile)
+                || hallway.Profile >= interior.Profiles.Count || badProfiles.Contains(hallway.Profile) || interior.Profiles[hallway.Profile].Kind != ProfileKind.Hallway
                 || Enumerable.Range(0, hallway.Nodes.Count).Any(i => hallway.Node(i).Length() > PlanLimits.MaxReachMetres)
                 || !SolidRotation.IsValid(hallway.Gravity))
             {
@@ -272,6 +285,22 @@ public static class PlanValidator
                 if (HallwayGeometry.Kind(HallwayGeometry.Slope(hallway.Node(a), hallway.Node(b), down)) == RunKind.Shaft)
                     log.Add(Severity.Warning, IssueCode.HallwayShaft, element, r);
             }
+        }
+
+        // Room walls: one per solid, a box room using a good wall profile. The value is the profile index.
+        if (interior.RoomWalls.Count > HullInterior.MaxRoomWalls)
+            log.Add(Severity.Error, IssueCode.RoomWall, default, interior.RoomWalls.Count);
+
+        var seen = new HashSet<uint>();
+
+        foreach (var wall in interior.RoomWalls)
+        {
+            var element = new ElementRef(ElementKind.Solid, wall.Solid);
+            var index = doc.Solids.IndexOf(wall.Solid);
+
+            if (!seen.Add(wall.Solid) || index < 0 || !WallGeometry.IsRoom(doc.Solids[index])
+                || wall.Profile >= interior.Profiles.Count || interior.Profiles[wall.Profile].Kind != ProfileKind.Wall || badProfiles.Contains(wall.Profile))
+                log.Add(Severity.Error, IssueCode.RoomWall, element, wall.Profile);
         }
     }
 

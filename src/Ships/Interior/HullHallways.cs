@@ -3,14 +3,19 @@ using System.Text;
 
 namespace BrutalGame.Ships.Interior;
 
+/// <summary>A hallway's closed cross-section, or one wall's section for rooms (half a hallway's).</summary>
+public enum ProfileKind : byte { Hallway, Wall }
+
 /// <summary>
-/// A cross-section outline for hallways: X across, Y up from the floor (1/1024 m; Y = 0 is the floor), 3-32 points. The
-/// plan keeps its own copy: <see cref="Source"/> names the library file it came from, but a change to that file reaches
-/// the plan only when the profile is reimported on purpose.
+/// A cross-section in 1/1024 m. A hallway profile is a closed outline, X across, Y up from the floor (Y = 0), 3-32 points.
+/// A wall profile is one wall's section, an open line from floor to ceiling, 2-32 points: X is how far the wall stands in
+/// from the room's side (≥ 0), Y the height (from 0, never going down). The plan keeps its own copy: <see cref="Source"/>
+/// names the library file it came from, but a change to that file reaches the plan only when it is reimported on purpose.
 /// </summary>
 public sealed class HullProfile
 {
     public const int MinPoints = 3;
+    public const int MinWallPoints = 2;
     public const int MaxPoints = 32;
     public const int MaxNameBytes = 64;
     public const int MaxSourceBytes = 255;
@@ -23,17 +28,25 @@ public sealed class HullProfile
     /// <summary>The library file (relative to the profile library) it was imported from or saved to; empty if made here.</summary>
     public string Source = "";
 
+    public ProfileKind Kind;
+
     public readonly List<ProfilePoint> Points = new();
 
     public HullProfile Clone()
     {
-        var copy = new HullProfile { Name = Name, Source = Source };
+        var copy = new HullProfile { Name = Name, Source = Source, Kind = Kind };
         copy.Points.AddRange(Points);
         return copy;
     }
 
-    public bool SameShape(HullProfile other) => Points.SequenceEqual(other.Points);
+    public bool SameShape(HullProfile other) => Kind == other.Kind && Points.SequenceEqual(other.Points);
 }
+
+/// <summary>A room solid (by id) whose walls follow a wall profile (an index into the plan's profiles).</summary>
+public readonly record struct RoomWall(uint Solid, byte Profile);
+
+/// <summary>The interior block's layout: BODY formats 6-7 (one inline profile per hallway), 8 (route networks), 9 (wall profiles).</summary>
+public enum InteriorLayout : byte { Legacy, Routes, Walls }
 
 /// <summary>
 /// A hallway: a walkable space swept along a network of nodes, like a pipe: nodes joined by runs, and three or more runs at
@@ -111,21 +124,38 @@ public sealed class HullHallway
     }
 }
 
-/// <summary>The plan's interior spaces: its profiles and hallways (rooms stay ordinary Room-role solids).</summary>
+/// <summary>The plan's interior spaces: its profiles, hallways and the wall profiles its rooms (ordinary Room-role solids) use.</summary>
 public sealed class HullInterior
 {
     public const int MaxHallways = 255;
     public const int MaxProfiles = 64;
+    public const int MaxRoomWalls = 255;
 
     public readonly List<HullProfile> Profiles = new();
     public readonly List<HullHallway> Hallways = new();
+    public readonly List<RoomWall> RoomWalls = new();
 
-    public bool IsEmpty => Hallways.Count == 0 && Profiles.Count == 0;
+    public bool IsEmpty => Hallways.Count == 0 && Profiles.Count == 0 && RoomWalls.Count == 0;
+
+    /// <summary>Needs the wall layout (BODY format 9) to be written.</summary>
+    public bool HasWalls => RoomWalls.Count > 0 || Profiles.Any(p => p.Kind == ProfileKind.Wall);
 
     public int IndexOf(uint id) => Hallways.FindIndex(h => h.Id == id);
 
     /// <summary>The profile a hallway uses (null when its index is out of range).</summary>
     public HullProfile? ProfileOf(HullHallway hallway) => hallway.Profile < Profiles.Count ? Profiles[hallway.Profile] : null;
+
+    /// <summary>The wall profile index room solid <paramref name="solid"/> uses, or -1.</summary>
+    public int WallOf(uint solid)
+    {
+        foreach (var w in RoomWalls)
+        {
+            if (w.Solid == solid)
+                return w.Profile;
+        }
+
+        return -1;
+    }
 
     public HullInterior Clone()
     {
@@ -137,21 +167,24 @@ public sealed class HullInterior
         foreach (var h in Hallways)
             copy.Hallways.Add(h.Clone());
 
+        copy.RoomWalls.AddRange(RoomWalls);
         return copy;
     }
 
     /// <summary>
-    /// <c>u8 profile count</c>, per profile <c>u8 name length, name (UTF-8), u8 source length, source, u8 point count,
-    /// i32 X, Y</c> per point; then <c>u8 hallway count</c>, per hallway <c>u32 id, u32 gravity, u8 material, u8 profile,
-    /// u8 node count, u8 run count</c>, i32 X, Y, Z per node, u8 A, B per run. (BODY formats 6 and 7 held one inline
-    /// profile and a line of nodes per hallway; <see cref="Read"/> converts them.)
+    /// <c>u8 profile count</c>, per profile <c>u8 name length, name (UTF-8), u8 source length, source, [u8 kind], u8 point
+    /// count, i32 X, Y</c> per point; then <c>u8 hallway count</c>, per hallway <c>u32 id, u32 gravity, u8 material, u8
+    /// profile, u8 node count, u8 run count</c>, i32 X, Y, Z per node, u8 A, B per run; then <c>[u8 room wall count, per
+    /// room u32 solid, u8 profile]</c>. The bracketed parts are the wall layout (<paramref name="walls"/>, BODY format 9).
+    /// (BODY formats 6 and 7 held one inline profile and a line of nodes per hallway; <see cref="Read"/> converts them.)
     /// </summary>
-    public byte[] ToBytes()
+    public byte[] ToBytes(bool walls)
     {
         var names = Profiles.Select(p => Clip(p.Name, HullProfile.MaxNameBytes)).ToList();
         var sources = Profiles.Select(p => Clip(p.Source, HullProfile.MaxSourceBytes)).ToList();
-        var size = 1 + Profiles.Select((p, i) => 3 + names[i].Length + sources[i].Length + p.Points.Count * 8).Sum()
-            + 1 + Hallways.Sum(h => 12 + h.Nodes.Count * 12 + h.Runs.Count * 2);
+        var extra = walls ? 1 : 0;
+        var size = 1 + Profiles.Select((p, i) => 3 + extra + names[i].Length + sources[i].Length + p.Points.Count * 8).Sum()
+            + 1 + Hallways.Sum(h => 12 + h.Nodes.Count * 12 + h.Runs.Count * 2) + (walls ? 1 + RoomWalls.Count * 5 : 0);
         var b = new byte[size];
         var o = 0;
         b[o++] = (byte)Profiles.Count;
@@ -164,6 +197,10 @@ public sealed class HullInterior
             b[o++] = (byte)sources[i].Length;
             sources[i].CopyTo(b, o);
             o += sources[i].Length;
+
+            if (walls)
+                b[o++] = (byte)Profiles[i].Kind;
+
             b[o++] = (byte)Profiles[i].Points.Count;
 
             foreach (var p in Profiles[i].Points)
@@ -201,6 +238,18 @@ public sealed class HullInterior
             }
         }
 
+        if (walls)
+        {
+            b[o++] = (byte)RoomWalls.Count;
+
+            foreach (var w in RoomWalls)
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(o), w.Solid);
+                b[o + 4] = w.Profile;
+                o += 5;
+            }
+        }
+
         return b;
     }
 
@@ -210,14 +259,15 @@ public sealed class HullInterior
         return bytes.Length <= max ? bytes : bytes[..max];
     }
 
-    /// <summary>Reads the block at the start of <paramref name="s"/>; <paramref name="legacy"/>: the BODY format 6 and 7 layout.</summary>
-    public static HullInterior? Read(ReadOnlySpan<byte> s, out int consumed, bool legacy = false)
+    /// <summary>Reads the block at the start of <paramref name="s"/>, written in <paramref name="layout"/>.</summary>
+    public static HullInterior? Read(ReadOnlySpan<byte> s, out int consumed, InteriorLayout layout)
     {
         consumed = 0;
         var interior = new HullInterior();
+        var walls = layout == InteriorLayout.Walls;
         var o = 0;
 
-        if (legacy)
+        if (layout == InteriorLayout.Legacy)
             return ReadLegacy(s, out consumed);
 
         if (s.Length < 1)
@@ -232,8 +282,16 @@ public sealed class HullInterior
         {
             var p = new HullProfile();
 
-            if (!Text(s, ref o, out p.Name) || !Text(s, ref o, out p.Source) || s.Length < o + 1)
+            if (!Text(s, ref o, out p.Name) || !Text(s, ref o, out p.Source) || s.Length < o + 1 + (walls ? 1 : 0))
                 return null;
+
+            if (walls)
+            {
+                if (s[o] > (byte)ProfileKind.Wall)
+                    return null;
+
+                p.Kind = (ProfileKind)s[o++];
+            }
 
             int points = s[o++];
 
@@ -276,6 +334,17 @@ public sealed class HullInterior
                 h.Runs.Add((s[o], s[o + 1]));
 
             interior.Hallways.Add(h);
+        }
+
+        if (walls)
+        {
+            if (s.Length < o + 1 || s.Length < o + 1 + s[o] * 5)
+                return null;
+
+            int rooms = s[o++];
+
+            for (var i = 0; i < rooms; i++, o += 5)
+                interior.RoomWalls.Add(new RoomWall(BinaryPrimitives.ReadUInt32LittleEndian(s[o..]), s[o + 4]));
         }
 
         consumed = o;

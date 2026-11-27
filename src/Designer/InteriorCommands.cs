@@ -6,7 +6,7 @@ using static BrutalGame.Ships.HullSurface;
 namespace BrutalGame.Designer;
 
 /// <summary>
-/// Hallway and profile edits, each one undo group that swaps the plan's interior for an edited copy (the old one is never
+/// Hallway, profile and room wall edits, each one undo group that swaps the plan's interior for an edited copy (the old one is never
 /// touched). Profiles are the plan's own copies: changing one reshapes every hallway that uses it; the library on disk
 /// reaches a plan only through an import or a deliberate reimport.
 /// </summary>
@@ -18,7 +18,7 @@ public static class InteriorCommands
 
     public static string LastError { get; private set; } = "";
 
-    /// <summary>A two-node hallway; it uses <paramref name="profile"/>, or the plan's first profile (made if there is none).</summary>
+    /// <summary>A two-node hallway; it uses <paramref name="profile"/>, or the plan's first hallway profile (made if there is none).</summary>
     public static uint AddHallway(DesignSession session, Vector3d from, Vector3d to, DefId stairMaterial, int profile = -1)
     {
         if (session.Doc.Interior is { } interior && interior.Hallways.Count >= HullInterior.MaxHallways)
@@ -30,14 +30,20 @@ public static class InteriorCommands
         var id = session.Doc.AllocateId();
         Change(session, (s, data) =>
         {
-            if (data.Profiles.Count == 0)
+            if (profile < 0 || profile >= data.Profiles.Count || data.Profiles[profile].Kind != ProfileKind.Hallway)
+                profile = data.Profiles.FindIndex(p => p.Kind == ProfileKind.Hallway);
+
+            if (profile < 0)
+            {
+                profile = data.Profiles.Count;
                 data.Profiles.Add(Default());
+            }
 
             var hallway = new HullHallway
             {
                 Id = id,
                 Material = s.EnsureMaterial(stairMaterial),
-                Profile = (byte)Math.Clamp(profile, 0, data.Profiles.Count - 1),
+                Profile = (byte)profile,
             };
             hallway.Chain([ComponentCommands.Quantise(from), ComponentCommands.Quantise(to)]);
             data.Hallways.Add(hallway);
@@ -134,9 +140,9 @@ public static class InteriorCommands
     // ---- profiles ----
 
     /// <summary>A new plan profile (its floor moved to Y = 0). Returns its index, or -1.</summary>
-    public static int AddProfile(DesignSession session, string name, IReadOnlyList<ProfilePoint> points, string source = "")
+    public static int AddProfile(DesignSession session, string name, IReadOnlyList<ProfilePoint> points, string source = "", ProfileKind kind = ProfileKind.Hallway)
     {
-        if (!Check(points))
+        if (!Check(points, kind))
             return -1;
 
         if (session.Doc.Interior is { } interior && interior.Profiles.Count >= HullInterior.MaxProfiles)
@@ -148,17 +154,17 @@ public static class InteriorCommands
         var index = session.Doc.Interior?.Profiles.Count ?? 0;
         Change(session, (_, data) =>
         {
-            var profile = new HullProfile { Name = name, Source = source };
+            var profile = new HullProfile { Name = name, Source = source, Kind = kind };
             profile.Points.AddRange(Floored(points));
             data.Profiles.Add(profile);
         });
         return index;
     }
 
-    /// <summary>Replaces a profile's outline (its floor moved to Y = 0): every hallway using it changes.</summary>
+    /// <summary>Replaces a profile's outline (its floor moved to Y = 0): every hallway or room using it changes.</summary>
     public static bool SetProfilePoints(DesignSession session, int profile, IReadOnlyList<ProfilePoint> points)
     {
-        if (!Check(points) || session.Doc.Interior is not { } interior || profile < 0 || profile >= interior.Profiles.Count)
+        if (session.Doc.Interior is not { } interior || profile < 0 || profile >= interior.Profiles.Count || !Check(points, interior.Profiles[profile].Kind))
             return false;
 
         Change(session, (_, data) =>
@@ -178,7 +184,7 @@ public static class InteriorCommands
         return true;
     }
 
-    /// <summary>Removes a profile no hallway uses (later profiles move down one, and the hallways' indices with them).</summary>
+    /// <summary>Removes a profile no hallway or room uses (later profiles move down one, and the users' indices with them).</summary>
     public static bool RemoveProfile(DesignSession session, int profile)
     {
         if (session.Doc.Interior is not { } interior || profile < 0 || profile >= interior.Profiles.Count)
@@ -187,6 +193,12 @@ public static class InteriorCommands
         if (interior.Hallways.Any(h => h.Profile == profile))
         {
             LastError = "Hallways use this profile: give them another first";
+            return false;
+        }
+
+        if (interior.RoomWalls.Any(w => w.Profile == profile))
+        {
+            LastError = "Rooms use this profile: give them another first";
             return false;
         }
 
@@ -199,13 +211,60 @@ public static class InteriorCommands
                 if (h.Profile > profile)
                     h.Profile--;
             }
+
+            for (var i = 0; i < data.RoomWalls.Count; i++)
+            {
+                if (data.RoomWalls[i].Profile > profile)
+                    data.RoomWalls[i] = data.RoomWalls[i] with { Profile = (byte)(data.RoomWalls[i].Profile - 1) };
+            }
+        });
+        return true;
+    }
+
+    /// <summary>Room solid <paramref name="solid"/> (and its mirror partners) uses wall profile <paramref name="profile"/>; -1: plain box walls again.</summary>
+    public static bool SetRoomWall(DesignSession session, uint solid, int profile)
+    {
+        if (!session.TryGetSolid(solid, out var room) || !WallGeometry.IsRoom(room))
+        {
+            LastError = "Only a box room (Room role, or a subtract) can use a wall profile";
+            return false;
+        }
+
+        var interior = session.Doc.Interior;
+
+        if (profile >= 0 && (interior is null || profile >= interior.Profiles.Count || interior.Profiles[profile].Kind != ProfileKind.Wall))
+            return false;
+
+        var ids = new List<uint> { solid };
+
+        foreach (var (_, partner) in session.Symmetry.Partners(session.Doc, room))
+        {
+            if (!ids.Contains(partner))
+                ids.Add(partner);
+        }
+
+        if (profile >= 0 && (interior?.RoomWalls.Count ?? 0) + ids.Count > HullInterior.MaxRoomWalls)
+        {
+            LastError = "The plan has the most walled rooms it can hold";
+            return false;
+        }
+
+        Change(session, (_, data) =>
+        {
+            data.RoomWalls.RemoveAll(w => ids.Contains(w.Solid));
+
+            if (profile >= 0)
+            {
+                foreach (var id in ids)
+                    data.RoomWalls.Add(new RoomWall(id, (byte)profile));
+            }
         });
         return true;
     }
 
     public static bool SetHallwayProfile(DesignSession session, uint id, int profile)
     {
-        if (session.Doc.Interior is not { } interior || profile < 0 || profile >= interior.Profiles.Count)
+        if (session.Doc.Interior is not { } interior || profile < 0 || profile >= interior.Profiles.Count || interior.Profiles[profile].Kind != ProfileKind.Hallway)
             return false;
 
         return SetHallway(session, id, h => h.Profile = (byte)profile);
@@ -214,8 +273,17 @@ public static class InteriorCommands
     private static HullHallway? Find(DesignSession session, uint id) =>
         session.Doc.Interior is { } interior && interior.IndexOf(id) is var index and >= 0 ? interior.Hallways[index] : null;
 
-    private static bool Check(IReadOnlyList<ProfilePoint> points)
+    private static bool Check(IReadOnlyList<ProfilePoint> points, ProfileKind kind)
     {
+        if (kind == ProfileKind.Wall)
+        {
+            if (WallGeometry.IsValid(points))
+                return true;
+
+            LastError = "A wall profile needs 2 to 32 points from the floor up, never going down or out past the wall";
+            return false;
+        }
+
         if (points.Count is < HullProfile.MinPoints or > HullProfile.MaxPoints || HallwayGeometry.Area2(points) == 0)
         {
             LastError = "A profile needs 3 to 32 points enclosing some area";

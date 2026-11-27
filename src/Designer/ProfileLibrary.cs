@@ -20,8 +20,8 @@ public sealed class ProfileNode
 }
 
 /// <summary>
-/// The hallway profile library on disk: <c>Documents/BRUTALGame/Profiles</c>, one <c>.bprofile</c> file per profile (JSON:
-/// name and outline in 1/1024 m), subfolders as categories. Plans hold their own copies: importing copies a file into the
+/// The profile library on disk: <c>Documents/BRUTALGame/Profiles</c>, one <c>.bprofile</c> file per profile (JSON:
+/// name, kind (hallway or wall; hallway when missing) and points in 1/1024 m), subfolders as categories. Plans hold their own copies: importing copies a file into the
 /// plan, and a change to the file reaches the plan only when that profile is reimported on purpose.
 /// </summary>
 public sealed class ProfileLibrary
@@ -83,10 +83,13 @@ public sealed class ProfileLibrary
         {
             var data = JsonSerializer.Deserialize<ProfileFile>(File.ReadAllText(file));
 
-            if (data?.Points is null || data.Points.Count is < HullProfile.MinPoints or > HullProfile.MaxPoints)
+            var kind = string.Equals(data?.Kind, nameof(ProfileKind.Wall), StringComparison.OrdinalIgnoreCase) ? ProfileKind.Wall : ProfileKind.Hallway;
+            var least = kind == ProfileKind.Wall ? HullProfile.MinWallPoints : HullProfile.MinPoints;
+
+            if (data?.Points is null || data.Points.Count < least || data.Points.Count > HullProfile.MaxPoints)
                 return null;
 
-            var profile = new HullProfile { Name = data.Name ?? Path.GetFileNameWithoutExtension(file), Source = relative };
+            var profile = new HullProfile { Name = data.Name ?? Path.GetFileNameWithoutExtension(file), Source = relative, Kind = kind };
 
             foreach (var p in data.Points)
             {
@@ -110,6 +113,7 @@ public sealed class ProfileLibrary
         var data = new ProfileFile
         {
             Name = profile.Name,
+            Kind = profile.Kind.ToString(),
             UnitsPerMetre = HullSolid.PositionUnitsPerMetre,
             Points = profile.Points.Select(p => new[] { p.X, p.Y }).ToList(),
         };
@@ -122,6 +126,7 @@ public sealed class ProfileLibrary
     private sealed class ProfileFile
     {
         public string? Name { get; set; }
+        public string? Kind { get; set; }
         public int UnitsPerMetre { get; set; } = HullSolid.PositionUnitsPerMetre;
         public List<int[]>? Points { get; set; }
     }

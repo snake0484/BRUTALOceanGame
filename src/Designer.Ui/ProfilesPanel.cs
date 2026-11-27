@@ -7,8 +7,9 @@ using BrutalGame.Ships.Interior;
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>
-/// The Profiles tab. The plan's own profiles: make one from a preset, duplicate, rename, delete (when no hallway uses it)
-/// and shape it in the editor; every hallway using it follows. The library on disk (<see cref="ProfileLibrary"/>, folders
+/// The Profiles tab. The plan's own profiles, hallway outlines and wall sections (half a hallway, for rooms): make one from
+/// a preset or from half a hallway, duplicate, rename, delete (when nothing uses it) and shape it in the editor; every
+/// hallway or room using it follows. The library on disk (<see cref="ProfileLibrary"/>, folders
 /// as categories): import a profile into the plan, save a plan profile to it. The plan keeps its copy: a change to the
 /// library file shows here as "the library has changed" and reaches the plan only with Reimport.
 /// </summary>
@@ -22,6 +23,8 @@ public sealed class ProfilesPanel : IDisposable
     private int _nameVersion = -1;
     private float _width = (float)InteriorCommands.DefaultWidth;
     private float _height = (float)InteriorCommands.DefaultHeight;
+    private float _wallHeight = 2.4f;
+    private float _feature = 0.3f;
     private string _message = "";
 
     public ProfilesPanel(ProfileLibrary library)
@@ -78,20 +81,31 @@ public sealed class ProfilesPanel : IDisposable
         for (var i = 0; i < count; i++)
         {
             var p = interior!.Profiles[i];
-            var users = interior.Hallways.Count(h => h.Profile == i);
-            var clear = HallwayGeometry.Measure(p.Points);
-            var note = clear.Fits ? $"{clear.People} abreast" : "too small";
+            string note;
 
-            if (ImGui.Selectable($"{p.Name}  ({note}, {users} hallway{(users == 1 ? "" : "s")}){(p.Source.Length > 0 ? "  [library]" : "")}##prof{i}", i == Selected, ImGuiSelectableFlags.None, default))
+            if (p.Kind == ProfileKind.Wall)
+            {
+                var rooms = interior.RoomWalls.Count(w => w.Profile == i);
+                note = $"wall, {rooms} room{(rooms == 1 ? "" : "s")}";
+            }
+            else
+            {
+                var users = interior.Hallways.Count(h => h.Profile == i);
+                var clear = HallwayGeometry.Measure(p.Points);
+                note = $"{(clear.Fits ? $"{clear.People} abreast" : "too small")}, {users} hallway{(users == 1 ? "" : "s")}";
+            }
+
+            if (ImGui.Selectable($"{p.Name}  ({note}){(p.Source.Length > 0 ? "  [library]" : "")}##prof{i}", i == Selected, ImGuiSelectableFlags.None, default))
                 Selected = i;
         }
 
-        if (ImGui.Button("New profile"u8))
-        {
-            var name = $"Profile {count + 1}";
-            Selected = InteriorCommands.AddProfile(session, name, HallwayGeometry.Preset(HallwayPreset.Rounded, _width, _height));
-            _message = Selected < 0 ? InteriorCommands.LastError : "";
-        }
+        if (ImGui.Button("New hallway"u8))
+            Added(InteriorCommands.AddProfile(session, $"Profile {count + 1}", HallwayGeometry.Preset(HallwayPreset.Rounded, _width, _height)));
+
+        ImGui.SameLine();
+
+        if (ImGui.Button("New wall"u8))
+            Added(InteriorCommands.AddProfile(session, $"Wall {count + 1}", WallGeometry.Preset(WallPreset.Chamfered, _wallHeight, _feature), kind: ProfileKind.Wall));
 
         ImGui.SameLine();
         ImGui.BeginDisabled(Selected < 0 || Selected >= count);
@@ -99,7 +113,7 @@ public sealed class ProfilesPanel : IDisposable
         if (ImGui.Button("Duplicate"u8))
         {
             var source = interior!.Profiles[Selected];
-            Selected = InteriorCommands.AddProfile(session, $"{source.Name} copy", source.Points);
+            Added(InteriorCommands.AddProfile(session, $"{source.Name} copy", source.Points, kind: source.Kind));
         }
 
         ImGui.SameLine();
@@ -113,6 +127,14 @@ public sealed class ProfilesPanel : IDisposable
         }
 
         ImGui.EndDisabled();
+    }
+
+    private void Added(int index)
+    {
+        if (index >= 0)
+            Selected = index;
+
+        _message = index < 0 ? InteriorCommands.LastError : "";
     }
 
     private void DrawProfile(DesignSession session, HullInterior interior, int index)
@@ -140,6 +162,17 @@ public sealed class ProfilesPanel : IDisposable
                 InteriorCommands.SetProfile(session, index, p => p.Name = name);
         }
 
+        if (profile.Kind == ProfileKind.Wall)
+            DrawWall(session, index, profile);
+        else
+            DrawHallway(session, index, profile);
+
+        // The library copy: save to it, or reimport from it on purpose.
+        DrawSource(session, index, profile);
+    }
+
+    private void DrawHallway(DesignSession session, int index, HullProfile profile)
+    {
         // Presets reshape it.
         DesignerStyle.ItemWidth(90f);
         ImGui.InputFloat("Width m"u8, ref _width, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None);
@@ -171,7 +204,50 @@ public sealed class ProfilesPanel : IDisposable
 
         ImGui.TextDisabled("Drag points; double-click an edge to add one, right-click a point to remove it."u8);
 
-        // The library copy: save to it, or reimport from it on purpose.
+        if (ImGui.Button("Make a wall from half of it"u8))
+        {
+            if (WallGeometry.FromHallway(profile.Points) is { } half)
+                Added(InteriorCommands.AddProfile(session, $"{profile.Name} wall", half, kind: ProfileKind.Wall));
+            else
+                _message = "This outline has no right side to take a wall from";
+        }
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("A wall profile for rooms: this outline's right half, from the floor up to its middle"u8);
+    }
+
+    private void DrawWall(DesignSession session, int index, HullProfile profile)
+    {
+        DesignerStyle.ItemWidth(90f);
+        ImGui.InputFloat("Height m##wall"u8, ref _wallHeight, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None);
+        ImGui.SameLine();
+        DesignerStyle.ItemWidth(90f);
+        ImGui.InputFloat("Detail m"u8, ref _feature, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None);
+        _wallHeight = Math.Clamp(_wallHeight, 0.2f, 16f);
+        _feature = Math.Clamp(_feature, 0.05f, 4f);
+
+        for (var p = 0; p < WallGeometry.PresetNames.Length; p++)
+        {
+            if (p > 0)
+                ImGui.SameLine();
+
+            if (ImGui.Button($"{WallGeometry.PresetNames[p]}##wallpreset{p}"))
+                Commit(session, index, WallGeometry.Preset((WallPreset)p, _wallHeight, _feature));
+        }
+
+        var shown = _editor.Shown(index, profile.Points);
+        var tall = shown.Count > 0 ? shown[^1].Y / (double)HullSolid.PositionUnitsPerMetre : 0;
+        var deepest = shown.Count > 0 ? shown.Max(p => p.X) / (double)HullSolid.PositionUnitsPerMetre : 0;
+        ImGui.Text($"{tall:F2} m tall, stands in up to {deepest:F2} m from the room's side");
+
+        if (_editor.Draw(index, profile.Points, default, ProfileKind.Wall) is { } edited)
+            Commit(session, index, edited);
+
+        ImGui.TextWrapped("The room's side is on the right. The lower half keeps to the floor and the upper half to the ceiling, so taller rooms stretch the middle. Drag points; double-click a segment to add one, right-click a point to remove it."u8);
+    }
+
+    private void DrawSource(DesignSession session, int index, HullProfile profile)
+    {
         if (profile.Source.Length > 0)
         {
             var current = _library.Current(profile.Source);
@@ -258,15 +334,18 @@ public sealed class ProfilesPanel : IDisposable
         }
 
         var inPlan = interior?.Profiles.FindIndex(p => p.Source == node.Relative) ?? -1;
-        ImGui.TreeNodeEx($"{node.Name}{(inPlan >= 0 ? "  (in the plan)" : "")}##{node.Relative}", ImGuiTreeNodeFlags.Leaf | ImGuiTreeNodeFlags.NoTreePushOnOpen | ImGuiTreeNodeFlags.SpanAvailWidth);
+        ImGui.TreeNodeEx($"{node.Name}{(node.Profile!.Kind == ProfileKind.Wall ? "  [wall]" : "")}{(inPlan >= 0 ? "  (in the plan)" : "")}##{node.Relative}", ImGuiTreeNodeFlags.Leaf | ImGuiTreeNodeFlags.NoTreePushOnOpen | ImGuiTreeNodeFlags.SpanAvailWidth);
 
         if (ImGui.IsItemHovered())
             ImGui.SetTooltip("Double-click to import a copy into the plan"u8);
 
         if (ImGui.IsItemHovered() && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
         {
-            Selected = InteriorCommands.AddProfile(session, node.Profile!.Name, node.Profile.Points, node.Relative);
-            _message = Selected < 0 ? InteriorCommands.LastError : $"Imported {node.Relative}. Later changes to the file reach the plan only through Reimport.";
+            var added = InteriorCommands.AddProfile(session, node.Profile!.Name, node.Profile.Points, node.Relative, node.Profile.Kind);
+            Added(added);
+
+            if (added >= 0)
+                _message = $"Imported {node.Relative}. Later changes to the file reach the plan only through Reimport.";
         }
     }
 

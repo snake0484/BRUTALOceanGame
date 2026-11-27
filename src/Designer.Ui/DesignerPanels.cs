@@ -2,6 +2,7 @@ using Brutal.ImGuiApi;
 using Brutal.Numerics;
 using BrutalGame.Plans;
 using BrutalGame.Ships;
+using BrutalGame.Ships.Interior;
 
 namespace BrutalGame.Designer.Ui;
 
@@ -94,8 +95,12 @@ public sealed class DesignerPanels
     /// <summary>The interior view: the hull's panels are shown but cannot change anything.</summary>
     public bool Locked;
 
+    /// <summary>Set for one frame when a room's "Edit profile" asks the Profiles tab to show its wall profile.</summary>
+    public int EditProfileRequest { get; private set; } = -1;
+
     public void Draw(DesignSession session, DesignStats stats, MeshEditState meshEdit)
     {
+        EditProfileRequest = -1;
         ImGui.BeginDisabled(Locked);
         DrawTools(session, stats);
         DrawSolidList(session);
@@ -219,6 +224,43 @@ public sealed class DesignerPanels
         ImGui.End();
     }
 
+    /// <summary>A box room's walls: plain, or one of the plan's wall profiles (made in the Profiles tab).</summary>
+    private void DrawWalls(DesignSession session, uint id)
+    {
+        var interior = session.Doc.Interior;
+        var current = interior?.WallOf(id) ?? -1;
+        var name = current >= 0 && current < interior!.Profiles.Count ? interior.Profiles[current].Name : "Plain";
+        DesignerStyle.ItemWidth(120f);
+
+        if (ImGui.BeginCombo("Walls"u8, $"{name}", ImGuiComboFlags.None))
+        {
+            if (ImGui.Selectable("Plain##walls"u8, current < 0, ImGuiSelectableFlags.None, default) && current >= 0)
+                InteriorCommands.SetRoomWall(session, id, -1);
+
+            for (var i = 0; i < (interior?.Profiles.Count ?? 0); i++)
+            {
+                if (interior!.Profiles[i].Kind != ProfileKind.Wall)
+                    continue;
+
+                if (ImGui.Selectable($"{interior.Profiles[i].Name}##wall{i}", i == current, ImGuiSelectableFlags.None, default) && i != current)
+                    InteriorCommands.SetRoomWall(session, id, i);
+            }
+
+            if (interior is null || !interior.Profiles.Exists(p => p.Kind == ProfileKind.Wall))
+                ImGui.TextDisabled("No wall profiles yet: make one in Profiles"u8);
+
+            ImGui.EndCombo();
+        }
+
+        if (current >= 0)
+        {
+            ImGui.SameLine();
+
+            if (ImGui.Button("Edit##wallprofile"u8))
+                EditProfileRequest = current;
+        }
+    }
+
     private void DrawProperties(DesignSession session, MeshEditState meshEdit)
     {
         if (ImGui.Begin("Properties"u8))
@@ -276,6 +318,9 @@ public sealed class DesignerPanels
                 if (Combo("Role"u8, ref role, RoleNames))
                     Designer.LayerCommands.SetRole(session, id, (SolidRole)role);
             }
+
+            if (WallGeometry.IsRoom(solid))
+                DrawWalls(session, id);
 
             var material = MaterialSlot(session.Doc, solid.Material);
 

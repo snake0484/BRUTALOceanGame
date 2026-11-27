@@ -178,7 +178,9 @@ public sealed class DesignerApp : DesignApp
         var windows = doc.Windows is { IsEmpty: false }
             ? WindowGeometry.Expand(doc.Windows, new HullSurface(doc.Solids.AsSpan(), doc.Meshes), doc.Layers is not null, doc.Meshes.Count + hallways.Meshes.Count)
             : new WindowGeometry.Expansion();
-        var meshes = hallways.Meshes.Count + windows.Meshes.Count > 0 ? [.. doc.Meshes, .. hallways.Meshes, .. windows.Meshes] : doc.Meshes;
+        // Rooms with a wall profile are cut as their walled shape in their box's place.
+        var walls = WallGeometry.Expand(doc.Interior, doc.Solids.AsSpan(), doc.Meshes.Count + hallways.Meshes.Count + windows.Meshes.Count);
+        var meshes = hallways.Meshes.Count + windows.Meshes.Count + walls.Meshes.Count > 0 ? [.. doc.Meshes, .. hallways.Meshes, .. windows.Meshes, .. walls.Meshes] : doc.Meshes;
         var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), meshes, doc.Brushes);
 
         if (windows.Panes.Count > 0)
@@ -193,6 +195,9 @@ public sealed class DesignerApp : DesignApp
 
         foreach (ref readonly var s in doc.Solids.AsSpan())
             solids.Add(s);
+
+        foreach (var (index, room) in walls.Rooms)
+            solids[index] = room;
 
         solids.AddRange(hallways.Solids);
         solids.AddRange(windows.Cuts);
@@ -507,6 +512,8 @@ public sealed class DesignerApp : DesignApp
 
             if (_interiorPanel.EditProfileRequest >= 0)
                 (_profilesPanel.Selected, _profilesPanel.Focus) = (_interiorPanel.EditProfileRequest, true);
+            else if (_panels.EditProfileRequest >= 0)
+                (_profilesPanel.Selected, _profilesPanel.Focus) = (_panels.EditProfileRequest, true);
 
             _profilesPanel.Draw(_session);
             _windowsPanel.Draw(_session);
@@ -754,11 +761,16 @@ public sealed class DesignerApp : DesignApp
     /// <summary>--demo-hallway-plain: the hallway in a solid block without layers.</summary>
     public static bool HallwayPlain;
 
+    /// <summary>--demo-walls: a room with a coved wall profile in a solid block.</summary>
+    public static bool WallDemo;
+
     private void DemoLayered()
     {
         var all = _catalog.All;
 
-        if (HallwayDemo && HallwayPlain)
+        if (WallDemo)
+            SampleHulls.WallRoom(_session, all[0].Id);
+        else if (HallwayDemo && HallwayPlain)
             SampleHulls.HallwayBlock(_session, all[0].Id);
         else if (HallwayDemo)
             SampleHulls.HallwayHull(_session, all[Math.Min(2, all.Count - 1)].Id, all[0].Id, all[Math.Min(1, all.Count - 1)].Id);

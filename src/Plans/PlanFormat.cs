@@ -65,6 +65,7 @@ public enum PlanFormatError
 /// (interiors) adds flag 4 and the <see cref="HullInterior"/> block between the brushes and the components; format 7
 /// (windows) adds flag 8 and the <see cref="HullWindowSet"/> block after the interior. Format 8 (route networks) writes
 /// pipes and hallways as node networks with junctions and the plan's profile list; older formats are converted on load.
+/// Format 9 (wall profiles) adds each profile's kind and the rooms' wall profiles to the interior block.
 /// </summary>
 public static class PlanFormat
 {
@@ -76,12 +77,14 @@ public static class PlanFormat
     public const ushort InteriorFormat = 6;
     public const ushort WindowFormat = 7;
     public const ushort RouteFormat = 8;
+    public const ushort WallFormat = 9;
 
     /// <summary>The newest format this build writes; bodies up to it can be read.</summary>
-    public const ushort Newest = RouteFormat;
+    public const ushort Newest = WallFormat;
 
     public static ushort FormatOf(PlanDocument doc) =>
-        doc.Interior is { IsEmpty: false } || doc.Components is { Pipes.Count: > 0 } || doc.Prefabs.Values.Any(p => FormatOf(p) >= RouteFormat) ? RouteFormat
+        doc.Interior is { HasWalls: true } || doc.Prefabs.Values.Any(p => FormatOf(p) >= WallFormat) ? WallFormat
+        : doc.Interior is { IsEmpty: false } || doc.Components is { Pipes.Count: > 0 } || doc.Prefabs.Values.Any(p => FormatOf(p) >= RouteFormat) ? RouteFormat
         : doc.Windows is { IsEmpty: false } ? WindowFormat
         : doc.Components is { IsEmpty: false } || doc.Prefabs.Count > 0 ? ComponentFormat
         : doc.Brushes is { IsEmpty: false } ? BrushFormat : doc.Layers is not null ? LayerFormat : doc.Meshes.Count > 0 ? MeshFormat : Format;
@@ -105,7 +108,7 @@ public static class PlanFormat
         var format = FormatOf(doc);
         var layers = doc.Layers?.ToBytes() ?? [];
         var brushes = format >= BrushFormat && doc.Brushes is { IsEmpty: false } ? doc.Brushes.ToBytes() : [];
-        var interior = format >= InteriorFormat && doc.Interior is { IsEmpty: false } ? doc.Interior.ToBytes() : [];
+        var interior = format >= InteriorFormat && doc.Interior is { IsEmpty: false } ? doc.Interior.ToBytes(format >= WallFormat) : [];
         var windows = format >= WindowFormat && doc.Windows is { IsEmpty: false } ? doc.Windows.ToBytes() : [];
         var components = format >= ComponentFormat ? ComponentBlock(doc) : [];
         var bytes = new byte[BodyFixedBytes + doc.Materials.Count * 4 + n * HullSolid.SizeInBytes + (format >= MeshFormat ? 4 + meshBytes : 0)
@@ -270,7 +273,7 @@ public static class PlanFormat
         if (header.Magic != PlanHeader.MagicValue)
             return PlanFormatError.BadMagic;
 
-        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat or InteriorFormat or WindowFormat or RouteFormat))
+        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat or InteriorFormat or WindowFormat or RouteFormat or WallFormat))
             return PlanFormatError.UnsupportedFormat;
 
         if (header.Level is not (PlanLevel.Ship or PlanLevel.HullChunk or PlanLevel.Component))
@@ -488,7 +491,7 @@ public static class PlanFormat
 
         if (hasInterior)
         {
-            doc.Interior = r.Interior(legacy: format < RouteFormat);
+            doc.Interior = r.Interior(format < RouteFormat ? InteriorLayout.Legacy : format < WallFormat ? InteriorLayout.Routes : InteriorLayout.Walls);
 
             if (doc.Interior is null)
                 return false;
@@ -706,9 +709,9 @@ public static class PlanFormat
             return windows;
         }
 
-        public HullInterior? Interior(bool legacy)
+        public HullInterior? Interior(InteriorLayout layout)
         {
-            var interior = HullInterior.Read(_bytes[_offset..], out var consumed, legacy);
+            var interior = HullInterior.Read(_bytes[_offset..], out var consumed, layout);
             _offset += consumed;
             return interior;
         }
