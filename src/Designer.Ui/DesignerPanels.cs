@@ -110,6 +110,9 @@ public sealed class DesignerPanels
     /// <summary>Set by the host each frame when something other than a solid is selected: Properties shows this instead.</summary>
     public Action<DesignSession>? OtherProperties;
 
+    /// <summary>The Properties tab's inspector (its filter and section state carry over between selections).</summary>
+    public readonly Inspector Inspector = new();
+
     /// <summary>Set for one frame when a room's "Edit profile" asks the Profiles tab to show its wall profile.</summary>
     public int EditProfileRequest { get; private set; } = -1;
 

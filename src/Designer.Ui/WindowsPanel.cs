@@ -17,6 +17,8 @@ public sealed class WindowsPanel
 {
     private const float CentrePixels = 12f;
 
+    private static readonly HullWindow Defaults = new();
+
     private static readonly uint OutlineColour = OverlayRenderer.Rgba(150, 210, 255, 200);
     private static readonly uint SelectedColour = OverlayRenderer.Rgba(255, 230, 120, 255);
     private static readonly uint PreviewColour = OverlayRenderer.Rgba(150, 255, 170, 230);
@@ -28,19 +30,10 @@ public sealed class WindowsPanel
     private int _surfaceVersion = -1;
     private DesignSession? _surfaceSession;
     private string _message = "";
-    private Draft _draft;
 
     private enum Placing { None, New, Move }
 
     private Placing _placing;
-
-    private struct Draft
-    {
-        public uint Id;
-        public int Version;
-        public float Width, Height, Depth;
-        public int Thickness;
-    }
 
     public WindowsPanel(HullMaterialCatalog catalog) => _catalog = catalog;
 
@@ -49,13 +42,18 @@ public sealed class WindowsPanel
     public void Reset() => (Selected, _placing, _surface, _surfaceVersion) = (0, Placing.None, null, -1);
 
     /// <summary>The selected window's properties (in the Properties tab).</summary>
-    public void DrawProperties(DesignSession session)
+    public void DrawProperties(DesignSession session, Inspector inspector)
     {
         var set = session.Doc.Windows;
         var index = set?.IndexOf(Selected) ?? -1;
 
         if (index >= 0)
-            DrawWindow(session, set!.Windows[index]);
+        {
+            var window = set!.Windows[index];
+            inspector.Begin("Window"u8, $"#{window.Id}");
+            DrawWindow(session, inspector, window);
+            inspector.End();
+        }
 
         if (_message.Length > 0)
             ImGui.TextWrapped($"{_message}");
@@ -98,70 +96,85 @@ public sealed class WindowsPanel
         _template.HeightMm = Mm(height);
         var material = _templateMaterial < 0 ? FirstGlazing() : _templateMaterial;
 
+        DesignerStyle.ItemWidth(220f);
+
         if (MaterialCombo("Pane##tmat"u8, ref material))
             _templateMaterial = material;
     }
 
-    private void DrawWindow(DesignSession session, HullWindow window)
+    private void DrawWindow(DesignSession session, Inspector inspector, HullWindow window)
     {
-        ImGui.SeparatorText($"Window #{window.Id}");
+        var id = window.Id;
 
-        if (_draft.Id != window.Id || _draft.Version != session.Version)
+        if (inspector.Section("Shape"u8))
         {
-            _draft = new Draft
+            var shape = (int)window.Shape;
+
+            if (inspector.Choice("Outline"u8, ref shape, WindowGeometry.ShapeNames, (int)Defaults.Shape, "The opening's outline"u8))
+                WindowCommands.SetWindow(session, id, w => w.Shape = (WindowShape)shape);
+
+            var width = window.WidthMm / 1000.0;
+
+            if (inspector.Float("Width"u8, ref width, Defaults.WidthMm / 1000.0, 0.01f, HullWindow.MinSizeMm / 1000.0, HullWindow.MaxSizeMm / 1000.0, "%.2f m"u8, "Across the window"u8))
+                WindowCommands.SetWindow(session, id, w => w.WidthMm = Mm((float)width));
+
+            var height = window.HeightMm / 1000.0;
+
+            if (inspector.Float("Height"u8, ref height, Defaults.HeightMm / 1000.0, 0.01f, HullWindow.MinSizeMm / 1000.0, HullWindow.MaxSizeMm / 1000.0, "%.2f m"u8, "Up the window"u8))
+                WindowCommands.SetWindow(session, id, w => w.HeightMm = Mm((float)height));
+
+            var turn = (double)window.Roll * SolidRotation.DegreesPerStep;
+
+            if (inspector.Float("Turn"u8, ref turn, 0, 1f, 0, 360 - SolidRotation.DegreesPerStep, "%.0f deg"u8, "Turned about the hull's normal, in 15 degree steps"u8))
             {
-                Id = window.Id, Version = session.Version, Width = window.WidthMm / 1000f, Height = window.HeightMm / 1000f,
-                Depth = window.DepthMm / 1000f, Thickness = window.ThicknessMm,
-            };
+                var roll = (byte)((int)Math.Round(turn / SolidRotation.DegreesPerStep) % 24);
+                WindowCommands.SetWindow(session, id, w => w.Roll = roll);
+            }
         }
 
-        var shape = window.Shape;
-
-        if (Shape(ref shape, out var changed) && changed)
-            WindowCommands.SetWindow(session, window.Id, w => w.Shape = shape);
-
-        DesignerStyle.ItemWidth(90f);
-        ImGui.InputFloat("Width m"u8, ref _draft.Width, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None);
-        var sized = ImGui.IsItemDeactivatedAfterEdit();
-        ImGui.SameLine();
-        DesignerStyle.ItemWidth(90f);
-        ImGui.InputFloat("Height m"u8, ref _draft.Height, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None);
-        sized |= ImGui.IsItemDeactivatedAfterEdit();
-        DesignerStyle.ItemWidth(90f);
-        ImGui.InputFloat("Cut depth m"u8, ref _draft.Depth, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None);
-        sized |= ImGui.IsItemDeactivatedAfterEdit();
-        ImGui.SameLine();
-        DesignerStyle.ItemWidth(90f);
-        ImGui.InputInt("Pane mm"u8, ref _draft.Thickness, 0, 0, ImGuiInputTextFlags.None);
-        sized |= ImGui.IsItemDeactivatedAfterEdit();
-
-        if (sized)
+        if (inspector.Section("Cut"u8))
         {
-            var (w, h) = (Mm(_draft.Width), Mm(_draft.Height));
-            var depth = (ushort)Math.Clamp((int)Math.Round(_draft.Depth * 1000), 0, HullWindow.MaxDepthMm);
-            var thickness = (ushort)Math.Clamp(_draft.Thickness, HullWindow.MinThicknessMm, 2000);
-            WindowCommands.SetWindow(session, window.Id, x => (x.WidthMm, x.HeightMm, x.DepthMm, x.ThicknessMm) = (w, h, depth, thickness));
+            var depth = window.DepthMm / 1000.0;
+
+            if (inspector.Float("Depth"u8, ref depth, Defaults.DepthMm / 1000.0, 0.01f, 0, HullWindow.MaxDepthMm / 1000.0, "%.2f m"u8, "How far into the hull the opening cuts"u8))
+            {
+                var mm = (ushort)Math.Clamp((int)Math.Round(depth * 1000), 0, HullWindow.MaxDepthMm);
+                WindowCommands.SetWindow(session, id, w => w.DepthMm = mm);
+            }
         }
 
-        ImGui.Text($"Turned {window.Roll * SolidRotation.DegreesPerStep} deg");
-        ImGui.SameLine();
+        if (inspector.Section("Pane"u8))
+        {
+            var thickness = (int)window.ThicknessMm;
 
-        if (ImGui.Button("-##winroll"u8))
-            WindowCommands.SetWindow(session, window.Id, x => x.Roll = (byte)((x.Roll + 23) % 24));
+            if (inspector.Int("Thickness"u8, ref thickness, Defaults.ThicknessMm, 1f, HullWindow.MinThicknessMm, 2000, "%d mm"u8, "The pane's thickness"u8))
+            {
+                var mm = (ushort)thickness;
+                WindowCommands.SetWindow(session, id, w => w.ThicknessMm = mm);
+            }
 
-        ImGui.SameLine();
+            var material = CatalogIndex(session.Doc, window.Material);
 
-        if (ImGui.Button("+##winroll"u8))
-            WindowCommands.SetWindow(session, window.Id, x => x.Roll = (byte)((x.Roll + 1) % 24));
+            if (inspector.Row("Material"u8, "What the pane is made of: glazings first, they are see-through"u8))
+            {
+                var glazing = FirstGlazing();
+                ImGui.SetNextItemWidth(inspector.EditorWidth);
+                var picked = MaterialCombo("##winmat"u8, ref material);
 
-        var material = CatalogIndex(session.Doc, window.Material);
+                if (inspector.Revert(material != glazing))
+                    (material, picked) = (glazing, true);
 
-        if (MaterialCombo("Pane##winmat"u8, ref material))
-            WindowCommands.SetMaterial(session, window.Id, _catalog.All[material].Id);
+                if (picked)
+                    WindowCommands.SetMaterial(session, id, _catalog.All[material].Id);
+            }
 
-        if (_catalog.TryGet(_catalog.All[material].Id, out var m))
-            ImGui.TextDisabled($"{m.DensityKgM3} kg/m3, strength {m.YieldMpa} MPa{(m.Transparent ? "" : ", not see-through")}");
-
+            if (_catalog.All.Count > 0 && _catalog.TryGet(_catalog.All[material].Id, out var m))
+            {
+                inspector.Info("Density"u8, $"{m.DensityKgM3} kg/m3");
+                inspector.Info("Strength"u8, $"{m.YieldMpa} MPa");
+                inspector.Info("See-through"u8, m.Transparent ? "Yes"u8 : "No"u8);
+            }
+        }
     }
 
     /// <summary>Add menu: the next clicks on the hull place windows.</summary>
@@ -358,7 +371,6 @@ public sealed class WindowsPanel
 
         index = Math.Clamp(index, 0, all.Count - 1);
         var changed = false;
-        DesignerStyle.ItemWidth(220f);
 
         if (ImGui.BeginCombo(label, $"{all[index].Name}", ImGuiComboFlags.None))
         {

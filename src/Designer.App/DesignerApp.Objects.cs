@@ -197,7 +197,7 @@ public sealed partial class DesignerApp
         _panels.OtherProperties = selected.Kind switch
         {
             ObjectKind.Hallway => s => _interiorPanel.DrawProperties(s),
-            ObjectKind.Window => s => _windowsPanel.DrawProperties(s),
+            ObjectKind.Window => s => _windowsPanel.DrawProperties(s, _panels.Inspector),
             ObjectKind.Decal => s => _decalsPanel.DrawProperties(s),
             ObjectKind.Stroke => s => _panels.DrawStrokeProperties(s),
             ObjectKind.Placement => s => _prefabPanel.DrawProperties(s),
