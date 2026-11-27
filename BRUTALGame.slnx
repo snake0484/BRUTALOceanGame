@@ -17,6 +17,7 @@
     <Project Path="src/Ships/Ships.csproj" />
     <Project Path="src/Sim/Sim.csproj" />
     <Project Path="src/PlanetDesigner/PlanetDesigner.csproj" />
+    <Project Path="src/PlanetDesigner.App/PlanetDesigner.App.csproj" />
     <Project Path="src/Terrain/Terrain.csproj" />
     <Project Path="src/Terrain.Runtime/Terrain.Runtime.csproj" />
     <Project Path="src/Water/Water.csproj" />

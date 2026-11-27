@@ -264,6 +264,9 @@ public sealed class TerrainWorld : IDisposable
     /// <paramref name="angle"/> (rad) of unit <paramref name="direction"/> regenerates in place. A second call before then
     /// widens the region to the whole body.
     /// </summary>
+    /// <summary>The last <see cref="ReplaceGenerator"/> as applied: bounds rebuild ms and leaves marked to regenerate.</summary>
+    public (float Ms, int Leaves) LastReplace { get; private set; }
+
     public void ReplaceGenerator(int body, PlanetGenerator generator, double3 direction, double angle)
     {
         if (_replacement is { } pending && (pending.Body != body || pending.Direction != direction))
@@ -276,6 +279,8 @@ public sealed class TerrainWorld : IDisposable
     {
         var (index, generator, direction, angle) = _replacement!.Value;
         _replacement = null;
+        var start = Stopwatch.GetTimestamp();
+        var leaves = 0;
         var old = _bodies[index];
         var body = _bodies[index] = new Body(generator, old.Collision, old.Edits);
 
@@ -287,7 +292,10 @@ public sealed class TerrainWorld : IDisposable
         body.BoundsBuilt();
 
         if (index != _focus)
+        {
+            LastReplace = ((float)Stopwatch.GetElapsedTime(start).TotalMilliseconds, 0);
             return;
+        }
 
         _body = body;
         _selectJob.Selector = body.Selector;
@@ -306,7 +314,10 @@ public sealed class TerrainWorld : IDisposable
 
             record.Dirty = true;
             _dirty.Add(coord);
+            leaves++;
         }
+
+        LastReplace = ((float)Stopwatch.GetElapsedTime(start).TotalMilliseconds, leaves);
     }
 
     /// <summary>Records an edit the sim accepted on <paramref name="body"/>; on the focus body, every loaded leaf it shows on regenerates.</summary>

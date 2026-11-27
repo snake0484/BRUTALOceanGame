@@ -23,7 +23,7 @@ public readonly record struct DesignRegion(double3 Direction, double Angle)
 public sealed class PlanetDesignSession
 {
     public const string ShapeMap = "shape";
-    public const int MapRes = 512;
+    public const int MapRes = 1024;
     public const float MapScale = 0.05f;
     public const int MaxUndo = 64;
 
@@ -199,8 +199,12 @@ public sealed class PlanetDesignSession
         }
     }
 
-    /// <summary>The generated ground at d to half a metre, raised clear of the protected band.</summary>
-    public float SiteHeight(double3 d) => Math.Clamp(MathF.Round(_generated.Surface.Height(d.X, d.Y, d.Z) * 2f) * 0.5f, SiteFloor, _generated.Params.MaxHeight);
+    /// <summary>The ground at d with the painted height (other sites aside) to half a metre, raised clear of the protected band.</summary>
+    public float SiteHeight(double3 d)
+    {
+        var ground = _generated.Surface.Height(d.X, d.Y, d.Z) + Shape.Sample(d.X, d.Y, d.Z);
+        return Math.Clamp(MathF.Round(ground * 2f) * 0.5f, SiteFloor, _generated.Params.MaxHeight);
+    }
 
     public void Undo()
     {

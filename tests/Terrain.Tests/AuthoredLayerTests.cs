@@ -189,6 +189,32 @@ public sealed class AuthoredLayerTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>The orbit LOD: the 1024² impostor bake of the body changes where the bump is and nowhere else much.</summary>
+    [Fact]
+    public void ImpostorShowsTheLayer()
+    {
+        var plain = new PlanetGenerator(Base);
+        var authored = Register(Layer("test-impostor", bump: true, site: true));
+        const int size = PlanetImpostor.FocusSize;
+        var n = (int)PlanetImpostor.Texels(size);
+        ushort[] a = new ushort[n], b = new ushort[n];
+        uint[] albedoA = new uint[n], albedoB = new uint[n];
+        var changed = 0;
+
+        for (var face = 0; face < PlanetImpostor.Faces; face++)
+        {
+            PlanetImpostor.BakeFace(plain, size, face, a, albedoA);
+            PlanetImpostor.BakeFace(authored, size, face, b, albedoB);
+        }
+
+        // Level 0 holds the six faces first.
+        for (var i = 0; i < PlanetImpostor.Faces * size * size; i++)
+            changed += a[i] != b[i] ? 1 : 0;
+
+        output.WriteLine($"{changed} of {6 * size * size} base texels changed");
+        Assert.InRange(changed, 20, 2000);
+    }
+
     [Fact]
     public void MapIsContinuousAcrossCubeEdges()
     {
