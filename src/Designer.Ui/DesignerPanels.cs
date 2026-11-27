@@ -182,7 +182,7 @@ public sealed class DesignerPanels
 
             ImGui.EndDisabled();
             ImGui.TextDisabled("RMB orbit, MMB/Shift+RMB pan, wheel zoom, LMB pick (Ctrl adds)"u8);
-            ImGui.TextDisabled("W move, E rotate, R scale; Del delete, Ctrl+D duplicate"u8);
+            ImGui.TextDisabled("Gizmo: arrows move, rings turn, cubes resize; Del delete, Ctrl+D duplicate"u8);
             ImGui.TextDisabled("Ctrl+Z/Y undo/redo, F frame, Ctrl+W close tab"u8);
         }
 

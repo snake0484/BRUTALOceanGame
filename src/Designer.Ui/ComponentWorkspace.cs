@@ -64,9 +64,6 @@ public sealed class ComponentWorkspace
         _chemistry = chemistry;
     }
 
-    /// <summary>The viewport gizmo's mode (the host's W/E/R).</summary>
-    public GizmoMode Mode;
-
     public uint SelectedPart;
     public uint SelectedPipe;
 
@@ -808,7 +805,7 @@ public sealed class ComponentWorkspace
         {
             var p = data.Parts[part];
 
-            if (_gizmo.Update(p.Position, p.Rotation, Mode, camera, viewProj, viewport, mouse, mouseFree, down, clicked, Grid, overlay))
+            if (_gizmo.Update(p.Position, p.Rotation, camera, viewProj, viewport, mouse, mouseFree, down, clicked, Grid, overlay))
             {
                 if (_gizmo.Turned)
                     p.Rotation = _gizmo.Rotation;
@@ -831,7 +828,7 @@ public sealed class ComponentWorkspace
 
             var node = SelectedNode;
 
-            if (_gizmo.Update(route.Node(node), null, Mode, camera, viewProj, viewport, mouse, mouseFree, down, clicked, Grid, overlay))
+            if (_gizmo.Update(route.Node(node), null, camera, viewProj, viewport, mouse, mouseFree, down, clicked, Grid, overlay))
             {
                 var at = ComponentCommands.Quantise(Add(route.Node(node), _gizmo.Offset));
                 ComponentCommands.SetPipe(session, route.Id, r => r.Nodes[node] = at);

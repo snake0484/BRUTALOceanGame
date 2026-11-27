@@ -11,7 +11,7 @@ namespace BrutalGame.Designer.Ui;
 /// <summary>
 /// The Interior panel and view tool for hallways: walkable spaces cut out of the hull along a network of nodes. The panel
 /// shows the selected hallway's properties: its profile (from the Profiles tab), clearance, gravity, stair material and
-/// runs. In the view: click a node to select it and drag the arrows (W) or turn gravity on the rings (E); the bar beside
+/// runs. In the view: click a node to select it and drag the arrows or turn gravity on the rings; the bar beside
 /// it adds a node (from an end it extends, from the middle it branches into a junction) or deletes; the diamond in the
 /// middle of each run of the selected hallway splits it with a new node.
 /// </summary>
@@ -36,9 +36,6 @@ public sealed class InteriorPanel
 
     public uint Selected;
     public int SelectedNode = -1;
-
-    /// <summary>The view gizmo's mode (W move, E turns gravity).</summary>
-    public GizmoMode Mode;
 
     /// <summary>Set for one frame when "Edit profile" asks the Profiles tab to show this profile.</summary>
     public int EditProfileRequest { get; private set; } = -1;
@@ -162,7 +159,7 @@ public sealed class InteriorPanel
                 InteriorCommands.SetHallway(session, hallway.Id, h => h.Gravity = SolidRotation.AddSteps(h.Gravity, axis, 1));
         }
 
-        ImGui.TextDisabled("Or select a node and turn the rings in the view (E)."u8);
+        ImGui.TextDisabled("Or select a node and turn the rings in the view."u8);
         var material = CatalogIndex(session.Doc, hallway.Material);
 
         if (MaterialCombo("Stairs##hallmat"u8, ref material))
@@ -340,7 +337,7 @@ public sealed class InteriorPanel
             overlay.Cone(Sub(at, Scale(down, length * 0.9)), Sub(at, Scale(down, length * 0.5)), length * 0.1, GravityColour);
             overlay.OnTop = false;
 
-            if (_gizmo.Update(at, hallway.Gravity, Mode, camera, viewProj, viewport, mouse, mouseFree, io.MouseDown[0], clicked, step, overlay))
+            if (_gizmo.Update(at, hallway.Gravity, camera, viewProj, viewport, mouse, mouseFree, io.MouseDown[0], clicked, step, overlay))
             {
                 if (_gizmo.Turned)
                 {

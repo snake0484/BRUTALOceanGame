@@ -59,8 +59,9 @@ public sealed class MeshEditState
 
 /// <summary>
 /// The 3D viewport's mouse tool and overlay (drawn by <see cref="OverlayRenderer"/>, depth tested against the hull,
-/// faint where hidden): solid outlines (Add grey, Subtract red, Paint amber, selection thick white), a move gizmo on ship
-/// axes, rotation rings or face resize handles on the primary solid (by <see cref="Mode"/>), and a translucent ghost of the solid being dragged
+/// faint where hidden): solid outlines (Add grey, Subtract red, Paint amber, selection thick white), one gizmo on the
+/// primary solid (move arrows on ship axes, rotation rings just outside them, a resize cube off each face; the handle
+/// nearest the mouse wins, and a drag shows only its own), and a translucent ghost of the solid being dragged
 /// (nothing bakes until release, which commits one undo group). With the mesh editor on, the primary mesh solid's cage
 /// is drawn instead, clicks pick vertices, edges or faces, and the gizmo moves the selection.
 /// </summary>
@@ -106,6 +107,7 @@ public sealed class ViewportTool
     private int _hoverAxis = -1;
     private int _hoverSide;
     private int _ringHover = -1;
+    private float _hoverBest;
     private DragKind _hoverKind;
     private int _dragSide;
     private Vector3d _dragLast;
@@ -116,8 +118,8 @@ public sealed class ViewportTool
 
     public bool Dragging => _drag != DragKind.None;
 
-    /// <summary>What the handles on the primary solid do: move arrows, rotation rings, or a resize handle on each face.</summary>
-    public GizmoMode Mode;
+    /// <summary>Whether the primary solid shows its gizmo (off while a node, window, placement or part has it).</summary>
+    public bool Handles = true;
 
     public void Update(DesignSession session, MeshEditState edit, OrbitCamera camera, Vector2 viewport, in Matrix4x4 viewProj, bool mouseFree, OverlayRenderer overlay)
     {
@@ -175,6 +177,7 @@ public sealed class ViewportTool
         }
 
         _hoverAxis = -1;
+        _hoverBest = HandlePixels;
 
         if (editing)
         {
@@ -182,7 +185,7 @@ public sealed class ViewportTool
             return;
         }
 
-        if (hasPrimary)
+        if (hasPrimary && Handles)
             DrawHandles(overlay, solid, mesh, camera, viewProj, viewport, mouse, hover: mouseFree);
 
         if (!mouseFree || !ImGui.IsMouseClicked(ImGuiMouseButton.Left, false))
@@ -877,7 +880,6 @@ public sealed class ViewportTool
     private void DrawMoveGizmo(OverlayRenderer overlay, Vector3d centre, OrbitCamera camera, in Matrix4x4 viewProj, Vector2 viewport, Vector2 mouse, bool hover)
     {
         var length = Math.Max(0.5, camera.Depth(centre) * GizmoScreenFraction);
-        var best = HandlePixels;
         var hasCentre = camera.Project(centre, viewProj, viewport, out var c);
         overlay.OnTop = true;
 
@@ -896,9 +898,9 @@ public sealed class ViewportTool
             {
                 var distance = SegmentDistance(mouse, Vector2.Lerp(c, t, 0.2f), t);
 
-                if (distance < best)
+                if (distance < _hoverBest)
                 {
-                    best = distance;
+                    _hoverBest = distance;
                     (_hoverAxis, _hoverKind) = (axis, DragKind.Move);
                 }
             }
@@ -912,18 +914,16 @@ public sealed class ViewportTool
         var centre = new Vector3d(solid.PositionX, solid.PositionY, solid.PositionZ);
         var length = Math.Max(0.5, camera.Depth(centre) * GizmoScreenFraction);
 
-        if (Mode == GizmoMode.Move)
-        {
-            DrawMoveGizmo(overlay, centre, camera, viewProj, viewport, mouse, hover);
-            return;
-        }
+        // A drag shows only its own handles; otherwise all three, the nearest to the mouse taking it.
+        if (_drag is DragKind.None or DragKind.Resize)
+            DrawResizeHandles(overlay, solid, mesh, centre, length, camera, viewProj, viewport, mouse, hover);
 
-        if (Mode == GizmoMode.Rotate)
+        if (_drag is DragKind.None or DragKind.Rotate)
         {
             var active = _drag == DragKind.Rotate ? _dragAxis : -1;
+            var best = _hoverBest;
             overlay.OnTop = true;
-            var hit = RotationRings.Draw(overlay, centre, length, solid.Rotation, active, _ringHover, camera, viewProj, viewport, mouse, hover, HandlePixels);
-
+            var hit = RotationRings.Draw(overlay, centre, length * RotationRings.Outside, solid.Rotation, active, _ringHover, camera, viewProj, viewport, mouse, hover, ref best);
             overlay.OnTop = false;
 
             if (hover)
@@ -931,19 +931,29 @@ public sealed class ViewportTool
                 _ringHover = hit;
 
                 if (hit >= 0)
-                    (_hoverAxis, _hoverKind) = (hit, DragKind.Rotate);
+                    (_hoverAxis, _hoverKind, _hoverBest) = (hit, DragKind.Rotate, best);
             }
-
-            return;
         }
 
-        // Scale: a handle just outside the middle of each face, on the solid's own axes.
+        // Arrows last: within the rings, they win a tie.
+        if (_drag is DragKind.None or DragKind.Move)
+        {
+            if (hover)
+                _hoverBest += 2f;
+
+            DrawMoveGizmo(overlay, centre, camera, viewProj, viewport, mouse, hover);
+        }
+    }
+
+    /// <summary>A resize handle just outside the middle of each face, on the solid's own axes.</summary>
+    private void DrawResizeHandles(OverlayRenderer overlay, in HullSolid solid, HullMesh? mesh, Vector3d centre, double length, OrbitCamera camera,
+        in Matrix4x4 viewProj, Vector2 viewport, Vector2 mouse, bool hover)
+    {
         LocalBounds(solid, mesh, out var min, out var max);
         SolidRotation.Matrix(solid.Rotation, _matrix);
         var mid = HullSurface.Scale(HullSurface.Add(min, max), 0.5);
         var middle = Transform(centre, mid.X, mid.Y, mid.Z);
         var margin = 0.04 * length;
-        var best = HandlePixels;
         overlay.OnTop = true;
 
         for (var axis = 0; axis < 3; axis++)
@@ -961,9 +971,9 @@ public sealed class ViewportTool
                 overlay.Line(middle, handle, OverlayRenderer.WithAlpha(colour, 140));
                 overlay.Cube(handle, length * (active ? 0.05 : 0.035), colour);
 
-                if (hover && camera.Project(handle, viewProj, viewport, out var f) && Vector2.Distance(mouse, f) < best)
+                if (hover && camera.Project(handle, viewProj, viewport, out var f) && Vector2.Distance(mouse, f) < _hoverBest)
                 {
-                    best = Vector2.Distance(mouse, f);
+                    _hoverBest = Vector2.Distance(mouse, f);
                     (_hoverAxis, _hoverKind, _hoverSide) = (axis, DragKind.Resize, side);
                 }
             }

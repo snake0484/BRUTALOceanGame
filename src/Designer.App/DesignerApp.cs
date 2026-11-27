@@ -490,8 +490,6 @@ public sealed class DesignerApp : DesignApp
         _panels.Draw(_session, _stats, _meshEdit);
         _viewOverlay.Draw(_session, _meshEdit, _camera, _panels.Cutaway, editable: !InteriorView);
         var workspace = _active.Component;
-        _tool.Mode = _bar.Mode;
-        _prefabPanel.Mode = _bar.Mode;
         _prefabPanel.BeginFrame();
         var viewport = ViewportSize;
 
@@ -500,14 +498,12 @@ public sealed class DesignerApp : DesignApp
 
         if (workspace is not null)
         {
-            workspace.Mode = _bar.Mode;
             workspace.DrawPanels(_session);
             workspace.DrawContext(_session, _camera, viewport);
         }
         else
         {
             _prefabPanel.Draw(_session);
-            _interiorPanel.Mode = _bar.Mode;
             _interiorPanel.Draw(_session);
 
             if (_interiorPanel.EditProfileRequest >= 0)
@@ -523,13 +519,14 @@ public sealed class DesignerApp : DesignApp
         }
 
         // One bar at a time: a picked node, window, placement or part outranks the selected solid.
-        var other = workspace is not null
-            ? workspace.SelectedPart != 0 || workspace.SelectedNode >= 0
-            : _interiorPanel.SelectedNode >= 0 || _windowsPanel.Selected != 0 || _prefabPanel.Selected != 0;
-
-        if (!other)
+        if (!OtherSelected)
             _panels.DrawContext(_session, _meshEdit, _camera, viewport);
     }
+
+    /// <summary>A picked node, window, placement or part: it has the gizmo and the menu, not the selected solid.</summary>
+    private bool OtherSelected => _active.Component is { } workspace
+        ? workspace.SelectedPart != 0 || workspace.SelectedNode >= 0
+        : _interiorPanel.SelectedNode >= 0 || _windowsPanel.Selected != 0 || _prefabPanel.Selected != 0;
 
     /// <summary>The Add menu: new things go at the camera target (windows wait for a click on the hull).</summary>
     private void HandleAdd()
@@ -600,6 +597,7 @@ public sealed class DesignerApp : DesignApp
             return;
 
         var strokeUsedMouse = !used && !_tool.Dragging && workspace is null && _panels.Strokes.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay);
+        _tool.Handles = !OtherSelected;
         _tool.Update(_session, _meshEdit, _camera, viewport, viewProj, mouseFree && !strokeUsedMouse && !used, _overlay);
     }
 
@@ -848,8 +846,6 @@ public sealed class DesignerApp : DesignApp
             NewDocument(component: false);
         else if (ctrl && key == GlfwKey.O)
             PickAndOpen();
-        else if (!ctrl && key is GlfwKey.W or GlfwKey.E or GlfwKey.R)
-            _bar.Mode = key == GlfwKey.W ? GizmoMode.Move : key == GlfwKey.E ? GizmoMode.Rotate : GizmoMode.Scale;
         else if (!ctrl && key == GlfwKey.I)
             _bar.InteriorView = !_bar.InteriorView;
         else if (key == GlfwKey.Delete && _active.Component is { } component)

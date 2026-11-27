@@ -9,7 +9,7 @@ public enum AddKind { None, Box, Wedge, Cylinder, Hallway, Window, Chamber, Nozz
 public readonly record struct DocumentTab(int Key, string Title, bool Modified, bool Component);
 
 /// <summary>
-/// The bar across the top: the File menu, the gizmo mode (W move, E rotate, R scale) and a tab per open ship or
+/// The bar across the top: the File menu, the Add menu, the interior view and a tab per open ship or
 /// component. Closing a tab with unsaved changes asks first. The host owns the documents; the bar only reports what the
 /// user picked this frame.
 /// </summary>
@@ -21,8 +21,6 @@ public sealed class DocumentBar
     private int _forceKey = -1;
     private int _confirmKey = -1;
     private bool _openConfirm;
-
-    public GizmoMode Mode;
 
     /// <summary>The interior view: the hull see-through and locked, so what is inside can be reached and edited.</summary>
     public bool InteriorView;
@@ -77,10 +75,6 @@ public sealed class DocumentBar
         {
             DrawFileMenu(activeKey);
             DrawAddMenu();
-            ImGui.Separator();
-            ModeItem("Move"u8, "W"u8, GizmoMode.Move);
-            ModeItem("Rotate"u8, "E"u8, GizmoMode.Rotate);
-            ModeItem("Scale"u8, "R"u8, GizmoMode.Scale);
             ImGui.Separator();
 
             if (ImGui.MenuItem("Interior view"u8, "I"u8, InteriorView))
@@ -158,12 +152,6 @@ public sealed class DocumentBar
             if (ImGui.MenuItem(label))
                 Add = kind;
         }
-    }
-
-    private void ModeItem(ReadOnlySpan<byte> label, ReadOnlySpan<byte> key, GizmoMode mode)
-    {
-        if (ImGui.MenuItem(label, key, Mode == mode))
-            Mode = mode;
     }
 
     private void DrawTabs(int activeKey)

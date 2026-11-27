@@ -82,7 +82,7 @@ profile; any angle, each hallway with its own gravity (a ship may have several),
   stair material and runs. The Profiles tab's editor takes presets (rectangle, rounded, octagon, arch at a width and
   height), then drag points (0.05 m snap), double-click an edge to add one, right-click to remove; it shows one
   0.8 × 1.9 m lane per person abreast. In the view: select a node; the bar beside it adds a node (extends or branches),
-  deletes the node or the hallway; the marker mid-run splits it; arrows (W) move it, rings (E) turn gravity. `--demo-hallway` (layered hull) and
+  deletes the node or the hallway; the marker mid-run splits it; arrows move it, rings turn gravity (one gizmo: a selection shows only the handles it can use; a picked node, window, placement or part has it instead of the selected solid). `--demo-hallway` (layered hull) and
   `--demo-hallway-plain` (solid block) show one. The selection's menu opens on a right-click in the view (a right-drag
   still orbits).
 - **Wall profiles (2026-11-27, BODY format 9; plans without them keep format 8):** half a hallway profile, for rooms. A

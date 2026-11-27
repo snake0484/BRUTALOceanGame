@@ -30,9 +30,6 @@ public sealed class PrefabPanel
 
     public uint Selected;
 
-    /// <summary>Move or rotate (scale has no meaning for a placement, so it moves).</summary>
-    public GizmoMode Mode;
-
     /// <summary>Set for one frame when the user asks to open a placed prefab in the component editor.</summary>
     public PlanDocument? OpenRequest { get; private set; }
 
@@ -118,7 +115,7 @@ public sealed class PrefabPanel
         var placement = data.Placements[index];
         ImGui.SeparatorText($"Placement #{placement.Id}");
         var at = placement.Position;
-        ImGui.Text($"At {at.X:F3}, {at.Y:F3}, {at.Z:F3} m (W move, E rotate in the view)");
+        ImGui.Text($"At {at.X:F3}, {at.Y:F3}, {at.Z:F3} m (arrows move, rings turn in the view)");
         var (yaw, pitch, roll) = SolidRotation.ToSteps(placement.Rotation);
         int[] steps = [yaw, pitch, roll];
 
@@ -217,7 +214,7 @@ public sealed class PrefabPanel
         {
             var placement = data.Placements[index];
 
-            if (_gizmo.Update(placement.Position, placement.Rotation, Mode, camera, viewProj, viewport, mouse, mouseFree, io.MouseDown[0], clicked, step, overlay))
+            if (_gizmo.Update(placement.Position, placement.Rotation, camera, viewProj, viewport, mouse, mouseFree, io.MouseDown[0], clicked, step, overlay))
             {
                 if (_gizmo.Turned)
                     placement.Rotation = _gizmo.Rotation;
