@@ -188,6 +188,21 @@ Left for later:
 - **Weather on the sphere (D31):** the swell's wind is still sampled in the spawn bubble's plane and applied planet-wide.
 - **Spawn beach:** still the wide flat of step 2; a steeper coast would show the wash better.
 
+### Breaking waves, slice 1: after review (2026-11-27)
+
+The breaking face (`docs/pivot/briefs/breaking-waves-brief.md`) as it stands after the review's fixes (6b719a9, f47aeff, 8aa65b1, af46a3a, 69f629f). Measured on the spawn beach, Release, RTX 4090, `--surf-beach` and `--surf-climb` unless said.
+
+- **Grid filter.** The face fades out over grid spacings 16-32 m whatever its wavelength and is filtered at max(the grid's spacing, camera height / 96), which does not step where the finest clipmap level does. Climb from 10 m to 4 km and back, tick by tick through the CPU mirror of the shader's filter (the GPU is not read back): 0 jumps and 0 kicks as drawn; at the grid's own spacing (as before) 11 height and 11 whitewater jumps, up to 0.67 m and 0.98 at the level switches.
+- **Far band.** Where the grid cannot draw the face the fragment shader shades the surf zone from the atlas' break clock as whitewater averaged over a wave, out to the regions' load distance. It is a flat pale band: no streaks, no sets.
+- **Swash** arrives on the regions' carrier phase at the shoreline point, each region by its weight.
+- **Bake.** Solved 32 cells past the window, slowness averaged along each step, inflow edges on the coarse solve's ray direction. Where two windows overlap on the spawn beach: 0.00 rad and 0.00 m apart (0.11 rad and 0.60 m before); on a barred, curved test seabed up to 0.29 rad, 0.17 of amplitude, 1.3 m of break clock. Only water joined to the open sea carries the wave. Depths: 16 m corners, 8 m and 4 m where the seabed bends (7.6k samples a region here, 17.4k before). Worker time 23-25 ms settled; during the load 27-30 ms median and 49-57 ms slowest (was 27-32 settled, 32-34 and 47-49).
+- **Carrier.** Drawn only in water shallower than 8 x its deep-water height, so it never starts on a window's edge; the long lines of carrier further out are gone with it.
+- **Rebake.** Only past 1°, 1 % of frequency or 5 % of height. 5.4 minutes with weather on: no rebake but the test's own 15° turn (7 bakes). The weather did not take the carrier past the tolerance in that time; what it did inside it was not logged.
+- **Tile edges.** One tile's carrier but for a 540 m band at an edge, phases matched under the camera (`SeaTiles.Hand`, `CoastRegionSet.Match`). Tested at 40° of latitude only, not seen in the game; away from the camera the two carriers drift apart along the band by k0 x the angle between the tiles' frames per metre, and crossing it at vehicle speed, or near the poles, shifts the waves visibly.
+- **In motion** (`BreakerStability`): per tick at 275 points across the surf, height step 0.018 m, second differences 0.0044 m, 0.0072 rad, 0.019 of whitewater, 0 jumps, 0 kicks; the same through the load and through a rebake's cross-fade.
+- **GPU.** Ocean pass with faces on against off: +0.011 ms at the beach, +0.020 ms from 600 m; surf foam compute +0.003 ms. Main thread: 0 bytes allocated in 43,020 frames once loaded.
+- **Not done:** the far band and the swash's timing were looked at in stills and bursts, not judged in motion by eye; the depth refinement has only run in tests (the spawn beach bends nowhere enough to trigger it); a storm arriving has not been run through the rebake.
+
 ### Carry-overs from M2 (2026-11-26)
 
 The exit check, measured at 93ac548 with `--planet-fly` (Release, Ryzen 7 9850X3D with 8 cores and 3 streaming workers, RTX 4090, 1600x900; two runs, the worse number of the two where they differ; each leg starts settled; a hole is a frame where a desired leaf in view, not provably below the horizon or empty, has nothing loaded over it):

@@ -10,7 +10,7 @@ namespace BrutalGame;
 /// --surf-beach (breaking-waves-brief.md §8): once the coast regions round the spawn's beach have loaded it logs the
 /// carrier and the break's profile out to sea, then judges the drawn face in motion: at fixed rest points across the
 /// surf zone, over <see cref="Ticks"/> ticks, how far its height, normal and whitewater move in a tick and how often
-/// they jump or kick. It follows the same points frame by frame through the regions' load and, after turning the swell,
+/// they jump or kick. It follows the same points tick by tick through the regions' load and, after turning the swell,
 /// through their rebake and cross-fade, then logs the bakes every <see cref="BakeLogSeconds"/>. With --surf-climb it
 /// instead takes the camera from <see cref="ClimbLow"/> to <see cref="ClimbHigh"/> over the surf and back, judging the
 /// face as the grid under it draws it. The window stays open for captures.
@@ -63,8 +63,7 @@ public sealed class SurfBeachTest
     private BreakerStability _frames;
     private double _climbStart;
     private double _bakesLogged;
-    private double _watchTime;
-    private double _watchStep;
+    private double _watchNext;
     private int _watched;
     private Stage _stage;
     private int _pointCount;
@@ -130,7 +129,7 @@ public sealed class SurfBeachTest
         }
 
         if (_watching)
-            Watch(time, renderTime);
+            Watch(renderTime);
 
         var settled = worldReady && _coast.Settled && _coast.Drawn > 0;
 
@@ -143,7 +142,7 @@ public sealed class SurfBeachTest
                 return;
 
             Log.Info($"regions loaded: {_coast.Drawn} drawn, {_coast.Probes} probes; {Bakes()}; {CoastRegionSet.ResidentBytes / 1048576.0:F1} MB resident on the CPU; main thread allocated {_allocated} bytes in {_frameCount} frames of region update and upload");
-            Log.Info($"through the load, frame by frame at {Watched} points: {_frames}");
+            Log.Info($"through the load, tick by tick at {Watched} points: {_frames}");
             Profile(renderTime);
             Stability();
             Seams(renderTime);
@@ -178,7 +177,7 @@ public sealed class SurfBeachTest
         else if (_stage == Stage.Turning && settled && _coast.Bakes > _turnBakes && SameCarrier())
         {
             Log.Info($"rebaked: {Bakes()}; main thread allocated {_allocated} bytes in {_frameCount} frames of region update and upload");
-            Log.Info($"through the rebake and cross-fade, frame by frame at {Watched} points: {_frames}");
+            Log.Info($"through the rebake and cross-fade, tick by tick at {Watched} points: {_frames}");
             Stability();
             Seams(renderTime);
             _allocated = 0;
@@ -367,27 +366,29 @@ public sealed class SurfBeachTest
 
         _watching = true;
         _watched = 0;
+        _watchNext = renderTime + _sim.Clock.TickSeconds;
     }
 
-    /// <summary>Frames are not evenly spaced, so a second difference is taken only across two frames of the same length.</summary>
-    private void Watch(double time, double renderTime)
+    /// <summary>Frames are not evenly spaced, so the points are taken at every tick's time the frame has reached, against the regions as they stand that frame.</summary>
+    private void Watch(double renderTime)
     {
-        var step = time - _watchTime;
-        var even = _watched > 0 && Math.Abs(step - _watchStep) < 0.1 * _watchStep;
-        (_watchTime, _watchStep) = (time, step);
+        var dt = _sim.Clock.TickSeconds;
 
-        for (var i = 0; i < Watched; i++)
+        for (; _watchNext <= renderTime; _watchNext += dt)
         {
-            _coast.Sample(_watch[i], renderTime, out var face);
-            _frames.Step(_last[i], face);
+            for (var i = 0; i < Watched; i++)
+            {
+                _coast.Sample(_watch[i], _watchNext, out var face);
+                _frames.Step(_last[i], face);
 
-            if (even)
-                _frames.Kick(_first[i], _last[i], face);
+                if (_watched > 0)
+                    _frames.Kick(_first[i], _last[i], face);
 
-            (_first[i], _last[i]) = (_last[i], face);
+                (_first[i], _last[i]) = (_last[i], face);
+            }
+
+            _watched++;
         }
-
-        _watched++;
     }
 
     /// <summary>Logs the carrier's state every <see cref="ProfileStep"/> out to sea, and takes the rest points across the surf zone for <see cref="Stability"/>.</summary>
