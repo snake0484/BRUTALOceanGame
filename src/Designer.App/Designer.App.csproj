@@ -1,8 +1,24 @@
-<Project Sdk="Microsoft.NET.Sdk">
+<Project>
+  <!--
+    Authoring (planet tabs, D89): our own tools, never in the app players get. On by default in Debug, off otherwise;
+    runDesigner.bat builds with -p:Authoring=true. An authoring build adds the game-view references and keeps its own
+    obj and bin, so the shipping restore graph (obj/project.assets.json, which DesignerBoundaryTests reads) never has them.
+  -->
+  <PropertyGroup>
+    <Configuration Condition="'$(Configuration)' == ''">Debug</Configuration>
+    <Authoring Condition="'$(Authoring)' == '' and '$(Configuration)' == 'Debug'">true</Authoring>
+    <Authoring Condition="'$(Authoring)' == ''">false</Authoring>
+    <BaseIntermediateOutputPath Condition="'$(Authoring)' == 'true'">obj\authoring\</BaseIntermediateOutputPath>
+    <BaseOutputPath Condition="'$(Authoring)' == 'true'">bin\authoring\</BaseOutputPath>
+  </PropertyGroup>
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <RootNamespace>BrutalGame.Designer.App</RootNamespace>
     <AssemblyName>BRUTALDesigner</AssemblyName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Authoring)' == 'true'">
+    <DefineConstants>$(DefineConstants);AUTHORING</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Logging.Console" />
@@ -13,9 +29,19 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Designer.Ui\Designer.Ui.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(Authoring)' == 'true'">
     <ProjectReference Include="..\Game\Game.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(Authoring)' != 'true'">
+    <Compile Remove="Authoring\**" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="obj\**;bin\**" />
+    <None Remove="obj\**;bin\**" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="BrutalGame.DesignKit.Ui" />
   </ItemGroup>
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
 </Project>

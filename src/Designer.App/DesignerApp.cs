@@ -2,7 +2,6 @@ using System.Numerics;
 using Brutal.GlfwApi;
 using Brutal.ImGuiApi;
 using Brutal.Numerics;
-using BrutalGame.Designer.App.Planets;
 using BrutalGame.Designer.Ui;
 using BrutalGame.Engine.Jobs;
 using BrutalGame.Engine.Rendering;
@@ -70,9 +69,9 @@ public sealed partial class DesignerApp : DesignApp
 
     private OverlayRenderer _overlay => Overlay;
 
-    protected override bool Busy => _active.Planet?.Busy ?? (_baker.Busy || GroupsBusy);
+    protected override bool Busy => _active.Tab?.Busy ?? (_baker.Busy || GroupsBusy);
 
-    protected override bool CameraHeld => _active.Planet?.CameraHeld ?? _tool.Dragging;
+    protected override bool CameraHeld => _active.Tab?.CameraHeld ?? _tool.Dragging;
 
     /// <summary>One open plan: a ship, or a component with its own editor state (selection, test bench).</summary>
     private sealed class Document
@@ -82,8 +81,8 @@ public sealed partial class DesignerApp : DesignApp
         public DesignSession Session = null!;
         public ComponentWorkspace? Component;
 
-        /// <summary>Set on a planet tab, whose ship session stays empty.</summary>
-        public PlanetWorkspace? Planet;
+        /// <summary>Set on a tab that is not a plan (an authoring build's planet tab); its ship session stays empty.</summary>
+        public ITabWorkspace? Tab;
 
         public readonly OrbitCamera Camera = new();
         public bool Framed;
@@ -91,7 +90,7 @@ public sealed partial class DesignerApp : DesignApp
         public string Title => Session.Path.Length > 0 ? Path.GetFileNameWithoutExtension(Session.Path) : Name;
 
         /// <summary>Never touched: a new tab or file opened now replaces it.</summary>
-        public bool Pristine => Planet is null && Session.Path.Length == 0 && !Session.Modified && Session.Undo.UndoCount == 0 && Session.Doc.Solids.Count == 0 && (Session.Doc.Components?.Parts.Count ?? 0) == 0;
+        public bool Pristine => Tab is null && Session.Path.Length == 0 && !Session.Modified && Session.Undo.UndoCount == 0 && Session.Doc.Solids.Count == 0 && (Session.Doc.Components?.Parts.Count ?? 0) == 0;
     }
     private readonly SceneLighting _lighting;
     private readonly string? _saveOnExit;
@@ -179,7 +178,7 @@ public sealed partial class DesignerApp : DesignApp
 
     protected override void Tick()
     {
-        if (TickPlanet())
+        if (TickTab())
             return;
 
         Commit();
@@ -426,7 +425,7 @@ public sealed partial class DesignerApp : DesignApp
 
         var closing = _docs[index];
         _docs.RemoveAt(index);
-        ClosePlanet(closing);
+        CloseTab(closing);
 
         if (_docs.Count == 0)
             NewDocument(component: false);
@@ -559,7 +558,7 @@ public sealed partial class DesignerApp : DesignApp
         _tabs.Clear();
 
         foreach (var d in _docs)
-            _tabs.Add(new DocumentTab(d.Key, d.Title, d.Planet?.Session.Modified ?? d.Session.Modified, d.Component is not null));
+            _tabs.Add(new DocumentTab(d.Key, d.Title, d.Tab?.Modified ?? d.Session.Modified, d.Component is not null));
 
         _bar.ComponentTab = _active.Component is not null;
         _bar.Draw(_tabs, _active.Key);
@@ -573,9 +572,9 @@ public sealed partial class DesignerApp : DesignApp
 
     protected override void DrawPanels(ImGuiIOPtr io)
     {
-        if (_active.Planet is { } planet)
+        if (_active.Tab is { } tab)
         {
-            planet.DrawPanels(ShipLayout.EditDock);
+            tab.DrawPanels(ShipLayout.EditDock);
             return;
         }
 
@@ -675,9 +674,9 @@ public sealed partial class DesignerApp : DesignApp
 
     protected override void UpdateViewport(ImGuiIOPtr io, Vector2 viewport, in Matrix4x4 viewProj, bool mouseFree)
     {
-        if (_active.Planet is { } planet)
+        if (_active.Tab is { } tab)
         {
-            planet.UpdateViewport(io, viewport, viewProj, mouseFree, _overlay);
+            tab.UpdateViewport(io, viewport, viewProj, mouseFree, _overlay);
             return;
         }
 
@@ -758,9 +757,9 @@ public sealed partial class DesignerApp : DesignApp
 
     protected override void RecordScene(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj)
     {
-        if (_active.Planet is { } planet)
+        if (_active.Tab is { } tab)
         {
-            planet.RecordScene(commands, frameIndex, extent, viewProj, Renderer.OutputExtent);
+            tab.RecordScene(commands, frameIndex, extent, viewProj, Renderer.OutputExtent);
             return;
         }
 
@@ -778,7 +777,7 @@ public sealed partial class DesignerApp : DesignApp
 
     protected override void RecordAfterScene(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj)
     {
-        if (_active.Planet is not null)
+        if (_active.Tab is not null)
             return;
 
         if (InteriorView)
@@ -789,16 +788,16 @@ public sealed partial class DesignerApp : DesignApp
 
     private void HandleFiles()
     {
-        if (_active.Planet is { } planet && _bar.Request is FileRequest.Save or FileRequest.SaveAs)
+        if (_active.Tab is { } tab && _bar.Request is FileRequest.Save or FileRequest.SaveAs)
         {
-            SavePlanet(planet);
+            _stats.Message = tab.Save();
             return;
         }
 
         switch (_bar.Request)
         {
             case FileRequest.OpenPlanet:
-                OpenPlanet(new PlanetStart { Body = _bar.PlanetBody });
+                OpenPlanetRequest(_bar.PlanetBody);
                 break;
             case FileRequest.New:
                 NewDocument(component: false);
@@ -990,8 +989,8 @@ public sealed partial class DesignerApp : DesignApp
 
     protected override void HandleKey(GlfwKey key, bool ctrl)
     {
-        if (_active.Planet is { } planet && !(ctrl && key is GlfwKey.W or GlfwKey.N or GlfwKey.O))
-            planet.HandleKey(key, ctrl);
+        if (_active.Tab is { } tab && !(ctrl && key is GlfwKey.W or GlfwKey.N or GlfwKey.O))
+            tab.HandleKey(key, ctrl);
         else if (ctrl && key == GlfwKey.W)
             _bar.AskClose(_active.Key);
         else if (ctrl && key == GlfwKey.N)
@@ -1043,7 +1042,7 @@ public sealed partial class DesignerApp : DesignApp
 
     protected override void DisposeGpu()
     {
-        DisposePlanets();
+        DisposeTabs();
         _baker.Dispose();
         _hull.Dispose();
         _decalTextures.Dispose();

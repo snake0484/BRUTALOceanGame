@@ -32,7 +32,7 @@ public sealed class PlanetStart
 /// vertical as up. A committed stroke, site change, undo or redo re-registers the layer and rebuilds the terrain around
 /// it. No ticks, ocean or physics. Main thread only; the host calls it only while its tab is in front.
 /// </summary>
-public sealed class PlanetWorkspace : IDisposable
+public sealed class PlanetWorkspace : ITabWorkspace
 {
     public const string SystemId = "test";
 
@@ -132,6 +132,18 @@ public sealed class PlanetWorkspace : IDisposable
 
     /// <summary>The octree is still loading around the camera.</summary>
     public bool Busy => _octreeActive && !_terrain.Settled;
+
+    public bool Modified => _session.Modified;
+
+    /// <summary>Space behind the body.</summary>
+    public float4 ClearColour => new(0f, 0f, 0f, 1f);
+
+    public string Save()
+    {
+        _session.Save();
+        Log.Info($"saved {Body}: version {_session.Layer.Version}, hash {_session.Layer.Hash():X16}");
+        return $"Saved planet {Body} (version {_session.Layer.Version})";
+    }
 
     /// <summary>Land above the sea with the sun about 25 degrees up, as a seeded search finds it: where the view opens, relief in raking light.</summary>
     private static double3 DaySideLand(PlanetSurface surface, double3 sun)
@@ -233,7 +245,6 @@ public sealed class PlanetWorkspace : IDisposable
         }
     }
 
-    /// <param name="dock">Where the Planet panel docks on first use.</param>
     public void DrawPanels(uint dock) => _tools.DrawPanel(Body, dock, _refreshMs, _terrain.LastReplace, _terrain.PendingJobs);
 
     public void UpdateViewport(ImGuiIOPtr io, Vector2 viewport, in Matrix4x4 viewProj, bool mouseFree, OverlayRenderer overlay)
@@ -252,7 +263,7 @@ public sealed class PlanetWorkspace : IDisposable
         else if (ctrl && key == GlfwKey.Y)
             _session.Redo();
         else if (ctrl && key == GlfwKey.S)
-            _session.Save();
+            Save();
         else if (!ctrl && key is >= GlfwKey.Number1 and <= GlfwKey.Number3)
             _tools.Tool = (PlanetTool)(key - GlfwKey.Number1);
     }

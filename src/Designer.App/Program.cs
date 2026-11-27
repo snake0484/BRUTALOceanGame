@@ -23,7 +23,7 @@ string[]? cutaway = null;
 double[]? view = null;
 string? script = null;
 
-DesignerApp.ParsePlanetArgs(args);
+DesignerApp.ParseAuthoringArgs(args);
 
 for (var i = 0; i < args.Length; i++)
 {
