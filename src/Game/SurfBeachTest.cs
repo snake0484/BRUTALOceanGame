@@ -15,8 +15,10 @@ namespace BrutalGame;
 /// instead takes the camera from <see cref="ClimbLow"/> to <see cref="ClimbHigh"/> over the surf and back, judging the
 /// face as the grid under it draws it. With the weather driving the sea it does not turn the swell: it keeps following the
 /// points through every rebake the weather causes (a storm moving the carrier past the tolerance), logging each one and,
-/// every <see cref="BakeLogSeconds"/>, the spawn tile's wind, the carrier and the rebakes so far. The swell under the
-/// points is judged tick by tick alongside the face. The window stays open for captures.
+/// every <see cref="BakeLogSeconds"/>, the spawn tile's wind, the carriers and the rebakes so far. It follows the carrier
+/// of every sea tile whose swell reaches the spawn (two or more where the beach lies on a tile edge: --surf-edge), each
+/// tile's maps being baked for its own. The swell under the points is judged tick by tick alongside the face. The
+/// window stays open for captures.
 /// </summary>
 public sealed class SurfBeachTest
 {
@@ -84,7 +86,9 @@ public sealed class SurfBeachTest
     private readonly float[] _swell1 = new float[Watched];
     private float _swellKick;
     private float _swellStep;
-    private CoastCarrier _weatherCarrier;
+    private readonly int[] _nearTiles = new int[SeaTiles.MaxBlend];
+    private readonly CoastCarrier[] _nearCarriers = new CoastCarrier[SeaTiles.MaxBlend];
+    private int _nearCount;
     private int _weatherRebakes;
     private bool _weatherPending;
     private double _weatherFrom;
@@ -134,7 +138,7 @@ public sealed class SurfBeachTest
             if (time - _bakesLogged >= BakeLogSeconds)
             {
                 _bakesLogged = time;
-                var carrier = _coast.Carrier;
+                var carrier = Carrier;
                 Log.Info($"at {time:F0} s: {_coast.Bakes} bakes so far, {_coast.Drawn} regions drawn; carrier period {(carrier.Calm ? 0f : MathF.Tau / carrier.Omega):F2} s, height {carrier.Height:F2} m, direction {carrier.Direction * 180f / MathF.PI:F1} degrees; main thread allocated {_allocated} bytes in {_frameCount} frames");
             }
 
@@ -186,10 +190,10 @@ public sealed class SurfBeachTest
         {
             _frames = default;
             (_swellKick, _swellStep) = (0f, 0f);
-            _weatherCarrier = _coast.Carrier;
             _bakesLogged = time;
             _stage = Stage.Weather;
-            Log.Info($"weather drives the sea: following the points through its rebakes; spawn tile wind {_sim.SpawnWind.Speed} m/s");
+            Near();
+            Log.Info($"weather drives the sea: following the points through its rebakes; spawn tile wind {_sim.SpawnWind.Speed} m/s; tiles at the spawn {Carriers()}");
         }
         else if (_stage == Stage.Settled && time - _settledAt > TurnAfterSeconds)
         {
@@ -218,11 +222,16 @@ public sealed class SurfBeachTest
     /// <summary>A rebake starts when the carrier the regions are baked for moves, and ends once every drawn region has it and nothing fades.</summary>
     private void FollowWeather(double time)
     {
-        var carrier = _coast.Carrier;
-
-        if (carrier != _weatherCarrier)
+        for (var i = 0; i < _nearCount; i++)
         {
-            Log.Info($"at {time:F0} s (weather {_sim.WeatherTime / 60.0:F1} min): carrier {Describe(_weatherCarrier)} -> {Describe(carrier)}; spawn tile wind {_sim.SpawnWind.Speed} m/s {_sim.SpawnWind.Direction * 10} deg");
+            var tile = _nearTiles[i];
+            var carrier = _coast.BakedFor(tile);
+
+            if (carrier == _nearCarriers[i])
+                continue;
+
+            var wind = _sim.SeaWinds.At(tile, SeaWind.Epoch(_sim.Clock.TickIndex));
+            Log.Info($"at {time:F0} s (weather {_sim.WeatherTime / 60.0:F1} min): tile {tile} carrier {Describe(_nearCarriers[i])} -> {Describe(carrier)}; its wind {wind.Speed} m/s {wind.Direction * 10} deg");
 
             if (!_weatherPending)
             {
@@ -232,7 +241,7 @@ public sealed class SurfBeachTest
                 (_swellKick, _swellStep) = (0f, 0f);
             }
 
-            _weatherCarrier = carrier;
+            _nearCarriers[i] = carrier;
             _weatherRebakes++;
         }
 
@@ -248,7 +257,7 @@ public sealed class SurfBeachTest
         {
             _bakesLogged = time;
             var swell = _sim.Ocean.Swells.Near(_sim.Bubble.Origin);
-            Log.Info($"at {time:F0} s (weather {_sim.WeatherTime / 60.0:F1} min): spawn tile wind {_sim.SpawnWind.Speed} m/s, Hs {swell.SignificantWaveHeight:F2} m; carrier {Describe(carrier)}; {_weatherRebakes} weather rebakes, {_coast.Bakes} bakes; main thread allocated {_allocated} bytes in {_frameCount} frames");
+            Log.Info($"at {time:F0} s (weather {_sim.WeatherTime / 60.0:F1} min): spawn tile wind {_sim.SpawnWind.Speed} m/s, Hs {swell.SignificantWaveHeight:F2} m; carriers {Carriers()}; {_weatherRebakes} weather rebakes, {_coast.Bakes} bakes; main thread allocated {_allocated} bytes in {_frameCount} frames");
 
             if (!_weatherPending)
             {
@@ -257,6 +266,34 @@ public sealed class SurfBeachTest
                 (_swellKick, _swellStep) = (0f, 0f);
             }
         }
+    }
+
+    /// <summary>The tiles whose swells reach the spawn (<see cref="SeaTiles.Locate"/>), and their carriers as baked now.</summary>
+    private unsafe void Near()
+    {
+        _sim.Ocean.Tiles.Locate(double3.Normalize(_sim.Bubble.Origin), out var blend);
+        _nearCount = blend.Count;
+
+        for (var k = 0; k < blend.Count; k++)
+            (_nearTiles[k], _nearCarriers[k]) = (blend.Tile[k], _coast.BakedFor(blend.Tile[k]));
+    }
+
+    private unsafe string Carriers()
+    {
+        _sim.Ocean.Tiles.Hand(double3.Normalize(_sim.Bubble.Origin), out var hand);
+        var text = "";
+
+        for (var i = 0; i < _nearCount; i++)
+        {
+            var share = 0f;
+
+            for (var k = 0; k < hand.Count; k++)
+                share = hand.Tile[k] == _nearTiles[i] ? hand.Weight[k] : share;
+
+            text += $"{(i > 0 ? ", " : "")}tile {_nearTiles[i]} (share {share:F2}) {Describe(_coast.BakedFor(_nearTiles[i]))}";
+        }
+
+        return text;
     }
 
     private static string Describe(CoastCarrier c) => c.Calm ? "calm" : $"T {MathF.Tau / c.Omega:F2} s H {c.Height:F2} m dir {c.Direction * 180f / MathF.PI:F0}";
@@ -416,16 +453,10 @@ public sealed class SurfBeachTest
         Log.Info($"along the shore 60 m out, {-SeamReach:F0} .. {SeamReach:F0} m: regions cover {first:F0} .. {last:F0} m ({covered} of {total} samples); in {overlaps} samples two regions overlap, their carriers' phases apart by mean {(overlaps > 0 ? meanPhase / overlaps : 0f):F2} rad, worst {worstPhase:F2} rad, heights by at most {worstHeight:F2} m");
     }
 
-    private bool SameCarrier()
-    {
-        foreach (var region in _coast.Regions)
-        {
-            if (region.Drawn && region.Key.Carrier != _coast.Carrier)
-                return false;
-        }
+    private bool SameCarrier() => _coast.Current;
 
-        return true;
-    }
+    /// <summary>The carrier the spawn tile's maps are baked for.</summary>
+    private CoastCarrier Carrier => _coast.BakedFor(_sim.SpawnTile);
 
     /// <summary>The point of the sea at (x, z) of the spawn's bubble: +x out to sea from the waterline.</summary>
     private double3 Sea(float x, float z) => double3.Normalize(_sim.Bubble.ToPlanet(new System.Numerics.Vector3(x, 0f, z)));
@@ -482,7 +513,9 @@ public sealed class SurfBeachTest
     /// <summary>Logs the carrier's state every <see cref="ProfileStep"/> out to sea, and takes the rest points across the surf zone for <see cref="Stability"/>.</summary>
     private void Profile(double time)
     {
-        var carrier = _coast.Carrier;
+        var carrier = Carrier;
+        Near();
+        Log.Info($"tiles at the spawn: {Carriers()}");
         Log.Info($"carrier: period {MathF.Tau / carrier.Omega:F1} s, deep-water height {carrier.Height:F2} m, direction {carrier.Direction * 180f / MathF.PI:F0} degrees (tile east toward south); Hs {_sim.Ocean.Swells.Near(_sim.Bubble.Origin).SignificantWaveHeight:F2} m");
         var line = "";
         var outer = 0f;

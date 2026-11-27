@@ -91,6 +91,7 @@ public sealed partial class GameApp : IDisposable
     private readonly PlanetFlyTest? _planetFly;
     private readonly ShoreFlyTest? _shoreFly;
     private readonly CoastRegionSet _coast;
+    private readonly SwellCarriers _coastCarriers;
     private readonly CoastAtlasGpu _coastGpu;
     private readonly TimingRing _coastMs = new(256);
     private readonly bool _benchFaces;
@@ -148,14 +149,15 @@ public sealed partial class GameApp : IDisposable
     /// <param name="seamTest">--seam-test: static views of the octree alone over a key clear colour; one captured frame per view counts the pixels showing through it.</param>
     /// <param name="faces">false with --no-faces: the breaking faces over the coast regions are not drawn (A/B).</param>
     /// <param name="benchFaces">--bench-faces: --bench alternates the breaking faces, not the shore wash.</param>
+    /// <param name="surfEdge">--surf-edge: --surf-beach on a beach that lies on a sea tile's row edge, where two tiles' swells meet.</param>
     /// <param name="surfClimb">--surf-climb: --surf-beach, then the camera climbs to 4 km over the surf and back (SurfBeachTest).</param>
     /// <param name="surfBeach">--surf-beach: the camera stands in the shallows off the spawn's beach, looking along the break (unless --cam places it), under a sun held over the beach.</param>
     /// <param name="menu">Menu mode (no test or bench flag): app states, menus and settings (GameApp.Menu.cs); null runs as before.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false, bool shoreFly = false, bool seamTest = false, Menu.MenuLaunch? menu = null, string? planetKind = null, ulong? kindSeed = null, bool steep = false, bool faces = true, bool benchFaces = false, bool surfBeach = false, bool surfClimb = false)
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false, bool shoreFly = false, bool seamTest = false, Menu.MenuLaunch? menu = null, string? planetKind = null, ulong? kindSeed = null, bool steep = false, bool faces = true, bool benchFaces = false, bool surfBeach = false, bool surfClimb = false, bool surfEdge = false)
     {
         _benchFaces = benchFaces;
         _surfBeach = surfBeach;
-        _sim = new SimWorld(seed: menu?.Seed ?? 1, WorkerBudget.Tick, weather, kind: planetKind, kindSeed: kindSeed) { WeatherTimeOffset = weatherOffset * 60.0 };
+        _sim = new SimWorld(seed: menu?.Seed ?? 1, WorkerBudget.Tick, weather, kind: planetKind, kindSeed: kindSeed, edgeSpawn: surfEdge) { WeatherTimeOffset = weatherOffset * 60.0 };
 
         ref readonly var planet = ref _sim.Celestial[_sim.PlanetIndex];
         _planetFrame = planet.Surface;
@@ -211,6 +213,7 @@ public sealed partial class GameApp : IDisposable
         _depths = new ShoreDepthGrid(_sim.Shore);
         _depthTexture = new ShoreDepthTexture(_renderer);
         _coast = new CoastRegionSet(_sim.Ocean.Tiles, _sim.CoastDepth, WorkerBudget.Side);
+        _coastCarriers = new SwellCarriers(_sim.Ocean.Swells);
         _coastGpu = new CoastAtlasGpu(_renderer);
         _oceanPanel = new OceanPanel(_sim.Ocean, p => _sim.SetSwell(p), _oceanFft, _depths, _depthTexture, _coast, _coastGpu) { BreakerFaces = faces };
         _surfTest = surfBeach ? new SurfBeachTest(_sim, _coast, surfClimb) : null;
@@ -601,22 +604,21 @@ public sealed partial class GameApp : IDisposable
         return double3.Normalize(up * sin + double3.Normalize(along * 0.8 + _sim.Seaward * 0.6) * cos);
     }
 
-    /// <summary>
-    /// The coast regions follow the camera and the swell's target carrier (breaking-waves-brief.md): baked on a job,
-    /// faded in and out; none without a sea to draw.
-    /// </summary>
     /// <summary>The swell of the camera's sea tile.</summary>
     private OceanSwell Swell => _sim.Ocean.Swells.Near(PlanetCamera);
 
     /// <summary>The camera in the planet's frame; the spawn when it is in another frame.</summary>
     private double3 PlanetCamera => _camera.Frame == _planetFrame ? _camera.Position : _sim.Bubble.Origin;
 
+    /// <summary>
+    /// The coast regions follow the camera, each window its own sea tile's target carrier (breaking-waves-brief.md):
+    /// baked on a job, faded in and out; none without a sea to draw.
+    /// </summary>
     private void UpdateCoast(double3 camera, double frameSeconds)
     {
         var start = Stopwatch.GetTimestamp();
         var bytes = GC.GetAllocatedBytesForCurrentThread();
-        var carrier = _seaWanted ? CoastCarrier.From(Swell.TargetCarrierDirection, Swell.TargetCarrierOmega, Swell.TargetCarrierHeight) : default;
-        _coast.Update(camera, carrier, Swell.TargetSignificantHeight, (float)frameSeconds);
+        _coast.Update(camera, _seaWanted ? _coastCarriers : null, (float)frameSeconds);
         _coastAllocated += GC.GetAllocatedBytesForCurrentThread() - bytes;
         _coastMs.Record((float)Stopwatch.GetElapsedTime(start).TotalMilliseconds);
     }

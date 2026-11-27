@@ -120,8 +120,6 @@ public sealed unsafe class OceanRenderer : IDisposable
         public Vector4 DepthFar;
         public Vector4 DepthWrap;
         public Vector4 DepthValid;
-        public Vector4 Carrier;
-        public Vector4 Shore;
         public Vector4 Planet;
         public Vector4 BandRow;
         public Vector4 BandSouth;
@@ -129,6 +127,8 @@ public sealed unsafe class OceanRenderer : IDisposable
         public fixed float SlotToTile[4 * SeaTiles.MaxBlend];
         public fixed float SlotFromTile[4 * SeaTiles.MaxBlend];
         public fixed float SlotSide[4 * SeaTiles.MaxBlend];
+        public fixed float SlotCarrier[4 * SeaTiles.MaxBlend];
+        public fixed float SlotShore[4 * SeaTiles.MaxBlend];
         public fixed float Coast[CoastFloats * CoastRegionSet.Capacity];
         public fixed int SlotWaves[4 * SeaTiles.MaxBlend];
         public int WaveCount;
@@ -599,7 +599,6 @@ public sealed unsafe class OceanRenderer : IDisposable
     public void Prepare(int frameIndex, OceanSurface sea, in SeaFrame frame, double renderTime, in View view, in SpectrumState spectrum, CoastRegionSet? coast = null)
     {
         SeaSlots.Build(sea.Tiles, frame, view.Camera.X, view.Camera.Z, WaveReach, out var slots);
-        var swell = sea.Swells.For(slots.Tile[slots.Primary]) ?? sea.Swells.Uniform;
         var block = (byte*)_buffer.Mapped + _frameOffsets[frameIndex];
         var header = (FrameHeader*)block;
         var waves = new Span<GpuWave>(block + WavesOffset, MaxWaves);
@@ -621,7 +620,6 @@ public sealed unsafe class OceanRenderer : IDisposable
         var altitude = (float)(camera.Y + frame.Drop(camera.X, camera.Z));
         _firstLevel = FirstLevel(altitude);
 
-        header->Planet = new Vector4((float)camera.X, (float)camera.Z, 0f, (float)frame.SeaRadius);
         header->CameraPos = new Vector4(0f, height, 0f, (float)(renderTime % TimeWrap));
         header->SunDir = new Vector4(SunDirection, SunIntensity);
         header->SkyZenith = new Vector4(SkyZenith, Glitter(spectrum.Params.WindSpeed));
@@ -634,7 +632,8 @@ public sealed unsafe class OceanRenderer : IDisposable
         header->DepthRect = view.DepthNear;
         header->DepthFar = view.DepthFar;
         header->DepthValid = view.DepthValid;
-        header->DepthWrap = new Vector4(view.DepthCellX & (SurfFoamResolution - 1), view.DepthCellZ & (SurfFoamResolution - 1), FaceSpacing(altitude), 0f);
+        var primary = sea.Swells.For(slots.Tile[slots.Primary]);
+        header->DepthWrap = new Vector4(view.DepthCellX & (SurfFoamResolution - 1), view.DepthCellZ & (SurfFoamResolution - 1), FaceSpacing(altitude), primary?.SignificantWaveHeight ?? 0f);
         _foamOn = view.DepthNear.Z > 0f;
         (_depthCellX, _depthCellZ, _depthVersion) = (view.DepthCellX, view.DepthCellZ, view.DepthVersion);
 
@@ -664,14 +663,30 @@ public sealed unsafe class OceanRenderer : IDisposable
 
         header->WaveCount = count;
 
-        // The surf carrier is the camera's tile's; its direction k·(T x) = (Tᵀ k)·x in the frame's plane.
-        var p = slots.Primary;
-        var shore = swell.GpuShore(ShoreWash);
-        header->Carrier = swell.GpuCarrier(renderTime, slots.U[p], slots.V[p]);
-        header->Shore = new Vector4(
-            slots.ToTile[4 * p] * shore.X + slots.ToTile[4 * p + 2] * shore.Y,
-            slots.ToTile[4 * p + 1] * shore.X + slots.ToTile[4 * p + 3] * shore.Y,
-            shore.Z, shore.W);
+        // Each slot's surf carrier for the shore wash is its tile's; its direction k·(T x) = (Tᵀ k)·x in the frame's plane.
+        var breaker = 0f;
+
+        for (var s = 0; s < slots.Count; s++)
+        {
+            var carrier = default(Vector4);
+            var shore = default(Vector4);
+
+            if (sea.Swells.For(slots.Tile[s]) is { } own)
+            {
+                carrier = own.GpuCarrier(renderTime, slots.U[s], slots.V[s]);
+                var open = own.GpuShore(ShoreWash);
+                shore = new Vector4(
+                    slots.ToTile[4 * s] * open.X + slots.ToTile[4 * s + 2] * open.Y,
+                    slots.ToTile[4 * s + 1] * open.X + slots.ToTile[4 * s + 3] * open.Y,
+                    open.Z, open.W);
+                breaker = MathF.Max(breaker, open.Z);
+            }
+
+            ((Vector4*)header->SlotCarrier)[s] = carrier;
+            ((Vector4*)header->SlotShore)[s] = shore;
+        }
+
+        header->Planet = new Vector4((float)camera.X, (float)camera.Z, breaker, (float)frame.SeaRadius);
         header->DebugView = _fft.DebugView ? 1f : 0f;
         header->CoastCount = BreakerFaces && coast is not null ? PlaceCoast(header->Coast, coast, slots, renderTime) : 0;
         CoastDrawn = header->CoastCount;
@@ -679,7 +694,7 @@ public sealed unsafe class OceanRenderer : IDisposable
 
         if (CoastDrawn > 0)
         {
-            _cullReach += FaceCullHeight * coast!.Carrier.Height;
+            _cullReach += FaceCullHeight * coast!.DrawnHeight;
             _cullMargin += FaceCullMargin;
         }
     }

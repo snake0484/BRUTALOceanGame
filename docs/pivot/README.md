@@ -198,7 +198,7 @@ The breaking face (`docs/pivot/briefs/breaking-waves-brief.md`) as it stands aft
 - **Bake.** Solved 32 cells past the window, slowness averaged along each step, inflow edges on the coarse solve's ray direction. Where two windows overlap on the spawn beach: 0.00 rad and 0.00 m apart (0.11 rad and 0.60 m before); on a barred, curved test seabed up to 0.29 rad, 0.17 of amplitude, 1.3 m of break clock. Only water joined to the open sea carries the wave. Depths: 16 m corners, 8 m and 4 m where the seabed bends (7.6k samples a region here, 17.4k before). Worker time 23-25 ms settled; during the load 27-30 ms median and 49-57 ms slowest (was 27-32 settled, 32-34 and 47-49).
 - **Carrier.** Drawn only in water shallower than 8 x its deep-water height, so it never starts on a window's edge; the long lines of carrier further out are gone with it.
 - **Rebake.** Only past 1°, 1 % of frequency or 5 % of height. 5.4 minutes with weather on: no rebake but the test's own 15° turn (7 bakes). A storm taking the carrier past the tolerance has since been run (Weather wiring below): 4 weather rebakes in 15 minutes, 0 kicks.
-- **Tile edges.** One tile's carrier but for a 540 m band at an edge, phases matched under the camera (`SeaTiles.Hand`, `CoastRegionSet.Match`). Tested at 40° of latitude only, not seen in the game; away from the camera the two carriers drift apart along the band by k0 x the angle between the tiles' frames per metre, and crossing it at vehicle speed, or near the poles, shifts the waves visibly.
+- **Tile edges.** Each region is its own tile's carrier but for a 540 m band at an edge (`SeaTiles.Hand`); where the two tiles' carriers are one wave its phases are matched under the camera (`CoastRegionSet.Match`), else the two cross-fade (Coast carriers per tile below). Away from the camera a matched pair drifts apart along the band by k0 x the angle between the tiles' frames per metre, and crossing it at vehicle speed, or near the poles, shifts the waves visibly.
 - **In motion** (`BreakerStability`): per tick at 275 points across the surf, height step 0.018 m, second differences 0.0044 m, 0.0072 rad, 0.019 of whitewater, 0 jumps, 0 kicks; the same through the load and through a rebake's cross-fade.
 - **GPU.** Ocean pass with faces on against off: +0.011 ms at the beach, +0.020 ms from 600 m; surf foam compute +0.003 ms. Main thread: 0 bytes allocated in 43,020 frames once loaded.
 - **Not done:** the far band and the swash's timing were looked at in stills and bursts, not judged in motion by eye; the depth refinement has only run in tests (the spawn beach bends nowhere enough to trigger it); a storm arriving has since been run through the rebake (Weather wiring below).
@@ -209,7 +209,7 @@ The sphere weather (D31) drives the game and the headless sim; the flat island f
 
 - **Sim.** `SimWorld` owns the sea planet's `SphereWeatherField` (`PlanetClimate.Rocky` from the body seed, systems 4× the island's: `SimWorld.WeatherSizeScale`) and a `SeaWindSchedule`: each `SeaTiles` tile's wind at each 60 s epoch, the mean over a 5 × 5 lattice across the tile (mean speed along the mean direction), quantized to 1 m/s and 10°. The server passes `weather: true`. `--weather-offset` is a whole-tick offset of weather time.
 - **Sea.** `SeaSwells` keeps a swell per live tile. At an epoch's first tick a changed key crossfades in over 45 s, its components seeded by tile and key; the next epoch's key is read and its set built mid-epoch, staggered by tile. The surf carrier's phase is closed form (lerped ω integrated over the blend plus the gap to the new set's −ω t closed on the smoothstep), so a tile made late is bit-identical to one live all along (`LateTile_MatchesOneLiveAllAlong`). Live tiles: the GPU window and blend tiles round the bubble, the view and entities within 10 km of sea level; dropped 10 s after the last anchor leaves. `OceanSurface` blends the tiles' swells with the old squared weights; the depth cap's Hs is the blend's. A query on a tile with no live swell sees calm and counts a miss (0 in the runs below).
-- **GPU.** Each of the four slots carries its own tile's waves (up to 1536 in the frame block, phase in `a.z`, a range per slot). The FFT detail takes the camera blend's spectra mixed by squared weight. Coast regions and the shore wash still take the camera tile's carrier (see Left).
+- **GPU.** Each of the four slots carries its own tile's waves (up to 1536 in the frame block, phase in `a.z`, a range per slot). The FFT detail takes the camera blend's spectra mixed by squared weight. Coast regions and the shore wash take their own tile's carrier (Coast carriers per tile below).
 - **Client.** `WeatherSystem` bakes a `SphereWeatherCache` round the camera and samples it for the sky. The Weather panel shows the wind, pressure and sky at the camera, the sea tile's key, Hs, Tp and blend, the systems within 150 km (list and map) and the cache's and sea's tick times.
 
 Measured (Release, RTX 4090 machine, other sessions working; `SeaSwellsTests.Costs`, in-game panel):
@@ -229,11 +229,34 @@ Storm (`--surf-beach --weather-offset 3972`, the week's strongest wind at the sp
 What the cloud work (D80) can read: `SimWorld.Weather` (`SphereWeatherField`: `Gather(unit, extra, time, span)` lists the systems with centre, radius, kind, strength, cloud, rain, convection; `Sample` gives cloud, rain, storm at a point) and the client's `WeatherSystem.Cache` (`SphereWeatherCache`, ~1 km nodes of cloud, rain, storm and wind round the camera, rebaked every 5 s and lerped). Both are pure functions of seed and tick, so a cloud map built from them needs no bandwidth.
 
 Left:
-- **Coast carriers per tile.** Coast regions and the shore wash follow the camera tile's carrier; a region in a neighbouring tile is baked for the camera tile's swell, not its own, and re-keys when the camera crosses the edge. Per-tile carriers need `CoastRegionSet`'s hand-over to match two carriers of different frequency.
+- ~~**Coast carriers per tile.**~~ Done (Coast carriers per tile below).
 - **Base swell changes** (`SetSwell`: the panel's Apply, launch options) rebuild every live tile at once, without a blend.
 - **Drag and lift** do not read the weather yet.
 - **GPU cost** of per-slot waves was not A/B benched; the in-game profiler read 0.25 ms for the ocean surface pass at the spawn with the UI up.
 - **Only the spawn tile's storm** was run in game; a storm across a tile edge, seen from the edge, was not.
+
+### Coast carriers per tile (2026-11-27)
+
+Each coast region is baked for the swell of the sea tile it lies in, not the camera's; nothing re-keys when the camera crosses a tile edge.
+
+- **Regions.** `CoastRegionSet.Update` takes an `ICoastCarriers` (the game's `SwellCarriers` reads `SeaSwells.For(tile)`'s target carrier and Hs). Each tile round the camera, and each tile with a slot in use, keeps its own baked carrier, tolerance test (`Keeps`) and break depth; a tile with no swell is calm and its regions fade out. A tile's rebake leaves every other tile's maps alone.
+- **Hand-over.** Two carriers of different frequency cannot agree for more than a moment (their phase gap runs at the difference of their ω), and a wave whose ω varies in space has its wavenumber grow with time, so there is no single smooth wave across the band. The two tiles' faces cross-fade across it by their hand shares instead, each continuous in time. Where the carriers are one wave (same direction and frequency, any heights) they share one set of hand-over turns and are matched under the camera as before. A map's phase shift depends only on its own carrier and the camera, so it never moves when another tile rebakes.
+- **Swash.** Each GPU slot carries its own tile's carrier and shore wash (breaker height, direction, set groups: `slotCarrier`, `slotShore` in the frame block). A region's swash takes its own slot's bores; outside the regions each slot's open-carrier swash is weighted by its hand share at the shoreline point. The depth cap's Hs is the camera tile's (`depthWrap.w`). Looked at in the bursts below only; not measured.
+- **--surf-edge** puts the spawn's beach on a sea tile row edge (the first row edge near 30° with a beach). Seed 1: 31.22° N, tiles 2388 and 2305 with hand shares 0.50 each. Over a week of its weather (`EdgeSpawn_TwoTiles`) the two tiles carry one wave in 9,992 of 10,080 minutes and different frequencies in 88; first at weather minute 679, when tile 2388's 12 m/s wind sea (6.6 s, 190°) overtakes the 13 s groundswell, until 693.
+
+Measured (Release, RTX 4090; `--surf-edge --weather-offset 676`, 20 minutes, the five watched points on the 50 / 50 line of the band):
+
+- Through tile 2388's rebake to the wind sea and back (184 s and 1024 s): each settled in 6.1 s; face 0 jumps, 0 kicks, second differences ≤ 0.0097 m, 0.0019 rad, 0.0094 whitewater; tile 2305's maps were not baked again (3 bakes each, all 2388's).
+- 14 minutes with the two carriers in the band: face 0 kicks, second differences ≤ 0.0005 m, 0.0006 rad, 0.0078 whitewater; open swell ≤ 0.0037 m. With one shared wave before and after: ≤ 0.0007 m, 0.0019 rad, 0.0081.
+- The cost of the cross-fade: on the 50 / 50 line each train is drawn at half weight, so the face's peak there fell from 1.07 m and 0.97 whitewater (one wave) to 0.50 m and 0.50 (two). The band is 540 m wide.
+- Unit test `TileEdge_TwoSwells_EachTileBakesItsOwn` (different frequency and direction, 40° latitude): parked in the band, crossing it at 12 m/s, and through the neighbour's rebake to a third carrier: 0 jumps, 0 kicks, second differences ≤ 0.0016 m; the home tile's maps keep their version and phase.
+- Main thread: 136 B per rebake, as before; 0 between.
+- Bursts from 300 m straight down over the band (`--surf-edge --hide-ui --cam 60 300 0 90 -88`, two 40-frame bursts at 250 ms each): with two carriers (`--weather-offset 680`) frame-to-frame mean differences 0.73-1.00, with one shared wave (`670`) 0.84-0.97; no frame steps. The two-carrier breakers in the band are visibly fainter than the shared wave's.
+- Coast update on the main thread (`UpdateCost`): 2.5 µs a frame at rest, 1.3 µs mean flying at 30 m/s (2.0 and 0.9 before: the per-tile carriers are read every frame).
+
+Left:
+- **Weak band.** Where two tiles' carriers differ, the breakers in the 540 m band are two half-strength trains. User decision 2026-11-27: keep the cross-fade (a narrower band or one tile's carrier carried across were the alternatives).
+- The swash's per-slot timing and heights were seen in bursts, not judged in motion by eye.
 
 ### Carry-overs from M2 (2026-11-26)
 

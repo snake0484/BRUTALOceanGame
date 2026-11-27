@@ -33,16 +33,16 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 cascadeAnchorZ; // xyz = frac(camera z / L) per cascade, w = camera z mod the lace period
     vec4 depthRect;      // near depth map: xy = window corner relative to the camera, z = world size (0 = none), w = depth outside both maps
     vec4 depthFar;       // far depth map: xy = corner relative to the camera, z = world size (0 = none)
-    vec4 depthWrap;      // xy = the near window's corner cell mod the map's size (it is stored toroidally), z = the grid spacing the camera's height calls for (m, continuous: OceanRenderer.FaceSpacing), w unused
+    vec4 depthWrap;      // xy = the near window's corner cell mod the map's size (it is stored toroidally), z = the grid spacing the camera's height calls for (m, continuous: OceanRenderer.FaceSpacing), w = the camera tile's open swell Hs (the depth cap)
     vec4 depthValid;     // the part of the near window that holds its depth: xy = min, zw = max, relative to the camera (empty: min > max)
-    vec4 carrier;        // surf carrier (OceanSwell.GpuCarrier): x = omega, y = phase, z = set group ratio (a set every 1 / this waves), w = set group phase
-    vec4 shore;          // xy = carrier travel direction, z = its breaker height (0 = no shore wash), w = open swell Hs
-    vec4 planet;         // xy = camera x, z in the sea frame, z unused, w = sea radius
+    vec4 planet;         // xy = camera x, z in the sea frame, z = the slots' largest breaker height (0 = no shore wash), w = sea radius
     vec4 bandRow;        // tile blend coordinate across the row edge = dot(xy, x0) + z (SeaSlots)
     vec4 bandCell[2];    // ... across the cell edge of the row south of it, and of the row north of it
     vec4 slotToTile[MAX_SLOTS];   // per slot: (u by x, u by z, v by x, v by z), sea frame plane to tile plane at the camera
     vec4 slotFromTile[MAX_SLOTS]; // per slot: the inverse, (x by u, x by v, z by u, z by v)
     vec4 slotSide[MAX_SLOTS];     // per slot: x = side of the row edge, y = side of its row's cell edge (-1, +1, 0 = whole), z = its row (0 south, 1 north)
+    vec4 slotCarrier[MAX_SLOTS];  // per slot: its tile's surf carrier (OceanSwell.GpuCarrier): x = omega, y = phase, z = set group ratio (a set every 1 / this waves), w = set group phase
+    vec4 slotShore[MAX_SLOTS];    // per slot: xy = its carrier's travel direction in the sea frame, z = its breaker height (0 = no shore wash), w = its open swell Hs
     CoastRegion coast[MAX_COAST]; // the coast regions drawn (ocean_breaker.glsl)
     ivec4 slotWaves[MAX_SLOTS];   // per slot: x = its tile's first wave, y = one past its last (each tile has its own swell, SeaSwells)
     int waveCount;
@@ -66,10 +66,11 @@ const float WAVE_BREAKING_GAMMA = 0.78; // the surf wave breaks at this height /
 const float GROUP_DEPTH = 0.7;          // sets modulate the surf wave's height by 1 +- this, mean square 1
 const float TWO_PI = 6.28318530718;
 
-// Set envelope at a point whose carrier spatial phase is spatial: (1 + m cos(ratio spatial + group phase)) / sqrt(1 + m^2/2).
-float groupEnvelope(float spatial)
+// Set envelope at a point whose slot's carrier spatial phase is spatial: (1 + m cos(ratio spatial + group phase)) / sqrt(1 + m^2/2).
+float groupEnvelope(int slot, float spatial)
 {
-    return (1.0 + GROUP_DEPTH * cos(frame.carrier.z * spatial + frame.carrier.w)) / sqrt(1.0 + 0.5 * GROUP_DEPTH * GROUP_DEPTH);
+    vec4 carrier = frame.slotCarrier[slot];
+    return (1.0 + GROUP_DEPTH * cos(carrier.z * spatial + carrier.w)) / sqrt(1.0 + 0.5 * GROUP_DEPTH * GROUP_DEPTH);
 }
 
 // Cascade i's texture coordinate at camera-relative x plus the camera's place in the tile, so it stays small anywhere
@@ -135,7 +136,7 @@ float waterDepth(vec2 xz)
 // arriving in a backwash pushes the edge out again rather than one half sine a period. Timing is the open carrier's
 // phase at the shoreline point below (found along the depth gradient): along a straight shore Snell's law keeps k0 sin
 // of the angle, so the arrival phase is the open wave's there. The amplitude is that bore's: the carrier's breaker height
-// (frame.shore.z) for the crest that arrived (the set envelope it carried), less what the break has dissipated since it
+// (frame.slotShore[].z, of the sea tile's swell the bores are of) for the crest that arrived (the set envelope it carried), less what the break has dissipated since it
 // began (surfWidth: the distance from where it broke to the shore), so the small waves between sets barely move the edge
 // and a set wave runs far up, and lee shores facing away from the carrier get none. The sheet behind an edge is the
 // Shen-Meyer lens, (x_edge - x)^2 / (9 g t^2), thick just behind a fresh edge and thinning as the sheet ages, over a
@@ -165,19 +166,33 @@ float surfWidth(float breakerHeight, float slope)
 }
 
 // A beach point for the swash: its depth, the beach's slope, its distance up the beach from the shoreline below it
-// (negative in the water), the open carrier's spatial phase at that shoreline point, the bore's energy height there
-// and the edge's decelerations and top speed.
+// (negative in the water), the sea tile slot whose carrier the bores are of, its open carrier's spatial phase at that
+// shoreline point, the bore's energy height there and the edge's decelerations and top speed.
 struct SwashBeach
 {
     float d;
     float slope;
     float s0;
+    int slot;
     float spatial;
     float unbroken;
     float up;
     float back;
     float u0Max;
 };
+
+// The bores of slot s's carrier at a shoreline point whose beach falls along grad (b.slope its length): their set
+// envelope's phase there and their energy height before it, the breaker height on a shore facing the carrier less the
+// break's dissipation over the surf zone it has crossed.
+void swashCarrier(inout SwashBeach b, int s, vec2 shore, vec2 grad)
+{
+    vec4 sh = frame.slotShore[s];
+    float omega = max(frame.slotCarrier[s].x, 1e-3);
+    b.slot = s;
+    b.spatial = omega * omega / 9.81 * dot(sh.xy, shore);
+    float exposure = sqrt(max(dot(sh.xy, -grad / b.slope), 0.0));
+    b.unbroken = sh.z * exposure * exp(-surfWidth(sh.z, b.slope) / SWASH_DISSIPATE);
+}
 
 // The sheets of the last SWASH_EVENTS bores for a carrier whose phase at the shoreline point is `phase` (0 as a crest
 // reaches it) and angular frequency omega: the surface above the beach point, how fresh the up-rushing foam is there
@@ -196,7 +211,7 @@ float swashRun(SwashBeach b, float phase, float omega, out float front, out floa
         float age = since * period;
         // The set envelope travels with the crests, so the crest that reached the shore `since` periods ago carried the
         // envelope `since` wavelengths back along the travel.
-        float u0 = min(SWASH_U0 * sqrt(9.81 * b.unbroken * groupEnvelope(b.spatial + TWO_PI * since)), b.u0Max);
+        float u0 = min(SWASH_U0 * sqrt(9.81 * b.unbroken * groupEnvelope(b.slot, b.spatial + TWO_PI * since)), b.u0Max);
         float tUp = u0 / b.up;
         float dt = age - tUp;
         float xs = age < tUp ? age * (u0 - 0.5 * b.up * age) : 0.5 * u0 * tUp - 0.5 * b.back * dt * dt;
@@ -221,21 +236,24 @@ float swashRun(SwashBeach b, float phase, float omega, out float front, out floa
 }
 
 // The swash of the coast regions over a shoreline point, each by its weight there (ocean_breaker.glsl): their carriers
-// reach the shore when the breaking faces drawn from them do.
-float coastSwash(SwashBeach b, vec2 shore, out float front, out float edge, out float weight);
+// reach the shore when the breaking faces drawn from them do, with the bores of their own tile's swell.
+float coastSwash(SwashBeach b, vec2 shore, vec2 grad, out float front, out float edge, out float weight);
+
+void slotShares(vec2 x0, out float w[MAX_SLOTS]);
 
 // The swash sheet's surface above x0 (depth d: negative on land), or -1e3 where there is none. front: how fresh the
 // up-rushing foam is here, 1 at the edge of a strong bore's up-rush falling to 0 SWASH_FOAM_FRONT behind it; only on the
 // beach, never over the water. gSwashEdge: 1 at the edge of the sheet that is highest here, 0 SWASH_EDGE_WIDTH behind it.
-// The bores arrive on the coast regions' carrier where one covers the shoreline point, and on the open carrier's phase
-// there elsewhere (along a straight shore Snell's law keeps k0 sin of the angle).
+// The bores arrive on the coast regions' carrier where one covers the shoreline point, and elsewhere on the open
+// carrier's phase there (along a straight shore Snell's law keeps k0 sin of the angle) of each sea tile by its share of
+// a coherent wave at the shoreline point (slotShares).
 float gSwashEdge = 0.0;
 
 float swashSheet(vec2 x0, float d, out float front)
 {
     front = 0.0;
     gSwashEdge = 0.0;
-    if (d > SWASH_SEA || d < -SWASH_MAX || frame.shore.z <= 0.0)
+    if (d > SWASH_SEA || d < -SWASH_MAX || frame.planet.z <= 0.0)
         return -1e3;
 
     // The shoreline below x0: along the depth gradient to where the depth reaches 0; the beach slope is the gradient's.
@@ -249,28 +267,32 @@ float swashSheet(vec2 x0, float d, out float front)
     b.d = d;
     b.slope = sqrt(g2);
     vec2 shore = x0 - d * grad / g2;
-    float omega = max(frame.carrier.x, 1e-3);
-    b.spatial = omega * omega / 9.81 * dot(frame.shore.xy, shore);
-
-    // The bore's energy height at the shore, before its set envelope: the breaker height on a shore facing the carrier,
-    // less the break's dissipation over the surf zone it has crossed.
-    float exposure = sqrt(max(dot(frame.shore.xy, -grad / b.slope), 0.0));
-    b.unbroken = frame.shore.z * exposure * exp(-surfWidth(frame.shore.z, b.slope) / SWASH_DISSIPATE);
     b.up = max(9.81 * b.slope * (1.0 + SWASH_FRICTION), SWASH_DECEL_MIN);
     b.back = SWASH_BACK * b.up;
     b.u0Max = sqrt(2.0 * b.up * SWASH_MAX / b.slope);
     b.s0 = -d / b.slope;
 
     float weight;
-    float sheet = coastSwash(b, shore, front, gSwashEdge, weight);
+    float sheet = coastSwash(b, shore, grad, front, gSwashEdge, weight);
     if (weight < 0.999)
     {
-        float openFront;
-        float openEdge;
-        float open = swashRun(b, b.spatial + frame.carrier.y, omega, openFront, openEdge);
-        sheet += (1.0 - weight) * open;
-        front += (1.0 - weight) * openFront;
-        gSwashEdge += (1.0 - weight) * openEdge;
+        float shares[MAX_SLOTS];
+        slotShares(shore, shares);
+
+        for (int s = 0; s < MAX_SLOTS; ++s)
+        {
+            if (shares[s] <= 0.0)
+                continue;
+
+            float openFront;
+            float openEdge;
+            swashCarrier(b, s, shore, grad);
+            float open = swashRun(b, b.spatial + frame.slotCarrier[s].y, max(frame.slotCarrier[s].x, 1e-3), openFront, openEdge);
+            float w = (1.0 - weight) * shares[s];
+            sheet += w * open;
+            front += w * openFront;
+            gSwashEdge += w * openEdge;
+        }
     }
 
     return sheet;
@@ -447,7 +469,7 @@ OceanPoint oceanAt(vec2 x0, float se)
     // Depth-limited swell (OceanSurface): min(1, BREAKING_GAMMA h / Hs), so the open swell cannot run through the beach;
     // 0 on land.
     float depth = waterDepth(x0);
-    float cap = frame.shore.w > 1e-4 ? clamp(BREAKING_GAMMA * depth / frame.shore.w, 0.0, 1.0) : 1.0;
+    float cap = frame.depthWrap.w > 1e-4 ? clamp(BREAKING_GAMMA * depth / frame.depthWrap.w, 0.0, 1.0) : 1.0;
     Swell sw = swellAt(x0, 2.0 * se, 4.0 * se, cap);
 
     // The breaking face over the coast regions: the surf carrier and its breakers, on top of the swell. Drawn only: the
