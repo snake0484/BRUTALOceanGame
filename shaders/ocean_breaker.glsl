@@ -10,8 +10,8 @@ layout(set = 0, binding = 9) uniform sampler2DArray coastDir;    // rg = directi
 const float COAST_CELLS = 256.0;          // CoastWindow.Cells
 const float COAST_CELL = 4.0;             // CoastWindow.CellSize
 const float COAST_BLEND = 32.0;           // CoastWindow.Blend
-const float COAST_MAX_SPACING = 32.0;     // grid spacing (m) past which no carrier can be drawn ...
-const float COAST_FADE_SPACING = 16.0;    // ... and from which the face fades out toward it, whatever its wavelength
+const float COAST_MAX_SPACING = 32.0;     // BreakerFace.MaxSpacing: grid spacing (m) past which no carrier can be drawn ...
+const float COAST_FADE_SPACING = 16.0;    // BreakerFace.FadeSpacing: ... and from which the face fades out toward it, whatever its wavelength
 const float SURF_GAMMA = 0.78;            // SurfCarrier.BreakingGamma
 const float COHERENT_KH = 0.4;
 const float INCOHERENT_KH = 1.2;
@@ -61,6 +61,7 @@ const float STAND_FROM = 0.45;
 const float STAND_AMOUNT = 0.55;
 const float BREAK_STEEP = 0.85;
 const float THROW_FOAM_HEIGHT = 0.6;
+const float THROW_BLEND = 0.5;
 const float SPILL_TIP = 0.5;
 const float CREST_AMPLITUDE = 0.2;
 const float BORE_LIFT = 0.35;
@@ -69,7 +70,7 @@ const float RUNUP_DEPTH = 0.6;
 const float BORE_FADE_DEPTH = 0.4;
 const float FACE_SPENT_DEPTH = 0.3;
 const float FACE_MIN_HEIGHT = 1e-3;
-const float FACE_MIN_CELLS = 1.5;         // the crest's lift and whitewater are at least this many grid cells wide (GPU only)
+const float FACE_MIN_CELLS = 1.5;         // BreakerFace.MinCells: the crest's lift and whitewater are at least this many grid cells wide
 const float FAR_FOAM = 0.5;               // lace coverage of the surf zone where the grid cannot resolve the face (coastBand, GPU only)
 
 // What the face adds at a rest position: height and its gradient, the horizontal shift and its partials
@@ -86,6 +87,7 @@ struct Face
 struct SurfPoint
 {
     float phase;   // wrapped to [-pi, pi): 0 on a crest
+    float turns;   // what the wrap took off (whole turns, rad)
     vec2 dir;
     float k;
     float unbroken;
@@ -139,7 +141,8 @@ float coastSpatialPhase(float layer, vec2 f)
 }
 
 // The carrier at cell coordinates c of region r (SurfCarrier.At): the rest through the samplers; all clamped to the window.
-SurfPoint surfCarrierAt(int r, vec2 c)
+// turns < 0 wraps the phase to the nearest crest; a point's own turns give the phase against that point's crest.
+SurfPoint surfCarrierAt(int r, vec2 c, float turns)
 {
     vec4 wave = frame.coast[r].wave;
     float layer = frame.coast[r].cellZ.w;
@@ -150,7 +153,9 @@ SurfPoint surfCarrierAt(int r, vec2 c)
     float depth = max(fields.r, 0.0);
 
     SurfPoint p;
-    p.phase = wrapPhase(coastSpatialPhase(layer, f) + wave.x);
+    float total = coastSpatialPhase(layer, f) + wave.x;
+    p.turns = turns < 0.0 ? total - wrapPhase(total) : turns;
+    p.phase = total - p.turns;
     p.dir = dir / max(length(dir), 1e-6);
     p.k = surfWaveNumber(wave.y, max(depth, SPENT_DEPTH_K));
     p.unbroken = surfUnbroken(wave.z, wave.y, depth, fields.g);
@@ -244,7 +249,7 @@ Face breakerFace(int r, vec2 c, float se, out float resolved)
     float hi = 4.0 * se;
     float narrowest = FACE_MIN_CELLS * se;
     Face o = Face(0.0, vec2(0.0), vec2(0.0), vec3(0.0), 0.0);
-    SurfPoint here = surfCarrierAt(r, c);
+    SurfPoint here = surfCarrierAt(r, c, -1.0);
     resolved = smoothstep(lo, hi, TWO_PI / here.k) * (1.0 - smoothstep(COAST_FADE_SPACING, COAST_MAX_SPACING, se));
     if (here.unbroken < FACE_MIN_HEIGHT || resolved <= 0.0)
         return o;
@@ -263,12 +268,12 @@ Face breakerFace(int r, vec2 c, float se, out float resolved)
     float eta = norm * (cs1 + sharp * (cs2 + sharp * cs3));
     vec2 slope = -norm * here.k * (sn1 + sharp * (2.0 * sn2 + sharp * 3.0 * sn3)) * here.dir;
 
-    // Two Newton steps to the crest.
+    // Two Newton steps to the crest, the phase taken against this point's crest all the way.
     vec2 x = c * COAST_CELL;
     vec2 guess = x - here.dir * (here.phase / here.k);
-    SurfPoint crest = surfCarrierAt(r, guess / COAST_CELL);
+    SurfPoint crest = surfCarrierAt(r, guess / COAST_CELL, here.turns);
     guess -= crest.dir * (crest.phase / crest.k);
-    crest = surfCarrierAt(r, guess / COAST_CELL);
+    crest = surfCarrierAt(r, guess / COAST_CELL, here.turns);
 
     float sn = dot(x - guess, crest.dir) + crest.phase / crest.k;
     float wavelength = TWO_PI / crest.k;
@@ -328,7 +333,8 @@ Face breakerFace(int r, vec2 c, float se, out float resolved)
         float whiteFront = clamp(WHITE_FRONT * state.height, WHITE_FRONT_MIN, WHITE_FRONT_MAX);
         float whiteWidth = max(sn < 0.0 ? WHITE_BACK * whiteFront : whiteFront, narrowest);
         float ew = exp(-(sn * sn) / (whiteWidth * whiteWidth));
-        float throwing = smoothstep(0.6, 1.0, state.curl) * (sn > 0.0 ? 0.6 * ew : 0.15 * ew * ew * ew) * smoothstep(0.0, THROW_FOAM_HEIGHT, state.height);
+        float thrown = mix(0.15 * ew * ew * ew, 0.6 * ew, smoothstep(-THROW_BLEND * whiteWidth, 0.0, sn));
+        float throwing = smoothstep(0.6, 1.0, state.curl) * thrown * smoothstep(0.0, THROW_FOAM_HEIGHT, state.height);
         float spilling = state.spill * (sn > 0.0 ? ew : ew * ew);
         float roller = state.broken * (sn > 0.0 ? ew : max(ew, ROLLER_TRAIL * exp(sn / max(ROLLER_TAIL * state.height, ROLLER_TAIL_MIN))));
         o.foam = max(max(throwing, spilling), roller) * window * smoothstep(0.0, WHITE_DRY_DEPTH, here.depth);

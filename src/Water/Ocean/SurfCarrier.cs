@@ -5,8 +5,9 @@ namespace BrutalGame.Water.Ocean;
 /// <summary>The surf carrier at a point of a coast map (<see cref="SurfCarrier.At"/>).</summary>
 public struct SurfCarrierPoint
 {
-    /// <summary>Phase wrapped to [-π, π): 0 on a crest.</summary>
+    /// <summary>Phase wrapped to [-π, π): 0 on a crest. <see cref="Turns"/> is what the wrap took off (rad, whole turns).</summary>
     public float Phase;
+    public float Turns;
 
     /// <summary>Unit direction of travel in the window's plane, and the local wavenumber k(h).</summary>
     public float DirX;
@@ -83,16 +84,22 @@ public static class SurfCarrier
     /// The carrier at local (x, z) metres of the map, <paramref name="phase0"/> being the map's phase at the time
     /// (<see cref="CoastAtlas.PhaseAt"/>).
     /// </summary>
-    public static SurfCarrierPoint At(CoastAtlas atlas, float x, float z, float phase0)
+    /// <param name="turns">NaN wraps the phase to the nearest crest; a point's <see cref="SurfCarrierPoint.Turns"/> gives the phase against that point's crest, however far off.</param>
+    public static SurfCarrierPoint At(CoastAtlas atlas, float x, float z, float phase0, float turns = float.NaN)
     {
         atlas.Sample(x, z, out var s);
         var carrier = atlas.Key.Carrier;
         var depth = MathF.Max(s.Depth, 0f);
         var length = MathF.Max(MathF.Sqrt(s.DirX * s.DirX + s.DirZ * s.DirZ), 1e-6f);
+        var total = s.Phase + phase0;
+
+        if (float.IsNaN(turns))
+            turns = total - Wrap(total);
 
         return new SurfCarrierPoint
         {
-            Phase = Wrap(s.Phase + phase0),
+            Phase = total - turns,
+            Turns = turns,
             DirX = s.DirX / length,
             DirZ = s.DirZ / length,
             K = WaveNumber(carrier.Omega, MathF.Max(depth, SpentDepthK)),

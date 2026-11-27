@@ -21,6 +21,7 @@ public sealed class MenuLaunch(SettingsStore settings)
         "--moon-test",
         "--shore-fly",
         "--surf-beach",
+        "--surf-climb",
         "--no-faces",
         "--bench-faces",
         "--seam-test",

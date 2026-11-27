@@ -137,7 +137,9 @@ public sealed class CoastRegionSetTests(ITestOutputHelper output)
         var peak = 0f;
         var least = 1f;
         var tick = 0L;
+        var stats = default(BreakerStability);
         set.Sample(point, 0.0, out var before);
+        var first = before;
 
         void Step(CoastCarrier carrier)
         {
@@ -145,7 +147,12 @@ public sealed class CoastRegionSetTests(ITestOutputHelper output)
             set.Sample(point, ++tick * (double)Frame, out var face);
             worst = MathF.Max(worst, MathF.Abs(face.Height - before.Height));
             peak = MathF.Max(peak, MathF.Abs(face.Height));
-            before = face;
+            stats.Step(before, face);
+
+            if (tick > 1)
+                stats.Kick(first, before, face);
+
+            (first, before) = (before, face);
 
             if (set.Busy)
                 Thread.Sleep(1);
@@ -188,8 +195,53 @@ public sealed class CoastRegionSetTests(ITestOutputHelper output)
 
         Assert.Equal(CoastRegionSet.MaxDesired, Live(set));
         Assert.True(peak > 0.3f, "the point never saw a wave");
+        output.WriteLine(stats.ToString());
         Assert.True(worst <= BreakerStability.HeightJump, $"the face jumped {worst:F3} m in a tick");
+        Assert.Equal(0, stats.Jumps);
+        Assert.Equal(0, stats.Kicks);
         Assert.True(least > 0.999f, $"a window's maps summed to {least:F3} in a cross-fade");
+    }
+
+    /// <summary>In the cells two windows share the two maps are drawn as one wave: the blended face there moves as smoothly as one map's.</summary>
+    [Fact]
+    public void Overlap_MovesAsOneWave()
+    {
+        using var set = Beach();
+        Settle(set, Camera(790.0, 960.0), Swell);
+        var stats = default(BreakerStability);
+        var maps = 0;
+
+        foreach (var region in set.Regions)
+        {
+            region.Window.ToLocal(Home.Direction(770.0, 960.0), out var x, out var z);
+            maps += region.Drawn && CoastWindow.Weight((float)x / CoastWindow.CellSize, (float)z / CoastWindow.CellSize) > 0.3f ? 1 : 0;
+        }
+
+        Assert.Equal(2, maps);
+
+        for (var u = 690.0; u <= 800.0; u += 2.3)
+        {
+            for (var v = 930.0; v <= 990.0; v += 30.0)
+            {
+                var point = Home.Direction(u, v);
+                set.Sample(point, 0.0, out var first);
+                set.Sample(point, Frame, out var before);
+                stats.Step(first, before);
+
+                for (var tick = 2; tick <= 600; tick++)
+                {
+                    set.Sample(point, tick * (double)Frame, out var face);
+                    stats.Step(before, face);
+                    stats.Kick(first, before, face);
+                    (first, before) = (before, face);
+                }
+            }
+        }
+
+        output.WriteLine(stats.ToString());
+        Assert.Equal(0, stats.Jumps);
+        Assert.Equal(0, stats.Kicks);
+        Assert.True(stats.MaxHeight > 0.5f && stats.MaxFoam > 0.5f, "the wave never broke in the shared cells");
     }
 
     /// <summary>Inside the tolerance a new carrier keeps the maps and only the drawn height follows; past it they are baked again.</summary>

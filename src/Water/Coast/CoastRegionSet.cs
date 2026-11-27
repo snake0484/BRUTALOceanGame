@@ -272,7 +272,8 @@ public sealed class CoastRegionSet : IDisposable
     /// <paramref name="time"/> (s): each region's <see cref="BreakerFace"/> by its window, fade and its tile's share of
     /// the carrier there (<see cref="SeaTiles.Hand"/>). Vector parts are in the plane of the tile the direction is in.
     /// </summary>
-    public unsafe void Sample(in double3 direction, double time, out FacePoint p)
+    /// <param name="spacing">The spacing (m) of the grid it is drawn on (<see cref="BreakerFace.Apply"/>); 0 for the face itself.</param>
+    public unsafe void Sample(in double3 direction, double time, out FacePoint p, float spacing = 0f)
     {
         p = default;
         _tiles.Hand(direction, out var hand);
@@ -289,7 +290,7 @@ public sealed class CoastRegionSet : IDisposable
             if (weight <= 0f)
                 continue;
 
-            BreakerFace.Apply(_atlases[i], x, z, PhaseAt(i, time), out var face);
+            BreakerFace.Apply(_atlases[i], x, z, PhaseAt(i, time), out var face, spacing);
             Add(ref p, face, weight, region.Key.Tile, hand.Tile[0], direction);
         }
     }

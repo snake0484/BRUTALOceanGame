@@ -37,6 +37,7 @@ var steep = false;
 var faces = true;
 var benchFaces = false;
 var surfBeach = false;
+var surfClimb = false;
 
 for (var i = 0; i < args.Length; i++)
 {
@@ -94,6 +95,8 @@ for (var i = 0; i < args.Length; i++)
         benchFaces = true;
     else if (args[i] == "--surf-beach")
         surfBeach = true;
+    else if (args[i] == "--surf-climb")
+        (surfBeach, surfClimb) = (true, true);
     else if (args[i] == "--orbit-test")
     {
         orbitTest = OrbitTestFrame.Surface;
@@ -117,7 +120,7 @@ if (BrutalGame.Menu.MenuLaunch.FromArgs(args) is { } menu)
 {
     do
     {
-        using var menuApp = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest, shoreFly, seamTest, menu, planetKind, kindSeed, steep, faces, benchFaces, surfBeach);
+        using var menuApp = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest, shoreFly, seamTest, menu, planetKind, kindSeed, steep, faces, benchFaces, surfBeach, surfClimb);
         menuApp.Run();
     }
     while (menu.TakeRelaunch());
@@ -125,5 +128,5 @@ if (BrutalGame.Menu.MenuLaunch.FromArgs(args) is { } menu)
     return;
 }
 
-using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest, shoreFly, seamTest, planetKind: planetKind, kindSeed: kindSeed, steep: steep, faces: faces, benchFaces: benchFaces, surfBeach: surfBeach);
+using var app = new GameApp(windSpeed, foamDebug, editTest, camera, hideUi, benchSeconds, planetFly, swell, weather ?? true, weatherOffset, renderScale, orbitTest, moonTest, shoreFly, seamTest, planetKind: planetKind, kindSeed: kindSeed, steep: steep, faces: faces, benchFaces: benchFaces, surfBeach: surfBeach, surfClimb: surfClimb);
 app.Run();

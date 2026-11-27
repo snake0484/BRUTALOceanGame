@@ -705,10 +705,26 @@ public sealed unsafe class OceanRenderer : IDisposable
     }
 
     /// <summary>The finest level's spacing (m) without <see cref="FirstLevel"/>'s steps: the breaking faces are filtered at it.</summary>
-    private static float FaceSpacing(float altitude) => MathF.Max(altitude, 0f) * FinestCell;
+    public static float FaceSpacing(float altitude) => MathF.Max(altitude, 0f) * FinestCell;
+
+    /// <summary>The effective spacing (m) of the grid drawn a horizontal distance from a camera at an altitude: its level's, morphing to the next's (ocean.vert).</summary>
+    public static float GridSpacing(float altitude, float distance)
+    {
+        var level = FirstLevel(altitude);
+        var spacing = BaseSpacing * (1 << level);
+
+        while (distance > HalfCells * spacing && level < WaveLevels - 1)
+        {
+            spacing *= 2f;
+            level++;
+        }
+
+        var morph = Math.Clamp((distance / (HalfCells * spacing) - MorphStart) / (MorphEnd - MorphStart), 0f, 1f);
+        return spacing * (1f + morph);
+    }
 
     /// <summary>The finest level drawn from <paramref name="altitude"/> (m above the sea): cells of about <see cref="FinestCell"/> of it.</summary>
-    private static int FirstLevel(float altitude) =>
+    public static int FirstLevel(float altitude) =>
         Math.Clamp((int)MathF.Floor(MathF.Log2(MathF.Max(altitude * FinestCell / BaseSpacing, 1f))), 0, Levels - 2);
 
     /// <summary>

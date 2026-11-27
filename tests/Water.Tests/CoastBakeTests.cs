@@ -260,8 +260,51 @@ public sealed class CoastBakeTests(ITestOutputHelper output)
             output.WriteLine($"z {z} depth {sa.Depth:F1}: phase apart {phase:F3} rad, amp {sa.Amplitude:F3} / {sb.Amplitude:F3}, clock {sa.BreakDistance:F1} / {sb.BreakDistance:F1} m");
         }
 
-        Assert.True(worstPhase < 0.5f, $"phases {worstPhase:F2} rad apart");
-        Assert.True(worstAmp < 0.15f, $"amplitudes {worstAmp:F2} apart");
+        Assert.True(worstPhase < 0.2f, $"phases {worstPhase:F2} rad apart");
+        Assert.True(worstAmp < 0.06f, $"amplitudes {worstAmp:F2} apart");
+        Assert.True(worstBreak < 2f, $"break clocks {worstBreak:F1} m apart");
+    }
+
+    /// <summary>The same over a seabed that is not a plane (a bar off a curved shore), across both kinds of shared edge.</summary>
+    [Theory]
+    [InlineData(1, 0)]
+    [InlineData(0, 1)]
+    public void NeighbourWindows_AgreeOverABarredBay(int stepX, int stepZ)
+    {
+        static float Seabed(double u, double v) => BreakerFaceTests.BarredBay(0.8 * u + 0.6 * v - 230.0, 0.8 * v - 0.6 * u);
+        var carrier = CoastCarrier.From(0.95f, 0.5f, 1.2f);
+        var a = Bake(Seabed, carrier, 0, 0);
+        var b = Bake(Seabed, carrier, stepX, stepZ);
+        var phaseA = a.PhaseAt(0.0);
+        var phaseB = b.PhaseAt(0.0);
+        const float shift = (float)CoastWindow.PitchMetres;
+        const float middle = shift + 0.5f * CoastWindow.Blend * Cell;
+        var worstPhase = 0f;
+        var worstAmp = 0f;
+        var worstBreak = 0f;
+        var surf = 0;
+
+        for (var along = 40f; along < 1000f; along += 6f)
+        {
+            var (x, z) = stepX == 1 ? (middle, along) : (along, middle);
+            a.Sample(x, z, out var sa);
+            b.Sample(x - shift * stepX, z - shift * stepZ, out var sb);
+            Assert.Equal(sa.Depth, sb.Depth, 0.02f);
+
+            if (sa.Depth < 0.5f || sa.Depth > 8f)
+                continue;
+
+            surf += sa.BreakDistance > 1f ? 1 : 0;
+            worstPhase = MathF.Max(worstPhase, MathF.Abs(SurfCarrier.Wrap(sa.Phase + phaseA - sb.Phase - phaseB)));
+            worstAmp = MathF.Max(worstAmp, MathF.Abs(sa.Amplitude - sb.Amplitude));
+            worstBreak = MathF.Max(worstBreak, MathF.Abs(sa.BreakDistance - sb.BreakDistance));
+        }
+
+        output.WriteLine($"shared edge ({stepX}, {stepZ}): phases {worstPhase:F3} rad apart, amplitudes {worstAmp:F3}, break clocks {worstBreak:F1} m; {surf} samples in the surf");
+        Assert.True(surf > 0, "the shared cells miss the surf zone");
+        Assert.True(worstPhase < 0.35f, $"phases {worstPhase:F2} rad apart");
+        Assert.True(worstAmp < 0.2f, $"amplitudes {worstAmp:F2} apart");
+        Assert.True(worstBreak < 4f, $"break clocks {worstBreak:F1} m apart");
     }
 
     /// <summary>Water with no way to the open sea carries no wave: a pond behind the beach has none, and a window whose only shallows are a pond is not baked.</summary>

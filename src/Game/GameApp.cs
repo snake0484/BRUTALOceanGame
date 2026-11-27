@@ -149,9 +149,10 @@ public sealed partial class GameApp : IDisposable
     /// <param name="seamTest">--seam-test: static views of the octree alone over a key clear colour; one captured frame per view counts the pixels showing through it.</param>
     /// <param name="faces">false with --no-faces: the breaking faces over the coast regions are not drawn (A/B).</param>
     /// <param name="benchFaces">--bench-faces: --bench alternates the breaking faces, not the shore wash.</param>
+    /// <param name="surfClimb">--surf-climb: --surf-beach, then the camera climbs to 4 km over the surf and back (SurfBeachTest).</param>
     /// <param name="surfBeach">--surf-beach: the camera stands in the shallows off the spawn's beach, looking along the break (unless --cam places it), under a sun held over the beach.</param>
     /// <param name="menu">Menu mode (no test or bench flag): app states, menus and settings (GameApp.Menu.cs); null runs as before.</param>
-    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false, bool shoreFly = false, bool seamTest = false, Menu.MenuLaunch? menu = null, string? planetKind = null, ulong? kindSeed = null, bool steep = false, bool faces = true, bool benchFaces = false, bool surfBeach = false)
+    public GameApp(float windSpeed, bool foamDebug, bool editTest, float[]? camera = null, bool hideUi = false, double benchSeconds = 0.0, bool planetFly = false, float[]? swell = null, bool weather = true, float weatherOffset = 0f, float renderScale = 1f, OrbitTestFrame? orbitTest = null, bool moonTest = false, bool shoreFly = false, bool seamTest = false, Menu.MenuLaunch? menu = null, string? planetKind = null, ulong? kindSeed = null, bool steep = false, bool faces = true, bool benchFaces = false, bool surfBeach = false, bool surfClimb = false)
     {
         _benchFaces = benchFaces;
         _surfBeach = surfBeach;
@@ -214,7 +215,7 @@ public sealed partial class GameApp : IDisposable
         _coast = new CoastRegionSet(_sim.Ocean.Tiles, _sim.CoastDepth, WorkerBudget.Side);
         _coastGpu = new CoastAtlasGpu(_renderer);
         _oceanPanel = new OceanPanel(_sim.Ocean, _oceanFft, _depths, _depthTexture, _coast, _coastGpu) { BreakerFaces = faces };
-        _surfTest = surfBeach ? new SurfBeachTest(_sim, _coast) : null;
+        _surfTest = surfBeach ? new SurfBeachTest(_sim, _coast, surfClimb) : null;
         _weatherPanel = new WeatherPanel(_weather.Map) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset };
         _instances = new InstanceBuffer(_renderer);
         _terrainRenderer = new TerrainRenderer(_renderer, _instances);
@@ -345,6 +346,10 @@ public sealed partial class GameApp : IDisposable
             UpdateOctreeCover(terrain, frameSeconds);
             UpdateSea(terrain, terrainCamera, frameSeconds);
             _surfTest?.Update(Stopwatch.GetElapsedTime(_startTime).TotalSeconds, _sim.RenderTime, WorldReady, _coastAllocated);
+
+            if (_surfTest is { Climbing: true })
+                PlaceCamera(_surfTest.CameraPosition, SurfBeachYaw, _surfTest.CameraPitch);
+
             _coastAllocated = 0;
             _sections.Terrain = Lap(ref mark);
             UpdateSun(terrainCamera, terrainAxes);
