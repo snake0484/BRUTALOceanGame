@@ -177,6 +177,29 @@ public static class SampleHulls
         InteriorCommands.AddNode(session, id, 1, new Vector3d(1.5, 2.9, 1.5));
     }
 
+    /// <summary>
+    /// A block with a turret on a rotor on top (a box and a barrel turning about ship up) and a flap on a hinge across its
+    /// front edge (swinging -60 to 30 degrees).
+    /// </summary>
+    public static void JointsDemo(DesignSession session, DefId alloy)
+    {
+        const int m = HullSolid.PositionUnitsPerMetre;
+        const int h = HullSolid.HalfUnitsPerMetre;
+        HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 2 * m, 0, 5 * h, 2 * h, 6 * h, SolidRotation.Identity, alloy);
+        var turret = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, (int)(5.25 * m), -1 * m, 2 * h, (ushort)(1.25 * h), (ushort)(2.5 * h), SolidRotation.Identity, alloy);
+        var barrel = HullCommands.AddSolid(session, SolidShape.Cylinder, SolidOp.Add, 0, (int)(5.5 * m), (int)(-5.5 * m), (ushort)(0.35 * h), 3 * h, (ushort)(0.35 * h), SolidRotation.FromSteps(0, 6, 0), alloy);
+        var flap = HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, (int)(3.75 * m), (int)(6.75 * m), (ushort)(4.5 * h), (ushort)(0.25 * h), (ushort)(0.75 * h), SolidRotation.Identity, alloy);
+
+        var rotor = JointCommands.AddJoint(session, JointKind.Rotor, new Vector3d(0, 4, -1), new Vector3d(0, 1, 0), 0);
+        JointCommands.SetJoint(session, rotor, j => j.Speed = 60);
+        JointCommands.SetMember(session, turret, rotor);
+        JointCommands.SetMember(session, barrel, rotor);
+
+        var hinge = JointCommands.AddJoint(session, JointKind.Hinge, new Vector3d(0, 4, 6), new Vector3d(1, 0, 0), 0);
+        JointCommands.SetJoint(session, hinge, j => (j.Min, j.Max, j.Target, j.Speed) = (-600, 300, 0, 400));
+        JointCommands.SetMember(session, flap, hinge);
+    }
+
     /// <summary>A solid block with a 7 x 3 x 6 m room and a 4 m round room cut out of it, walls coved at the ceiling and chamfered at the floor.</summary>
     public static void WallRoom(DesignSession session, DefId alloy)
     {

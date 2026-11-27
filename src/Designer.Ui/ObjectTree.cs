@@ -7,7 +7,7 @@ using static BrutalGame.Ships.HullSurface;
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>What the designer can select: one thing at a time (solids may be several).</summary>
-public enum ObjectKind : byte { None, Solid, Hallway, Window, Decal, Stroke, Placement }
+public enum ObjectKind : byte { None, Solid, Hallway, Window, Decal, Stroke, Placement, Joint }
 
 public readonly record struct ObjectRef(ObjectKind Kind, uint Id)
 {
@@ -17,8 +17,9 @@ public readonly record struct ObjectRef(ObjectKind Kind, uint Id)
 /// <summary>
 /// The Objects tab: the ship as a tree. Each solid is a hull node; windows, decals, brush strokes and placed components
 /// sit under the solid they are on (found from the geometry: the solid a short ray back along their normal hits, or for a
-/// component the solid below it), worked out again when the plan changes. Hallways, and anything on no solid, sit under
-/// the ship. Click to select (Ctrl adds solids); the host shows the selection in Properties.
+/// component the solid below it), worked out again when the plan changes. Rotors and hinges are nodes holding the solids
+/// that move with them (and the joints mounted on those). Hallways, and anything on no solid, sit under the ship. Click to
+/// select (Ctrl adds solids); the host shows the selection in Properties.
 /// </summary>
 public sealed class ObjectTree
 {
@@ -56,9 +57,22 @@ public sealed class ObjectTree
             if (ImGui.TreeNodeEx(shipItems ? "Ship##root"u8 : "Component##root"u8, ImGuiTreeNodeFlags.DefaultOpen | ImGuiTreeNodeFlags.SpanAvailWidth))
             {
                 var solids = session.Doc.Solids.AsSpan();
+                var joints = session.Doc.Joints;
 
                 for (var i = 0; i < solids.Length; i++)
-                    Solid(session, solids[i], i, selected, label, shipItems);
+                {
+                    if (joints is null || joints.JointOf(solids[i].Id) == 0)
+                        Solid(session, solids[i], i, selected, label, shipItems);
+                }
+
+                if (joints is not null)
+                {
+                    foreach (var j in joints.Joints)
+                    {
+                        if (j.Parent == 0)
+                            Joint(session, j, selected, label, shipItems, 0);
+                    }
+                }
 
                 if (shipItems)
                 {
@@ -100,6 +114,44 @@ public sealed class ObjectTree
 
         foreach (var child in children!)
             Leaf(child, selected, label);
+
+        ImGui.TreePop();
+    }
+
+    /// <summary>A joint node: the solids that move with it, then the joints mounted on it.</summary>
+    private void Joint(DesignSession session, HullJoint joint, ObjectRef selected, Func<ObjectRef, string> label, bool shipItems, int depth)
+    {
+        var item = new ObjectRef(ObjectKind.Joint, joint.Id);
+        var flags = ImGuiTreeNodeFlags.SpanAvailWidth | ImGuiTreeNodeFlags.OpenOnArrow | ImGuiTreeNodeFlags.DefaultOpen;
+
+        if (item == selected)
+            flags |= ImGuiTreeNodeFlags.Selected;
+
+        var open = ImGui.TreeNodeEx($"{label(item)}##joint{joint.Id}", flags);
+
+        if (ImGui.IsItemClicked(ImGuiMouseButton.Left) && !ImGui.IsItemToggledOpen())
+            (Picked, Toggle) = (item, false);
+
+        if (!open)
+            return;
+
+        var set = session.Doc.Joints!;
+        var solids = session.Doc.Solids.AsSpan();
+
+        for (var i = 0; i < solids.Length; i++)
+        {
+            if (set.JointOf(solids[i].Id) == joint.Id)
+                Solid(session, solids[i], i, selected, label, shipItems);
+        }
+
+        if (depth < HullJointSet.MaxJoints)
+        {
+            foreach (var child in set.Joints)
+            {
+                if (child.Parent == joint.Id)
+                    Joint(session, child, selected, label, shipItems, depth + 1);
+            }
+        }
 
         ImGui.TreePop();
     }

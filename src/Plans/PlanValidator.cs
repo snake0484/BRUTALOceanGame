@@ -66,6 +66,9 @@ public enum IssueCode : ushort
     DecalShape,
     PaintSlots,
     PaintRef,
+    JointCount,
+    JointShape,
+    JointMember,
 }
 
 public readonly record struct ValidationIssue(Severity Severity, IssueCode Code, ElementRef Element, int Value);
@@ -335,6 +338,39 @@ public static class PlanValidator
         }
     }
 
+    /// <summary>
+    /// Joints: count; each a known kind, a valid axis, within reach, a parent that exists and at most three deep (no loops),
+    /// a torque in range and, for a hinge, limits that hold its target; each member a solid that exists, once, of a joint
+    /// that exists.
+    /// </summary>
+    private static void ValidateJoints(PlanDocument doc, ValidationLog log)
+    {
+        if (doc.Joints is not { } set)
+            return;
+
+        if (set.Joints.Count > HullJointSet.MaxJoints)
+            log.Add(Severity.Error, IssueCode.JointCount, default, set.Joints.Count);
+
+        foreach (var j in set.Joints)
+        {
+            var element = new ElementRef(ElementKind.Placement, j.Id);
+            var depth = set.Depth(j.Id);
+
+            if (!Enum.IsDefined(j.Kind) || !SolidRotation.IsValid(j.Rotation) || j.Pivot.Length() > PlanLimits.MaxReachMetres
+                || depth is 0 or > HullJointSet.MaxDepth || j.TorqueNm > HullJoint.MaxTorqueNm
+                || (j.Kind == JointKind.Hinge && (j.Min < -1800 || j.Max > 1800 || j.Min > j.Max || j.Target < j.Min || j.Target > j.Max)))
+                log.Add(Severity.Error, IssueCode.JointShape, element, depth);
+        }
+
+        var seen = new HashSet<uint>();
+
+        foreach (var (solid, joint) in set.Members)
+        {
+            if (!seen.Add(solid) || doc.Solids.IndexOf(solid) < 0 || set.IndexOf(joint) < 0)
+                log.Add(Severity.Error, IssueCode.JointMember, new ElementRef(ElementKind.Solid, solid), (int)joint);
+        }
+    }
+
     /// <summary>Paints: slot count, each naming a finish; the hull's slot and strokes' slots in range, each stroke there.</summary>
     private static void ValidatePaint(PlanDocument doc, ValidationLog log)
     {
@@ -504,6 +540,7 @@ public static class PlanValidator
         ValidateBrushes(doc, log);
         ValidateDecals(doc, log);
         ValidatePaint(doc, log);
+        ValidateJoints(doc, log);
         ValidateComponents(doc, log);
         ValidateInterior(doc, log);
         ValidateWindows(doc, log);

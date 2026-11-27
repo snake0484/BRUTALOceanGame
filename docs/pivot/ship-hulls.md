@@ -282,6 +282,13 @@ public sealed class HullDeformation
   - Emitters take damage like any component (the shared Integrity rule) and detach by the anchor-cell rule.
 - **Suit lockers (round 6, D64).** EVA suits are not worn by default, so `SuitLocker` components (ship-design-and-construction.md, "Suit lockers") stand beside airlocks, in hangars and in crew rooms. To the hull they are ordinary interior placements against a wall (the 70 % mount rule), with a Power socket and ship-atmosphere.md's `Air` socket. The designer's reach checks (an airlock needs one in the room on its ship side or within 10 m of its inner door; ship-atmosphere.md's validation rows) read the room labels and placement positions; nothing is stored in the hull for them.
 
+### Moving parts: rotors and hinges (designer, 2026-11-27)
+
+- **Data.** `HullJointSet` (plan format 13): up to 16 joints, each a kind (rotor or hinge), a pivot (1/1024 m), a snap rotation whose +Y is the axis, the joint it is mounted on (0 = the ship), and its motor: speed (0.1 rpm or 0.1°/s), torque (N·m), and for a hinge its limits and target (0.1°). Members map plan solids to joints; a solid in no joint is the ship's own. Joints nest at most 3 deep. Not wired yet: the motor settings are the drive.
+- **Moving part = sub-hull.** Each joint's solids bake and mesh on their own (`JointGroups`), so a cut in one part never cuts another. Strokes, windows, decals and placements go with the solid under them; hallways stay with the ship. Mass is the sum of the parts.
+- **Preview.** "Play joints" (P) turns each part about its axis: a rotor at its speed, a hinge from its lower limit to its upper one and back. The renderer turns a part's bricks with a per-draw rotation; paint, decals and finishes are worked out at rest, so they move with it.
+- **Next.** Physics: each part a Jolt body with a hinge constraint and motor, on the wire as joint angles.
+
 ### Collision (Jolt)
 
 **Constraints found:**

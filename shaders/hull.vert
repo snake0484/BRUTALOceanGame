@@ -15,6 +15,9 @@ layout(push_constant) uniform Brick {
     vec4 clipPlane;   // cutaway, used by hull.frag
     vec4 ghost;       // interior view, glazing pass and projector cells, used by hull.frag
     vec4 cells;       // projector cell grid, used by hull.frag
+    vec4 turn0;       // the moving part's turn: rows of R in xyz, w the offset d (world = R rest + d, camera-relative)
+    vec4 turn1;
+    vec4 turn2;
 } brick;
 
 // PackedTerrainVertex.OffsetVoxels * StepsPerVoxel.
@@ -26,6 +29,7 @@ layout(location = 1) in vec2 inNormalOct;
 layout(location = 0) out vec3 vRelPos;
 layout(location = 1) out vec3 vNormal;
 layout(location = 2) flat out uint vMaterial;
+layout(location = 3) out vec3 vRestPos;   // camera-relative position at rest: paint, decals and finishes are worked out here
 
 vec3 decodeOctahedral(vec2 e)
 {
@@ -39,9 +43,12 @@ vec3 decodeOctahedral(vec2 e)
 void main()
 {
     vec3 local = (vec3(inPositionMaterial.xyz) - POSITION_OFFSET) * brick.originScale.w;
-    vec3 world = brick.originScale.xyz + local;
+    vec3 rest = brick.originScale.xyz + local;
+    mat3 turn = transpose(mat3(brick.turn0.xyz, brick.turn1.xyz, brick.turn2.xyz));
+    vec3 world = turn * rest + vec3(brick.turn0.w, brick.turn1.w, brick.turn2.w);
     vRelPos = world;
-    vNormal = decodeOctahedral(inNormalOct);
+    vRestPos = rest;
+    vNormal = turn * decodeOctahedral(inNormalOct);
     vMaterial = inPositionMaterial.w;
     gl_Position = frame.viewProj * vec4(world, 1.0);
 }

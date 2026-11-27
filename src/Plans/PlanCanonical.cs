@@ -63,6 +63,16 @@ public static class PlanCanonical
         if (doc.Decals is { IsEmpty: true })
             doc.Decals = null;
 
+        // Members of solids or joints that are gone are dropped; the rest go in solid id order.
+        if (doc.Joints is { } joints)
+        {
+            joints.Members.RemoveAll(m => doc.Solids.IndexOf(m.Solid) < 0 || joints.IndexOf(m.Joint) < 0);
+            joints.Members.Sort((a, b) => a.Solid.CompareTo(b.Solid));
+
+            if (joints.IsEmpty)
+                doc.Joints = null;
+        }
+
         // Strokes' own paints for strokes that are gone are dropped; the rest go in stroke id order.
         if (doc.Paint is { } paint)
         {

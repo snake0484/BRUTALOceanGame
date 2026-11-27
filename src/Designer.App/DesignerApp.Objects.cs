@@ -19,6 +19,7 @@ public sealed partial class DesignerApp
     [
         (AddKind.Box, "Box"), (AddKind.Wedge, "Wedge"), (AddKind.Cylinder, "Cylinder"), (AddKind.Hallway, "Hallway"),
         (AddKind.Window, "Window"), (AddKind.Decal, "Decal or paint shape"), (AddKind.Stroke, "Brush stroke"), (AddKind.Component, "Component"),
+        (AddKind.Rotor, "Rotor"), (AddKind.Hinge, "Hinge"),
     ];
 
     private static readonly (AddKind Kind, string Label)[] ComponentAdds =
@@ -28,7 +29,10 @@ public sealed partial class DesignerApp
     ];
 
     private readonly ObjectTree _tree = new();
-    private (uint, uint, uint, uint, uint, uint) _lastSelection;
+    private (uint, uint, uint, uint, uint, uint, uint) _lastSelection;
+
+    /// <summary>The solid right-clicked (what a new joint is mounted on, and whose moving part a new solid joins), or 0.</summary>
+    private uint _addOnSolid;
 
     /// <summary>The Add dialog's item (None: closed), and the item to add this frame without options.</summary>
     private AddKind _adding;
@@ -40,7 +44,8 @@ public sealed partial class DesignerApp
 
     /// <summary>The one selected thing (or the primary solid).</summary>
     private ObjectRef CurrentSelection =>
-        _interiorPanel.Selected != 0 ? new ObjectRef(ObjectKind.Hallway, _interiorPanel.Selected)
+        _jointsPanel.Selected != 0 ? new ObjectRef(ObjectKind.Joint, _jointsPanel.Selected)
+        : _interiorPanel.Selected != 0 ? new ObjectRef(ObjectKind.Hallway, _interiorPanel.Selected)
         : _windowsPanel.Selected != 0 ? new ObjectRef(ObjectKind.Window, _windowsPanel.Selected)
         : _decalsPanel.Selected != 0 ? new ObjectRef(ObjectKind.Decal, _decalsPanel.Selected)
         : _panels.Strokes.Selected != 0 ? new ObjectRef(ObjectKind.Stroke, _panels.Strokes.Selected)
@@ -69,6 +74,9 @@ public sealed partial class DesignerApp
         if (item.Kind != ObjectKind.Placement)
             _prefabPanel.Selected = 0;
 
+        if (item.Kind != ObjectKind.Joint)
+            _jointsPanel.Selected = 0;
+
         switch (item.Kind)
         {
             case ObjectKind.Solid when toggle:
@@ -92,13 +100,16 @@ public sealed partial class DesignerApp
             case ObjectKind.Placement:
                 _prefabPanel.Selected = item.Id;
                 break;
+            case ObjectKind.Joint:
+                _jointsPanel.Selected = item.Id;
+                break;
         }
 
         _lastSelection = SelectionState();
     }
 
-    private (uint, uint, uint, uint, uint, uint) SelectionState() =>
-        (_session.Selection.Primary, _interiorPanel.Selected, _windowsPanel.Selected, _decalsPanel.Selected, _panels.Strokes.Selected, _prefabPanel.Selected);
+    private (uint, uint, uint, uint, uint, uint, uint) SelectionState() =>
+        (_session.Selection.Primary, _interiorPanel.Selected, _windowsPanel.Selected, _decalsPanel.Selected, _panels.Strokes.Selected, _prefabPanel.Selected, _jointsPanel.Selected);
 
     /// <summary>Whatever was picked last (in the view, a panel or the tree) is the one selection: the others clear.</summary>
     private void KeepOneSelected()
@@ -117,6 +128,7 @@ public sealed partial class DesignerApp
             : now.Item4 != 0 && now.Item4 != last.Item4 ? new ObjectRef(ObjectKind.Decal, now.Item4)
             : now.Item5 != 0 && now.Item5 != last.Item5 ? new ObjectRef(ObjectKind.Stroke, now.Item5)
             : now.Item6 != 0 && now.Item6 != last.Item6 ? new ObjectRef(ObjectKind.Placement, now.Item6)
+            : now.Item7 != 0 && now.Item7 != last.Item7 ? new ObjectRef(ObjectKind.Joint, now.Item7)
             : now.Item1 != 0 && now.Item1 != last.Item1 ? new ObjectRef(ObjectKind.Solid, now.Item1)
             : ObjectRef.None;
 
@@ -150,6 +162,7 @@ public sealed partial class DesignerApp
             ObjectKind.Decal => s => _decalsPanel.DrawProperties(s),
             ObjectKind.Stroke => s => _panels.DrawStrokeProperties(s),
             ObjectKind.Placement => s => _prefabPanel.DrawProperties(s),
+            ObjectKind.Joint => s => _jointsPanel.DrawProperties(s),
             _ => null,
         };
     }
@@ -170,6 +183,7 @@ public sealed partial class DesignerApp
         ObjectKind.Decal => _decalsPanel.Label(_session, item.Id),
         ObjectKind.Stroke => BrushesPanel.Label(_session, item.Id),
         ObjectKind.Placement => PrefabPanel.Label(_session, item.Id),
+        ObjectKind.Joint => JointsPanel.Label(_session, item.Id),
         _ => $"#{item.Id}",
     };
 
@@ -186,6 +200,7 @@ public sealed partial class DesignerApp
         Vector3d ray = _camera.Ray(at, ViewportSize);
         var surface = new HullSurface(_session.Doc.Solids.AsSpan(), _session.Doc.Meshes);
         _addOnSurface = surface.Raycast(eye, ray, 4000, out var t, out var normal);
+        _addOnSolid = _addOnSurface ? Tools.HullPicking.Pick(_session.Doc, eye, ray, out _) : 0;
         (_addAt, _addNormal) = _addOnSurface ? (HullSurface.Add(eye, HullSurface.Scale(ray, t)), normal) : (new Vector3d(_camera.Target.X, _camera.Target.Y, _camera.Target.Z), new Vector3d(0, 1, 0));
         _addWindowAt = ContextBar.At;
     }
@@ -259,6 +274,11 @@ public sealed partial class DesignerApp
                     return false;
 
                 _panels.AddSolid(_session, _adding switch { AddKind.Wedge => SolidShape.Wedge, AddKind.Cylinder => SolidShape.Cylinder, _ => SolidShape.Box });
+
+                // Added on a moving part: it moves with that part's joint.
+                if (_session.Doc.Joints?.JointOf(_addOnSolid) is var joint and not 0 and not null)
+                    JointCommands.SetMember(_session, _session.Selection.Primary, joint.Value);
+
                 Select(new ObjectRef(ObjectKind.Solid, _session.Selection.Primary));
                 return true;
             }
@@ -288,6 +308,18 @@ public sealed partial class DesignerApp
                     Select(new ObjectRef(ObjectKind.Stroke, _panels.Strokes.Selected));
 
                 return made;
+            }
+            case AddKind.Rotor or AddKind.Hinge:
+            {
+                var kind = _adding == AddKind.Rotor ? JointKind.Rotor : JointKind.Hinge;
+                _jointsPanel.DrawAddOptions(kind);
+
+                if (!ImGui.Button("Add"u8))
+                    return false;
+
+                _jointsPanel.PlaceAt(_session, kind, _addAt, _addNormal, _addOnSolid);
+                Select(new ObjectRef(ObjectKind.Joint, _jointsPanel.Selected));
+                return true;
             }
             case AddKind.Component:
                 _prefabPanel.DrawAddOptions();

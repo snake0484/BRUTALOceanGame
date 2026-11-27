@@ -27,6 +27,9 @@ layout(push_constant) uniform Brick {
     vec4 clipPlane;   // camera-relative: fragments with dot(xyz, pos) > w are cut away (cutaway view)
     vec4 ghost;       // x = opacity of the see-through interior view (0: solid); y = 1: the glazing pass; z = cell table, w = grid dims
     vec4 cells;       // xyz camera-relative grid origin, w cell size (metres)
+    vec4 turn0;       // the moving part's turn (rows of R, w offset); paint is worked out at rest, then turned
+    vec4 turn1;
+    vec4 turn2;
 } brick;
 
 struct Projector {
@@ -47,6 +50,7 @@ layout(set = 0, binding = 5) uniform sampler2DArray finishSurface;  // normal x,
 layout(location = 0) in vec3 vRelPos;
 layout(location = 1) in vec3 vNormal;
 layout(location = 2) flat in uint vMaterial;
+layout(location = 3) in vec3 vRestPos;
 
 layout(location = 0) out vec4 outColor;
 
@@ -315,9 +319,15 @@ void main()
     s.albedo = frame.palette[min(vMaterial, 31u)].rgb;
     s.roughness = 0.6;
     s.metalness = 0.0;
-    s.normal = shading;
     s.painted = false;
-    s = decorate(s, vRelPos, face);
+
+    // Paint, decals and finishes at rest (they move with a turning part), the normal turned back to the world after.
+    mat3 turn = transpose(mat3(brick.turn0.xyz, brick.turn1.xyz, brick.turn2.xyz));
+    vec3 restFace = normalize(cross(dFdx(vRestPos), dFdy(vRestPos)));
+    restFace = dot(restFace, transpose(turn) * face) < 0.0 ? -restFace : restFace;
+    s.normal = transpose(turn) * shading;
+    s = decorate(s, vRestPos, restFace);
+    s.normal = normalize(turn * s.normal);
 
     vec3 N = s.painted ? normalize(s.normal + (shading - face)) : s.normal;
     float up = N.y;

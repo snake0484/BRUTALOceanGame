@@ -226,6 +226,29 @@ public sealed class DesignerPanels
             half, half, half, SolidRotation.Identity, material);
     }
 
+    /// <summary>Which rotor or hinge the solid moves with (it joins that joint's moving part), or the ship itself.</summary>
+    private static void DrawMovesWith(DesignSession session, HullJointSet joints, uint id)
+    {
+        var current = joints.JointOf(id);
+        var index = joints.IndexOf(current);
+        var name = index < 0 ? "The ship (fixed)" : $"{JointsPanel.KindName(joints.Joints[index].Kind)} #{current}";
+        DesignerStyle.ItemWidth(160f);
+
+        if (!ImGui.BeginCombo("Moves with"u8, $"{name}", ImGuiComboFlags.None))
+            return;
+
+        if (ImGui.Selectable("The ship (fixed)##moves"u8, current == 0, ImGuiSelectableFlags.None, default) && current != 0)
+            JointCommands.SetMember(session, id, 0);
+
+        foreach (var j in joints.Joints)
+        {
+            if (ImGui.Selectable($"{JointsPanel.KindName(j.Kind)} #{j.Id}##moves{j.Id}", j.Id == current, ImGuiSelectableFlags.None, default) && j.Id != current)
+                JointCommands.SetMember(session, id, j.Id);
+        }
+
+        ImGui.EndCombo();
+    }
+
     /// <summary>A box room's walls: plain, or one of the plan's wall profiles (made in the Profiles tab).</summary>
     private void DrawWalls(DesignSession session, uint id)
     {
@@ -339,6 +362,9 @@ public sealed class DesignerPanels
 
             if (WallGeometry.IsRoom(solid, session.Doc.Meshes))
                 DrawWalls(session, id);
+
+            if (session.Doc.Joints is { Joints.Count: > 0 } joints)
+                DrawMovesWith(session, joints, id);
 
             var material = MaterialSlot(session.Doc, solid.Material);
 

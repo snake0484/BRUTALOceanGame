@@ -36,6 +36,7 @@ public sealed partial class DesignerApp : DesignApp
     private readonly PrefabPanel _prefabPanel;
     private readonly InteriorPanel _interiorPanel;
     private readonly WindowsPanel _windowsPanel;
+    private readonly JointsPanel _jointsPanel = new();
     private readonly DecalCatalog _decalCatalog;
     private readonly DecalTextures _decalTextures;
     private readonly DecalsPanel _decalsPanel;
@@ -67,7 +68,7 @@ public sealed partial class DesignerApp : DesignApp
 
     private OverlayRenderer _overlay => Overlay;
 
-    protected override bool Busy => _baker.Busy;
+    protected override bool Busy => _baker.Busy || GroupsBusy;
 
     protected override bool CameraHeld => _tool.Dragging;
 
@@ -120,6 +121,7 @@ public sealed partial class DesignerApp : DesignApp
         _paintPanel = new PaintPanel(_finishCatalog, new PaintLibrary(PaintLibrary.DefaultFolder));
         _hull = new HullRenderer(Renderer, _decalTextures, _finishTextures);
         _hullScope = Renderer.GpuTimer.Supported ? Renderer.GpuTimer.Register("Hull") : -1;
+        _jointsPanel.PartMassKg = id => PartMass(_groups.GroupOfJoint(id)).MassKg;
         _lighting = new SceneLighting
         {
             SunDirection = Vector3.Normalize(new Vector3(0.45f, 0.8f, 0.35f)),
@@ -170,6 +172,7 @@ public sealed partial class DesignerApp : DesignApp
     {
         Commit();
         PollBake();
+        UpdatePose(Math.Clamp(ImGui.GetIO().DeltaTime, 0f, 0.1f));
         _stats.HullGpuMs = _hullScope >= 0 ? Renderer.GpuTimer.Ring(_hullScope).Average : 0f;
 
         if (PaintBench)
@@ -205,6 +208,7 @@ public sealed partial class DesignerApp : DesignApp
         var walls = WallGeometry.Expand(doc.Interior, doc.Solids.AsSpan(), doc.Meshes, doc.Meshes.Count + hallways.Meshes.Count + windows.Meshes.Count);
         var meshes = hallways.Meshes.Count + windows.Meshes.Count + walls.Meshes.Count > 0 ? [.. doc.Meshes, .. hallways.Meshes, .. windows.Meshes, .. walls.Meshes] : doc.Meshes;
         var paint = doc.Paint;
+        _groups = JointGroups.Build(doc);
         var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), meshes, doc.Brushes, doc.Interior?.Profiles, paint is null ? null : id => paint.SlotOf(id), _models.Mesh);
 
         if (windows.Panes.Count > 0)
@@ -214,6 +218,7 @@ public sealed partial class DesignerApp : DesignApp
         }
 
         var extras = new List<SurfacePolygon>();
+        ClearGroupExtras();
         var solids = new List<HullSolid>(doc.Solids.Count + hallways.Solids.Count + 16);
         var palette = new List<DefId>(doc.Materials);
 
@@ -264,7 +269,7 @@ public sealed partial class DesignerApp : DesignApp
                     remap[m] = (byte)Math.Min(at, HullRenderer.PaletteSize - 1);
                 }
 
-                shape.Place(placement, m => m < remap.Length ? remap[m] : (byte)0, extras);
+                shape.Place(placement, m => m < remap.Length ? remap[m] : (byte)0, ExtrasOf(_groups.PlacementGroup(i), extras));
                 solids.Add(shape.Cutter(placement, doc.Layers is not null, 0xE0000000u | (uint)i));
                 _stats.ComponentsKg += shape.PartsMassKg;
             }
@@ -293,11 +298,8 @@ public sealed partial class DesignerApp : DesignApp
         _stats.Generated = expanded.Generated;
         _stats.Unstuck = expanded.Unstuck;
         var densities = _catalog.Densities(doc);
-        _baker.InnerSurfacesOnly = !_stats.ShowGrid;
-        _baker.Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(solids), meshes, densities, doc.Layers);
-
-        // The drawn surface: exact polygons from the solids plus the brush flair, rebuilt on the job workers.
-        _surfaceBuilder.Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(solids), meshes, doc.Layers is not null, expanded, extras);
+        // The drawn surface (exact polygons plus the brush flair) and the grid (mass, collision), each moving part on its own.
+        StartBakes(solids, meshes, densities, doc.Layers, expanded, extras);
         _densities = densities;
         _shownGrid = _stats.ShowGrid;
         _surfaceChanged = true;
@@ -373,6 +375,7 @@ public sealed partial class DesignerApp : DesignApp
         _interiorPanel.Reset();
         _windowsPanel.Reset();
         _decalsPanel.Reset();
+        _jointsPanel.Reset();
         _paintPanel.Reset();
         _profilesPanel.Reset();
         _seenVersion = -1;
@@ -432,14 +435,25 @@ public sealed partial class DesignerApp : DesignApp
                 bricks.AddRange(_baker.Bricks);
         }
 
-        _hull.Upload(bricks);
+        // The ship's own part is group 0; each joint's moving part follows, tagged with its group.
+        var groups = new List<int>(bricks.Count);
+
+        for (var i = 0; i < bricks.Count; i++)
+            groups.Add(0);
+
+        AddGroupBricks(bricks, groups);
+        _hull.Upload(bricks, groups);
+        _stats.Mass = TotalMass();
         (_stats.Projectors, _stats.ProjectorRefs) = (_hull.Projectors, _hull.ProjectorRefs);
     }
 
     private void PollBake()
     {
         _baker.Poll();
-        _stats.Baking = _baker.Busy || _surfaceBuilder.Busy;
+        _stats.Baking = _baker.Busy || _surfaceBuilder.Busy || GroupsBusy;
+
+        if (PollGroupBakes())
+            _surfaceChanged = true;
 
         if (_surfaceBuilder.Poll())
         {
@@ -472,7 +486,7 @@ public sealed partial class DesignerApp : DesignApp
         _uploadedBake = _baker.Version;
         _surfaceChanged = false;
         UploadSurface();
-        _stats.Mass = _baker.Mass;
+        _stats.Mass = TotalMass();
         _stats.Bricks = _baker.Bricks.Count;
         _stats.Triangles = _baker.TriangleCount;
         _stats.BakeMs = _baker.LastBakeMs;
@@ -576,6 +590,7 @@ public sealed partial class DesignerApp : DesignApp
                     _interiorPanel.DrawContext(_session, _camera, viewport);
                     _windowsPanel.DrawContext(_session, _camera, viewport);
                     _decalsPanel.DrawContext(_session, _camera, viewport);
+                    _jointsPanel.DrawContext(_session, _camera, viewport);
                     _prefabPanel.DrawContext(_session, _camera, viewport);
                 }
 
@@ -594,7 +609,7 @@ public sealed partial class DesignerApp : DesignApp
     /// <summary>A picked node, window, placement or part: it has the gizmo and the menu, not the selected solid.</summary>
     private bool OtherSelected => _active.Component is { } workspace
         ? workspace.SelectedPart != 0 || workspace.SelectedNode >= 0
-        : _interiorPanel.SelectedNode >= 0 || _windowsPanel.Selected != 0 || _decalsPanel.Selected != 0 || _prefabPanel.Selected != 0;
+        : _interiorPanel.SelectedNode >= 0 || _windowsPanel.Selected != 0 || _decalsPanel.Selected != 0 || _jointsPanel.Selected != 0 || _prefabPanel.Selected != 0;
 
     protected override void AfterPanels(ImGuiIOPtr io)
     {
@@ -628,6 +643,7 @@ public sealed partial class DesignerApp : DesignApp
             ? workspace.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
             : _windowsPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
               || _decalsPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
+              || _jointsPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay)
               || _interiorPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay)
               || _prefabPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay));
         // The interior view leaves the hull alone: no solid picking, gizmos or strokes.
@@ -808,11 +824,16 @@ public sealed partial class DesignerApp : DesignApp
     /// <summary>--demo-walls: a room with a coved wall profile in a solid block.</summary>
     public static bool WallDemo;
 
+    /// <summary>--demo-joints: a block with a turret on a rotor and a flap on a hinge.</summary>
+    public static bool JointsDemo;
+
     private void DemoLayered()
     {
         var all = _catalog.All;
 
-        if (WallDemo)
+        if (JointsDemo)
+            SampleHulls.JointsDemo(_session, all[0].Id);
+        else if (WallDemo)
             SampleHulls.WallRoom(_session, all[0].Id);
         else if (HallwayDemo && HallwayPlain)
             SampleHulls.HallwayBlock(_session, all[0].Id);
@@ -894,6 +915,8 @@ public sealed partial class DesignerApp : DesignApp
             PickAndOpen();
         else if (!ctrl && key == GlfwKey.I)
             _bar.InteriorView = !_bar.InteriorView;
+        else if (!ctrl && key == GlfwKey.P)
+            _bar.PlayJoints = !_bar.PlayJoints;
         else if (key == GlfwKey.Delete && _active.Component is { } component)
         {
             if (!component.DeleteSelected(_session) && !InteriorView)
@@ -926,6 +949,7 @@ public sealed partial class DesignerApp : DesignApp
         _baker.Wait();
         _surfaceBuilder.Wait();
         _surfaceBuilder.Dispose();
+        DisposeGroupBakes();
         _files.Dispose();
         _profilesPanel.Dispose();
         _paintPanel.Dispose();

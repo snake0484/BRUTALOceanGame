@@ -3,7 +3,7 @@ using Brutal.ImGuiApi;
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>What the Add menu (a right-click in the view) makes.</summary>
-public enum AddKind { None, Box, Wedge, Cylinder, Hallway, Window, Decal, Stroke, Component, Chamber, Nozzle, Injector, Igniter, Pipe }
+public enum AddKind { None, Box, Wedge, Cylinder, Hallway, Window, Decal, Stroke, Component, Rotor, Hinge, Chamber, Nozzle, Injector, Igniter, Pipe }
 
 /// <summary>One open plan as the tab bar shows it. <see cref="Key"/> stays the same while the tab lives.</summary>
 public readonly record struct DocumentTab(int Key, string Title, bool Modified, bool Component);
@@ -24,6 +24,9 @@ public sealed class DocumentBar
 
     /// <summary>The interior view: the hull see-through and locked, so what is inside can be reached and edited.</summary>
     public bool InteriorView;
+
+    /// <summary>Preview the rotors and hinges moving (P).</summary>
+    public bool PlayJoints;
 
     /// <summary>The open tab is a component.</summary>
     public bool ComponentTab;
@@ -74,6 +77,9 @@ public sealed class DocumentBar
 
             if (ImGui.MenuItem("Interior view"u8, "I"u8, InteriorView))
                 InteriorView = !InteriorView;
+
+            if (ImGui.MenuItem("Play joints"u8, "P"u8, PlayJoints))
+                PlayJoints = !PlayJoints;
 
             ImGui.Separator();
             DrawTabs(activeKey);

@@ -27,7 +27,10 @@ public sealed unsafe class HullRenderer : IDisposable
 {
     public const int PaletteSize = 32;
     private const int UniformAlignment = 256;
-    private const int PushConstantSize = 64;
+    private const int PushConstantSize = 112;
+
+    /// <summary>Moving parts (joints' groups) the renderer can turn; group 0 is the ship's own.</summary>
+    public const int MaxGroups = 17;
 
     /// <summary>Projector cells: about this size, and at most this many along each axis of a brick.</summary>
     private const double CellMetres = 2.0;
@@ -77,6 +80,33 @@ public sealed unsafe class HullRenderer : IDisposable
         public int Cells;
 
         public double CellSize;
+
+        /// <summary>The moving part (joint group) the brick belongs to.</summary>
+        public int Group;
+    }
+
+    private readonly double[] _groupRotation = new double[MaxGroups * 9];
+    private readonly Vector3d[] _groupTranslation = new Vector3d[MaxGroups];
+
+    /// <summary>
+    /// Each moving part's transform this frame (p' = R p + t, ship space; rotations row-major, 9 per group). Bricks are
+    /// drawn turned by their group's; paint, decals and finishes are worked out at rest, so they move with the part.
+    /// </summary>
+    public void SetPose(ReadOnlySpan<double> rotations, ReadOnlySpan<Vector3d> translations)
+    {
+        var groups = Math.Min(translations.Length, MaxGroups);
+        rotations[..(groups * 9)].CopyTo(_groupRotation);
+        translations[..groups].CopyTo(_groupTranslation);
+
+        for (var g = groups; g < MaxGroups; g++)
+            Identity(g);
+    }
+
+    private void Identity(int g)
+    {
+        _groupRotation.AsSpan(g * 9, 9).Clear();
+        (_groupRotation[g * 9], _groupRotation[g * 9 + 4], _groupRotation[g * 9 + 8]) = (1, 1, 1);
+        _groupTranslation[g] = default;
     }
 
     /// <summary>A projector as the shader reads it (std430, six vec4).</summary>
@@ -134,6 +164,9 @@ public sealed unsafe class HullRenderer : IDisposable
         _ghostPipeline = CreatePipeline(context.Pipelines, renderer.RenderPass, ghost: true);
         _palette.AsSpan().Fill(new Vector4(0.6f, 0.6f, 0.6f, 1f));
         SetPaint(null, _ => -1);
+
+        for (var g = 0; g < MaxGroups; g++)
+            Identity(g);
     }
 
     public int BrickCount => _draws.Count;
@@ -166,7 +199,10 @@ public sealed unsafe class HullRenderer : IDisposable
     public bool HasGlazing { get; private set; }
 
     /// <summary>Replaces the drawn bricks. Waits for the device: call on commit only.</summary>
-    public void Upload(IReadOnlyList<HullBrick> bricks)
+    public void Upload(IReadOnlyList<HullBrick> bricks) => Upload(bricks, null);
+
+    /// <summary>Replaces the drawn bricks, each in moving part <paramref name="groups"/>[i] (all the ship's own when null). Waits for the device: call on commit only.</summary>
+    public void Upload(IReadOnlyList<HullBrick> bricks, IReadOnlyList<int>? groups)
     {
         var vertexCount = 0;
         var indexCount = 0;
@@ -187,15 +223,18 @@ public sealed unsafe class HullRenderer : IDisposable
         var v = 0;
         var i = 0;
 
-        foreach (var brick in bricks)
+        for (var b = 0; b < bricks.Count; b++)
         {
+            var brick = bricks[b];
+
             if (brick.IndexCount == 0)
                 continue;
 
             brick.VertexSpan.CopyTo(vertices[v..]);
             brick.IndexSpan.CopyTo(indices[i..]);
             Bounds(brick, out var min, out var max);
-            _draws.Add(new Draw { Origin = brick.Origin, FirstIndex = i, IndexCount = brick.IndexCount, VertexOffset = v, Min = min, Max = max });
+            var group = groups is null ? 0 : Math.Clamp(groups[b], 0, MaxGroups - 1);
+            _draws.Add(new Draw { Origin = brick.Origin, FirstIndex = i, IndexCount = brick.IndexCount, VertexOffset = v, Min = min, Max = max, Group = group });
             v += brick.VertexCount;
             i += brick.IndexCount;
         }
@@ -473,7 +512,7 @@ public sealed unsafe class HullRenderer : IDisposable
             clip = new Vector4(_clipAxis == 0 ? sign : 0f, _clipAxis == 1 ? sign : 0f, _clipAxis == 2 ? sign : 0f, (float)(sign * (_clipOffset - cam)));
         }
 
-        var push = stackalloc Vector4[4];
+        var push = stackalloc Vector4[7];
         push[1] = clip;
         push[2] = new Vector4(ghost, glazing ? 1f : 0f, 0f, 0f);
 
@@ -484,6 +523,16 @@ public sealed unsafe class HullRenderer : IDisposable
             push[2].Z = boxes ? draw.Table : 0f;
             push[2].W = boxes ? draw.Cells : 0f;
             push[3] = new Vector4((float)(draw.Min.X - camera.X), (float)(draw.Min.Y - camera.Y), (float)(draw.Min.Z - camera.Z), (float)draw.CellSize);
+
+            // The part's turn: world = R rest + d, camera-relative, with d = R cam + t - cam (in double).
+            var r = _groupRotation.AsSpan(draw.Group * 9, 9);
+            var t = _groupTranslation[draw.Group];
+            var dx = r[0] * camera.X + r[1] * camera.Y + r[2] * camera.Z + t.X - camera.X;
+            var dy = r[3] * camera.X + r[4] * camera.Y + r[5] * camera.Z + t.Y - camera.Y;
+            var dz = r[6] * camera.X + r[7] * camera.Y + r[8] * camera.Z + t.Z - camera.Z;
+            push[4] = new Vector4((float)r[0], (float)r[1], (float)r[2], (float)dx);
+            push[5] = new Vector4((float)r[3], (float)r[4], (float)r[5], (float)dy);
+            push[6] = new Vector4((float)r[6], (float)r[7], (float)r[8], (float)dz);
             commands.PushConstants(_layout, VkShaderStageFlags.VertexBit | VkShaderStageFlags.FragmentBit, 0, new ReadOnlySpan<byte>(push, PushConstantSize));
             commands.DrawIndexed(draw.IndexCount, 1, draw.FirstIndex, draw.VertexOffset, 0);
         }
