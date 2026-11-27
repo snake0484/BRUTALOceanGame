@@ -196,6 +196,17 @@ public sealed class CelestialView : IDisposable
     /// Before the frame's terrain: every body's render pose in the camera's frame, then the focus. A new focus moves the
     /// camera into its surface frame (unless <see cref="Pinned"/>) and asks for its large impostor.
     /// </summary>
+    /// <summary>Swaps a body's generator (the planet designer changed its authored layer); its large impostor rebakes. The 256² one is not rebaked.</summary>
+    public void ReplaceGenerator(int index, PlanetGenerator generator)
+    {
+        var body = _bodies[index];
+        body.Generator = generator;
+        _generators[body.TerrainBody] = generator;
+
+        if (_focusTextureBody == index)
+            _focusTextureBody = -1;
+    }
+
     public void Update(FlyCamera camera)
     {
         Pose(camera);
