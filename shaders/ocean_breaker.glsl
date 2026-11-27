@@ -15,6 +15,8 @@ const float COAST_FADE_SPACING = 16.0;    // ... and from which the face fades o
 const float SURF_GAMMA = 0.78;            // SurfCarrier.BreakingGamma
 const float COHERENT_KH = 0.4;
 const float INCOHERENT_KH = 1.2;
+const float FORM_DEPTH = 4.0;             // SurfCarrier.FormDepth
+const float FADE_DEPTH = 8.0;             // SurfCarrier.FadeDepth
 const float SPENT_DEPTH_K = 0.3;
 const float MAX_SHARPNESS = 0.55;
 const float SHARP_FROM = 0.1;
@@ -117,7 +119,8 @@ float surfUnbroken(float deepHeight, float omega, float depth, float shoaling)
 {
     float h = max(depth, 0.0);
     float coherence = 1.0 - smooth01((surfWaveNumber(omega, h) * h - COHERENT_KH) / (INCOHERENT_KH - COHERENT_KH));
-    return deepHeight * sqrt(coherence) * shoaling;
+    float shallows = 1.0 - smooth01((h - FORM_DEPTH * deepHeight) / ((FADE_DEPTH - FORM_DEPTH) * max(deepHeight, 1e-4)));
+    return deepHeight * sqrt(coherence * shallows) * shoaling;
 }
 
 float surfSharpness(float height, float depth)

@@ -37,6 +37,13 @@ public static class SurfCarrier
     public const float CoherentKh = 0.4f;
     public const float IncoherentKh = 1.2f;
 
+    /// <summary>
+    /// And only near where it breaks: none of it in water deeper than <see cref="FadeDepth"/> × its deep-water height, all
+    /// by <see cref="FormDepth"/> ×. A window with no water that shallow has no carrier, so one never starts at a window's edge.
+    /// </summary>
+    public const float FormDepth = 4f;
+    public const float FadeDepth = 8f;
+
     /// <summary>The carrier's wavenumber is taken at no shallower than this (m).</summary>
     public const float SpentDepthK = 0.3f;
 
@@ -56,11 +63,14 @@ public static class SurfCarrier
     /// <summary>Share of the carrier's energy that is coherent at local k h.</summary>
     public static float Coherence(float kh) => 1f - Smooth((kh - CoherentKh) / (IncoherentKh - CoherentKh));
 
+    /// <summary>Share of the carrier's energy drawn in water this deep (<see cref="FadeDepth"/>).</summary>
+    public static float Shallows(float depth, float deepHeight) => 1f - Smooth((depth - FormDepth * deepHeight) / ((FadeDepth - FormDepth) * MathF.Max(deepHeight, 1e-4f)));
+
     /// <summary>The carrier's height crest to trough before breaking, from its deep-water height and the map's shoaling factor.</summary>
     public static float Unbroken(float deepHeight, float omega, float depth, float shoaling)
     {
         var h = MathF.Max(depth, 0f);
-        return deepHeight * MathF.Sqrt(Coherence(WaveNumber(omega, h) * h)) * shoaling;
+        return deepHeight * MathF.Sqrt(Coherence(WaveNumber(omega, h) * h) * Shallows(h, deepHeight)) * shoaling;
     }
 
     /// <summary>γ h / H unclamped: below 1 the wave is past its breaking limit.</summary>

@@ -157,6 +157,8 @@ public sealed class CoastRegionSet : IDisposable
 
     public float LastBakeDepthMs { get; private set; }
 
+    public int LastBakeDepthSamples { get; private set; }
+
     public int Bakes { get; private set; }
 
     public int Probes { get; private set; }
@@ -176,10 +178,11 @@ public sealed class CoastRegionSet : IDisposable
     /// Per frame, main thread: takes a finished job, moves the fades by <paramref name="seconds"/>, and when the camera
     /// (planet frame) has moved or something changed, chooses the windows wanted again and starts the next job.
     /// </summary>
-    /// <param name="significantHeight">Hs of the swell the carrier is of: windows with no water shallower than <see cref="CoastBake.BreakDepth"/> are left out.</param>
+    /// <param name="significantHeight">Hs of the swell the carrier is of: windows with no water shallower than <see cref="CoastBake.BreakDepth"/>, or than the carrier is drawn in, are left out.</param>
     public void Update(in double3 camera, CoastCarrier carrier, float significantHeight, float seconds)
     {
-        var breakDepth = CoastBake.BreakDepth(significantHeight);
+        var drawn = SurfCarrier.FadeDepth * (1f + HeightTolerance) * MathF.Max(carrier.Height, _baked.Height);
+        var breakDepth = MathF.Max(CoastBake.BreakDepth(significantHeight), drawn);
 
         if (!Keeps(_baked, carrier))
         {
@@ -340,7 +343,7 @@ public sealed class CoastRegionSet : IDisposable
         if (_running == Work.Probe)
         {
             for (var i = 0; i < _probe.Count; i++)
-                Remember(_probe.Keys[i], _probe.Min[i], _probe.Max[i]);
+                Remember(_probe.Keys[i].Tile, _probe.Keys[i].X, _probe.Keys[i].Z, _probe.Min[i], _probe.Max[i]);
 
             Probes += _probe.Count;
             _probe.Count = 0;
@@ -351,6 +354,11 @@ public sealed class CoastRegionSet : IDisposable
             Bakes++;
             LastBakeMs = _bake.Ms;
             LastBakeDepthMs = _bake.DepthMs;
+            LastBakeDepthSamples = _bake.DepthSamples;
+
+            // The solve knows which water is the sea's: a window whose shallows are all landlocked is not asked for again.
+            if (_bake.Solved)
+                Remember(region.Key.Tile, region.Key.X, region.Key.Z, _bake.SeaMin, _bake.ProbeMax);
 
             if (_bake.Baked && region.Key.Carrier == _baked)
                 GoLive(ref region, _atlases[_bakeSlot]);
@@ -648,23 +656,27 @@ public sealed class CoastRegionSet : IDisposable
         return -1;
     }
 
-    /// <summary>Files a probe's result, over the entry of its bucket least recently asked for if none is empty.</summary>
-    private void Remember(in Candidate key, float min, float max)
+    /// <summary>Files a window's depths over its own entry, or else over the entry of its bucket least recently asked for if none is empty.</summary>
+    private void Remember(int tile, short x, short z, float min, float max)
     {
-        var h = Hash(key.Tile, key.X, key.Z);
-        var into = h;
-        var oldest = long.MaxValue;
+        var into = Find(tile, x, z);
 
-        for (var i = 0; i < ProbeReach; i++)
+        if (into < 0)
         {
-            var at = (h + i) & (ProbeSlots - 1);
-            var stamp = _probes[at].Known ? _probes[at].Stamp : long.MinValue;
+            var h = Hash(tile, x, z);
+            var oldest = long.MaxValue;
 
-            if (stamp < oldest)
-                (into, oldest) = (at, stamp);
+            for (var i = 0; i < ProbeReach; i++)
+            {
+                var at = (h + i) & (ProbeSlots - 1);
+                var stamp = _probes[at].Known ? _probes[at].Stamp : long.MinValue;
+
+                if (stamp < oldest)
+                    (into, oldest) = (at, stamp);
+            }
         }
 
-        _probes[into] = new ProbeEntry { Tile = key.Tile, X = key.X, Z = key.Z, Known = true, Min = min, Max = max, Stamp = ++_stamp };
+        _probes[into] = new ProbeEntry { Tile = tile, X = x, Z = z, Known = true, Min = min, Max = max, Stamp = ++_stamp };
     }
 
     public void Dispose() => _scheduler.AbortJobs(waitForCompletion: true);
