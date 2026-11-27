@@ -1,0 +1,28 @@
+{
+  "id": "sensor.proximity-lidar",
+  "name": "Lidar rangefinder",
+  "kind": "Proximity",
+  "rateHz": 30,
+  "powerW": 12,
+  "tickCostNs": 600,
+  "range": 12,
+  "halfAngleDeg": 10,
+  "signals": [
+    {
+      "name": "Detected",
+      "unit": "",
+      "step": 1,
+      "min": 0,
+      "max": 1,
+      "input": false
+    },
+    {
+      "name": "Range",
+      "unit": "m",
+      "step": 0.05,
+      "min": 0,
+      "max": 12,
+      "input": false
+    }
+  ]
+}

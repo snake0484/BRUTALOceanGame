@@ -135,6 +135,8 @@ public sealed partial class DesignerApp : DesignApp
 
         if (load is not null)
             Open(load);
+        else if (ComponentDemo is { } name && Catalog().FirstOrDefault(c => c.Prefab.Meta.Name.Contains(name, StringComparison.OrdinalIgnoreCase)) is { Prefab: not null } named)
+            OpenComponentCopy(named.Prefab);
         else if (EngineDemo)
         {
             var ship = _active;
@@ -345,6 +347,7 @@ public sealed partial class DesignerApp : DesignApp
             _catalogPrefabs.Add(("Doors", SampleComponents.SwingDoor(alloy)));
             _catalogPrefabs.Add(("Doors", SampleComponents.SlidingDoor(alloy)));
             _catalogPrefabs.Add(("Docking", SampleComponents.DockingPort(alloy)));
+            _catalogPrefabs.Add(("Lights", SampleComponents.ProximityLamp(alloy)));
         }
 
         return _catalogPrefabs;
@@ -891,6 +894,9 @@ public sealed partial class DesignerApp : DesignApp
 
     /// <summary>--demo-engine: the catalog rocket open in the component editor; with --place, placed on the demo ship.</summary>
     public static bool EngineDemo;
+
+    /// <summary>--demo-component name: opens a copy of the first catalog component whose name contains it.</summary>
+    public static string? ComponentDemo;
 
     public static bool PlaceEngine;
 

@@ -1,0 +1,18 @@
+{
+  "id": "sensor.encoder-basic",
+  "name": "Position encoder",
+  "kind": "JointPosition",
+  "rateHz": 10,
+  "powerW": 0.5,
+  "tickCostNs": 40,
+  "signals": [
+    {
+      "name": "Position",
+      "unit": "joint",
+      "step": 5,
+      "min": -10000,
+      "max": 10000,
+      "input": false
+    }
+  ]
+}

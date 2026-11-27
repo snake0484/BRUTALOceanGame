@@ -1,0 +1,34 @@
+{
+  "id": "effector.lamp",
+  "name": "Lamp",
+  "kind": "Light",
+  "rateHz": 60,
+  "powerW": 20,
+  "tickCostNs": 20,
+  "signals": [
+    {
+      "name": "On",
+      "unit": "",
+      "step": 1,
+      "min": 0,
+      "max": 1,
+      "input": true
+    },
+    {
+      "name": "Brightness",
+      "unit": "%",
+      "step": 1,
+      "min": 0,
+      "max": 100,
+      "input": true
+    },
+    {
+      "name": "Lit",
+      "unit": "",
+      "step": 1,
+      "min": 0,
+      "max": 1,
+      "input": false
+    }
+  ]
+}
