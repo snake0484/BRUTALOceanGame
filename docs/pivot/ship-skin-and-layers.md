@@ -64,6 +64,18 @@ earlier ones and over paint. Images load once into an sRGB texture array (512 px
 the list of boxes touching its bounds (built on commit), so a fragment tests only those; the Stats panel shows the box
 and brick-list counts.
 
+**Paints (2026-11-27, BODY format 11):** a ship has up to 32 **paint slots**; each holds a paint, a **finish** from game
+data (`data/paints/finishes.json`: CC0 texture sets, see `data/paints/LICENSE.md`) in a colour. Everything painted names a
+slot, so changing a slot, or importing another paint into it, repaints every use at once. Uses: the hull's **base paint**
+(without it, surfaces keep the structural materials' colours), brush **strokes' own paint** (a fill band over the stroke's
+flair, as wide and tall as it; brushes without one carry the hull's), and **paint shapes** (decals that are a rectangle,
+ellipse, triangle or diamond filled with a slot instead of an image). Paints save to and import from a library like
+profiles (`Documents/BRUTALGame/Paints/**/*.bpaint`, JSON naming the finish by its data key); a slot keeps its copy and
+takes a changed file only on Reimport. Drawing: finishes are 1024 px layers of two arrays (sRGB colour with a bare-metal
+mask; normal, roughness, metalness), sampled triplanar in ship space (the hull has no UVs) with whiteout-blended normals;
+the paint's colour replaces the finish's own, keeping its light and dark, except where scratched to bare metal; roughness
+and metalness drive the highlight. Order on a surface: base paint, stroke fills, paint shapes and images, pattern paint.
+
 ## Interior spaces: hallways (2026-11-27)
 
 User direction: hallways are like pipes, a route of nodes with an area that must fit humanoids, and an adjustable

@@ -39,6 +39,9 @@ public sealed class DesignerApp : DesignApp
     private readonly DecalCatalog _decalCatalog;
     private readonly DecalTextures _decalTextures;
     private readonly DecalsPanel _decalsPanel;
+    private readonly FinishCatalog _finishCatalog;
+    private readonly FinishTextures _finishTextures;
+    private readonly PaintPanel _paintPanel;
     private readonly List<HullProjector> _projectors = new();
     private readonly ProfilesPanel _profilesPanel;
     private readonly Dictionary<ulong, PrefabShape> _shapes = new();
@@ -108,7 +111,11 @@ public sealed class DesignerApp : DesignApp
         _decalCatalog = DecalCatalog.Load(dataFolder);
         _decalTextures = new DecalTextures(Renderer, Enumerable.Range(0, _decalCatalog.All.Count).Select(_decalCatalog.ImagePath).ToList());
         _decalsPanel = new DecalsPanel(_decalCatalog, _decalTextures.Aspect);
-        _hull = new HullRenderer(Renderer, _decalTextures);
+        // Paint finishes are game data too: two texture arrays, a layer each in catalog order.
+        _finishCatalog = FinishCatalog.Load(dataFolder);
+        _finishTextures = new FinishTextures(Renderer, _finishCatalog);
+        _paintPanel = new PaintPanel(_finishCatalog, new PaintLibrary(PaintLibrary.DefaultFolder));
+        _hull = new HullRenderer(Renderer, _decalTextures, _finishTextures);
         _lighting = new SceneLighting
         {
             SunDirection = Vector3.Normalize(new Vector3(0.45f, 0.8f, 0.35f)),
@@ -189,7 +196,8 @@ public sealed class DesignerApp : DesignApp
         // Rooms with a wall profile are cut as their walled shape in their box's place.
         var walls = WallGeometry.Expand(doc.Interior, doc.Solids.AsSpan(), doc.Meshes, doc.Meshes.Count + hallways.Meshes.Count + windows.Meshes.Count);
         var meshes = hallways.Meshes.Count + windows.Meshes.Count + walls.Meshes.Count > 0 ? [.. doc.Meshes, .. hallways.Meshes, .. windows.Meshes, .. walls.Meshes] : doc.Meshes;
-        var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), meshes, doc.Brushes, doc.Interior?.Profiles);
+        var paint = doc.Paint;
+        var expanded = StrokeExpansion.Expand(doc.Solids.AsSpan(), meshes, doc.Brushes, doc.Interior?.Profiles, paint is null ? null : id => paint.SlotOf(id));
 
         if (windows.Panes.Count > 0)
         {
@@ -264,12 +272,15 @@ public sealed class DesignerApp : DesignApp
         {
             foreach (var decal in doc.Decals.Decals)
             {
-                if (_decalCatalog.IndexOf(new DefId(decal.Asset)) is var layer and >= 0)
+                if (decal.Shape != DecalShape.Image)
+                    _projectors.Add(decal.Projector(0));
+                else if (_decalCatalog.IndexOf(new DefId(decal.Asset)) is var layer and >= 0)
                     _projectors.Add(decal.Projector(layer));
             }
         }
 
         _hull.SetProjectors(_projectors);
+        _hull.SetPaint(paint, id => _finishCatalog.IndexOf(new DefId(id)));
         (_stats.Projectors, _stats.ProjectorRefs) = (_hull.Projectors, _hull.ProjectorRefs);
         _stats.Generated = expanded.Generated;
         _stats.Unstuck = expanded.Unstuck;
@@ -354,6 +365,7 @@ public sealed class DesignerApp : DesignApp
         _interiorPanel.Reset();
         _windowsPanel.Reset();
         _decalsPanel.Reset();
+        _paintPanel.Reset();
         _profilesPanel.Reset();
         _seenVersion = -1;
         _bar.Show(document.Key);
@@ -540,6 +552,7 @@ public sealed class DesignerApp : DesignApp
             _profilesPanel.Draw(_session);
             _windowsPanel.Draw(_session);
             _decalsPanel.Draw(_session);
+            _paintPanel.Draw(_session);
             _interiorPanel.DrawContext(_session, _camera, viewport);
             _windowsPanel.DrawContext(_session, _camera, viewport);
             _decalsPanel.DrawContext(_session, _camera, viewport);
@@ -914,6 +927,7 @@ public sealed class DesignerApp : DesignApp
         _surfaceBuilder.Dispose();
         _files.Dispose();
         _profilesPanel.Dispose();
+        _paintPanel.Dispose();
     }
 
     protected override void DisposeGpu()
@@ -921,5 +935,6 @@ public sealed class DesignerApp : DesignApp
         _baker.Dispose();
         _hull.Dispose();
         _decalTextures.Dispose();
+        _finishTextures.Dispose();
     }
 }

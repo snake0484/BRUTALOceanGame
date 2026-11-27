@@ -1,10 +1,11 @@
 namespace BrutalGame.Ships;
 
-public enum ProjectorKind : byte { Paint = 1, Decal = 2 }
+public enum ProjectorKind : byte { Paint = 1, Decal = 2, Fill = 3 }
 
 /// <summary>
 /// A box that colours the hull and its flair where they pass through it, projected along <see cref="N"/>: a piece of a paint
-/// stroke's band, or a decal. Ship space, metres. Drawn only: it changes no shape, mass or collision. Deterministic from
+/// stroke's band, a decal (an image, or a shape filled with a paint slot), or a fill: a brush stroke's own paint over its
+/// flair (whatever way the surface faces). Ship space, metres. Drawn only: it changes no shape, mass or collision. Deterministic from
 /// the plan, like the flair.
 /// </summary>
 public struct HullProjector
@@ -30,6 +31,12 @@ public struct HullProjector
 
     /// <summary>Decal: the image's layer in the decal texture array.</summary>
     public int Layer;
+
+    /// <summary>Decal: an image or a shape (filled with <see cref="Paint"/>).</summary>
+    public DecalShape Shape;
+
+    /// <summary>A shape's or fill's paint slot.</summary>
+    public byte Paint;
 
     /// <summary>The box's ship-space bounds.</summary>
     public readonly void Bounds(out Vector3d min, out Vector3d max)

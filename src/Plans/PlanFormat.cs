@@ -68,7 +68,8 @@ public enum PlanFormatError
 /// Format 9 (wall profiles) adds each profile's kind and the rooms' wall profiles to the interior block. Format 10 (brush
 /// profiles) points sweep brushes at the plan's profiles with a line point and size, and sizes every stroke point; the
 /// inline outlines of older sweeps become plan brush profiles on load; it also adds flag 16 and the
-/// <see cref="HullDecalSet"/> block after the windows.
+/// <see cref="HullDecalSet"/> block after the windows. Format 11 (paints) gives decals a shape and paint slot and adds flag
+/// 32 and the <see cref="HullPaintSet"/> block (slots, the hull's paint, strokes' own paints) after the decals.
 /// </summary>
 public static class PlanFormat
 {
@@ -82,12 +83,14 @@ public static class PlanFormat
     public const ushort RouteFormat = 8;
     public const ushort WallFormat = 9;
     public const ushort BrushProfileFormat = 10;
+    public const ushort PaintFormat = 11;
 
     /// <summary>The newest format this build writes; bodies up to it can be read.</summary>
-    public const ushort Newest = BrushProfileFormat;
+    public const ushort Newest = PaintFormat;
 
     public static ushort FormatOf(PlanDocument doc) =>
-        doc.Brushes is { NeedsProfiles: true } || doc.Decals is { IsEmpty: false } || doc.Prefabs.Values.Any(p => FormatOf(p) >= BrushProfileFormat) ? BrushProfileFormat
+        doc.Paint is { IsEmpty: false } || doc.Decals is { HasShapes: true } || doc.Prefabs.Values.Any(p => FormatOf(p) >= PaintFormat) ? PaintFormat
+        : doc.Brushes is { NeedsProfiles: true } || doc.Decals is { IsEmpty: false } || doc.Prefabs.Values.Any(p => FormatOf(p) >= BrushProfileFormat) ? BrushProfileFormat
         : doc.Interior is { HasKinds: true } || doc.Prefabs.Values.Any(p => FormatOf(p) >= WallFormat) ? WallFormat
         : doc.Interior is { IsEmpty: false } || doc.Components is { Pipes.Count: > 0 } || doc.Prefabs.Values.Any(p => FormatOf(p) >= RouteFormat) ? RouteFormat
         : doc.Windows is { IsEmpty: false } ? WindowFormat
@@ -115,10 +118,11 @@ public static class PlanFormat
         var brushes = format >= BrushFormat && doc.Brushes is { IsEmpty: false } ? doc.Brushes.ToBytes(format >= BrushProfileFormat) : [];
         var interior = format >= InteriorFormat && doc.Interior is { IsEmpty: false } ? doc.Interior.ToBytes(format >= WallFormat) : [];
         var windows = format >= WindowFormat && doc.Windows is { IsEmpty: false } ? doc.Windows.ToBytes() : [];
-        var decals = format >= BrushProfileFormat && doc.Decals is { IsEmpty: false } ? doc.Decals.ToBytes() : [];
+        var decals = format >= BrushProfileFormat && doc.Decals is { IsEmpty: false } ? doc.Decals.ToBytes(format >= PaintFormat) : [];
+        var paint = format >= PaintFormat && doc.Paint is { IsEmpty: false } ? doc.Paint.ToBytes() : [];
         var components = format >= ComponentFormat ? ComponentBlock(doc) : [];
         var bytes = new byte[BodyFixedBytes + doc.Materials.Count * 4 + n * HullSolid.SizeInBytes + (format >= MeshFormat ? 4 + meshBytes : 0)
-            + (format >= BrushFormat ? 1 : 0) + layers.Length + brushes.Length + interior.Length + windows.Length + decals.Length + components.Length];
+            + (format >= BrushFormat ? 1 : 0) + layers.Length + brushes.Length + interior.Length + windows.Length + decals.Length + paint.Length + components.Length];
         var w = new Writer(bytes);
 
         w.U8((byte)doc.Class);
@@ -183,13 +187,14 @@ public static class PlanFormat
         if (format == BrushFormat)
             w.U8(doc.Layers is not null ? (byte)1 : (byte)0);
         else if (format >= ComponentFormat)
-            w.U8((byte)((doc.Layers is not null ? 1 : 0) | (brushes.Length > 0 ? 2 : 0) | (interior.Length > 0 ? 4 : 0) | (windows.Length > 0 ? 8 : 0) | (decals.Length > 0 ? 16 : 0)));
+            w.U8((byte)((doc.Layers is not null ? 1 : 0) | (brushes.Length > 0 ? 2 : 0) | (interior.Length > 0 ? 4 : 0) | (windows.Length > 0 ? 8 : 0) | (decals.Length > 0 ? 16 : 0) | (paint.Length > 0 ? 32 : 0)));
 
         w.Bytes(layers);
         w.Bytes(brushes);
         w.Bytes(interior);
         w.Bytes(windows);
         w.Bytes(decals);
+        w.Bytes(paint);
         w.Bytes(components);
         return bytes;
     }
@@ -280,7 +285,7 @@ public static class PlanFormat
         if (header.Magic != PlanHeader.MagicValue)
             return PlanFormatError.BadMagic;
 
-        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat or InteriorFormat or WindowFormat or RouteFormat or WallFormat or BrushProfileFormat))
+        if (header.Format is not (Format or MeshFormat or LayerFormat or BrushFormat or ComponentFormat or InteriorFormat or WindowFormat or RouteFormat or WallFormat or BrushProfileFormat or PaintFormat))
             return PlanFormatError.UnsupportedFormat;
 
         if (header.Level is not (PlanLevel.Ship or PlanLevel.HullChunk or PlanLevel.Component))
@@ -462,6 +467,7 @@ public static class PlanFormat
         var hasInterior = false;
         var hasWindows = false;
         var hasDecals = false;
+        var hasPaint = false;
 
         if (format == BrushFormat)
         {
@@ -472,7 +478,7 @@ public static class PlanFormat
         }
         else if (format >= ComponentFormat)
         {
-            if (!r.U8(out var flags) || flags > (format >= BrushProfileFormat ? 31 : format >= WindowFormat ? 15 : format == InteriorFormat ? 7 : 3))
+            if (!r.U8(out var flags) || flags > (format >= PaintFormat ? 63 : format >= BrushProfileFormat ? 31 : format >= WindowFormat ? 15 : format == InteriorFormat ? 7 : 3))
                 return false;
 
             layered = (flags & 1) != 0;
@@ -480,6 +486,7 @@ public static class PlanFormat
             hasInterior = (flags & 4) != 0;
             hasWindows = (flags & 8) != 0;
             hasDecals = (flags & 16) != 0;
+            hasPaint = (flags & 32) != 0;
         }
 
         if (layered)
@@ -521,9 +528,17 @@ public static class PlanFormat
 
         if (hasDecals)
         {
-            doc.Decals = r.Decals();
+            doc.Decals = r.Decals(format >= PaintFormat);
 
             if (doc.Decals is null)
+                return false;
+        }
+
+        if (hasPaint)
+        {
+            doc.Paint = r.Paint();
+
+            if (doc.Paint is null)
                 return false;
         }
 
@@ -751,11 +766,18 @@ public static class PlanFormat
             return bytes;
         }
 
-        public HullDecalSet? Decals()
+        public HullDecalSet? Decals(bool shapes)
         {
-            var decals = HullDecalSet.Read(_bytes[_offset..], out var consumed);
+            var decals = HullDecalSet.Read(_bytes[_offset..], out var consumed, shapes);
             _offset += consumed;
             return decals;
+        }
+
+        public HullPaintSet? Paint()
+        {
+            var paint = HullPaintSet.Read(_bytes[_offset..], out var consumed);
+            _offset += consumed;
+            return paint;
         }
 
         public HullWindowSet? Windows()

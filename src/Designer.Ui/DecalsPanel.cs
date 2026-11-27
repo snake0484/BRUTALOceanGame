@@ -7,13 +7,16 @@ using static BrutalGame.Ships.HullSurface;
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>
-/// The Decals panel and view tool. A decal is a game image projected onto the hull and the brushes on it. Place one by
-/// clicking the hull (Add > Decal); pick it in the list or by its centre in the view; choose its image, size, how deep it
+/// The Decals panel and view tool. A decal is a game image, or a shape (rectangle, ellipse, triangle, diamond) filled with
+/// one of the ship's paint slots, projected onto the hull and the brushes on it. Place one by clicking the hull (Add >
+/// Decal); pick it in the list or by its centre in the view; choose its image or shape and paint, size, how deep it
 /// reaches, its turn and opacity, or move it by clicking a new spot.
 /// </summary>
 public sealed class DecalsPanel
 {
     private const float CentrePixels = 12f;
+
+    private static readonly string[] ShapeNames = ["Image", "Rectangle", "Ellipse", "Triangle", "Diamond"];
 
     private static readonly uint OutlineColour = OverlayRenderer.Rgba(255, 190, 120, 200);
     private static readonly uint SelectedColour = OverlayRenderer.Rgba(255, 230, 120, 255);
@@ -57,11 +60,9 @@ public sealed class DecalsPanel
 
         if (ImGui.Begin("Decals"u8))
         {
-            ImGui.TextWrapped("A decal projects a game image onto the hull and the brushes on it."u8);
+            ImGui.TextWrapped("A decal projects a game image, or a shape in one of the ship's paints, onto the hull and the brushes on it."u8);
 
-            if (_catalog.All.Count == 0)
-                ImGui.TextColored(new Brutal.Numerics.float4(1f, 0.6f, 0.4f, 1f), "No decal images in the game data (data/decals)."u8);
-            else if (_placing == Placing.New)
+            if (_placing == Placing.New)
                 ImGui.TextColored(new Brutal.Numerics.float4(0.6f, 1f, 0.7f, 1f), "Click the hull to place a decal (Esc stops)."u8);
             else
                 ImGui.TextDisabled("Add > Decal, then click the hull."u8);
@@ -73,7 +74,7 @@ public sealed class DecalsPanel
             if (index >= 0)
                 DrawDecal(session, set!.Decals[index]);
             else
-                DrawTemplate();
+                DrawTemplate(session);
 
             if (_message.Length > 0)
                 ImGui.TextWrapped($"{_message}");
@@ -83,6 +84,44 @@ public sealed class DecalsPanel
     }
 
     private string Name(uint asset) => _catalog.IndexOf(new DefId(asset)) is var i and >= 0 ? _catalog.All[i].Name : "missing image";
+
+    private string Name(HullDecal d, HullPaintSet? paint) => d.Shape == DecalShape.Image
+        ? Name(d.Asset)
+        : $"{ShapeNames[(int)d.Shape]} in {(paint is not null && d.Paint < paint.Slots.Count ? paint.Slots[d.Paint].Name : "a missing paint")}";
+
+    /// <summary>The shape (image or a paint shape) and what fills it: an image, or a paint slot.</summary>
+    private bool Kind(DesignSession session, bool template, ref DecalShape shape, ref int asset, ref int slot)
+    {
+        var changed = false;
+        var index = (int)shape;
+        DesignerStyle.ItemWidth(200f);
+
+        if (ImGui.BeginCombo(template ? "Shape##t"u8 : "Shape"u8, $"{ShapeNames[index]}", ImGuiComboFlags.None))
+        {
+            for (var i = 0; i < ShapeNames.Length; i++)
+            {
+                if (ImGui.Selectable($"{ShapeNames[i]}##shape{i}", i == index, ImGuiSelectableFlags.None, default) && i != index)
+                    (shape, changed) = ((DecalShape)i, true);
+            }
+
+            ImGui.EndCombo();
+        }
+
+        if (shape == DecalShape.Image)
+        {
+            if (_catalog.All.Count == 0)
+                ImGui.TextColored(new Brutal.Numerics.float4(1f, 0.6f, 0.4f, 1f), "No decal images in the game data (data/decals)."u8);
+            else
+                changed |= AssetCombo(template ? "Image##t"u8 : "Image"u8, ref asset);
+        }
+        else
+        {
+            DesignerStyle.ItemWidth(200f);
+            changed |= PaintPanel.SlotCombo(template ? "Paint##t"u8 : "Paint"u8, session.Doc.Paint, ref slot, "Pick a paint slot");
+        }
+
+        return changed;
+    }
 
     private void DrawList(DesignSession session)
     {
@@ -97,27 +136,41 @@ public sealed class DecalsPanel
 
         foreach (var d in set.Decals)
         {
-            if (ImGui.Selectable($"#{d.Id}  {Name(d.Asset)} {d.WidthMm / 1000.0:F2} x {d.HeightMm / 1000.0:F2} m##decal{d.Id}", d.Id == Selected, ImGuiSelectableFlags.None, default))
+            if (ImGui.Selectable($"#{d.Id}  {Name(d, session.Doc.Paint)} {d.WidthMm / 1000.0:F2} x {d.HeightMm / 1000.0:F2} m##decal{d.Id}", d.Id == Selected, ImGuiSelectableFlags.None, default))
                 Selected = d.Id == Selected ? 0 : d.Id;
         }
     }
 
-    /// <summary>The image and size new decals get, while none is selected.</summary>
-    private void DrawTemplate()
+    /// <summary>The image or shape and size new decals get, while none is selected.</summary>
+    private void DrawTemplate(DesignSession session)
     {
         ImGui.SeparatorText("New decals"u8);
+        var shape = _template.Shape;
+        var slot = (int)_template.Paint;
 
-        if (_catalog.All.Count == 0)
-            return;
+        if (Kind(session, true, ref shape, ref _templateAsset, ref slot))
+        {
+            (_template.Shape, _template.Paint) = (shape, (byte)Math.Max(slot, 0));
 
-        if (AssetCombo("Image##tdecal"u8, ref _templateAsset))
-            _template.HeightMm = Mm(_template.WidthMm / 1000f / Aspect(_templateAsset));
+            if (shape == DecalShape.Image)
+                _template.HeightMm = Mm(_template.WidthMm / 1000f / Aspect(_templateAsset));
+        }
 
         var width = _template.WidthMm / 1000f;
+        var height = _template.HeightMm / 1000f;
         DesignerStyle.ItemWidth(90f);
 
         if (ImGui.InputFloat("Width m##tdw"u8, ref width, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None))
-            (_template.WidthMm, _template.HeightMm) = (Mm(width), Mm(width / Aspect(_templateAsset)));
+            (_template.WidthMm, _template.HeightMm) = (Mm(width), shape == DecalShape.Image ? Mm(width / Aspect(_templateAsset)) : _template.HeightMm);
+
+        if (shape != DecalShape.Image)
+        {
+            ImGui.SameLine();
+            DesignerStyle.ItemWidth(90f);
+
+            if (ImGui.InputFloat("Height m##tdh"u8, ref height, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None))
+                _template.HeightMm = Mm(height);
+        }
     }
 
     private float Aspect(int index) => index >= 0 && index < _aspect.Length && _aspect[index] > 0 ? _aspect[index] : 1f;
@@ -136,12 +189,15 @@ public sealed class DecalsPanel
         }
 
         var asset = _catalog.IndexOf(new DefId(decal.Asset));
+        var shape = decal.Shape;
+        var slot = decal.Shape == DecalShape.Image ? -1 : (int)decal.Paint;
 
-        if (AssetCombo("Image"u8, ref asset))
+        if (Kind(session, false, ref shape, ref asset, ref slot))
         {
-            var id = _catalog.All[asset].Id.Value;
-            var height = Mm(decal.WidthMm / 1000f / Aspect(asset));
-            DecalCommands.SetDecal(session, decal.Id, d => (d.Asset, d.HeightMm) = (id, height));
+            var id = asset >= 0 && asset < _catalog.All.Count ? _catalog.All[asset].Id.Value : decal.Asset;
+            var height = shape == DecalShape.Image && asset >= 0 ? Mm(decal.WidthMm / 1000f / Aspect(asset)) : decal.HeightMm;
+            var paint = (byte)Math.Max(slot, 0);
+            DecalCommands.SetDecal(session, decal.Id, d => (d.Shape, d.Asset, d.Paint, d.HeightMm) = (shape, id, paint, height));
         }
 
         DesignerStyle.ItemWidth(90f);
@@ -164,7 +220,7 @@ public sealed class DecalsPanel
             DecalCommands.SetDecal(session, decal.Id, d => (d.WidthMm, d.HeightMm, d.DepthMm) = (w, h, depth));
         }
 
-        if (ImGui.Button("Fit height to image"u8) && asset >= 0)
+        if (decal.Shape == DecalShape.Image && ImGui.Button("Fit height to image"u8) && asset >= 0)
         {
             var height = Mm(decal.WidthMm / 1000f / Aspect(asset));
             DecalCommands.SetDecal(session, decal.Id, d => d.HeightMm = height);
@@ -215,11 +271,7 @@ public sealed class DecalsPanel
     }
 
     /// <summary>Add menu: the next clicks on the hull place decals.</summary>
-    public void StartPlacing()
-    {
-        if (_catalog.All.Count > 0)
-            _placing = Placing.New;
-    }
+    public void StartPlacing() => _placing = Placing.New;
 
     /// <summary>The menu for the selected decal in the view: move it (click the hull), delete.</summary>
     public void DrawContext(DesignSession session, OrbitCamera camera, Vector2 viewport)
@@ -311,7 +363,8 @@ public sealed class DecalsPanel
                     }
                     else
                     {
-                        Selected = DecalCommands.AddDecal(session, at, normal, _catalog.All[Math.Clamp(_templateAsset, 0, _catalog.All.Count - 1)].Id, _template);
+                        var image = _catalog.All.Count > 0 ? _catalog.All[Math.Clamp(_templateAsset, 0, _catalog.All.Count - 1)].Id : default;
+                        Selected = DecalCommands.AddDecal(session, at, normal, image, _template);
                         _message = Selected == 0 ? DecalCommands.LastError : "Placed. Click again to place another, or Esc to stop.";
                     }
 

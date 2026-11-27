@@ -2,9 +2,13 @@ using System.Buffers.Binary;
 
 namespace BrutalGame.Ships;
 
+/// <summary>What a decal lays: a game image, or a plain shape filled with one of the plan's paints.</summary>
+public enum DecalShape : byte { Image, Rectangle, Ellipse, Triangle, Diamond }
+
 /// <summary>
-/// A decal: a game image (by asset id) projected onto the hull and its flair from a box placed on the surface, along its
-/// normal. Drawn only: it changes no shape, mass or collision. Treated as immutable once in a plan.
+/// A decal: a game image (by asset id), or a shape filled with a paint slot, projected onto the hull and its flair from a
+/// box placed on the surface, along its normal. Drawn only: it changes no shape, mass or collision. Treated as immutable
+/// once in a plan.
 /// </summary>
 public sealed class HullDecal
 {
@@ -33,6 +37,11 @@ public sealed class HullDecal
 
     /// <summary>Opacity, 0-255.</summary>
     public byte Opacity = 255;
+
+    public DecalShape Shape;
+
+    /// <summary>A shape's paint slot (<see cref="HullPaintSet"/>).</summary>
+    public byte Paint;
 
     public Vector3d Position => new(X * HullSolid.MetresPerPositionUnit, Y * HullSolid.MetresPerPositionUnit, Z * HullSolid.MetresPerPositionUnit);
 
@@ -72,23 +81,29 @@ public sealed class HullDecal
             HalfN = DepthMm * 0.0005,
             Colour = 0x00FFFFFFu | ((uint)Opacity << 24),
             Layer = layer,
+            Shape = Shape,
+            Paint = Paint,
         };
     }
 
     public HullDecal Clone() => (HullDecal)MemberwiseClone();
 }
 
-/// <summary>The plan's decals (BODY format 10).</summary>
+/// <summary>The plan's decals (BODY format 10; 11 adds shapes).</summary>
 public sealed class HullDecalSet
 {
     public const int MaxDecals = 256;
-    private const int Bytes = 34;
+    private const int ImageBytes = 34;
+    private const int ShapeBytes = 36;
 
     public readonly List<HullDecal> Decals = new();
 
     public bool IsEmpty => Decals.Count == 0;
 
     public int IndexOf(uint id) => Decals.FindIndex(d => d.Id == id);
+
+    /// <summary>Needs the shapes layout (BODY format 11).</summary>
+    public bool HasShapes => Decals.Exists(d => d.Shape != DecalShape.Image);
 
     public HullDecalSet Clone()
     {
@@ -102,11 +117,12 @@ public sealed class HullDecalSet
 
     /// <summary>
     /// <c>u16 count</c>, then per decal <c>u32 id, i32 X, Y, Z, i16 NX, NY, NZ, u8 roll, u32 asset, u16 width, height,
-    /// depth (mm), u8 opacity</c> (34 B).
+    /// depth (mm), u8 opacity</c> (34 B); the shapes layout (<paramref name="shapes"/>) adds <c>u8 shape, u8 paint</c>.
     /// </summary>
-    public byte[] ToBytes()
+    public byte[] ToBytes(bool shapes)
     {
-        var b = new byte[2 + Decals.Count * Bytes];
+        var bytes = shapes ? ShapeBytes : ImageBytes;
+        var b = new byte[2 + Decals.Count * bytes];
         BinaryPrimitives.WriteUInt16LittleEndian(b, (ushort)Decals.Count);
         var o = 2;
 
@@ -126,29 +142,34 @@ public sealed class HullDecalSet
             BinaryPrimitives.WriteUInt16LittleEndian(s[29..], d.HeightMm);
             BinaryPrimitives.WriteUInt16LittleEndian(s[31..], d.DepthMm);
             s[33] = d.Opacity;
-            o += Bytes;
+
+            if (shapes)
+                (s[34], s[35]) = ((byte)d.Shape, d.Paint);
+
+            o += bytes;
         }
 
         return b;
     }
 
-    public static HullDecalSet? Read(ReadOnlySpan<byte> s, out int consumed)
+    public static HullDecalSet? Read(ReadOnlySpan<byte> s, out int consumed, bool shapes)
     {
         consumed = 0;
+        var bytes = shapes ? ShapeBytes : ImageBytes;
 
         if (s.Length < 2)
             return null;
 
         int count = BinaryPrimitives.ReadUInt16LittleEndian(s);
 
-        if (count > MaxDecals || s.Length < 2 + count * Bytes)
+        if (count > MaxDecals || s.Length < 2 + count * bytes)
             return null;
 
         var set = new HullDecalSet();
 
         for (var i = 0; i < count; i++)
         {
-            var r = s.Slice(2 + i * Bytes, Bytes);
+            var r = s.Slice(2 + i * bytes, bytes);
             set.Decals.Add(new HullDecal
             {
                 Id = BinaryPrimitives.ReadUInt32LittleEndian(r),
@@ -164,10 +185,12 @@ public sealed class HullDecalSet
                 HeightMm = BinaryPrimitives.ReadUInt16LittleEndian(r[29..]),
                 DepthMm = BinaryPrimitives.ReadUInt16LittleEndian(r[31..]),
                 Opacity = r[33],
+                Shape = shapes ? (DecalShape)r[34] : DecalShape.Image,
+                Paint = shapes ? r[35] : (byte)0,
             });
         }
 
-        consumed = 2 + count * Bytes;
+        consumed = 2 + count * bytes;
         return set;
     }
 }

@@ -64,6 +64,8 @@ public enum IssueCode : ushort
     RoomWall,
     DecalCount,
     DecalShape,
+    PaintSlots,
+    PaintRef,
 }
 
 public readonly record struct ValidationIssue(Severity Severity, IssueCode Code, ElementRef Element, int Value);
@@ -328,6 +330,25 @@ public static class PlanValidator
         }
     }
 
+    /// <summary>Paints: slot count, each naming a finish; the hull's slot and strokes' slots in range, each stroke there.</summary>
+    private static void ValidatePaint(PlanDocument doc, ValidationLog log)
+    {
+        if (doc.Paint is not { } paint)
+            return;
+
+        if (paint.Slots.Count > HullPaintSet.MaxSlots || paint.Slots.Exists(s => s.Finish == 0))
+            log.Add(Severity.Error, IssueCode.PaintSlots, default, paint.Slots.Count);
+
+        if (paint.Hull != HullPaintSet.None && paint.Hull >= paint.Slots.Count)
+            log.Add(Severity.Error, IssueCode.PaintRef, default, paint.Hull);
+
+        foreach (var (stroke, slot) in paint.Strokes)
+        {
+            if (slot >= paint.Slots.Count || doc.Brushes is not { } set || set.IndexOfStroke(stroke) < 0)
+                log.Add(Severity.Error, IssueCode.PaintRef, new ElementRef(ElementKind.Solid, stroke), slot);
+        }
+    }
+
     /// <summary>Decals: count, a real normal, sizes in range, an image named, within reach.</summary>
     private static void ValidateDecals(PlanDocument doc, ValidationLog log)
     {
@@ -339,7 +360,8 @@ public static class PlanValidator
 
         foreach (var d in set.Decals)
         {
-            if ((d.NX == 0 && d.NY == 0 && d.NZ == 0) || d.Roll >= 24 || d.Asset == 0 || d.Position.Length() > PlanLimits.MaxReachMetres
+            if ((d.NX == 0 && d.NY == 0 && d.NZ == 0) || d.Roll >= 24 || !Enum.IsDefined(d.Shape)
+                || (d.Shape == DecalShape.Image ? d.Asset == 0 : d.Paint >= (doc.Paint?.Slots.Count ?? 0)) || d.Position.Length() > PlanLimits.MaxReachMetres
                 || d.WidthMm is < HullDecal.MinSizeMm or > HullDecal.MaxSizeMm || d.HeightMm is < HullDecal.MinSizeMm or > HullDecal.MaxSizeMm
                 || d.DepthMm is < HullDecal.MinSizeMm or > HullDecal.MaxSizeMm)
                 log.Add(Severity.Error, IssueCode.DecalShape, new ElementRef(ElementKind.Placement, d.Id), d.WidthMm);
@@ -476,6 +498,7 @@ public static class PlanValidator
         ValidateLayers(doc, log);
         ValidateBrushes(doc, log);
         ValidateDecals(doc, log);
+        ValidatePaint(doc, log);
         ValidateComponents(doc, log);
         ValidateInterior(doc, log);
         ValidateWindows(doc, log);

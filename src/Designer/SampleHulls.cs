@@ -43,6 +43,15 @@ public static class SampleHulls
         var trimMaterial = session.EnsureMaterial(trim);
         
         var taper = BrushCommands.AddStroke(session, rib, [StrokePoint.From(new Vector3d(-5.5, 6.4, 3.5), up), StrokePoint.From(new Vector3d(5.5, 6.4, 3.5), up)], trimMaterial);
+
+        // Paint slots: the hull in satin slate, the tapered rib in orange gloss, white panels for shapes.
+        var hullPaint = PaintCommands.AddSlot(session, new HullPaint { Name = "Slate", Finish = DefId.FromName("finish.powder.satin").Value, Colour = 0xFF5A4A3C });
+        var trimPaint = PaintCommands.AddSlot(session, new HullPaint { Name = "Signal orange", Finish = DefId.FromName("finish.gloss").Value, Colour = 0xFF1E6EF0 });
+        var panels = PaintCommands.AddSlot(session, new HullPaint { Name = "White panels", Finish = DefId.FromName("finish.panels").Value, Colour = 0xFFE6E6E6 });
+        PaintCommands.SetHull(session, hullPaint);
+        PaintCommands.SetStroke(session, taper, trimPaint);
+        DecalCommands.AddDecal(session, new Vector3d(-6.0, 4.0, -1.5), new Vector3d(-1, 0, 0), default, new HullDecal { Shape = DecalShape.Rectangle, Paint = (byte)panels, WidthMm = 4000, HeightMm = 1200 });
+        DecalCommands.AddDecal(session, new Vector3d(0.5, 3.5, -6.0), new Vector3d(0, 0, -1), default, new HullDecal { Shape = DecalShape.Ellipse, Paint = (byte)trimPaint, WidthMm = 2500, HeightMm = 2500 });
         BrushCommands.SetPointScale(session, taper, 0, 0.3);
         BrushCommands.SetPointScale(session, taper, 1, 2.0);
         BrushCommands.AddStroke(session, ridge,

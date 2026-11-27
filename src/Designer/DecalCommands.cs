@@ -48,6 +48,16 @@ public static class DecalCommands
         return true;
     }
 
+    /// <summary>One edit applied to every decal (one undo group).</summary>
+    public static bool EditAll(DesignSession session, Action<HullDecal> edit)
+    {
+        if (session.Doc.Decals is null)
+            return false;
+
+        Change(session, data => data.Decals.ForEach(edit));
+        return true;
+    }
+
     private static void Change(DesignSession session, Action<HullDecalSet> mutate) =>
         session.Edit(s =>
         {

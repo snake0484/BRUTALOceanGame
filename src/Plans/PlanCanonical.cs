@@ -63,6 +63,16 @@ public static class PlanCanonical
         if (doc.Decals is { IsEmpty: true })
             doc.Decals = null;
 
+        // Strokes' own paints for strokes that are gone are dropped; the rest go in stroke id order.
+        if (doc.Paint is { } paint)
+        {
+            paint.Strokes.RemoveAll(s => doc.Brushes is not { } set || set.IndexOfStroke(s.Stroke) < 0);
+            paint.Strokes.Sort((a, b) => a.Stroke.CompareTo(b.Stroke));
+
+            if (paint.IsEmpty)
+                doc.Paint = null;
+        }
+
         // Prefabs no placement uses are dropped.
         var used = new HashSet<ulong>();
 

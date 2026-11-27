@@ -411,6 +411,17 @@ public sealed class BrushesPanel
             });
         }
 
+        // A model brush's own paint slot, or the hull's.
+        if (stroke.Brush < set.Brushes.Count && set.Brushes[stroke.Brush].Kind != BrushKind.Paint)
+        {
+            var paint = session.Doc.Paint;
+            var slot = paint?.SlotOf(stroke.Id) ?? -1;
+            DesignerStyle.ItemWidth(200f);
+
+            if (PaintPanel.SlotCombo("Paint##stroke"u8, paint, ref slot, "The hull's paint"))
+                PaintCommands.SetStroke(session, stroke.Id, slot);
+        }
+
         DesignerStyle.ItemWidth(90f);
         ImGui.InputFloat("Offset"u8, ref _offset, 0f, 0f, "%.3f m"u8, ImGuiInputTextFlags.None);
 

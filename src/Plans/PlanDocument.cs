@@ -110,6 +110,9 @@ public sealed class PlanDocument
     /// <summary>Decals on the hull; null when there are none.</summary>
     public HullDecalSet? Decals;
 
+    /// <summary>Paint slots, the hull's base paint and brush strokes' own paints; null when there are none.</summary>
+    public HullPaintSet? Paint;
+
     /// <summary>
     /// The component prefabs this plan places, by plan hash, carried inside it so a file or a network send is complete.
     /// Each is a component-level plan, never edited from here (a new design is a new hash).
@@ -190,6 +193,7 @@ public sealed class PlanDocument
         copy.Interior = Interior?.Clone();
         copy.Windows = Windows?.Clone();
         copy.Decals = Decals?.Clone();
+        copy.Paint = Paint?.Clone();
 
         // Prefabs are never edited in place: sharing them is safe.
         foreach (var (hash, prefab) in Prefabs)

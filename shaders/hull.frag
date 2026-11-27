@@ -1,18 +1,24 @@
 #version 450
-// Designer hull: Lambert sun + hemispheric sky + small specular, material colour from the palette, ACES + gamma.
+// Designer hull: Lambert sun + hemispheric sky + specular, ACES + gamma.
 // Dual contouring shares one vertex per cell, so a vertex on a crease carries the mean of both faces' normals; where the
 // interpolated normal leans more than CREASE_COS from the triangle's own normal the face normal is used: flat faces and
 // hard edges stay hard, curved surfaces stay smooth.
-// Paint and decals: projector boxes listed per brick (push z = first, w = count). Inside a box and facing its axis, a
-// paint box lays its pattern (the strongest paint wins, so overlapping pieces of one band do not double up) and a decal
-// lays its image over that, later decals on top.
+// Paint: the plan has paint slots (a finish texture set in a colour). The hull's slot, when set, paints every opaque
+// surface; projector boxes listed per brick (push z = first, w = count) then lay, in order: brush strokes' own paint
+// (fills), paint shapes and decal images, and pattern paint. Finishes are sampled triplanar in ship space (the hull has no
+// UVs), with whiteout-blended normals; the paint's colour replaces the finish's own, keeping its light and dark, except
+// where the finish is scratched to bare metal. Without a hull slot, surfaces keep the structural materials' colours.
 
 layout(set = 0, binding = 0, std140) uniform Frame {
     mat4 viewProj;
     vec4 sunDir;
     vec4 skyZenith;
     vec4 skyHorizon;
-    vec4 palette[32]; // rgb linear albedo, a = opacity (below 1: glazing, drawn in the blended glazing pass)
+    vec4 palette[32];    // rgb linear albedo, a = opacity (below 1: glazing, drawn in the blended glazing pass)
+    vec4 camera;         // xyz ship-space camera
+    vec4 hull;           // x: the hull's paint slot, -1 for the materials' colours
+    vec4 slotFinish[32]; // finish layer (-1 none), tile metres, metalness scale, mean luminance
+    vec4 slotColour[32]; // linear rgb, a opacity
 } frame;
 
 layout(push_constant) uniform Brick {
@@ -22,17 +28,19 @@ layout(push_constant) uniform Brick {
 } brick;
 
 struct Projector {
-    vec4 centre;  // xyz camera-relative, w kind (1 paint, 2 decal)
+    vec4 centre;  // xyz camera-relative, w kind (1 pattern paint, 2 decal or paint shape, 3 brush fill)
     vec4 u;       // xyz axis / half, w half (metres)
     vec4 v;
-    vec4 n;       // w: paint's distance along the stroke at the centre
+    vec4 n;       // w: pattern paint's distance along the stroke at the centre
     vec4 colour;  // rgb linear, a opacity
-    vec4 params;  // paint: x spacing, y line width, z pattern; decal: w layer
+    vec4 params;  // pattern paint: x spacing, y line width, z pattern; decal/fill: x shape (0 image), y paint slot, w layer
 };
 
 layout(set = 0, binding = 1, std430) readonly buffer Projectors { Projector projectors[]; };
 layout(set = 0, binding = 2, std430) readonly buffer Lists { uint lists[]; };
 layout(set = 0, binding = 3) uniform sampler2DArray decals;
+layout(set = 0, binding = 4) uniform sampler2DArray finishAlbedo;   // sRGB colour, a = scratched to bare metal
+layout(set = 0, binding = 5) uniform sampler2DArray finishSurface;  // normal x, y, roughness, metalness
 
 layout(location = 0) in vec3 vRelPos;
 layout(location = 1) in vec3 vNormal;
@@ -42,6 +50,14 @@ layout(location = 0) out vec4 outColor;
 
 const vec3 GROUND_BOUNCE = vec3(0.10, 0.09, 0.08);
 const float CREASE_COS = 0.85;
+
+struct Surface {
+    vec3 albedo;
+    float roughness;
+    float metalness;
+    vec3 normal;
+    bool painted;
+};
 
 vec3 acesFit(vec3 x)
 {
@@ -56,66 +72,177 @@ float lineCross(float along, float across, float s)
     return min(d1, d2) * s * 0.70710678;
 }
 
-// The surface's albedo with this brick's paint and decals laid on. Derivatives are taken before the loop (it diverges).
-vec3 decorate(vec3 albedo, vec3 rel, vec3 N)
+// Inside a shape on the unit square (u, v in -1..1), softened over about a pixel (aa in the same units).
+float shapeMask(int shape, vec2 l, float aa)
 {
+    float d;
+
+    if (shape == 2)
+        d = length(l) - 1.0;
+    else if (shape == 3)
+        d = max(abs(l.x) * 2.0 + l.y - 1.0, -1.0 - l.y) * 0.4472;   // triangle, point up
+    else if (shape == 4)
+        d = (abs(l.x) + abs(l.y) - 1.0) * 0.7071;
+    else
+        d = max(abs(l.x), abs(l.y)) - 1.0;
+
+    return 1.0 - smoothstep(-aa, aa, d);
+}
+
+vec3 tangentNormal(vec4 s)
+{
+    vec2 xy = s.rg * 2.0 - 1.0;
+    return vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0)));
+}
+
+// Paint slot `slot` at ship-space point p on a surface facing n (geometric), triplanar; dx, dy: p's screen derivatives.
+Surface paintAt(int slot, vec3 p, vec3 n, vec3 dx, vec3 dy)
+{
+    vec4 f = frame.slotFinish[slot];
+    vec4 c = frame.slotColour[slot];
+    Surface s;
+    s.painted = true;
+
+    if (f.x < 0.0)
+    {
+        s.albedo = c.rgb;
+        s.roughness = 0.5;
+        s.metalness = 0.0;
+        s.normal = n;
+        return s;
+    }
+
+    vec3 w = pow(abs(n), vec3(4.0));
+    w /= dot(w, vec3(1.0));
+    float k = 1.0 / f.y;
+    vec3 uvx = vec3(p.zy * k, f.x), uvy = vec3(p.xz * k, f.x), uvz = vec3(p.xy * k, f.x);
+    vec4 ax = textureGrad(finishAlbedo, uvx, dx.zy * k, dy.zy * k);
+    vec4 ay = textureGrad(finishAlbedo, uvy, dx.xz * k, dy.xz * k);
+    vec4 az = textureGrad(finishAlbedo, uvz, dx.xy * k, dy.xy * k);
+    vec4 sx = textureGrad(finishSurface, uvx, dx.zy * k, dy.zy * k);
+    vec4 sy = textureGrad(finishSurface, uvy, dx.xz * k, dy.xz * k);
+    vec4 sz = textureGrad(finishSurface, uvz, dx.xy * k, dy.xy * k);
+    vec4 a = ax * w.x + ay * w.y + az * w.z;
+    vec4 m = sx * w.x + sy * w.y + sz * w.z;
+
+    // The paint's colour, keeping the finish's light and dark; bare metal where it is scratched through.
+    float luminance = dot(a.rgb, vec3(0.2126, 0.7152, 0.0722));
+    vec3 tinted = c.rgb * clamp(luminance / max(f.w, 1e-3), 0.0, 2.0);
+    s.albedo = mix(tinted, a.rgb, a.a);
+    s.roughness = clamp(m.b, 0.04, 1.0);
+    s.metalness = clamp(m.a * f.z + a.a * (1.0 - f.z), 0.0, 1.0);
+
+    // Whiteout blend of the three tangent-space normals.
+    vec3 tx = tangentNormal(sx), ty = tangentNormal(sy), tz = tangentNormal(sz);
+    tx = vec3(tx.xy + n.zy, abs(tx.z) * n.x);
+    ty = vec3(ty.xy + n.xz, abs(ty.z) * n.y);
+    tz = vec3(tz.xy + n.xy, abs(tz.z) * n.z);
+    s.normal = normalize(tx.zyx * w.x + ty.xzy * w.y + tz.xyz * w.z);
+    return s;
+}
+
+Surface blend(Surface a, Surface b, float t)
+{
+    Surface r;
+    r.albedo = mix(a.albedo, b.albedo, t);
+    r.roughness = mix(a.roughness, b.roughness, t);
+    r.metalness = mix(a.metalness, b.metalness, t);
+    r.normal = normalize(mix(a.normal, b.normal, t));
+    r.painted = a.painted || (b.painted && t > 0.0);
+    return r;
+}
+
+// The hull's paint, then this brick's boxes in order. Derivatives are taken before the loop (it diverges).
+Surface decorate(Surface s, vec3 rel, vec3 n)
+{
+    vec3 dx = dFdx(rel);
+    vec3 dy = dFdy(rel);
+    vec3 p = rel + frame.camera.xyz;
+
+    int hull = int(frame.hull.x);
+
+    if (hull >= 0)
+        s = blend(s, paintAt(hull, p, n, dx, dy), 1.0);
+
     int first = int(brick.ghost.z);
     int count = int(brick.ghost.w);
 
     if (count == 0)
-        return albedo;
+        return s;
 
-    vec3 dx = dFdx(rel);
-    vec3 dy = dFdy(rel);
     float pixel = max(length(dx), length(dy));
-    float paint = 0.0;
-    vec3 paintColour = vec3(0.0);
+    float pattern = 0.0;
+    vec3 patternColour = vec3(0.0);
     vec4 decal = vec4(0.0);
 
     for (int i = 0; i < count; i++)
     {
-        Projector p = projectors[lists[first + i]];
-        vec3 d = rel - p.centre.xyz;
-        vec3 l = vec3(dot(d, p.u.xyz), dot(d, p.v.xyz), dot(d, p.n.xyz));
+        Projector pr = projectors[lists[first + i]];
+        vec3 d = rel - pr.centre.xyz;
+        vec3 l = vec3(dot(d, pr.u.xyz), dot(d, pr.v.xyz), dot(d, pr.n.xyz));
 
         if (any(greaterThan(abs(l), vec3(1.0))))
             continue;
 
-        float facing = dot(N, normalize(p.n.xyz));
+        float kind = pr.centre.w;
+
+        // A brush stroke's own paint covers its flair whatever way it faces.
+        if (kind > 2.5)
+        {
+            s = blend(s, paintAt(int(pr.params.y), p, n, dx, dy), 1.0);
+            continue;
+        }
+
+        float facing = dot(n, normalize(pr.n.xyz));
 
         if (facing < 0.05)
             continue;
 
         float fade = smoothstep(0.05, 0.3, facing);
 
-        if (p.centre.w < 1.5)
+        if (kind < 1.5)
         {
-            float along = p.n.w + l.x * p.u.w;
-            float across = l.y * p.v.w;
-            float half_ = p.params.y * 0.5;
-            float cover = 1.0 - smoothstep(half_ - pixel, half_ + pixel, lineCross(along, across, p.params.x));
+            float along = pr.n.w + l.x * pr.u.w;
+            float across = l.y * pr.v.w;
+            float half_ = pr.params.y * 0.5;
+            float cover = 1.0 - smoothstep(half_ - pixel, half_ + pixel, lineCross(along, across, pr.params.x));
             cover *= 1.0 - smoothstep(0.94, 1.0, abs(l.y));
-            float a = cover * p.colour.a * fade;
+            float a = cover * pr.colour.a * fade;
 
-            if (a > paint)
+            if (a > pattern)
             {
-                paint = a;
-                paintColour = p.colour.rgb;
+                pattern = a;
+                patternColour = pr.colour.rgb;
             }
+
+            continue;
         }
-        else
+
+        int shape = int(pr.params.x);
+
+        if (shape > 0)
         {
-            vec2 uv = vec2(l.x, -l.y) * 0.5 + 0.5;
-            vec2 gx = vec2(dot(dx, p.u.xyz), -dot(dx, p.v.xyz)) * 0.5;
-            vec2 gy = vec2(dot(dy, p.u.xyz), -dot(dy, p.v.xyz)) * 0.5;
-            vec4 texel = textureGrad(decals, vec3(uv, p.params.w), gx, gy);
-            float a = texel.a * p.colour.a * fade;
-            decal = vec4(texel.rgb * p.colour.rgb * a + decal.rgb * (1.0 - a), a + decal.a * (1.0 - a));
+            int slot = int(pr.params.y);
+            float aa = pixel / min(pr.u.w, pr.v.w);
+            float t = shapeMask(shape, l.xy, aa) * frame.slotColour[slot].a * pr.colour.a * fade;
+
+            if (t > 0.0)
+                s = blend(s, paintAt(slot, p, n, dx, dy), t);
+
+            continue;
         }
+
+        vec2 uv = vec2(l.x, -l.y) * 0.5 + 0.5;
+        vec2 gx = vec2(dot(dx, pr.u.xyz), -dot(dx, pr.v.xyz)) * 0.5;
+        vec2 gy = vec2(dot(dy, pr.u.xyz), -dot(dy, pr.v.xyz)) * 0.5;
+        vec4 texel = textureGrad(decals, vec3(uv, pr.params.w), gx, gy);
+        float a = texel.a * pr.colour.a * fade;
+        decal = vec4(texel.rgb * pr.colour.rgb * a + decal.rgb * (1.0 - a), a + decal.a * (1.0 - a));
     }
 
-    albedo = mix(albedo, paintColour, paint);
-    return albedo * (1.0 - decal.a) + decal.rgb;
+    s.albedo = mix(s.albedo, patternColour, pattern);
+    s.albedo = s.albedo * (1.0 - decal.a) + decal.rgb;
+    return s;
 }
 
 void main()
@@ -172,17 +299,40 @@ void main()
     vec3 V = normalize(-vRelPos);
     vec3 face = normalize(cross(dFdx(vRelPos), dFdy(vRelPos)));
     face = dot(face, V) < 0.0 ? -face : face;
-    vec3 N = normalize(vNormal);
-    N = dot(N, face) < CREASE_COS ? face : N;
+    vec3 shading = normalize(vNormal);
+    shading = dot(shading, face) < CREASE_COS ? face : shading;
     float intensity = frame.sunDir.w;
-    vec3 albedo = decorate(frame.palette[min(vMaterial, 31u)].rgb, vRelPos, N);
 
+    Surface s;
+    s.albedo = frame.palette[min(vMaterial, 31u)].rgb;
+    s.roughness = 0.6;
+    s.metalness = 0.0;
+    s.normal = shading;
+    s.painted = false;
+    s = decorate(s, vRelPos, face);
+
+    vec3 N = s.painted ? normalize(s.normal + (shading - face)) : s.normal;
     float up = N.y;
     vec3 skyAmbient = mix(frame.skyHorizon.rgb, frame.skyZenith.rgb, clamp(up, 0.0, 1.0));
     vec3 ambient = mix(skyAmbient, GROUND_BOUNCE, clamp(-up, 0.0, 1.0));
-
     float ndl = max(dot(N, L), 0.0);
-    float spec = ndl > 0.0 ? pow(max(dot(N, normalize(L + V)), 0.0), 48.0) * 0.15 : 0.0;
-    vec3 colour = albedo * (ndl * intensity + ambient) + spec * intensity;
+    vec3 colour;
+
+    if (s.painted)
+    {
+        // Roughness sets the highlight's tightness; metal reflects in its own colour and has no diffuse.
+        float r = max(s.roughness, 0.05);
+        float power = clamp(2.0 / (r * r * r * r) - 2.0, 2.0, 2048.0);
+        vec3 f0 = mix(vec3(0.04), s.albedo, s.metalness);
+        float highlight = ndl > 0.0 ? pow(max(dot(N, normalize(L + V)), 0.0), power) * (power + 8.0) / 25.13 : 0.0;
+        vec3 diffuse = s.albedo * (1.0 - s.metalness);
+        colour = diffuse * (ndl * intensity + ambient) + f0 * (highlight * ndl * intensity + ambient * (1.0 - r));
+    }
+    else
+    {
+        float spec = ndl > 0.0 ? pow(max(dot(N, normalize(L + V)), 0.0), 48.0) * 0.15 : 0.0;
+        colour = s.albedo * (ndl * intensity + ambient) + spec * intensity;
+    }
+
     outColor = vec4(pow(acesFit(colour), vec3(1.0 / 2.2)), 1.0);
 }

@@ -61,8 +61,12 @@ public static class StrokeExpansion
     private const double MergeCos = 0.9995;
     private const double MinStep = 1e-3;
 
-    /// <summary><paramref name="profiles"/>: the plan's profiles, which sweep brushes index.</summary>
-    public static ExpandedHull Expand(ReadOnlySpan<HullSolid> solids, IReadOnlyList<HullMesh> meshes, HullBrushSet? set, IReadOnlyList<HullProfile>? profiles)
+    /// <summary>
+    /// <paramref name="profiles"/>: the plan's profiles, which sweep brushes index. <paramref name="strokePaint"/>: a stroke's
+    /// own paint slot by id (-1: it carries the hull's), laid over its flair as fill boxes.
+    /// </summary>
+    public static ExpandedHull Expand(ReadOnlySpan<HullSolid> solids, IReadOnlyList<HullMesh> meshes, HullBrushSet? set, IReadOnlyList<HullProfile>? profiles,
+        Func<uint, int>? strokePaint = null)
     {
         var result = new ExpandedHull { PlanSolids = solids.Length };
         result.Meshes.AddRange(meshes);
@@ -96,6 +100,11 @@ public static class StrokeExpansion
             var scale = brush.Scale / (double)HullBrush.UnitScale * (stroke.Scale / (double)HullBrush.UnitScale);
             var offset = stroke.Offset * HullSolid.MetresPerPositionUnit;
 
+            var slot = strokePaint?.Invoke(stroke.Id) ?? -1;
+
+            if (slot >= 0 && Extent(brush, meshes, profiles) is { } extent)
+                Fill(path, extent.HalfWidth * scale, extent.Above * scale, offset, (byte)slot, result.Projectors);
+
             if (brush.Kind == BrushKind.Stamp && brush.Mesh < meshes.Count && brush.Spacing >= HullBrush.MinSpacing)
                 Stamps(path, meshes[brush.Mesh], brush.Spacing * HullSolid.MetresPerPositionUnit, scale, offset, s, template, result, generated);
             else if (brush.Kind == BrushKind.Paint)
@@ -111,6 +120,26 @@ public static class StrokeExpansion
         generated.CopyTo(all, solids.Length);
         result.Solids = all;
         return result;
+    }
+
+    /// <summary>A model brush's flair at size 1 (metres): how far it reaches either side of the line and out of the hull; null for paint.</summary>
+    private static (double HalfWidth, double Above)? Extent(HullBrush brush, IReadOnlyList<HullMesh> meshes, IReadOnlyList<HullProfile>? profiles)
+    {
+        const double k = HullSolid.MetresPerPositionUnit;
+
+        if (brush.Kind == BrushKind.Stamp && brush.Mesh < meshes.Count && meshes[brush.Mesh].Vertices.Length > 0)
+        {
+            var vertices = meshes[brush.Mesh].Vertices;
+            return (vertices.Max(v => Math.Max(Math.Abs(v.X), Math.Abs(v.Z))) * k, Math.Max(vertices.Max(v => v.Y), 0) * k);
+        }
+
+        if (brush.Kind == BrushKind.Sweep && profiles is not null && brush.Outline < profiles.Count && profiles[brush.Outline].Points.Count > 0)
+        {
+            var points = profiles[brush.Outline].Points;
+            return (points.Max(p => Math.Abs(p.X - brush.Anchor.X)) * k, Math.Max(points.Max(p => p.Y - brush.Anchor.Y), 0) * k);
+        }
+
+        return null;
     }
 
     /// <summary>The stroke stuck to the hull and resampled along it.</summary>
@@ -213,15 +242,40 @@ public static class StrokeExpansion
         }
     }
 
-    /// <summary>
-    /// A paint stroke's band as boxes along the path: one per run of the path that stays straight and level (pieces are
-    /// merged while direction, normal and width hold), each reaching <see cref="PaintAbove"/> out and <see cref="PaintBelow"/>
-    /// in. The band's width follows the point sizes; the pattern keeps its spacing.
-    /// </summary>
+    /// <summary>A paint stroke's pattern band: <see cref="Band"/> of the brush's width, reaching <see cref="PaintAbove"/> out and <see cref="PaintBelow"/> in.</summary>
     private static void Paint(StrokePath path, HullBrush brush, double scale, double offset, List<HullProjector> output)
     {
         const double k = HullSolid.MetresPerPositionUnit;
-        var width = brush.Width * k * scale;
+        var template = new HullProjector
+        {
+            Kind = ProjectorKind.Paint,
+            Colour = brush.Colour,
+            Spacing = (float)Math.Max(brush.Spacing * k * scale, 0.01),
+            LineWidth = (float)(brush.LineWidth * k * scale),
+            Pattern = brush.Pattern,
+        };
+        Band(path, brush.Width * k * scale * 0.5, PaintAbove, PaintBelow, false, offset, template, output);
+    }
+
+    /// <summary>
+    /// A stroke's own paint over its flair: <see cref="Band"/> as wide and tall as the flair (sizes following the points),
+    /// a little over, painting whatever way the surface faces.
+    /// </summary>
+    private static void Fill(StrokePath path, double halfWidth, double above, double offset, byte slot, List<HullProjector> output)
+    {
+        const double margin = 0.02;
+        Band(path, halfWidth + margin, above + margin, PaintBelow, true, offset, new HullProjector { Kind = ProjectorKind.Fill, Paint = slot, Colour = 0xFFFFFFFF }, output);
+    }
+
+    /// <summary>
+    /// Boxes along the path, copies of <paramref name="template"/>: one per run of the path that stays straight and level
+    /// (pieces are merged while direction, normal and size hold), <paramref name="halfWidth"/> either side (times the point
+    /// sizes), from <paramref name="below"/> in to <paramref name="above"/> out (times the point sizes when
+    /// <paramref name="sizedDepth"/>), lifted by <paramref name="offset"/>. Each carries the distance along the stroke at
+    /// its centre, so a pattern runs on through the pieces.
+    /// </summary>
+    private static void Band(StrokePath path, double halfWidth, double above, double below, bool sizedDepth, double offset, HullProjector template, List<HullProjector> output)
+    {
         var walked = 0.0;
         var start = 0;
 
@@ -255,25 +309,18 @@ public static class StrokeExpansion
             var length = Sub(b, a).Length();
             var n = Normalise(Add(path.Normals[start], path.Normals[end]), path.Normals[start]);
             var (across, normal, tangent) = Frame(n, Sub(b, a));
-            var half = width * 0.5 * (path.Scales[start] + path.Scales[end]) * 0.5;
+            var size = (path.Scales[start] + path.Scales[end]) * 0.5;
+            var half = halfWidth * size;
+            var top = sizedDepth ? above * size : above;
             var mid = Scale(Add(a, b), 0.5);
-
-            output.Add(new HullProjector
-            {
-                Kind = ProjectorKind.Paint,
-                Centre = Add(mid, Scale(normal, offset + (PaintAbove - PaintBelow) * 0.5)),
-                U = tangent,
-                V = across,
-                N = normal,
-                HalfU = length * 0.5 + Math.Min(half, length) * 0.5,
-                HalfV = half,
-                HalfN = (PaintAbove + PaintBelow) * 0.5,
-                Colour = brush.Colour,
-                Along = walked + length * 0.5,
-                Spacing = (float)Math.Max(brush.Spacing * k * scale, 0.01),
-                LineWidth = (float)(brush.LineWidth * k * scale),
-                Pattern = brush.Pattern,
-            });
+            var box = template;
+            box.Centre = Add(mid, Scale(normal, offset + (top - below) * 0.5));
+            (box.U, box.V, box.N) = (tangent, across, normal);
+            box.HalfU = length * 0.5 + Math.Min(half, length) * 0.5;
+            box.HalfV = half;
+            box.HalfN = (top + below) * 0.5;
+            box.Along = walked + length * 0.5;
+            output.Add(box);
 
             walked += length;
             start = end;

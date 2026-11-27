@@ -50,6 +50,10 @@ public sealed unsafe class HullRenderer : IDisposable
     private readonly List<HullProjector> _boxes = new();
     private readonly List<uint> _listScratch = new();
     private readonly DecalTextures _decals;
+    private readonly FinishTextures _finishes;
+    private readonly Vector4[] _slotFinish = new Vector4[PaletteSize];
+    private readonly Vector4[] _slotColour = new Vector4[PaletteSize];
+    private int _hullSlot = -1;
 
     private struct Draw
     {
@@ -83,6 +87,10 @@ public sealed unsafe class HullRenderer : IDisposable
         public Vector4 SkyZenith;
         public Vector4 SkyHorizon;
         public Palette Colours;
+        public Vector4 Camera;     // xyz ship-space camera (float; designer ships are small)
+        public Vector4 Hull;       // x: the hull's paint slot, -1 for the structural materials' colours
+        public Palette SlotFinish; // per paint slot: finish layer (-1 none), tile metres, metalness scale, mean luminance
+        public Palette SlotColour; // per paint slot: linear rgb, a opacity
     }
 
     [InlineArray(PaletteSize)]
@@ -91,10 +99,11 @@ public sealed unsafe class HullRenderer : IDisposable
         private Vector4 _element;
     }
 
-    public HullRenderer(Renderer renderer, DecalTextures decals)
+    public HullRenderer(Renderer renderer, DecalTextures decals, FinishTextures finishes)
     {
         _renderer = renderer;
         _decals = decals;
+        _finishes = finishes;
         var context = renderer.Context;
         _device = context.Device;
         _uniforms = new GpuBuffer(context, UniformStride * Renderer.FramesInFlight, VkBufferUsageFlags.UniformBufferBit, true);
@@ -112,6 +121,7 @@ public sealed unsafe class HullRenderer : IDisposable
         _pipeline = CreatePipeline(context.Pipelines, renderer.RenderPass, ghost: false);
         _ghostPipeline = CreatePipeline(context.Pipelines, renderer.RenderPass, ghost: true);
         _palette.AsSpan().Fill(new Vector4(0.6f, 0.6f, 0.6f, 1f));
+        SetPaint(null, _ => -1);
     }
 
     public int BrickCount => _draws.Count;
@@ -179,6 +189,31 @@ public sealed unsafe class HullRenderer : IDisposable
         }
 
         BuildLists();
+    }
+
+    /// <summary>
+    /// The plan's paint slots (finish layers from <paramref name="finishLayer"/>, -1 when the finish is not in game data) and
+    /// the hull's slot (-1: the structural materials' colours). Cheap: read into the frame uniforms.
+    /// </summary>
+    public void SetPaint(HullPaintSet? paint, Func<uint, int> finishLayer)
+    {
+        Array.Fill(_slotFinish, new Vector4(-1f, 1f, 0f, 1f));
+        Array.Fill(_slotColour, new Vector4(0.7f, 0.7f, 0.7f, 1f));
+        _hullSlot = -1;
+
+        if (paint is null)
+            return;
+
+        for (var i = 0; i < Math.Min(paint.Slots.Count, PaletteSize); i++)
+        {
+            var slot = paint.Slots[i];
+            var layer = finishLayer(slot.Finish);
+            var info = layer >= 0 && layer < _finishes.Info.Length ? _finishes.Info[layer] : new Vector4(1f, 0f, 1f, 0f);
+            _slotFinish[i] = new Vector4(layer, info.X, info.Y, info.Z);
+            _slotColour[i] = Linear(slot.Colour);
+        }
+
+        _hullSlot = paint.Hull < Math.Min(paint.Slots.Count, PaletteSize) ? paint.Hull : -1;
     }
 
     /// <summary>Replaces the paint and decal boxes (ship space). Waits for the device: call on commit only.</summary>
@@ -274,7 +309,9 @@ public sealed unsafe class HullRenderer : IDisposable
                 V = Axis(b.V, b.HalfV),
                 N = Axis(b.N, b.HalfN) with { W = (float)b.Along },
                 Colour = Linear(b.Colour),
-                Params = new Vector4(b.Spacing, b.LineWidth, (float)b.Pattern, b.Layer),
+                Params = b.Kind == ProjectorKind.Paint
+                    ? new Vector4(b.Spacing, b.LineWidth, (float)b.Pattern, b.Layer)
+                    : new Vector4((float)b.Shape, b.Paint, 0f, b.Layer),
             };
         }
     }
@@ -332,7 +369,14 @@ public sealed unsafe class HullRenderer : IDisposable
         uniforms->SkyHorizon = new Vector4(lighting.SkyHorizon, 0f);
 
         for (var p = 0; p < PaletteSize; p++)
+        {
             uniforms->Colours[p] = _palette[p];
+            uniforms->SlotFinish[p] = _slotFinish[p];
+            uniforms->SlotColour[p] = _slotColour[p];
+        }
+
+        uniforms->Camera = new Vector4((float)camera.X, (float)camera.Y, (float)camera.Z, 0f);
+        uniforms->Hull = new Vector4(_hullSlot, 0f, 0f, 0f);
 
         if (ghost <= 0f && !glazing)
             WriteProjectors(frameIndex, camera);
@@ -384,7 +428,7 @@ public sealed unsafe class HullRenderer : IDisposable
         buffer = new GpuBuffer(_renderer.Context, size, usage, hostVisible: true);
     }
 
-    /// <summary>0 frame uniforms, 1 projectors, 2 brick lists, 3 decal images.</summary>
+    /// <summary>0 frame uniforms, 1 projectors, 2 brick lists, 3 decal images, 4 finish albedo, 5 finish surface.</summary>
     private VkDescriptorSetLayout CreateSetLayout()
     {
         var bindings = stackalloc VkDescriptorSetLayoutBinding[]
@@ -393,9 +437,11 @@ public sealed unsafe class HullRenderer : IDisposable
             new() { Binding = 1, DescriptorType = VkDescriptorType.StorageBuffer, DescriptorCount = 1, StageFlags = VkShaderStageFlags.FragmentBit },
             new() { Binding = 2, DescriptorType = VkDescriptorType.StorageBuffer, DescriptorCount = 1, StageFlags = VkShaderStageFlags.FragmentBit },
             new() { Binding = 3, DescriptorType = VkDescriptorType.CombinedImageSampler, DescriptorCount = 1, StageFlags = VkShaderStageFlags.FragmentBit },
+            new() { Binding = 4, DescriptorType = VkDescriptorType.CombinedImageSampler, DescriptorCount = 1, StageFlags = VkShaderStageFlags.FragmentBit },
+            new() { Binding = 5, DescriptorType = VkDescriptorType.CombinedImageSampler, DescriptorCount = 1, StageFlags = VkShaderStageFlags.FragmentBit },
         };
 
-        return _device.CreateDescriptorSetLayout(new VkDescriptorSetLayoutCreateInfo { BindingCount = 4, Bindings = bindings }, null);
+        return _device.CreateDescriptorSetLayout(new VkDescriptorSetLayoutCreateInfo { BindingCount = 6, Bindings = bindings }, null);
     }
 
     private VkDescriptorPool CreatePool()
@@ -404,7 +450,7 @@ public sealed unsafe class HullRenderer : IDisposable
         {
             new() { Type = VkDescriptorType.UniformBuffer, DescriptorCount = Renderer.FramesInFlight },
             new() { Type = VkDescriptorType.StorageBuffer, DescriptorCount = 2 * Renderer.FramesInFlight },
-            new() { Type = VkDescriptorType.CombinedImageSampler, DescriptorCount = Renderer.FramesInFlight },
+            new() { Type = VkDescriptorType.CombinedImageSampler, DescriptorCount = 3 * Renderer.FramesInFlight },
         };
         return _device.CreateDescriptorPool(new VkDescriptorPoolCreateInfo { MaxSets = Renderer.FramesInFlight, PoolSizeCount = 3, PoolSizes = sizes }, null);
     }
@@ -432,6 +478,8 @@ public sealed unsafe class HullRenderer : IDisposable
             var projectors = new VkDescriptorBufferInfo { Buffer = _projectors.Handle, Offset = (ByteSize64)(i * ProjectorRegion), Range = (ByteSize64)ProjectorRegion };
             var lists = new VkDescriptorBufferInfo { Buffer = _lists.Handle, Offset = (ByteSize64)0, Range = (ByteSize64)_lists.Size };
             var image = new VkDescriptorImageInfo { ImageView = _decals.View, Sampler = _decals.Sampler, ImageLayout = VkImageLayout.ShaderReadOnlyOptimal };
+            var albedo = new VkDescriptorImageInfo { ImageView = _finishes.AlbedoView, Sampler = _finishes.Sampler, ImageLayout = VkImageLayout.ShaderReadOnlyOptimal };
+            var surface = new VkDescriptorImageInfo { ImageView = _finishes.SurfaceView, Sampler = _finishes.Sampler, ImageLayout = VkImageLayout.ShaderReadOnlyOptimal };
 
             _device.UpdateDescriptorSets(
                 [
@@ -439,6 +487,8 @@ public sealed unsafe class HullRenderer : IDisposable
                     new VkWriteDescriptorSet { DstSet = _sets[i], DstBinding = 1, DescriptorCount = 1, DescriptorType = VkDescriptorType.StorageBuffer, BufferInfo = &projectors },
                     new VkWriteDescriptorSet { DstSet = _sets[i], DstBinding = 2, DescriptorCount = 1, DescriptorType = VkDescriptorType.StorageBuffer, BufferInfo = &lists },
                     new VkWriteDescriptorSet { DstSet = _sets[i], DstBinding = 3, DescriptorCount = 1, DescriptorType = VkDescriptorType.CombinedImageSampler, ImageInfo = &image },
+                    new VkWriteDescriptorSet { DstSet = _sets[i], DstBinding = 4, DescriptorCount = 1, DescriptorType = VkDescriptorType.CombinedImageSampler, ImageInfo = &albedo },
+                    new VkWriteDescriptorSet { DstSet = _sets[i], DstBinding = 5, DescriptorCount = 1, DescriptorType = VkDescriptorType.CombinedImageSampler, ImageInfo = &surface },
                 ],
                 []
             );
