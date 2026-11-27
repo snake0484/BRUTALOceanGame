@@ -53,7 +53,7 @@ public sealed class ObjectTree
 
             ImGui.TextDisabled("Right-click empty space in the view to add."u8);
 
-            if (ImGui.TreeNodeEx("Ship##root"u8, ImGuiTreeNodeFlags.DefaultOpen | ImGuiTreeNodeFlags.SpanAvailWidth))
+            if (ImGui.TreeNodeEx(shipItems ? "Ship##root"u8 : "Component##root"u8, ImGuiTreeNodeFlags.DefaultOpen | ImGuiTreeNodeFlags.SpanAvailWidth))
             {
                 var solids = session.Doc.Solids.AsSpan();
 
