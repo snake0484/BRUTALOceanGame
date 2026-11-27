@@ -179,8 +179,8 @@ public static class BreakerFace
             var lift = state.Amplitude * e * window * wet;
             var dlift = state.Amplitude * e * (dwindow - 2f * sn / (width * width) * window) * wet;
 
-            // Peak: the carrier's height above its trough, as a share of its crest-to-trough span, raised to gamma.
-            var a = 0.5f * state.Height;
+            // Peak: the carrier's height here above its trough, as a share of its crest-to-trough span, raised to gamma.
+            var a = 0.5f * height;
             var peaking = amount * SmoothStep(PeakFrom, PeakFull, a);
 
             if (peaking > 0f)
@@ -188,10 +188,8 @@ public static class BreakerFace
                 var w = peaking * window;
                 var dw = peaking * dwindow;
                 var gamma = float.Lerp(1f, Peak, w);
-                var s = SurfCarrier.Sharpness(state.Height, crest.Depth);
-                var n = MathF.Sqrt(1f + s * s * (1f + s * s));
-                var troughAmp = a * (1f - s + s * s) / n;
-                var span = a * (1f + s + s * s) / n + troughAmp;
+                var troughAmp = norm * (1f - sharp + sharp * sharp);
+                var span = norm * (1f + sharp + sharp * sharp) + troughAmp;
                 var share = (eta + troughAmp) / span;
                 var peaked = share <= 0f ? share : share < 1f ? MathF.Pow(share, gamma) : 1f + gamma * (share - 1f);
                 var dShare = share <= 0f ? 1f : share < 1f ? gamma * MathF.Pow(share, gamma - 1f) : gamma;
@@ -261,14 +259,17 @@ public static class BreakerFace
         var broken = MathF.Max(spent, landed);
         var stand = SmoothStep(StandFrom, SurfCarrier.BreakingGamma, c.Unbroken / MathF.Max(depth, 0.1f));
 
+        // A crest followed ashore is let go over the first of the beach above the sea.
+        var afloat = SurfCarrier.Smooth(c.Depth / SpentDepth + 1f);
+
         return new CrestState
         {
-            Curl = curl,
-            Broken = broken,
+            Curl = curl * afloat,
+            Broken = broken * afloat,
             Height = height * Water(c.Depth),
             Amplitude = Amplitude(height, cap, onset, collapse, broken, c.Depth),
-            Steep = MathF.Max(MathF.Max(curl, BreakSteep * onset) * (1f - 0.5f * MathF.Max(spent, collapse)), StandAmount * stand),
-            Spill = (1f - c.Plunge) * onset,
+            Steep = MathF.Max(MathF.Max(curl, BreakSteep * onset) * (1f - 0.5f * MathF.Max(spent, collapse)), StandAmount * stand) * afloat,
+            Spill = (1f - c.Plunge) * onset * afloat,
         };
     }
 

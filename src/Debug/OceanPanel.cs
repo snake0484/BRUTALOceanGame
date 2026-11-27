@@ -3,6 +3,7 @@ using Brutal.ImGuiApi;
 using Brutal.Numerics;
 using BrutalGame.Engine.Time;
 using BrutalGame.Terrain.Runtime;
+using BrutalGame.Water.Coast;
 using BrutalGame.Water.Ocean;
 using BrutalGame.Water.Rendering;
 
@@ -28,6 +29,8 @@ public sealed class OceanPanel
     private readonly float2[] _benchPoints = new float2[BenchCount];
     private readonly ShoreDepthGrid _depths;
     private readonly ShoreDepthTexture _depthTexture;
+    private readonly CoastRegionSet _coast;
+    private readonly CoastAtlasGpu _coastGpu;
     private SwellParams _edit;
     private float _fetchKm;
     private float _depth = 50f;
@@ -37,13 +40,16 @@ public sealed class OceanPanel
     public readonly TimingRing PrepareMs = new(TimingSamples);
     public bool Open = true;
     public bool ShoreWash = true;
+    public bool BreakerFaces = true;
 
     /// <summary>Where the readouts and the benchmark sample the sea (planet frame; the sea point under the camera) and the tick they sample it at.</summary>
     public double3 Probe = double3.UnitX;
     public long Tick;
 
-    public OceanPanel(OceanSurface surface, OceanFft fft, ShoreDepthGrid depths, ShoreDepthTexture depthTexture)
+    public OceanPanel(OceanSurface surface, OceanFft fft, ShoreDepthGrid depths, ShoreDepthTexture depthTexture, CoastRegionSet coast, CoastAtlasGpu coastGpu)
     {
+        _coast = coast;
+        _coastGpu = coastGpu;
         _surface = surface;
         _depths = depths;
         _depthTexture = depthTexture;
@@ -80,6 +86,7 @@ public sealed class OceanPanel
             DrawDetail();
             DrawReadouts();
             DrawDepth();
+            DrawCoast();
             DrawPerf();
         }
 
@@ -156,6 +163,17 @@ public sealed class OceanPanel
         ImGui.Text($"{(_depths.HasMaps ? "maps on" : "no maps")}  {(_depths.Settled ? "settled" : "baking")}  jobs {_depths.Jobs}");
         ImGui.Text($"last job {_depths.LastJobMs,6:F2} ms / {_depths.LastJobCells} cells  far bake {_depths.LastFarBakeMs,6:F1} ms");
         ImGui.Text($"upload {_depthTexture.LastUploadMs,6:F3} ms / {_depthTexture.LastUploadCells} cells");
+    }
+
+    private void DrawCoast()
+    {
+        ImGui.SeparatorText("Breaking waves"u8);
+        ImGui.Checkbox("Breaker faces"u8, ref BreakerFaces);
+        var carrier = _coast.Carrier;
+        ImGui.Text($"carrier T {(carrier.Calm ? 0f : MathF.Tau / carrier.Omega),5:F1} s  H0 {carrier.Height,5:F2} m  dir {carrier.Direction * 180f / MathF.PI,5:F0} deg");
+        ImGui.Text($"regions {_coast.Drawn} / {CoastRegionSet.Capacity}  {(_coast.Settled ? "settled" : "working")}  {CoastRegionSet.ResidentBytes / 1048576f:F1} + {CoastAtlasGpu.Bytes / 1048576f:F1} MB");
+        ImGui.Text($"bakes {_coast.Bakes}  last {_coast.LastBakeMs,5:F1} ms (depth {_coast.LastBakeDepthMs,5:F1})  probes {_coast.Probes}");
+        ImGui.Text($"uploads {_coastGpu.Uploads}  last {_coastGpu.LastUploadMs,6:F3} ms");
     }
 
     private void DrawPerf()

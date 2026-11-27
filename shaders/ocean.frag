@@ -14,12 +14,14 @@ layout(location = 3) in float vCpuDxz;     // CPU band λDxz
 layout(location = 4) in float vShoreDamp; // OceanPoint.shore
 layout(location = 5) in float vSurfFoam;   // whitewater left behind by the surf
 layout(location = 6) in float vSwashEdge;  // 1 at the edge of a swash sheet, 0 half a metre behind it
+layout(location = 7) in float vBreakFoam;  // whitewater of the breaking face
 
 // Thin water is see-through (docs/shore-wash.md): the terrain shows through it, darkened as wet
 // sand is, under the sky's reflection, and the water's own colour takes over as it deepens, so the shallows read as depth
 // and a swash sheet as a glassy film with an edge rather than paint.
 const float SHEET_OPAQUE = 0.6;    // m of water by which the body colour has taken over from the terrain seen through it
 const float SWASH_EDGE_FOAM = 0.7; // lace coverage along the water's edge on the beach (vSwashEdge)
+const float BREAK_FOAM = 0.95;     // lace coverage of a breaking face's whitewater at full weight (vBreakFoam)
 const float GLITTER_NEAR = 0.3;    // m of pixel footprint from which the waves' slopes start to go unresolved ...
 const float GLITTER_FAR = 3.0;     // ... and by which they all are: the sun's glint is then the sea's glitter path
 
@@ -80,6 +82,11 @@ void main()
     float edgeFoam = max(0.6 * (1.0 - smoothstep(0.0, 0.04, max(thickness, 0.0))), SWASH_EDGE_FOAM * vSwashEdge);
     float coverage = max(0.6 * vSurfFoam, edgeFoam);
     float surf = foamLace(vRestXZ, coverage, 0.0);
+
+    // A breaking face's whitewater churns: fresh lace, denser than what the swash leaves.
+    float breaking = BREAK_FOAM * clamp(vBreakFoam, 0.0, 1.0);
+    surf = max(surf, foamLace(vRestXZ, breaking, 1.0));
+    coverage = max(coverage, breaking);
     float foam = clamp(max(foamLace(vRestXZ, whitecap, 0.5), surf), 0.0, 1.0);
 
     // Debug: red = folding (1 - J), green = J, blue = foam coverage before lace (whitecap or surf).

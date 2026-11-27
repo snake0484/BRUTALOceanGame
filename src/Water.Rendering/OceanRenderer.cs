@@ -6,6 +6,7 @@ using Brutal.ShaderCApi;
 using Brutal.VulkanApi;
 using Brutal.VulkanApi.Abstractions;
 using BrutalGame.Engine.Rendering;
+using BrutalGame.Water.Coast;
 using BrutalGame.Water.Ocean;
 
 namespace BrutalGame.Water.Rendering;
@@ -61,6 +62,9 @@ public sealed unsafe class OceanRenderer : IDisposable
     /// <summary>Swash sheets and the foam they leave; off for an A/B bench.</summary>
     public bool ShoreWash = true;
 
+    /// <summary>The breaking faces over the coast regions (ocean_breaker.glsl); off for an A/B bench.</summary>
+    public bool BreakerFaces = true;
+
     private readonly Device _device;
     private readonly PipelineCache _pipelines;
     private readonly VkDescriptorSetLayout _setLayout;
@@ -77,13 +81,15 @@ public sealed unsafe class OceanRenderer : IDisposable
     private const int Tiles = TileSide * TileSide;
     private const int TileQuads = 2 * HalfCells / TileSide;
 
-    /// <summary>Horizontal cull margin (m): the swell's and the cascades' horizontal displacement.</summary>
+    /// <summary>Horizontal cull margin (m): the swell's and the cascades' horizontal displacement, and more where a breaking face draws its wall back.</summary>
     private const float CullMargin = 12f;
+    private const float FaceCullMargin = 12f;
 
     private readonly int[] _tileFirst = new int[2 * Tiles];
     private readonly int[] _tileCount = new int[2 * Tiles];
     private readonly Vector4[] _frustum = new Vector4[5];
     private float _cullReach;
+    private float _cullMargin;
     private int _firstLevel;
 
     /// <summary>Clipmap tiles drawn last frame, out of all of them.</summary>
@@ -91,6 +97,9 @@ public sealed unsafe class OceanRenderer : IDisposable
 
     /// <summary>Clipmap surface triangles drawn last frame.</summary>
     public int TrianglesLastFrame { get; private set; }
+
+    /// <summary>Coast regions drawn last frame.</summary>
+    public int CoastDrawn { get; private set; }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct FrameHeader
@@ -119,11 +128,15 @@ public sealed unsafe class OceanRenderer : IDisposable
         public fixed float SlotToTile[4 * SeaTiles.MaxBlend];
         public fixed float SlotFromTile[4 * SeaTiles.MaxBlend];
         public fixed float SlotSide[4 * SeaTiles.MaxBlend];
+        public fixed float Coast[CoastFloats * CoastRegionSet.Capacity];
         public int WaveCount;
         public int SlotCount;
         public float DebugView;
-        public float Pad0;
+        public int CoastCount;
     }
+
+    /// <summary>Floats per coast region in the frame block: ocean_common.glsl CoastRegion (three vec4).</summary>
+    private const int CoastFloats = 12;
 
     /// <summary>What the sea is drawn with this frame, beyond the swell.</summary>
     public struct View
@@ -176,7 +189,9 @@ public sealed unsafe class OceanRenderer : IDisposable
     private long _foamTick = -1;
     private float _foamSeconds;
 
-    private const int Bindings = 2 + SampledMaps;
+    private const int CoastBinding = SurfFoamBinding + 1;
+    private const int CoastMaps = 3;
+    private const int Bindings = 2 + SampledMaps + CoastMaps;
     private bool _initialised;
     private double3 _camera;
     private double _seaRadius;
@@ -198,12 +213,15 @@ public sealed unsafe class OceanRenderer : IDisposable
     private readonly VkSampler _depthSampler;
     private readonly VkImageView _depthFarView;
     private readonly VkSampler _depthFarSampler;
+    private readonly CoastAtlasGpu _coast;
 
     /// <param name="depthView">Near signed depth map (ShoreDepthTexture, repeat sampler), in SHADER_READ_ONLY_OPTIMAL.</param>
     /// <param name="depthFarView">Far signed depth map (clamped), in SHADER_READ_ONLY_OPTIMAL.</param>
-    public OceanRenderer(Renderer renderer, OceanFft fft, VkImageView depthView, VkSampler depthSampler, VkImageView depthFarView, VkSampler depthFarSampler)
+    /// <param name="coast">The coast regions' atlas textures (ocean_breaker.glsl), in SHADER_READ_ONLY_OPTIMAL once recorded.</param>
+    public OceanRenderer(Renderer renderer, OceanFft fft, VkImageView depthView, VkSampler depthSampler, VkImageView depthFarView, VkSampler depthFarSampler, CoastAtlasGpu coast)
     {
         _fft = fft;
+        _coast = coast;
         _depthView = depthView;
         _depthSampler = depthSampler;
         _depthFarView = depthFarView;
@@ -374,6 +392,17 @@ public sealed unsafe class OceanRenderer : IDisposable
             StageFlags = buffers,
         };
 
+        for (var i = 0; i < CoastMaps; i++)
+        {
+            bindings[CoastBinding + i] = new VkDescriptorSetLayoutBinding
+            {
+                Binding = CoastBinding + i,
+                DescriptorType = VkDescriptorType.CombinedImageSampler,
+                DescriptorCount = 1,
+                StageFlags = stages,
+            };
+        }
+
         return _device.CreateDescriptorSetLayout(
             new VkDescriptorSetLayoutCreateInfo { BindingCount = Bindings, Bindings = bindings },
             null
@@ -385,7 +414,7 @@ public sealed unsafe class OceanRenderer : IDisposable
         var sizes = stackalloc VkDescriptorPoolSize[]
         {
             new() { Type = VkDescriptorType.UniformBuffer, DescriptorCount = Renderer.FramesInFlight },
-            new() { Type = VkDescriptorType.CombinedImageSampler, DescriptorCount = Renderer.FramesInFlight * SampledMaps },
+            new() { Type = VkDescriptorType.CombinedImageSampler, DescriptorCount = Renderer.FramesInFlight * (SampledMaps + CoastMaps) },
             new() { Type = VkDescriptorType.StorageBuffer, DescriptorCount = Renderer.FramesInFlight },
         };
 
@@ -418,6 +447,13 @@ public sealed unsafe class OceanRenderer : IDisposable
             new() { Sampler = _fft.Sampler, ImageView = _fft.FoamView, ImageLayout = VkImageLayout.General },
             new() { Sampler = _depthSampler, ImageView = _depthView, ImageLayout = VkImageLayout.ShaderReadOnlyOptimal },
             new() { Sampler = _depthFarSampler, ImageView = _depthFarView, ImageLayout = VkImageLayout.ShaderReadOnlyOptimal },
+        };
+
+        var coastMaps = stackalloc VkDescriptorImageInfo[]
+        {
+            new() { Sampler = _coast.NearestSampler, ImageView = _coast.PhaseView, ImageLayout = VkImageLayout.ShaderReadOnlyOptimal },
+            new() { Sampler = _coast.LinearSampler, ImageView = _coast.FieldsView, ImageLayout = VkImageLayout.ShaderReadOnlyOptimal },
+            new() { Sampler = _coast.LinearSampler, ImageView = _coast.DirectionView, ImageLayout = VkImageLayout.ShaderReadOnlyOptimal },
         };
 
         Span<VkWriteDescriptorSet> writes = stackalloc VkWriteDescriptorSet[Bindings];
@@ -461,6 +497,18 @@ public sealed unsafe class OceanRenderer : IDisposable
                 DescriptorType = VkDescriptorType.StorageBuffer,
                 BufferInfo = &surfFoam,
             };
+
+            for (var m = 0; m < CoastMaps; m++)
+            {
+                writes[CoastBinding + m] = new VkWriteDescriptorSet
+                {
+                    DstSet = _sets[i],
+                    DstBinding = CoastBinding + m,
+                    DescriptorCount = 1,
+                    DescriptorType = VkDescriptorType.CombinedImageSampler,
+                    ImageInfo = coastMaps + m,
+                };
+            }
 
             _device.UpdateDescriptorSets(writes, []);
         }
@@ -547,7 +595,8 @@ public sealed unsafe class OceanRenderer : IDisposable
     /// the camera and y the height above sea level; everything with a world phase (waves per sea tile, carrier, cascade
     /// tiles, depth maps) is rebased in double here.
     /// </summary>
-    public void Prepare(int frameIndex, OceanSurface sea, in SeaFrame frame, double renderTime, in View view)
+    /// <param name="coast">The coast regions whose breaking faces are drawn (uploaded by <see cref="CoastAtlasGpu.Record"/>); null draws none.</param>
+    public void Prepare(int frameIndex, OceanSurface sea, in SeaFrame frame, double renderTime, in View view, CoastRegionSet? coast = null)
     {
         var swell = sea.Swell;
         var block = (byte*)_buffer.Mapped + _frameOffsets[frameIndex];
@@ -613,6 +662,44 @@ public sealed unsafe class OceanRenderer : IDisposable
             slots.ToTile[4 * p + 1] * shore.X + slots.ToTile[4 * p + 3] * shore.Y,
             shore.Z, shore.W);
         header->DebugView = _fft.DebugView ? 1f : 0f;
+        header->CoastCount = BreakerFaces && coast is not null ? PlaceCoast(header->Coast, coast, slots, renderTime) : 0;
+        CoastDrawn = header->CoastCount;
+        _cullMargin = CullMargin;
+
+        if (CoastDrawn > 0)
+        {
+            _cullReach += FaceCullHeight * coast!.Carrier.Height;
+            _cullMargin += FaceCullMargin;
+        }
+    }
+
+    /// <summary>A shoaled, held breaker stands at most about this × the carrier's deep-water height over the sea.</summary>
+    private const float FaceCullHeight = 3f;
+
+    /// <summary>
+    /// Writes the regions drawn this frame (ocean_common.glsl CoastRegion): each placed against the camera through its
+    /// tile's slot, with its atlas layer, its map's phase at the render time and its fade. Returns the count.
+    /// </summary>
+    private int PlaceCoast(float* block, CoastRegionSet coast, in SeaSlots slots, double renderTime)
+    {
+        var regions = coast.Regions;
+        var count = 0;
+
+        for (var slot = 0; slot < regions.Length; slot++)
+        {
+            ref readonly var region = ref regions[slot];
+
+            if (!region.Drawn || !_coast.Ready(slot, region) || !CoastPlacement.Of(region, slots, out var placement))
+                continue;
+
+            var carrier = region.Key.Carrier;
+            var to = (Vector4*)(block + CoastFloats * count++);
+            to[0] = placement.CellX with { W = placement.Slot };
+            to[1] = placement.CellZ with { W = slot };
+            to[2] = new Vector4(coast.Atlas(slot).PhaseAt(renderTime), carrier.Omega, carrier.Height, region.Weight);
+        }
+
+        return count;
     }
 
     /// <summary>The finest level drawn from <paramref name="altitude"/> (m above the sea): cells of about <see cref="FinestCell"/> of it.</summary>
@@ -733,7 +820,7 @@ public sealed unsafe class OceanRenderer : IDisposable
             commands.PushConstants(_layout, PushStages, 0, MemoryMarshal.AsBytes(push));
             var variant = level == _firstLevel ? 0 : 1;
             var tileSize = TileQuads * spacing;
-            var margin = shell ? 0f : CullMargin;
+            var margin = shell ? 0f : _cullMargin;
             var reach = shell ? 0f : _cullReach;
 
             for (var tile = 0; tile < Tiles; tile++)
