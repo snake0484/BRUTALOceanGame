@@ -82,6 +82,12 @@ public sealed class CelestialView : IDisposable
     private ImpostorTexture? _focusTexture;
     private VkDescriptorSet _focusSet;
     private int _focusTextureBody = -1;
+
+    /// <summary>The large impostor baking to replace the one on screen, and whether that one's body has changed since.</summary>
+    private ImpostorTexture? _nextTexture;
+    private VkDescriptorSet _nextSet;
+    private int _nextBody = -1;
+    private bool _stale;
     private int _focus;
     private long _frame;
 
@@ -193,20 +199,21 @@ public sealed class CelestialView : IDisposable
     }
 
     /// <summary>
-    /// Before the frame's terrain: every body's render pose in the camera's frame, then the focus. A new focus moves the
-    /// camera into its surface frame (unless <see cref="Pinned"/>) and asks for its large impostor.
+    /// Swaps a body's generator (the planet designer changed its authored layer). Its large impostor rebakes beside the
+    /// one on screen, which stays until the new one is uploaded; the 256² one is not rebaked.
     /// </summary>
-    /// <summary>Swaps a body's generator (the planet designer changed its authored layer); its large impostor rebakes. The 256² one is not rebaked.</summary>
     public void ReplaceGenerator(int index, PlanetGenerator generator)
     {
         var body = _bodies[index];
         body.Generator = generator;
         _generators[body.TerrainBody] = generator;
-
-        if (_focusTextureBody == index)
-            _focusTextureBody = -1;
+        _stale |= _focusTextureBody == index || _nextBody == index;
     }
 
+    /// <summary>
+    /// Before the frame's terrain: every body's render pose in the camera's frame, then the focus. A new focus moves the
+    /// camera into its surface frame (unless <see cref="Pinned"/>) and asks for its large impostor.
+    /// </summary>
     public void Update(FlyCamera camera)
     {
         Pose(camera);
@@ -252,8 +259,13 @@ public sealed class CelestialView : IDisposable
 
         Ready = ready;
 
-        if (_focusTexture is not null)
-            Upload(commands, _focusTexture);
+        if (_nextTexture is not null)
+        {
+            Upload(commands, _nextTexture);
+
+            if (_nextTexture.Uploaded)
+                PromoteFocus();
+        }
 
         for (var i = _staging.Count - 1; i >= 0; i--)
         {
@@ -274,7 +286,7 @@ public sealed class CelestialView : IDisposable
             _retired.RemoveAt(i);
         }
 
-        if (_focusTextureBody != _focus && ready && !_scheduler.IsExecuting && _freeFocusSets.Count > 0)
+        if ((_focusTextureBody != _focus || _stale) && _nextTexture is null && ready && !_scheduler.IsExecuting && _freeFocusSets.Count > 0)
             StartFocusBake();
     }
 
@@ -486,25 +498,27 @@ public sealed class CelestialView : IDisposable
         }
     }
 
-    /// <summary>Replaces the large impostor with the focus body's (the old one is freed once no frame uses it).</summary>
+    /// <summary>Bakes the focus body's large impostor on a worker; the one on screen stays until it is uploaded.</summary>
     private void StartFocusBake()
     {
-        if (_focusTexture is not null)
-        {
-            if (!_focusTexture.Baked)
-                return;
-
-            _retired.Add(new Retired(_frame, _focusTexture, _focusSet));
-            _focusTexture = null;
-        }
-
         var body = _bodies[_focus];
-        _focusTextureBody = _focus;
-        _focusTexture = new ImpostorTexture(_context, body.Generator, PlanetImpostor.FocusSize);
-        _focusSet = _freeFocusSets.Pop();
-        _renderer.WriteSet(_focusSet, _focusTexture);
-        _focusTexture.QueueBake(_scheduler);
+        _stale = false;
+        _nextBody = _focus;
+        _nextTexture = new ImpostorTexture(_context, body.Generator, PlanetImpostor.FocusSize);
+        _nextSet = _freeFocusSets.Pop();
+        _renderer.WriteSet(_nextSet, _nextTexture);
+        _nextTexture.QueueBake(_scheduler);
         _scheduler.ExecuteJobs();
+    }
+
+    /// <summary>The baked impostor goes on screen; the old one is freed once no frame uses it.</summary>
+    private void PromoteFocus()
+    {
+        if (_focusTexture is not null)
+            _retired.Add(new Retired(_frame, _focusTexture, _focusSet));
+
+        (_focusTexture, _focusSet, _focusTextureBody) = (_nextTexture, _nextSet, _nextBody);
+        (_nextTexture, _nextBody) = (null, -1);
     }
 
     private VkDescriptorSet NewSet(ImpostorTexture texture)
@@ -567,6 +581,7 @@ public sealed class CelestialView : IDisposable
             retired.Texture.Dispose();
 
         _focusTexture?.Dispose();
+        _nextTexture?.Dispose();
         _placeholder.Dispose();
     }
 }

@@ -157,7 +157,7 @@ public sealed class PlanetTools
         return null;
     }
 
-    public void DrawPanel(string body, float refreshMs, (float Ms, int Leaves) replace, int pendingJobs)
+    public void DrawPanel(string body, float refreshMs, (float Ms, float MainMs, int Leaves) replace, int pendingJobs)
     {
         if (!ImGui.Begin("Planet"u8))
         {
@@ -168,7 +168,8 @@ public sealed class PlanetTools
         var layer = _session.Layer;
         ImGui.Text($"Body {body}  kind {layer.Kind}");
         ImGui.Text($"Version {layer.Version}{(_session.Modified ? " (unsaved)" : "")}  {layer.Sites.Count} sites, {layer.Markers.Count} markers");
-        ImGui.Text($"Refresh {refreshMs:F0} ms + bounds {replace.Ms:F0} ms, {replace.Leaves} leaves; {pendingJobs} jobs");
+        ImGui.Text($"Refresh {refreshMs:F0} ms, swap after {replace.Ms:F0} ms ({replace.MainMs:F1} ms main)");
+        ImGui.Text($"{replace.Leaves} leaves regenerated; {pendingJobs} jobs");
 
         if (ImGui.Button("Save (Ctrl+S)"u8))
             _session.Save();

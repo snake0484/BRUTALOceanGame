@@ -73,6 +73,8 @@ public sealed class PlanetDesignerApp : DesignApp
     private FocusBlend _focusBlend = FocusBlend.Alone;
     private long _lastFrame;
     private float _refreshMs;
+    private bool _focusUpgraded;
+    private float _focusBakeMs;
 
     public PlanetDesignerApp(PlanetDesignerOptions options)
         : base(new DesignAppOptions
@@ -209,9 +211,16 @@ public sealed class PlanetDesignerApp : DesignApp
         _terrain.Update(_view.Position, 0.0);
 
         if (_terrain.LastReplace != replaced)
-            Log.Info($"terrain: bounds rebuilt in {_terrain.LastReplace.Ms:F0} ms, {_terrain.LastReplace.Leaves} loaded leaves regenerate; ground at the target {_generator.Surface.Height(Target.X, Target.Y, Target.Z):F1} m (generated {_session.Generated.Surface.Height(Target.X, Target.Y, Target.Z):F1} m)");
+            Log.Info($"terrain: swapped {_terrain.LastReplace.Ms:F0} ms after the request ({_terrain.LastReplace.MainMs:F1} ms on the main thread), {_terrain.LastReplace.Leaves} loaded leaves regenerate; ground at the target {_generator.Surface.Height(Target.X, Target.Y, Target.Z):F1} m (generated {_session.Generated.Surface.Height(Target.X, Target.Y, Target.Z):F1} m)");
 
         _terrainDrawn = terrain && _terrain.Focus == _terrainBody;
+
+        if (_celestial.FocusUpgraded != _focusUpgraded || _celestial.FocusBakeMs != _focusBakeMs)
+        {
+            (_focusUpgraded, _focusBakeMs) = (_celestial.FocusUpgraded, _celestial.FocusBakeMs);
+            Log.Info($"focus impostor {(_focusUpgraded ? "on screen" : "gone")} at frame {Frames} (bake {_focusBakeMs:F0} ms)");
+        }
+
         UpdateCover(_terrainDrawn, seconds);
 
         if (OnSettled is { } settled && _terrain.Settled)
