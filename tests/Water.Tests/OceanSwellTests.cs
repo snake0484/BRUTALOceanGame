@@ -216,8 +216,10 @@ public sealed class OceanSwellTests(ITestOutputHelper output)
         output.WriteLine($"max steps: phase {maxPhase:E2}, group {maxGroup:E2} rad, ω {maxOmega:E2}, ratio {maxRatio:E2}, direction {maxDir:E2} rad, breaker {maxBreaker:E2} m; settled Tp {swell.PeakPeriod:F2} s");
         Assert.Equal(1f, swell.BlendProgress);
         Assert.InRange(swell.PeakPeriod, 13.99f, 14.01f);
-        Assert.True(maxPhase < 1e-4, $"phase step {maxPhase}");
-        Assert.True(maxGroup < 1e-4, $"group step {maxGroup}");
+        // The closed-form phase closes a gap of at most π on the blend's smoothstep: at most 1.5 π / BlendSeconds rad/s off ω.
+        var bound = 1.5 * Math.PI / swell.BlendSeconds * Tick + 1e-4;
+        Assert.True(maxPhase < bound, $"phase step {maxPhase} against {bound}");
+        Assert.True(maxGroup < bound, $"group step {maxGroup} against {bound}");
         Assert.True(maxOmega < 1e-3f, $"ω step {maxOmega}");
         Assert.True(maxRatio < 1e-3f, $"ratio step {maxRatio}");
         Assert.True(maxDir < 5e-3f, $"direction step {maxDir}");

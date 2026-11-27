@@ -68,7 +68,6 @@ public sealed partial class GameApp : IDisposable
     private readonly ImGuiLayer _imgui;
     private readonly ProfilerPanel _profiler;
     private readonly SimWorld _sim;
-    private readonly OceanSwell _swell;
     private readonly OceanPanel _oceanPanel;
     private readonly WeatherSystem _weather;
     private readonly WeatherPanel _weatherPanel;
@@ -156,8 +155,7 @@ public sealed partial class GameApp : IDisposable
     {
         _benchFaces = benchFaces;
         _surfBeach = surfBeach;
-        var weatherField = new WeatherField(new WeatherClimate());
-        _sim = new SimWorld(seed: menu?.Seed ?? 1, WorkerBudget.Tick, weatherField, kind: planetKind, kindSeed: kindSeed) { DriveWind = weather, WeatherTimeOffset = weatherOffset * 60.0 };
+        _sim = new SimWorld(seed: menu?.Seed ?? 1, WorkerBudget.Tick, weather, kind: planetKind, kindSeed: kindSeed) { WeatherTimeOffset = weatherOffset * 60.0 };
 
         ref readonly var planet = ref _sim.Celestial[_sim.PlanetIndex];
         _planetFrame = planet.Surface;
@@ -196,7 +194,6 @@ public sealed partial class GameApp : IDisposable
         });
         _window.OnKey += OnKey;
 
-        _swell = _sim.Ocean.Swell;
         _renderer = new Renderer(_window, _stats, Validation, vsync: benchSeconds <= 0.0, renderScale);
         _imgui = new ImGuiLayer(_window, _renderer);
 
@@ -207,16 +204,17 @@ public sealed partial class GameApp : IDisposable
             SwellPeriod = swell?[1] ?? 13f,
             SwellDirection = (swell?[2] ?? 0f) * MathF.PI / 180f,
         };
-        _weather = new WeatherSystem(weatherField, _sim.WeatherTime, CameraXZ);
+        _weather = new WeatherSystem(_sim.Weather);
+        _weather.Tick(_sim.WeatherTick, PlanetCamera);
         _sim.SetSwell(wind);
         _oceanFft = new OceanFft(_renderer) { DebugView = foamDebug };
         _depths = new ShoreDepthGrid(_sim.Shore);
         _depthTexture = new ShoreDepthTexture(_renderer);
         _coast = new CoastRegionSet(_sim.Ocean.Tiles, _sim.CoastDepth, WorkerBudget.Side);
         _coastGpu = new CoastAtlasGpu(_renderer);
-        _oceanPanel = new OceanPanel(_sim.Ocean, _oceanFft, _depths, _depthTexture, _coast, _coastGpu) { BreakerFaces = faces };
+        _oceanPanel = new OceanPanel(_sim.Ocean, p => _sim.SetSwell(p), _oceanFft, _depths, _depthTexture, _coast, _coastGpu) { BreakerFaces = faces };
         _surfTest = surfBeach ? new SurfBeachTest(_sim, _coast, surfClimb) : null;
-        _weatherPanel = new WeatherPanel(_weather.Map) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset };
+        _weatherPanel = new WeatherPanel(_weather.Cache, _sim.Ocean.Swells) { DriveOcean = weather, DriveSky = weather, TimeOffsetMinutes = weatherOffset };
         _instances = new InstanceBuffer(_renderer);
         _terrainRenderer = new TerrainRenderer(_renderer, _instances);
 
@@ -388,7 +386,8 @@ public sealed partial class GameApp : IDisposable
                 _sections.Uploads = Lap(ref mark);
 
                 gpu.Begin(commands, _fftScope);
-                _oceanFft.Record(commands, _renderer.FrameIndex, _swell, renderTime, (float)frameSeconds);
+                var spectrum = _sim.Ocean.Swells.SpectrumAt(PlanetCamera);
+                _oceanFft.Record(commands, _renderer.FrameIndex, spectrum, renderTime, (float)frameSeconds);
                 gpu.End(commands, _fftScope);
 
                 if (ocean)
@@ -407,7 +406,7 @@ public sealed partial class GameApp : IDisposable
                         DepthCellX = _depths.Origin.X,
                         DepthCellZ = _depths.Origin.Z,
                         DepthVersion = _depths.FrameVersion,
-                    }, _coast);
+                    }, spectrum, _coast);
                     _sections.Prepare = Lap(ref mark);
                     gpu.Begin(commands, _oceanComputeScope);
                     _ocean.RecordCompute(commands, _renderer.FrameIndex, (float)frameSeconds, _sim.Clock.TickIndex);
@@ -502,7 +501,7 @@ public sealed partial class GameApp : IDisposable
             SkyZenith = _clearSky.SkyZenith * (0.02f + 0.98f * day),
             SkyHorizon = _clearSky.SkyHorizon * (0.03f + 0.97f * day),
         };
-        _weather.Update(CameraXZ, _ocean, clear, _weatherPanel.DriveSky);
+        _weather.Update(PlanetCamera, _sim.WeatherTick, _ocean, clear, _weatherPanel.DriveSky);
         var horizon = _orbitTest is null ? System.Numerics.Vector3.Lerp(SpaceColour, _ocean.SkyHorizon, Atmosphere) : SpaceColour;
         _renderer.ClearColor = _seamTest is null ? new float4(horizon.X, horizon.Y, horizon.Z, 1f) : SeamTest.Key;
     }
@@ -606,12 +605,18 @@ public sealed partial class GameApp : IDisposable
     /// The coast regions follow the camera and the swell's target carrier (breaking-waves-brief.md): baked on a job,
     /// faded in and out; none without a sea to draw.
     /// </summary>
+    /// <summary>The swell of the camera's sea tile.</summary>
+    private OceanSwell Swell => _sim.Ocean.Swells.Near(PlanetCamera);
+
+    /// <summary>The camera in the planet's frame; the spawn when it is in another frame.</summary>
+    private double3 PlanetCamera => _camera.Frame == _planetFrame ? _camera.Position : _sim.Bubble.Origin;
+
     private void UpdateCoast(double3 camera, double frameSeconds)
     {
         var start = Stopwatch.GetTimestamp();
         var bytes = GC.GetAllocatedBytesForCurrentThread();
-        var carrier = _seaWanted ? CoastCarrier.From(_swell.TargetCarrierDirection, _swell.TargetCarrierOmega, _swell.TargetCarrierHeight) : default;
-        _coast.Update(camera, carrier, _swell.TargetSignificantHeight, (float)frameSeconds);
+        var carrier = _seaWanted ? CoastCarrier.From(Swell.TargetCarrierDirection, Swell.TargetCarrierOmega, Swell.TargetCarrierHeight) : default;
+        _coast.Update(camera, carrier, Swell.TargetSignificantHeight, (float)frameSeconds);
         _coastAllocated += GC.GetAllocatedBytesForCurrentThread() - bytes;
         _coastMs.Record((float)Stopwatch.GetElapsedTime(start).TotalMilliseconds);
     }
@@ -797,19 +802,6 @@ public sealed partial class GameApp : IDisposable
         return new System.Numerics.Vector3((float)centre.X, (float)centre.Y, (float)centre.Z);
     }
 
-    /// <summary>The camera in the weather plane (the spawn bubble's); the plane's origin outside the planet's frame.</summary>
-    private System.Numerics.Vector2 CameraXZ
-    {
-        get
-        {
-            if (_camera.Frame != _planetFrame || _orbitTest is not null)
-                return default;
-
-            var local = _sim.Bubble.ToLocal(_camera.Position);
-            return new System.Numerics.Vector2(local.X, local.Z);
-        }
-    }
-
     /// <summary>The camera at a point of the spawn bubble (y up from sea level, +x out to sea), looking along yaw (from +X toward +Z) and pitch.</summary>
     private void PlaceCamera(System.Numerics.Vector3 position, float yaw, float pitch)
     {
@@ -831,14 +823,17 @@ public sealed partial class GameApp : IDisposable
         _sim.DriveWind = _weatherPanel.DriveOcean;
         _sim.WeatherTimeOffset = _weatherPanel.TimeOffset;
 
+        _sim.ViewAnchor = _camera.Frame == _planetFrame ? _camera.Position : null;
+
         var ticks = _sim.Advance(frameSeconds);
         for (var i = 0; i < ticks; i++)
         {
             var tickStart = Stopwatch.GetTimestamp();
-            _weather.Tick(_sim.WeatherTime, CameraXZ);
-            _weatherPanel.TickMs.Record((float)Stopwatch.GetElapsedTime(tickStart).TotalMilliseconds);
+            _weather.Tick(_sim.WeatherTick, PlanetCamera);
+            _weatherPanel.TickMs.Record(_weather.LastTickMs);
 
             _sim.Tick();
+            _weatherPanel.SeaMs.Record(_sim.LastSwellMs);
             _oceanPanel.PrepareMs.Record(_sim.LastSwellMs);
             _stats.Tick.Record((float)Stopwatch.GetElapsedTime(tickStart).TotalMilliseconds);
         }
@@ -881,7 +876,7 @@ public sealed partial class GameApp : IDisposable
         _terrainRenderer.StatsEnabled = _profiler.Open || _terrainPanel.Open || _orbitTest is not null || _moonTest is not null;
         _oceanPanel.Draw();
         _terrainPanel.Draw();
-        _weatherPanel.Draw(CameraXZ);
+        _weatherPanel.Draw(PlanetCamera, _sim.WeatherTick);
         DrawMenu(); // menu
         _imgui.EndFrame();
         _stats.Ui.Record((float)Stopwatch.GetElapsedTime(uiStart).TotalMilliseconds);

@@ -5,9 +5,9 @@
 // Everything with a world phase (wave and carrier phases, cascade anchors, depth rects) is rebased to the camera in
 // double by OceanRenderer.Prepare.
 
-struct Wave { vec4 a; vec4 b; }; // a = (ku, kv, unused, amplitude), b = (cu, cv, omega, unused), in the wave plane's axes
+struct Wave { vec4 a; vec4 b; }; // a = (ku, kv, phase at the camera in its slot's tile plane, amplitude), b = (cu, cv, omega, unused), in the wave plane's axes
 
-const int MAX_WAVES = 512;
+const int MAX_WAVES = 1536; // OceanRenderer.MaxWaves: every slot's tile's own components
 const int MAX_SLOTS = 4;
 const int MAX_COAST = 8;
 
@@ -44,12 +44,12 @@ layout(set = 0, binding = 0, std140) uniform Frame {
     vec4 slotFromTile[MAX_SLOTS]; // per slot: the inverse, (x by u, x by v, z by u, z by v)
     vec4 slotSide[MAX_SLOTS];     // per slot: x = side of the row edge, y = side of its row's cell edge (-1, +1, 0 = whole), z = its row (0 south, 1 north)
     CoastRegion coast[MAX_COAST]; // the coast regions drawn (ocean_breaker.glsl)
+    ivec4 slotWaves[MAX_SLOTS];   // per slot: x = its tile's first wave, y = one past its last (each tile has its own swell, SeaSwells)
     int waveCount;
     int slotCount;
     float debugView;     // 1 = Jacobian/foam
     int coastCount;
     Wave waves[MAX_WAVES];
-    vec4 phases[MAX_WAVES]; // per wave, its phase at the camera in each slot's tile plane
 } frame;
 
 layout(set = 0, binding = 1) uniform sampler2DArray dispMap;  // (λDx, h, λDz, λDxz)
@@ -385,7 +385,6 @@ void slotShares(vec2 x0, out float w[MAX_SLOTS])
 Swell swellAt(vec2 x0, float lo, float hi, float cap)
 {
     Swell o = Swell(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    int count = min(frame.waveCount, MAX_WAVES);
     float weights[MAX_SLOTS];
     slotWeights(x0, weights);
 
@@ -403,7 +402,9 @@ Swell swellAt(vec2 x0, float lo, float hi, float cap)
         vec2 D = vec2(0.0);
         vec3 j = vec3(0.0); // (uu, vv, uv)
 
-        for (int i = 0; i < count; ++i)
+        int last = min(frame.slotWaves[s].y, MAX_WAVES);
+
+        for (int i = frame.slotWaves[s].x; i < last; ++i)
         {
             vec4 a = frame.waves[i].a;
             vec4 b = frame.waves[i].b;
@@ -414,7 +415,7 @@ Swell swellAt(vec2 x0, float lo, float hi, float cap)
 
             float A = a.w * w;
             vec2 c = b.xy * w;
-            float theta = dot(a.xy, uv) + frame.phases[i][s];
+            float theta = dot(a.xy, uv) + a.z;
             float sn = sin(theta);
             float cs = cos(theta);
 

@@ -351,9 +351,9 @@ public sealed unsafe class OceanFft : IDisposable
     /// column IFFT (which resolves the maps and the foam) and the whitecap thresholds. Must be recorded outside a render
     /// pass, before the ocean draw.
     /// </summary>
-    public void Record(CommandBuffer commands, int frameIndex, OceanSwell swell, double renderTime, float frameSeconds)
+    public void Record(CommandBuffer commands, int frameIndex, in SpectrumState spectrum, double renderTime, float frameSeconds)
     {
-        var rebuild = WriteUniforms(frameIndex, swell, renderTime, frameSeconds);
+        var rebuild = WriteUniforms(frameIndex, spectrum, renderTime, frameSeconds);
 
         if (!_initialised)
         {
@@ -413,9 +413,8 @@ public sealed unsafe class OceanFft : IDisposable
     }
 
     /// <summary>Writes this frame's uniforms. True when the spectrum cache must be rebuilt from them.</summary>
-    private bool WriteUniforms(int frameIndex, OceanSwell swell, double renderTime, float frameSeconds)
+    private bool WriteUniforms(int frameIndex, in SpectrumState spectrum, double renderTime, float frameSeconds)
     {
-        var spectrum = swell.GpuSpectrum;
         var p = spectrum.Params;
         var depth = float.IsFinite(p.Depth) ? p.Depth : 1e6f;
         var u = (FftUniforms*)((byte*)_uniforms.Mapped + frameIndex * UniformAlignment);
