@@ -10,9 +10,10 @@ namespace BrutalGame.Designer.Ui;
 /// A component's programme, in the component editor: the interface it implements (built-in, the player's, or a new one
 /// saved to the library); the node graph that answers each call (nodes as boxes, flow as curves from an output to the
 /// next node; drag a node's title to move it, drag from an output onto a node to link it, right-click an output to cut
-/// it, right-click a node to delete it, right-click empty space to add one, middle-drag to pan); each state's pose (where
-/// every joint stands in it, or holds); and the preview (a button per call, "Something in the way", the state it is in,
-/// the node running, highlighted).
+/// it, right-click a node to delete it, right-click empty space to add one, middle-drag to pan; a condition node's orange
+/// output goes to the "when" input of a Wait until or If); each state's pose (where every joint stands in it, or holds);
+/// and the preview (a button per call, "Jam the moving parts" to stop them as something in the way would, the state it
+/// is in, the node running, highlighted).
 /// </summary>
 public sealed class ProgramPanel
 {
@@ -29,6 +30,8 @@ public sealed class ProgramPanel
     private static readonly ImColor8 Running = new(255, 220, 90, 255);
     private static readonly ImColor8 Pin = new(150, 210, 255, 255);
     private static readonly ImColor8 Link = new(150, 210, 255, 200);
+    private static readonly ImColor8 ConditionPin = new(255, 170, 70, 255);
+    private static readonly ImColor8 ConditionLink = new(255, 170, 70, 200);
     private static readonly ImColor8 Text = new(235, 235, 235, 255);
     private static readonly ImColor8 Faint = new(200, 200, 200, 160);
 
@@ -40,6 +43,7 @@ public sealed class ProgramPanel
     private ushort _dragNode;
     private float2 _dragDelta;
     private (ushort Node, int Output)? _linkFrom;
+    private ushort _conditionFrom;
     private ushort _menuNode;
     private float2 _addAt;
     private string _message = "";
@@ -50,31 +54,52 @@ public sealed class ProgramPanel
     public int CallRequest = -1;
     public bool ResetRequest;
 
-    /// <summary>The preview's "Something in the way".</summary>
-    public bool Blocked;
+    /// <summary>The preview's "Jam the moving parts": they stop where they are, as if something were in the way.</summary>
+    public bool Jammed;
 
     public ProgramPanel(InterfaceLibrary library) => _library = library;
+
+    /// <summary>The nodes the Add menu offers, in its order (older kinds still run but are not offered).</summary>
+    private static readonly NodeKind[] Offered =
+    [
+        NodeKind.OnCall, NodeKind.SetState, NodeKind.WaitUntil, NodeKind.Wait, NodeKind.If, NodeKind.IfState,
+        NodeKind.JointAt, NodeKind.StateIs, NodeKind.InPose,
+    ];
 
     public static string NodeName(NodeKind kind) => kind switch
     {
         NodeKind.OnCall => "On call",
         NodeKind.SetState => "Set state",
-        NodeKind.WaitArrived => "Wait until in place",
+        NodeKind.WaitArrived => "Wait until in place (old)",
         NodeKind.Wait => "Wait",
         NodeKind.IfState => "If state is",
-        _ => "If something is in the way",
+        NodeKind.IfBlocked => "If jammed (old)",
+        NodeKind.WaitUntil => "Wait until",
+        NodeKind.If => "If",
+        NodeKind.StateIs => "State is",
+        NodeKind.JointAt => "Joint is at",
+        _ => "Joints in pose",
     };
 
     private static string[] Outputs(NodeKind kind) => kind switch
     {
-        NodeKind.WaitArrived => ["in place", "in the way"],
-        NodeKind.IfState or NodeKind.IfBlocked => ["yes", "no"],
+        NodeKind.WaitArrived => ["in place", "stopped"],
+        NodeKind.WaitUntil => ["got there", "timed out"],
+        NodeKind.IfState or NodeKind.IfBlocked or NodeKind.If => ["yes", "no"],
+        NodeKind.StateIs or NodeKind.JointAt or NodeKind.InPose => [],
         _ => ["then"],
     };
 
-    private static bool HasParam(NodeKind kind) => kind is NodeKind.OnCall or NodeKind.SetState or NodeKind.IfState or NodeKind.Wait;
+    /// <summary>How many rows of settings a node has.</summary>
+    private static int ParamRows(NodeKind kind) => kind switch
+    {
+        NodeKind.JointAt => 2,
+        NodeKind.OnCall or NodeKind.SetState or NodeKind.IfState or NodeKind.Wait or NodeKind.WaitUntil or NodeKind.StateIs => 1,
+        _ => 0,
+    };
 
-    private static float Height(NodeKind kind) => TitleHeight + (HasParam(kind) ? ParamHeight : 0) + Outputs(kind).Length * OutHeight + 6;
+    private static float Height(NodeKind kind) =>
+        TitleHeight + ParamRows(kind) * ParamHeight + Math.Max(Outputs(kind).Length, kind is NodeKind.WaitUntil or NodeKind.If ? 1 : 0) * OutHeight + 6;
 
     public void Draw(DesignSession session, ProgramInstance? run)
     {
@@ -116,7 +141,7 @@ public sealed class ProgramPanel
             _message = ok ? "" : "The standard door sequence needs a door's calls (Open, Close, Lock, Unlock) and states (Closed, Opening, Open, Closing, Locked, Blocked).";
         }
 
-        ImGui.TextDisabled("Drag titles to move, outputs onto a node to link; right-click to add, delete or cut; middle-drag pans."u8);
+        ImGui.TextDisabled("Drag titles to move, outputs onto a node to link (orange: a condition, onto a Wait until or If); right-click to add, delete or cut; middle-drag pans."u8);
         DrawGraph(session, program, run);
         DrawPoses(session, program);
 
@@ -217,7 +242,9 @@ public sealed class ProgramPanel
         if (ImGui.Button("Reset"u8))
             ResetRequest = true;
 
-        ImGui.Checkbox("Something in the way"u8, ref Blocked);
+        ImGui.Checkbox("Jam the moving parts"u8, ref Jammed);
+        ImGui.SameLine();
+        ImGui.TextDisabled("(they stop where they are, as if something were in the way)"u8);
 
         if (run is not null && run.State < program.Interface.States.Count)
             ImGui.Text($"State: {program.Interface.States[run.State]}{(run.Held ? " (stopped)" : "")}{(run.Node != 0 ? $", running node {run.Node}" : "")}");
@@ -227,7 +254,7 @@ public sealed class ProgramPanel
 
     private void DrawGraph(DesignSession session, HullProgram program, ProgramInstance? run)
     {
-        float2? size = new float2(0f, 380f);
+        float2? size = new float2(0f, 480f);
 
         if (!ImGui.BeginChild("##graph"u8, size, ImGuiChildFlags.Borders, ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse | ImGuiWindowFlags.NoMove))
         {
@@ -264,6 +291,9 @@ public sealed class ProgramPanel
                 if (to != 0 && target >= 0)
                     Curve(list, OutPin(origin, n, k), InPin(origin, program.Nodes[target]), Link);
             }
+
+            if (n.TakesCondition && n.In != 0 && program.IndexOf(n.In) is var c and >= 0)
+                Curve(list, ConditionOut(origin, program.Nodes[c]), ConditionIn(origin, n), ConditionLink);
         }
 
         var face = program.Interface;
@@ -283,7 +313,7 @@ public sealed class ProgramPanel
                 {
                     var p = NodePos(origin, target);
 
-                    if (target.HasInput && target.Id != from.Node && mouse.X >= p.X && mouse.X <= p.X + NodeWidth && mouse.Y >= p.Y && mouse.Y <= p.Y + Height(target.Kind))
+                    if (target.HasInput && target.Id != from.Node && Inside(mouse, p, target.Kind))
                     {
                         var (id, output, to) = (from.Node, from.Output, target.Id);
                         ProgramCommands.Set(session, pr => Relink(pr, id, output, to));
@@ -293,6 +323,32 @@ public sealed class ProgramPanel
 
                 _linkFrom = null;
             }
+        }
+
+        // A condition being dragged: drop it on a Wait until or If.
+        if (_conditionFrom != 0 && program.IndexOf(_conditionFrom) is var ci and >= 0)
+        {
+            var mouse = io.MousePos;
+            Curve(list, ConditionOut(origin, program.Nodes[ci]), mouse, Running);
+
+            if (!ImGui.IsMouseDown(ImGuiMouseButton.Left))
+            {
+                foreach (var target in program.Nodes)
+                {
+                    if (target.TakesCondition && Inside(mouse, NodePos(origin, target), target.Kind))
+                    {
+                        var (id, condition) = (target.Id, _conditionFrom);
+                        ProgramCommands.Set(session, pr => Edit(pr, id, n => n with { In = condition }));
+                        break;
+                    }
+                }
+
+                _conditionFrom = 0;
+            }
+        }
+        else
+        {
+            _conditionFrom = 0;
         }
 
         // Right-click on empty canvas: add a node there.
@@ -306,7 +362,7 @@ public sealed class ProgramPanel
         {
             ImGui.TextDisabled("Add node"u8);
 
-            foreach (var kind in Enum.GetValues<NodeKind>())
+            foreach (var kind in Offered)
             {
                 if (!ImGui.MenuItem(NodeName(kind), default, false, true))
                     continue;
@@ -322,7 +378,9 @@ public sealed class ProgramPanel
                 ProgramCommands.Set(session, p => p.Nodes.Add(new ProgramNode
                 {
                     Id = p.NextNodeId(), Kind = kind, X = (short)Math.Clamp(at.X, short.MinValue, short.MaxValue), Y = (short)Math.Clamp(at.Y, short.MinValue, short.MaxValue),
-                    B = kind == NodeKind.Wait ? (short)ProgramRunner.TicksPerSecond : (short)0,
+                    B = kind switch { NodeKind.Wait => (short)ProgramRunner.TicksPerSecond, NodeKind.WaitUntil => (short)(5 * ProgramRunner.TicksPerSecond), _ => (short)0 },
+                    A = kind == NodeKind.JointAt ? ProgramCommands.PositionTolerance : (byte)0,
+                    Joint = kind == NodeKind.JointAt ? session.Doc.Joints?.Joints.FirstOrDefault()?.Id ?? 0 : 0,
                 }));
             }
 
@@ -343,6 +401,7 @@ public sealed class ProgramPanel
                         var n = p.Nodes[i];
                         n.Out0 = n.Out0 == id ? (ushort)0 : n.Out0;
                         n.Out1 = n.Out1 == id ? (ushort)0 : n.Out1;
+                        n.In = n.In == id ? (ushort)0 : n.In;
                         p.Nodes[i] = n;
                     }
                 });
@@ -370,8 +429,25 @@ public sealed class ProgramPanel
     private float2 OutPin(float2 origin, in ProgramNode n, int k)
     {
         var p = NodePos(origin, n);
-        return new float2(p.X + NodeWidth, p.Y + TitleHeight + (HasParam(n.Kind) ? ParamHeight : 0) + k * OutHeight + OutHeight * 0.5f);
+        return new float2(p.X + NodeWidth, p.Y + TitleHeight + ParamRows(n.Kind) * ParamHeight + k * OutHeight + OutHeight * 0.5f);
     }
+
+    /// <summary>A condition's output: in its title, on the right.</summary>
+    private float2 ConditionOut(float2 origin, in ProgramNode n)
+    {
+        var p = NodePos(origin, n);
+        return new float2(p.X + NodeWidth, p.Y + TitleHeight * 0.5f);
+    }
+
+    /// <summary>A Wait until's or If's "when" input: on the left, level with its first output.</summary>
+    private float2 ConditionIn(float2 origin, in ProgramNode n)
+    {
+        var p = NodePos(origin, n);
+        return new float2(p.X, p.Y + TitleHeight + ParamRows(n.Kind) * ParamHeight + OutHeight * 0.5f);
+    }
+
+    private static bool Inside(float2 mouse, float2 p, NodeKind kind) =>
+        mouse.X >= p.X && mouse.X <= p.X + NodeWidth && mouse.Y >= p.Y && mouse.Y <= p.Y + Height(kind);
 
     private static void Curve(ImDrawListPtr list, float2 a, float2 b, ImColor8 colour)
     {
@@ -420,13 +496,37 @@ public sealed class ProgramPanel
         if (node.HasInput)
             list.AddCircleFilled(InPin(origin, node), PinRadius, Pin, 12);
 
-        // Its setting.
-        if (HasParam(node.Kind))
+        // A condition's output: drag onto a Wait until or If.
+        if (node.IsCondition)
         {
-            ImGui.SetCursorScreenPos(new float2(p.X + 6, p.Y + TitleHeight + 2));
-            ImGui.SetNextItemWidth(NodeWidth - 12);
-            DrawParam(session, face, node);
+            var pin = ConditionOut(origin, node);
+            list.AddCircleFilled(pin, PinRadius, ConditionPin, 12);
+            ImGui.SetCursorScreenPos(new float2(pin.X - 8, pin.Y - 8));
+            ImGui.InvisibleButton("##cond"u8, new float2(16, 16), ImGuiButtonFlags.MouseButtonLeft);
+
+            if (ImGui.IsItemActive() && _conditionFrom == 0)
+                _conditionFrom = node.Id;
         }
+
+        // A Wait until's or If's "when": right-click to cut.
+        if (node.TakesCondition)
+        {
+            var pin = ConditionIn(origin, node);
+            list.AddCircleFilled(pin, PinRadius, ConditionPin, 12);
+            list.AddText(new float2(pin.X + 9, pin.Y - 8), Faint, node.In == 0 ? "when (link a condition)" : "when");
+            ImGui.SetCursorScreenPos(new float2(pin.X - 8, pin.Y - 8));
+            ImGui.InvisibleButton("##when"u8, new float2(16, 16), ImGuiButtonFlags.MouseButtonRight);
+
+            if (ImGui.IsItemClicked(ImGuiMouseButton.Right))
+            {
+                var id = node.Id;
+                ProgramCommands.Set(session, pr => Edit(pr, id, n => n with { In = 0 }));
+            }
+        }
+
+        // Its settings.
+        if (ParamRows(node.Kind) > 0)
+            DrawParam(session, face, node, p);
 
         // Outputs: drag onto a node to link, right-click to cut.
         for (var k = 0; k < outs.Length; k++)
@@ -451,34 +551,91 @@ public sealed class ProgramPanel
         ImGui.PopID();
     }
 
-    private void DrawParam(DesignSession session, ComponentInterface face, ProgramNode node)
+    private void DrawParam(DesignSession session, ComponentInterface face, ProgramNode node, float2 p)
     {
         var id = node.Id;
+        ImGui.SetCursorScreenPos(new float2(p.X + 6, p.Y + TitleHeight + 2));
+        ImGui.SetNextItemWidth(NodeWidth - 12);
 
         switch (node.Kind)
         {
             case NodeKind.OnCall:
                 Pick(session, id, node.A, face.Calls);
                 break;
-            case NodeKind.SetState or NodeKind.IfState:
+            case NodeKind.SetState or NodeKind.IfState or NodeKind.StateIs:
                 Pick(session, id, node.A, face.States);
                 break;
             case NodeKind.Wait:
-            {
-                if (!_waitDraft.TryGetValue(id, out var seconds) || !ImGui.IsAnyItemActive())
-                    seconds = node.B / (float)ProgramRunner.TicksPerSecond;
-
-                ImGui.InputFloat("##wait"u8, ref seconds, 0f, 0f, "%.2f s"u8, ImGuiInputTextFlags.None);
-                _waitDraft[id] = seconds;
-
-                if (ImGui.IsItemDeactivatedAfterEdit())
-                {
-                    var ticks = (short)Math.Clamp((int)MathF.Round(seconds * ProgramRunner.TicksPerSecond), 0, short.MaxValue);
-                    ProgramCommands.Set(session, pr => Edit(pr, id, n => n with { B = ticks }));
-                }
-
+                Seconds(session, node, "%.2f s");
                 break;
+            case NodeKind.WaitUntil:
+                Seconds(session, node, node.B == 0 ? "for ever" : "time out %.2f s");
+                break;
+            case NodeKind.JointAt:
+                JointAt(session, node, p);
+                break;
+        }
+    }
+
+    /// <summary>A Wait's or Wait until's time, in seconds (stored in ticks).</summary>
+    private void Seconds(DesignSession session, ProgramNode node, string format)
+    {
+        var id = node.Id;
+
+        if (!_waitDraft.TryGetValue(id, out var seconds) || !ImGui.IsAnyItemActive())
+            seconds = node.B / (float)ProgramRunner.TicksPerSecond;
+
+        ImGui.InputFloat("##seconds"u8, ref seconds, 0f, 0f, format, ImGuiInputTextFlags.None);
+        _waitDraft[id] = seconds;
+
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            var ticks = (short)Math.Clamp((int)MathF.Round(seconds * ProgramRunner.TicksPerSecond), 0, short.MaxValue);
+            ProgramCommands.Set(session, pr => Edit(pr, id, n => n with { B = ticks }));
+        }
+    }
+
+    /// <summary>A Joint is at: which joint, then where (degrees, or a slider's metres) and how near.</summary>
+    private void JointAt(DesignSession session, ProgramNode node, float2 p)
+    {
+        var id = node.Id;
+        var joints = session.Doc.Joints?.Joints;
+        var joint = joints?.Find(j => j.Id == node.Joint);
+
+        if (ImGui.BeginCombo("##joint"u8, joint is null ? "(pick a joint)" : $"{JointsPanel.KindName(joint.Kind)} #{joint.Id}", ImGuiComboFlags.None))
+        {
+            foreach (var j in joints ?? [])
+            {
+                var pick = j.Id;
+
+                if (ImGui.Selectable($"{JointsPanel.KindName(j.Kind)} #{j.Id}", j.Id == node.Joint, ImGuiSelectableFlags.None, default))
+                    ProgramCommands.Set(session, pr => Edit(pr, id, n => n with { Joint = pick }));
             }
+
+            ImGui.EndCombo();
+        }
+
+        var unit = joint?.Kind == JointKind.Slider ? 1000f : 10f;
+        var at = node.B / unit;
+        var near = node.A / unit;
+        ImGui.SetCursorScreenPos(new float2(p.X + 6, p.Y + TitleHeight + ParamHeight + 2));
+        ImGui.SetNextItemWidth((NodeWidth - 18) * 0.55f);
+        ImGui.InputFloat("##at"u8, ref at, 0f, 0f, joint?.Kind == JointKind.Slider ? "%.3f m" : "%.1f deg", ImGuiInputTextFlags.None);
+
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            var stored = (short)Math.Clamp((int)MathF.Round(at * unit), short.MinValue, short.MaxValue);
+            ProgramCommands.Set(session, pr => Edit(pr, id, n => n with { B = stored }));
+        }
+
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth((NodeWidth - 18) * 0.45f);
+        ImGui.InputFloat("##near"u8, ref near, 0f, 0f, joint?.Kind == JointKind.Slider ? "+-%.3f" : "+-%.1f", ImGuiInputTextFlags.None);
+
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            var stored = (byte)Math.Clamp((int)MathF.Round(near * unit), 0, 255);
+            ProgramCommands.Set(session, pr => Edit(pr, id, n => n with { A = stored }));
         }
     }
 
@@ -503,7 +660,8 @@ public sealed class ProgramPanel
     {
         NodeKind.OnCall => new ImColor8(70, 120, 200, 255),
         NodeKind.SetState => new ImColor8(70, 150, 100, 255),
-        NodeKind.WaitArrived or NodeKind.Wait => new ImColor8(150, 110, 60, 255),
+        NodeKind.WaitArrived or NodeKind.Wait or NodeKind.WaitUntil => new ImColor8(150, 110, 60, 255),
+        NodeKind.StateIs or NodeKind.JointAt or NodeKind.InPose => new ImColor8(170, 100, 40, 255),
         _ => new ImColor8(120, 80, 150, 255),
     };
 

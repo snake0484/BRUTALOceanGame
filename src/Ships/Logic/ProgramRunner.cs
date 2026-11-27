@@ -22,8 +22,8 @@ public sealed class ProgramInstance
 
     /// <summary>
     /// Something physically stops the moving parts (the game's sweep; the designer's preview toggle): while set, parts on
-    /// their way stop where they are (the record becomes held). The programme learns of it only by what it can see: a
-    /// part that never reaches its position, so a Wait until times out.
+    /// their way stop where they are (the record becomes held), and set off again when it clears. The programme learns of
+    /// it only by what it can see: a part that does not reach its position in time, so a Wait until times out.
     /// </summary>
     public bool Obstructed;
 }
@@ -137,11 +137,16 @@ public static class ProgramRunner
     {
         var changed = false;
 
-        // Stopped where they are by whatever is in the way.
+        // Stopped where they are by whatever is in the way; when it clears, the motors drive them on from there.
         if (instance.Obstructed && !instance.Held && !Arrived(program, joints, instance, tick))
         {
             Enter(program, joints, instance, instance.State, tick);
             instance.Held = true;
+            changed = true;
+        }
+        else if (!instance.Obstructed && instance.Held)
+        {
+            Enter(program, joints, instance, instance.State, tick);
             changed = true;
         }
 
