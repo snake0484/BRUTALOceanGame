@@ -2,6 +2,7 @@ using System.Numerics;
 using Brutal.GlfwApi;
 using Brutal.ImGuiApi;
 using Brutal.Numerics;
+using BrutalGame.Buildings;
 using BrutalGame.Designer.Ui;
 using BrutalGame.Engine.Jobs;
 using BrutalGame.Engine.Rendering;
@@ -16,7 +17,7 @@ using BrutalGame.Ships.Interior;
 namespace BrutalGame.Designer.App;
 
 /// <summary>
-/// BRUTALDesigner, on the design kit's shell (<see cref="DesignApp"/>): a tab per open ship or component (each its own
+/// BRUTALDesigner, on the design kit's shell (<see cref="DesignApp"/>): a tab per open ship, component or building (each its own
 /// design session, camera and component editor state), bakes on hull bake workers. Per frame: commit and poll, panels,
 /// the viewport tools, drawing the hull. Validation, the plan hash and a new bake start only when the session's version
 /// moves (a commit), never per frame. No Sim, networking or physics.
@@ -80,6 +81,10 @@ public sealed partial class DesignerApp : DesignApp
         public string Name = "";
         public DesignSession Session = null!;
         public ComponentWorkspace? Component;
+
+        /// <summary>Set on a building tab: the pad and foundation, on the plan's history.</summary>
+        public BuildingSession? Building;
+
         public readonly OrbitCamera Camera = new();
         public bool Framed;
 
@@ -159,6 +164,9 @@ public sealed partial class DesignerApp : DesignApp
         else if (demo || demoMesh)
             Demo(demoMesh);
 
+        if (BuildingDemo && load is null)
+            DemoBuilding();
+
         if (cutaway is not null)
         {
             _panels.Cutaway.Enabled = true;
@@ -204,6 +212,7 @@ public sealed partial class DesignerApp : DesignApp
         var copy = doc.Clone();
         PlanCanonical.Canonicalise(copy);
         _stats.Hash = PlanFormat.HashBody(copy);
+        CommitBuilding();
         // Hallways become room cuts and stairs after the plan's solids; their meshes follow the plan's in the table.
         var hallways = HallwayGeometry.Expand(doc.Interior, doc.Layers is not null, doc.Meshes.Count);
 
@@ -390,7 +399,9 @@ public sealed partial class DesignerApp : DesignApp
         _active = document;
         _session = document.Session;
         var component = document.Component is not null;
-        _panels.Workspace = component ? Workspace.Component : Workspace.Ship;
+        _panels.Workspace = component ? Workspace.Component : document.Building is not null ? Workspace.Building : Workspace.Ship;
+        _panels.UndoHook = document.Building is not null ? BuildingUndo : null;
+        _panels.RedoHook = document.Building is not null ? BuildingRedo : null;
         _tool.GuideScale = component ? 0.08 : 1.0;
         _meshEdit.Enabled = false;
         _prefabPanel.Selected = 0;
@@ -554,7 +565,7 @@ public sealed partial class DesignerApp : DesignApp
         _tabs.Clear();
 
         foreach (var d in _docs)
-            _tabs.Add(new DocumentTab(d.Key, d.Title, d.Session.Modified, d.Component is not null));
+            _tabs.Add(new DocumentTab(d.Key, d.Title, d.Session.Modified, d.Component is not null, d.Building is not null));
 
         _bar.ComponentTab = _active.Component is not null;
         _bar.Draw(_tabs, _active.Key);
@@ -605,6 +616,7 @@ public sealed partial class DesignerApp : DesignApp
             _profilesPanel.Draw(_session);
             _paintPanel.Draw(_session);
             DrawAero();
+            DrawBuildingPanel();
         }
 
         if (ContextBar.BeginShared())
@@ -676,6 +688,7 @@ public sealed partial class DesignerApp : DesignApp
         {
             _aeroPanel.DrawOverlay(_overlay);
             OpeningsPanel.DrawPlacedPorts(_session.Doc, _overlay, _camera);
+            DrawGround();
         }
         var used = !_tool.Dragging && (workspace is not null
             ? workspace.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
@@ -780,6 +793,13 @@ public sealed partial class DesignerApp : DesignApp
             case FileRequest.Open:
                 PickAndOpen();
                 break;
+            case FileRequest.NewBuilding:
+                NewBuilding();
+                _stats.Message = "New building: y = 0 is the ground";
+                break;
+            case FileRequest.OpenBuilding:
+                PickAndOpenBuilding();
+                break;
             case FileRequest.Save:
                 SaveCurrent();
                 break;
@@ -794,7 +814,9 @@ public sealed partial class DesignerApp : DesignApp
 
     private void PickAndOpen()
     {
-        if (_files.PickOpen(DialogFolder) is { } open)
+        if (_active.Building is not null)
+            PickAndOpenBuilding();
+        else if (_files.PickOpen(DialogFolder) is { } open)
             Open(open);
         else if (!_files.HasDialogs)
             _stats.Message = "File dialogs are unavailable on this system (nfd.dll missing)";
@@ -811,7 +833,7 @@ public sealed partial class DesignerApp : DesignApp
 
     private void SaveAs()
     {
-        if (_files.PickSave(_session.Path, DialogFolder) is { } path)
+        if ((_active.Building is not null ? _buildingFiles.PickSave(_session.Path) : _files.PickSave(_session.Path, DialogFolder)) is { } path)
             Save(path);
         else if (!_files.HasDialogs)
             _stats.Message = "File dialogs are unavailable on this system (nfd.dll missing)";
@@ -819,6 +841,12 @@ public sealed partial class DesignerApp : DesignApp
 
     private void Save(string path)
     {
+        if (_active.Building is { } building)
+        {
+            SaveBuilding(building, path);
+            return;
+        }
+
         try
         {
             var hash = FilePlanHost.Save(_session.Doc, path);
@@ -838,6 +866,12 @@ public sealed partial class DesignerApp : DesignApp
 
     private void Open(string path)
     {
+        if (path.EndsWith("." + BuildingFile.Extension, StringComparison.OrdinalIgnoreCase))
+        {
+            OpenBuilding(path);
+            return;
+        }
+
         if (!FilePlanHost.TryLoad(path, out var doc, out var error))
         {
             _stats.Message = error;
@@ -945,6 +979,8 @@ public sealed partial class DesignerApp : DesignApp
             }
         }
 
+        PadBounds(ref x0, ref y0, ref z0, ref x1, ref y1, ref z1);
+
         if (solids.Length == 0 && x0 > x1)
             return;
 
@@ -982,9 +1018,9 @@ public sealed partial class DesignerApp : DesignApp
             // The hull is locked in the interior view.
         }
         else if (ctrl && key == GlfwKey.Z)
-            _session.UndoLast();
+            _ = _active.Building is { } building ? building.Undo() : _session.UndoLast();
         else if (ctrl && key == GlfwKey.Y)
-            _session.RedoNext();
+            _ = _active.Building is { } building ? building.Redo() : _session.RedoNext();
         else if (ctrl && key == GlfwKey.D && _session.Selection.Primary != 0)
             HullCommands.Duplicate(_session, _session.Selection.Primary);
         else if (ctrl && key == GlfwKey.S)
@@ -1007,6 +1043,7 @@ public sealed partial class DesignerApp : DesignApp
         DisposeGroupBakes();
         DisposeAero();
         _files.Dispose();
+        _buildingFiles.Dispose();
         _profilesPanel.Dispose();
         _paintPanel.Dispose();
     }

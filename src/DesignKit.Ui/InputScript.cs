@@ -6,7 +6,7 @@ namespace BrutalGame.DesignKit.Ui;
 /// <summary>
 /// --input-script: drives the app with scripted mouse input for hands-off UI tests, injected into ImGui after the
 /// platform backend each frame (so neither OS focus nor the real cursor interferes). Coordinates are client pixels.
-/// One command a line: <c>wait frames</c>, <c>move x y</c>, <c>click x y</c>, <c>drag x0 y0 x1 y1 frames</c>,
+/// One command a line: <c>wait frames</c>, <c>move x y</c>, <c>click x y</c>, <c>rclick x y</c> (right button), <c>type text</c> (replaces the focused field's text, then Enter), <c>drag x0 y0 x1 y1 frames</c>,
 /// <c>key name</c> (the app's own key handler, e.g. tab, delete, 1, w, ctrl+z), <c>shot name</c> (writes
 /// <c>name.ready</c> next to the script and holds until <c>name.done</c> appears, so an outside tool can capture the
 /// window), <c>log text</c>, <c>quit</c>. Blank lines and lines starting with # are skipped.
@@ -86,6 +86,12 @@ public sealed class InputScript
         io.AddMousePosEvent(x, y);
     }
 
+    private static void Keys(ImGuiIOPtr io, bool down, params ImGuiKey[] keys)
+    {
+        foreach (var key in keys)
+            io.AddKeyEvent(key, down);
+    }
+
     private void Run(string[] f)
     {
         static float F(string s) => float.Parse(s, CultureInfo.InvariantCulture);
@@ -99,11 +105,13 @@ public sealed class InputScript
                 _pending.Enqueue(io => Move(io, F(f[1]), F(f[2])));
                 break;
             case "click":
+            case "rclick":
                 var (cx, cy) = (F(f[1]), F(f[2]));
+                var button = f[0] == "rclick" ? 1 : 0;
                 _pending.Enqueue(io => Move(io, cx, cy));
-                _pending.Enqueue(io => io.AddMouseButtonEvent(0, true));
+                _pending.Enqueue(io => io.AddMouseButtonEvent(button, true));
                 _pending.Enqueue(_ => { });
-                _pending.Enqueue(io => io.AddMouseButtonEvent(0, false));
+                _pending.Enqueue(io => io.AddMouseButtonEvent(button, false));
                 _pending.Enqueue(_ => { });
                 _pending.Enqueue(_ => { });
                 break;
@@ -120,6 +128,18 @@ public sealed class InputScript
                 }
 
                 _pending.Enqueue(io => io.AddMouseButtonEvent(0, false));
+                _pending.Enqueue(_ => { });
+                break;
+            case "type":
+                var text = f.Length > 1 ? f[1] : "";
+                _pending.Enqueue(io => Keys(io, true, ImGuiKey.LeftCtrl, ImGuiKey.Mod_Ctrl, ImGuiKey.A));
+                _pending.Enqueue(io => Keys(io, false, ImGuiKey.LeftCtrl, ImGuiKey.Mod_Ctrl, ImGuiKey.A));
+
+                foreach (var c in text)
+                    _pending.Enqueue(io => io.AddInputCharacter(c));
+
+                _pending.Enqueue(io => Keys(io, true, ImGuiKey.Enter));
+                _pending.Enqueue(io => Keys(io, false, ImGuiKey.Enter));
                 _pending.Enqueue(_ => { });
                 break;
             case "key":

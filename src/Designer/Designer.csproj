@@ -4,6 +4,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\DesignKit\DesignKit.csproj" />
+    <ProjectReference Include="..\Buildings\Buildings.csproj" />
     <ProjectReference Include="..\Plans\Plans.csproj" />
   </ItemGroup>
 </Project>
