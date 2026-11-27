@@ -7,6 +7,8 @@
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="..\..\data\planets\kinds\*.json" LinkBase="Kinds" />
+    <EmbeddedResource Include="..\..\data\planets\**\body.json;..\..\data\planets\**\*.bmap" LogicalName="Authored/%(RecursiveDir)%(Filename)%(Extension)" />
+    <EmbeddedResource Include="..\..\data\systems\*.json" LogicalName="Systems/%(Filename)%(Extension)" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Terrain.Tests" />

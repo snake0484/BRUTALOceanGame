@@ -70,9 +70,9 @@ public sealed partial class DesignerApp : DesignApp
 
     private OverlayRenderer _overlay => Overlay;
 
-    protected override bool Busy => _baker.Busy || GroupsBusy;
+    protected override bool Busy => _active.Tab?.Busy ?? (_baker.Busy || GroupsBusy);
 
-    protected override bool CameraHeld => _tool.Dragging;
+    protected override bool CameraHeld => _active.Tab?.CameraHeld ?? _tool.Dragging;
 
     /// <summary>One open plan: a ship, or a component with its own editor state (selection, test bench).</summary>
     private sealed class Document
@@ -85,13 +85,16 @@ public sealed partial class DesignerApp : DesignApp
         /// <summary>Set on a building tab: the pad and foundation, on the plan's history.</summary>
         public BuildingSession? Building;
 
+        /// <summary>Set on a tab that is not a plan (an authoring build's planet tab); its ship session stays empty.</summary>
+        public ITabWorkspace? Tab;
+
         public readonly OrbitCamera Camera = new();
         public bool Framed;
 
         public string Title => Session.Path.Length > 0 ? Path.GetFileNameWithoutExtension(Session.Path) : Name;
 
         /// <summary>Never touched: a new tab or file opened now replaces it.</summary>
-        public bool Pristine => Session.Path.Length == 0 && !Session.Modified && Session.Undo.UndoCount == 0 && Session.Doc.Solids.Count == 0 && (Session.Doc.Components?.Parts.Count ?? 0) == 0;
+        public bool Pristine => Tab is null && Session.Path.Length == 0 && !Session.Modified && Session.Undo.UndoCount == 0 && Session.Doc.Solids.Count == 0 && (Session.Doc.Components?.Parts.Count ?? 0) == 0;
     }
     private readonly SceneLighting _lighting;
     private readonly string? _saveOnExit;
@@ -184,6 +187,9 @@ public sealed partial class DesignerApp : DesignApp
 
     protected override void Tick()
     {
+        if (TickTab())
+            return;
+
         Commit();
         PollBake();
         PollAero();
@@ -431,6 +437,7 @@ public sealed partial class DesignerApp : DesignApp
 
         var closing = _docs[index];
         _docs.RemoveAt(index);
+        CloseTab(closing);
 
         if (_docs.Count == 0)
             NewDocument(component: false);
@@ -565,7 +572,7 @@ public sealed partial class DesignerApp : DesignApp
         _tabs.Clear();
 
         foreach (var d in _docs)
-            _tabs.Add(new DocumentTab(d.Key, d.Title, d.Session.Modified, d.Component is not null, d.Building is not null));
+            _tabs.Add(new DocumentTab(d.Key, d.Title, d.Tab?.Modified ?? d.Session.Modified, d.Component is not null, d.Building is not null));
 
         _bar.ComponentTab = _active.Component is not null;
         _bar.Draw(_tabs, _active.Key);
@@ -579,6 +586,12 @@ public sealed partial class DesignerApp : DesignApp
 
     protected override void DrawPanels(ImGuiIOPtr io)
     {
+        if (_active.Tab is { } tab)
+        {
+            tab.DrawPanels(ShipLayout.EditDock);
+            return;
+        }
+
         if (InteriorView)
             _meshEdit.Enabled = false;
 
@@ -676,6 +689,12 @@ public sealed partial class DesignerApp : DesignApp
 
     protected override void UpdateViewport(ImGuiIOPtr io, Vector2 viewport, in Matrix4x4 viewProj, bool mouseFree)
     {
+        if (_active.Tab is { } tab)
+        {
+            tab.UpdateViewport(io, viewport, viewProj, mouseFree, _overlay);
+            return;
+        }
+
         var workspace = _active.Component;
         var cut = _panels.Cutaway;
 
@@ -754,6 +773,12 @@ public sealed partial class DesignerApp : DesignApp
 
     protected override void RecordScene(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj)
     {
+        if (_active.Tab is { } tab)
+        {
+            tab.RecordScene(commands, frameIndex, extent, viewProj, Renderer.OutputExtent);
+            return;
+        }
+
         if (InteriorView)
             return;
 
@@ -768,6 +793,9 @@ public sealed partial class DesignerApp : DesignApp
 
     protected override void RecordAfterScene(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj)
     {
+        if (_active.Tab is not null)
+            return;
+
         if (InteriorView)
             _hull.RecordGhost(commands, frameIndex, extent, viewProj, _camera.Position, _lighting, GhostOpacity);
         else
@@ -776,8 +804,17 @@ public sealed partial class DesignerApp : DesignApp
 
     private void HandleFiles()
     {
+        if (_active.Tab is { } tab && _bar.Request is FileRequest.Save or FileRequest.SaveAs)
+        {
+            _stats.Message = tab.Save();
+            return;
+        }
+
         switch (_bar.Request)
         {
+            case FileRequest.OpenPlanet:
+                OpenPlanetRequest(_bar.PlanetBody);
+                break;
             case FileRequest.New:
                 NewDocument(component: false);
                 _stats.Message = "New ship";
@@ -998,7 +1035,9 @@ public sealed partial class DesignerApp : DesignApp
 
     protected override void HandleKey(GlfwKey key, bool ctrl)
     {
-        if (ctrl && key == GlfwKey.W)
+        if (_active.Tab is { } tab && !(ctrl && key is GlfwKey.W or GlfwKey.N or GlfwKey.O))
+            tab.HandleKey(key, ctrl);
+        else if (ctrl && key == GlfwKey.W)
             _bar.AskClose(_active.Key);
         else if (ctrl && key == GlfwKey.N)
             NewDocument(component: false);
@@ -1050,6 +1089,7 @@ public sealed partial class DesignerApp : DesignApp
 
     protected override void DisposeGpu()
     {
+        DisposeTabs();
         _baker.Dispose();
         _hull.Dispose();
         _decalTextures.Dispose();

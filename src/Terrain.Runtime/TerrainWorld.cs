@@ -77,6 +77,9 @@ public sealed class TerrainWorld : IDisposable
     private int _batchJobs;
     private long _batchStart;
     private long _frame;
+    private (int Body, PlanetGenerator Generator, double3 Direction, double Angle)? _replacement;
+    private (int Index, Body Body, double3 Direction, double Angle, long Start, float MainMs)? _building;
+    private JobScheduler? _boundsScheduler;
 
     private sealed class ChunkRecord
     {
@@ -114,14 +117,15 @@ public sealed class TerrainWorld : IDisposable
         public readonly PlanetHeightBounds Bounds;
 
         /// <summary>Written only between selections while this body is the focus.</summary>
-        public readonly EditStore Edits = new();
+        public readonly EditStore Edits;
         public readonly bool Collision;
 
-        public Body(PlanetGenerator generator, bool collision)
+        public Body(PlanetGenerator generator, bool collision, EditStore? edits = null)
         {
             Generator = generator;
             Bounds = new PlanetHeightBounds(generator);
             Collision = collision;
+            Edits = edits ?? new EditStore();
         }
 
         /// <summary>Made once the bounds are built: its horizon occluder is their lowest ground.</summary>
@@ -256,6 +260,91 @@ public sealed class TerrainWorld : IDisposable
     /// <summary>Nothing left to do: the selection is current and every desired leaf is loaded and ready.</summary>
     public bool Settled { get; private set; }
 
+    /// <summary>
+    /// The last <see cref="ReplaceGenerator"/> as applied: ms from the request's start to the swap (the bounds rebuild on
+    /// workers), main-thread ms of it, and loaded leaves marked to regenerate.
+    /// </summary>
+    public (float Ms, float MainMs, int Leaves) LastReplace { get; private set; }
+
+    /// <summary>
+    /// Swaps a body's generator (the planet designer changed its authored layer). Its bounds rebuild on workers while
+    /// the old body keeps streaming; at the first <see cref="Update"/> after that with nothing in flight the new body
+    /// takes over (edits kept) and on the focus body every loaded leaf within <paramref name="angle"/> (rad) of unit
+    /// <paramref name="direction"/> regenerates in place. Calls before a rebuild starts grow one region to cover them
+    /// all (the whole body for another body); a call during a rebuild waits for it.
+    /// </summary>
+    public void ReplaceGenerator(int body, PlanetGenerator generator, double3 direction, double angle)
+    {
+        if (_replacement is { } pending)
+        {
+            var between = Math.Acos(Math.Clamp(double3.Dot(pending.Direction, direction), -1.0, 1.0));
+            (direction, angle) = pending.Body != body ? (direction, Math.PI) : (pending.Direction, Math.Max(pending.Angle, between + angle));
+        }
+
+        _replacement = (body, generator, direction, Math.Min(angle, Math.PI));
+    }
+
+    /// <summary>With no chunk job in flight: starts a requested bounds rebuild, or swaps in the body whose rebuild finished.</summary>
+    private void AdvanceReplacement()
+    {
+        if (_building is null && _replacement is not null)
+            StartReplace();
+        else if (_building is not null && !_boundsScheduler!.IsExecuting && !_selecting)
+            FinishReplace();
+    }
+
+    private void StartReplace()
+    {
+        var mark = Stopwatch.GetTimestamp();
+        var (index, generator, direction, angle) = _replacement!.Value;
+        _replacement = null;
+        var old = _bodies[index];
+        var body = new Body(generator, old.Collision, old.Edits);
+        _boundsScheduler ??= new JobScheduler((uint)Math.Min(CubeLattice.Faces, WorkerBudget.Streaming), "TerrainBounds", ThreadPriority.BelowNormal);
+
+        for (var face = 0; face < CubeLattice.Faces; face++)
+            _boundsScheduler.Queue(new BoundsJob(body.Bounds, face), 1);
+
+        _boundsScheduler.ExecuteJobs();
+        _building = (index, body, direction, angle, mark, (float)Stopwatch.GetElapsedTime(mark).TotalMilliseconds);
+    }
+
+    private void FinishReplace()
+    {
+        var mark = Stopwatch.GetTimestamp();
+        var (index, body, direction, angle, start, startMs) = _building!.Value;
+        _building = null;
+        body.BoundsBuilt();
+        _bodies[index] = body;
+        var leaves = 0;
+
+        if (index == _focus)
+        {
+            _body = body;
+            _selectJob.Selector = body.Selector;
+            _reselect = true;
+            var radius = body.Generator.Params.Radius;
+
+            foreach (var record in _chunks.Values)
+            {
+                var coord = record.Coord;
+                double size = coord.SizeMetres, half = 0.5 * size;
+                var centre = coord.Origin + new double3(half, half, half);
+                var length = centre.Length();
+
+                if (record.Dirty || length < 1.0 || double3.Dot(centre, direction) < length * Math.Cos(Math.Min(Math.PI, angle + 2.0 * size / radius)))
+                    continue;
+
+                record.Dirty = true;
+                _dirty.Add(coord);
+                leaves++;
+            }
+        }
+
+        var main = startMs + (float)Stopwatch.GetElapsedTime(mark).TotalMilliseconds;
+        LastReplace = ((float)Stopwatch.GetElapsedTime(start).TotalMilliseconds, main, leaves);
+    }
+
     /// <summary>Records an edit the sim accepted on <paramref name="body"/>; on the focus body, every loaded leaf it shows on regenerates.</summary>
     public void ApplyEdit(int body, in EditOp op)
     {
@@ -307,6 +396,7 @@ public sealed class TerrainWorld : IDisposable
 
         if (_body is null)
         {
+            AdvanceReplacement();
             Settled = false;
             LastUpdate = default;
             return;
@@ -336,6 +426,9 @@ public sealed class TerrainWorld : IDisposable
         if (!_scheduler.IsExecuting)
         {
             CollectBatch();
+
+            AdvanceReplacement();
+
             uploads += Lap(ref mark);
             Retire();
             LastRetireMs = Lap(ref mark);
@@ -864,6 +957,7 @@ public sealed class TerrainWorld : IDisposable
     {
         _selectScheduler.AbortJobs(waitForCompletion: true);
         _scheduler.AbortJobs(waitForCompletion: true);
+        _boundsScheduler?.AbortJobs(waitForCompletion: true);
 
         foreach (var job in _inFlight)
             Recycle(job);

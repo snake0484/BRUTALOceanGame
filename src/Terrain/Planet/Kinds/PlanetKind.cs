@@ -188,7 +188,7 @@ public static class PlanetKinds
 
         foreach (var name in assembly.GetManifestResourceNames())
         {
-            if (!name.EndsWith(".json", StringComparison.Ordinal))
+            if (!name.EndsWith(".json", StringComparison.Ordinal) || name.StartsWith(AuthoredWorld.AuthoredPrefix, StringComparison.Ordinal) || name.StartsWith(AuthoredWorld.SystemsPrefix, StringComparison.Ordinal))
                 continue;
 
             using var stream = assembly.GetManifestResourceStream(name)!;

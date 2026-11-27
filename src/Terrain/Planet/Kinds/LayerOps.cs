@@ -107,6 +107,12 @@ internal static partial class LayerOps
                 case LayerOp.Legacy:
                     Legacy(p, layer, ref r);
                     break;
+                case LayerOp.MapAdd:
+                    MapAdd(p, layer, ref r);
+                    break;
+                case LayerOp.Sites:
+                    Sites(p, layer, ref r);
+                    break;
             }
         }
     }

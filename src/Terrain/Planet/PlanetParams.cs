@@ -48,6 +48,9 @@ public readonly record struct PlanetParams
     public string KindId { get; init; }
     public ulong KindSeed { get; init; }
 
+    /// <summary>The authored body this is (data/planets/&lt;id&gt;), or null: its layer applies when seed and kind match (D83).</summary>
+    public string? BodyId { get; init; }
+
     /// <summary>Content hash of the compiled kind: joins <see cref="GeneratorVersion"/> wherever peers must agree on the terrain.</summary>
     public ulong ProgramHash { get; init; }
 
@@ -102,6 +105,13 @@ public readonly record struct PlanetParams
     public PlanetParams WithAxis(double x, double y, double z)
     {
         var p = this with { AxisX = x, AxisY = y, AxisZ = z };
+        return p with { ProgramHash = PlanetKindCompiler.Compile(PlanetKinds.Get(KindId), p).ContentHash };
+    }
+
+    /// <summary>The same body as authored body <paramref name="bodyId"/>: its authored layer joins the program, so the hash follows.</summary>
+    public PlanetParams WithBody(string? bodyId)
+    {
+        var p = this with { BodyId = bodyId };
         return p with { ProgramHash = PlanetKindCompiler.Compile(PlanetKinds.Get(KindId), p).ContentHash };
     }
 

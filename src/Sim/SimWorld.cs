@@ -107,7 +107,7 @@ public sealed class SimWorld : IDisposable
         Entities = new EntityTable(entityCapacity);
         PlanetIndex = FirstPlanet(Celestial);
         ref readonly var body = ref Celestial[PlanetIndex];
-        Planet = BodyTerrain(body, PlanetParams.BodySeed(seed, PlanetIndex), kind, kindSeed);
+        Planet = BodyTerrain(body, seed, PlanetIndex, kind, kindSeed);
         Generator = new PlanetGenerator(Planet);
         BodyParams = new PlanetParams?[Celestial.Count];
 
@@ -346,14 +346,22 @@ public sealed class SimWorld : IDisposable
         if (body.Kind is not (CelestialKind.Planet or CelestialKind.Moon))
             return null;
 
-        return BodyTerrain(body, PlanetParams.BodySeed(seed, index), body.Kind == CelestialKind.Moon ? kind : null, kindSeed);
+        return BodyTerrain(body, seed, index, body.Kind == CelestialKind.Moon ? kind : null, kindSeed);
     }
 
-    /// <summary>A body's terrain from its kind: the kind decides the sea, the relief range and the materials; moons stay dry.</summary>
-    private static PlanetParams BodyTerrain(in CelestialBody body, ulong bodySeed, string? kind, ulong? kindSeed)
+    /// <summary>
+    /// A body's terrain from its kind: the kind decides the sea, the relief range and the materials; moons stay dry. In a
+    /// fixed system the body carries its authored id, whose layer applies when seed and kind match (D83).
+    /// </summary>
+    private static PlanetParams BodyTerrain(in CelestialBody body, ulong systemSeed, int index, string? kind, ulong? kindSeed)
     {
-        var p = PlanetParams.Generate(bodySeed, body.Radius, body.Mu / (body.Radius * body.Radius), ocean: body.Kind != CelestialKind.Moon, kind ?? KindOf(body.Kind), kindSeed);
-        return body.SpinAxis == new double3(p.AxisX, p.AxisY, p.AxisZ) ? p : p.WithAxis(body.SpinAxis.X, body.SpinAxis.Y, body.SpinAxis.Z);
+        var p = PlanetParams.Generate(PlanetParams.BodySeed(systemSeed, index), body.Radius, body.Mu / (body.Radius * body.Radius), ocean: body.Kind != CelestialKind.Moon, kind ?? KindOf(body.Kind), kindSeed);
+        var id = AuthoredWorld.BodyId(systemSeed, index);
+
+        if (id is null && body.SpinAxis == new double3(p.AxisX, p.AxisY, p.AxisZ))
+            return p;
+
+        return (p with { BodyId = id }).WithAxis(body.SpinAxis.X, body.SpinAxis.Y, body.SpinAxis.Z);
     }
 
     /// <summary>

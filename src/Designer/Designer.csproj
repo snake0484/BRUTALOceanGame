@@ -6,5 +6,6 @@
     <ProjectReference Include="..\DesignKit\DesignKit.csproj" />
     <ProjectReference Include="..\Buildings\Buildings.csproj" />
     <ProjectReference Include="..\Plans\Plans.csproj" />
+    <ProjectReference Include="..\Terrain\Terrain.csproj" />
   </ItemGroup>
 </Project>
