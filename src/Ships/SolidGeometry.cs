@@ -91,4 +91,8 @@ public static class SolidGeometry
 public readonly record struct Vector3d(double X, double Y, double Z)
 {
     public double Length() => Math.Sqrt(X * X + Y * Y + Z * Z);
+
+    public static implicit operator Brutal.Numerics.double3(Vector3d v) => new(v.X, v.Y, v.Z);
+
+    public static implicit operator Vector3d(Brutal.Numerics.double3 v) => new(v.X, v.Y, v.Z);
 }

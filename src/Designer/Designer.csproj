@@ -3,6 +3,7 @@
     <RootNamespace>BrutalGame.Designer</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="..\DesignKit\DesignKit.csproj" />
     <ProjectReference Include="..\Plans\Plans.csproj" />
   </ItemGroup>
 </Project>

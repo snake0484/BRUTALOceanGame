@@ -1,13 +1,13 @@
 using System.Globalization;
 using Brutal.ImGuiApi;
 
-namespace BrutalGame.Designer.App;
+namespace BrutalGame.DesignKit.Ui;
 
 /// <summary>
 /// --input-script: drives the app with scripted mouse input for hands-off UI tests, injected into ImGui after the
 /// platform backend each frame (so neither OS focus nor the real cursor interferes). Coordinates are client pixels.
 /// One command a line: <c>wait frames</c>, <c>move x y</c>, <c>click x y</c>, <c>drag x0 y0 x1 y1 frames</c>,
-/// <c>key name</c> (the app's own key handler: tab, delete, 1, 2, 3, ctrl+z, ctrl+y), <c>shot name</c> (writes
+/// <c>key name</c> (the app's own key handler, e.g. tab, delete, 1, w, ctrl+z), <c>shot name</c> (writes
 /// <c>name.ready</c> next to the script and holds until <c>name.done</c> appears, so an outside tool can capture the
 /// window), <c>log text</c>, <c>quit</c>. Blank lines and lines starting with # are skipped.
 /// </summary>

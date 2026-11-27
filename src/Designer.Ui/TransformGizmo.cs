@@ -130,39 +130,29 @@ public static class RotationRings
         v = Cross(n, u);
     }
 
-    internal static float SegmentDistance(Vector2 p, Vector2 a, Vector2 b)
-    {
-        var ab = b - a;
-        var t = Math.Clamp(Vector2.Dot(p - a, ab) / Math.Max(ab.LengthSquared(), 1e-6f), 0f, 1f);
-        return Vector2.Distance(p, a + ab * t);
-    }
+    internal static float SegmentDistance(Vector2 p, Vector2 a, Vector2 b) => GizmoMath.SegmentDistance(p, a, b);
 }
 
 /// <summary>
 /// The gizmo for things that move and turn but have no size handles (component parts, pipe nodes, placed components):
-/// three axis arrows, or in rotate mode the three rotation rings. Hover a handle, press and drag. The caller commits when
-/// <see cref="Update"/> reports the drag ended, so a drag is one undo step.
+/// the kit's <see cref="MoveGizmo"/> arrows, or in rotate mode the three rotation rings. Hover a handle, press and drag.
+/// The caller commits when <see cref="Update"/> reports the drag ended, so a drag is one undo step.
 /// </summary>
 public sealed class TransformGizmo
 {
     private const float HandlePixels = 10f;
-    private const double ScreenFraction = 0.12;
 
-    private static readonly uint[] Colours = [OverlayRenderer.Rgba(235, 70, 70), OverlayRenderer.Rgba(90, 220, 90), OverlayRenderer.Rgba(80, 140, 255)];
-    private static readonly uint Active = OverlayRenderer.Rgba(255, 230, 120);
-
-    private int _axis = -1;
+    private readonly MoveGizmo _move = new();
+    private int _ring = -1;
     private int _hover = -1;
-    private bool _rotating;
     private Vector3d _origin;
-    private double _start;
     private uint _startRotation;
     private Vector3d _last;
     private double _angle;
 
-    public bool Dragging => _axis >= 0;
+    public bool Dragging => _ring >= 0 || _move.Dragging;
 
-    public bool Hovered => _hover >= 0;
+    public bool Hovered => _hover >= 0 || _move.Hovered;
 
     /// <summary>The current move's offset (metres).</summary>
     public Vector3d Offset { get; private set; }
@@ -180,125 +170,71 @@ public sealed class TransformGizmo
     public bool Update(Vector3d centre, uint? rotation, GizmoMode mode, OrbitCamera camera, in Matrix4x4 viewProj, Vector2 viewport, Vector2 mouse,
         bool mouseFree, bool down, bool clicked, double step, OverlayRenderer overlay)
     {
+        var turning = _ring >= 0 || (!_move.Dragging && mode == GizmoMode.Rotate && rotation is not null);
+
+        if (!turning)
+        {
+            _hover = -1;
+            var moved = _move.Update(centre, camera, viewProj, viewport, mouse, mouseFree, down, clicked, step, overlay);
+            Offset = _move.Offset;
+
+            if (moved)
+                Turned = false;
+
+            return moved;
+        }
+
         overlay.OnTop = true;
-        var changed = Run(centre, rotation, mode, camera, viewProj, viewport, mouse, mouseFree, down, clicked, step, overlay);
+        var changed = Turn(centre, rotation ?? _startRotation, camera, viewProj, viewport, mouse, mouseFree, down, clicked, overlay);
         overlay.OnTop = false;
         return changed;
     }
 
-    private bool Run(Vector3d centre, uint? rotation, GizmoMode mode, OrbitCamera camera, in Matrix4x4 viewProj, Vector2 viewport, Vector2 mouse,
-        bool mouseFree, bool down, bool clicked, double step, OverlayRenderer overlay)
+    private bool Turn(Vector3d centre, uint rotation, OrbitCamera camera, in Matrix4x4 viewProj, Vector2 viewport, Vector2 mouse,
+        bool mouseFree, bool down, bool clicked, OverlayRenderer overlay)
     {
-        var p = camera.Position;
-        var eye = new Vector3d(p.X, p.Y, p.Z);
-        var ray = camera.Ray(mouse, viewport);
-        var length = Math.Max(0.15, camera.Depth(centre) * ScreenFraction);
+        Vector3d eye = camera.Position;
+        Vector3d ray = camera.Ray(mouse, viewport);
+        var length = Math.Max(_move.MinLength, camera.Depth(centre) * _move.ScreenFraction);
 
-        if (_axis >= 0)
+        if (_ring >= 0)
         {
-            if (_rotating)
+            var n = RotationRings.Axis(_startRotation, _ring);
+
+            if (RotationRings.Hit(eye, ray, _origin, n, out var direction))
             {
-                var n = RotationRings.Axis(_startRotation, _axis);
-
-                if (RotationRings.Hit(eye, ray, _origin, n, out var direction))
-                {
-                    _angle += RotationRings.Angle(n, _last, direction);
-                    _last = direction;
-                }
-
-                var steps = RotationRings.Steps(_angle);
-                Rotation = SolidRotation.AddSteps(_startRotation, _axis, steps);
-                RotationRings.Draw(overlay, centre, length, Rotation, _axis, -1, camera, viewProj, viewport, mouse, pick: false, HandlePixels);
-                RotationRings.Label(mouse, steps);
-
-                if (down)
-                    return false;
-
-                _axis = -1;
-                Turned = true;
-                return steps != 0;
+                _angle += RotationRings.Angle(n, _last, direction);
+                _last = direction;
             }
 
-            var axis = Axis(_axis);
-
-            if (HullPicking.ClosestOnAxis(eye, ray, _origin, axis, out var along))
-            {
-                var d = along - _start;
-
-                if (step > 0)
-                    d = Math.Round(d / step) * step;
-
-                Offset = Scale(axis, d);
-            }
-
-            DrawArrows(Add(centre, Offset), length, camera, viewProj, viewport, mouse, hover: false, overlay);
+            var steps = RotationRings.Steps(_angle);
+            Rotation = SolidRotation.AddSteps(_startRotation, _ring, steps);
+            RotationRings.Draw(overlay, centre, length, Rotation, _ring, -1, camera, viewProj, viewport, mouse, pick: false, HandlePixels);
+            RotationRings.Label(mouse, steps);
 
             if (down)
                 return false;
 
-            _axis = -1;
-            Turned = false;
-            return Offset.Length() > 1e-9;
+            _ring = -1;
+            Turned = true;
+            return steps != 0;
         }
 
         Offset = default;
         var lastHover = _hover;
-        _hover = -1;
-        var turning = mode == GizmoMode.Rotate && rotation is not null;
-
-        if (turning)
-            _hover = RotationRings.Draw(overlay, centre, length, rotation!.Value, -1, lastHover, camera, viewProj, viewport, mouse, mouseFree, HandlePixels);
-        else
-            DrawArrows(centre, length, camera, viewProj, viewport, mouse, mouseFree, overlay);
+        _hover = RotationRings.Draw(overlay, centre, length, rotation, -1, lastHover, camera, viewProj, viewport, mouse, mouseFree, HandlePixels);
 
         if (!mouseFree || !clicked || _hover < 0)
             return false;
 
-        if (turning)
-        {
-            var n = RotationRings.Axis(rotation!.Value, _hover);
+        var axis = RotationRings.Axis(rotation, _hover);
 
-            if (RotationRings.Hit(eye, ray, centre, n, out _last))
-            {
-                (_axis, _rotating, _origin, _startRotation, _angle) = (_hover, true, centre, rotation.Value, 0);
-                Rotation = rotation.Value;
-            }
-        }
-        else if (HullPicking.ClosestOnAxis(eye, ray, centre, Axis(_hover), out _start))
+        if (RotationRings.Hit(eye, ray, centre, axis, out _last))
         {
-            (_axis, _rotating, _origin) = (_hover, false, centre);
+            (_ring, _origin, _startRotation, _angle) = (_hover, centre, rotation, 0);
+            Rotation = rotation;
         }
 
         return false;
     }
-
-    private void DrawArrows(Vector3d centre, double length, OrbitCamera camera, in Matrix4x4 viewProj, Vector2 viewport, Vector2 mouse, bool hover, OverlayRenderer overlay)
-    {
-        var best = HandlePixels;
-        var hasCentre = camera.Project(centre, viewProj, viewport, out var c);
-
-        for (var a = 0; a < 3; a++)
-        {
-            var d = Axis(a);
-            var tip = Add(centre, Scale(d, length));
-            var neck = Add(centre, Scale(d, length * 0.8));
-            var active = _axis == a || _hover == a;
-            var colour = active ? Active : Colours[a];
-            overlay.Ribbon(centre, neck, length * (active ? 0.035 : 0.025), colour);
-            overlay.Cone(neck, tip, length * (active ? 0.08 : 0.06), colour);
-
-            if (hover && hasCentre && camera.Project(tip, viewProj, viewport, out var t))
-            {
-                var distance = RotationRings.SegmentDistance(mouse, Vector2.Lerp(c, t, 0.2f), t);
-
-                if (distance < best)
-                {
-                    best = distance;
-                    _hover = a;
-                }
-            }
-        }
-    }
-
-    private static Vector3d Axis(int a) => a == 0 ? new Vector3d(1, 0, 0) : a == 1 ? new Vector3d(0, 1, 0) : new Vector3d(0, 0, 1);
 }

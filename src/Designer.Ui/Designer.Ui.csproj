@@ -7,6 +7,10 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Designer\Designer.csproj" />
+    <ProjectReference Include="..\DesignKit.Ui\DesignKit.Ui.csproj" />
     <ProjectReference Include="..\Engine\Engine.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="BrutalGame.DesignKit.Ui" />
   </ItemGroup>
 </Project>

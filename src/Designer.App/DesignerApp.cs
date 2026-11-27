@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Numerics;
 using Brutal.GlfwApi;
 using Brutal.ImGuiApi;
@@ -6,7 +5,8 @@ using Brutal.Numerics;
 using BrutalGame.Designer.Ui;
 using BrutalGame.Engine.Jobs;
 using BrutalGame.Engine.Rendering;
-using BrutalGame.Engine.Time;
+using Brutal.VulkanApi;
+using Brutal.VulkanApi.Abstractions;
 using BrutalGame.Plans;
 using BrutalGame.Ships.Components;
 using BrutalGame.Chemistry;
@@ -15,24 +15,15 @@ using BrutalGame.Ships;
 namespace BrutalGame.Designer.App;
 
 /// <summary>
-/// BRUTALDesigner: one window (Glfw + Vulkan through Engine's renderer + ImGui), a tab per open ship or component (each its
-/// own design session, camera and component editor state), bakes on hull bake workers. Per frame: input, panels, the viewport tool, polling the baker, drawing. Validation, the plan hash and a new
-/// bake start only when the session's version moves (a commit), never per frame. No Sim, networking or physics.
+/// BRUTALDesigner, on the design kit's shell (<see cref="DesignApp"/>): a tab per open ship or component (each its own
+/// design session, camera and component editor state), bakes on hull bake workers. Per frame: commit and poll, panels,
+/// the viewport tools, drawing the hull. Validation, the plan hash and a new bake start only when the session's version
+/// moves (a commit), never per frame. No Sim, networking or physics.
 /// </summary>
-public sealed class DesignerApp : IDisposable
+public sealed class DesignerApp : DesignApp
 {
     private const string Title = "BRUTAL Designer";
-    private const int TimingSamples = 256;
-#if DEBUG
-    private const bool Validation = true;
-#else
-    private const bool Validation = false;
-#endif
 
-    private readonly GlfwWindow _window;
-    private readonly FrameStats _frameStats = new(TimingSamples);
-    private readonly Renderer _renderer;
-    private readonly ImGuiLayer _imgui;
     private readonly HullRenderer _hull;
     private readonly HullBaker _baker;
     private readonly HullBins _bins = new();
@@ -52,14 +43,20 @@ public sealed class DesignerApp : IDisposable
     private int _shipCount;
     private int _componentCount;
     private readonly DesignerPanels _panels;
-    private readonly DesignerStyle _style = new();
     private readonly DesignStats _stats = new();
     private readonly ViewportTool _tool = new();
     private readonly MeshEditState _meshEdit = new();
-    private readonly OverlayRenderer _overlay;
 
     /// <summary>The open tab's camera.</summary>
-    private OrbitCamera _camera => _active.Camera;
+    protected override OrbitCamera Camera => _active.Camera;
+
+    private OrbitCamera _camera => Camera;
+
+    private OverlayRenderer _overlay => Overlay;
+
+    protected override bool Busy => _baker.Busy;
+
+    protected override bool CameraHeld => _tool.Dragging;
 
     /// <summary>One open plan: a ship, or a component with its own editor state (selection, test bench).</summary>
     private sealed class Document
@@ -77,15 +74,14 @@ public sealed class DesignerApp : IDisposable
         public bool Pristine => Session.Path.Length == 0 && !Session.Modified && Session.Undo.UndoCount == 0 && Session.Doc.Solids.Count == 0 && (Session.Doc.Components?.Parts.Count ?? 0) == 0;
     }
     private readonly SceneLighting _lighting;
-    private readonly int _closeAfterFrames;
     private readonly string? _saveOnExit;
     private int _seenVersion = -1;
     private int _uploadedBake;
-    private int _frames;
 
     /// <param name="view">Optional camera after framing: yaw and pitch in degrees, distance in metres.</param>
     /// <param name="cutaway">Optional cutaway at start: axis (x, y, z) and offset in metres.</param>
     public DesignerApp(string dataFolder, string? load, bool demo, bool demoMesh, string? saveOnExit, int closeAfterFrames, double[]? view = null, string? script = null, bool demoLayered = false, string[]? cutaway = null)
+        : base(new DesignAppOptions { Title = Title, LayoutFile = ShipLayout.File, SeedLayout = ShipLayout.Seed, ScriptPath = script, CloseAfterFrames = closeAfterFrames })
     {
         _catalog = HullMaterialCatalog.Load(dataFolder);
         _chemistry = ChemistryData.Load(dataFolder);
@@ -94,21 +90,10 @@ public sealed class DesignerApp : IDisposable
         RefreshLibrary();
         _prefabPanel = new PrefabPanel(_library, Shape);
         _saveOnExit = saveOnExit;
-        _closeAfterFrames = closeAfterFrames;
         _baker = new HullBaker(WorkerBudget.Background);
         _surfaceBuilder = new HullSurfaceBuilder(WorkerBudget.Background);
 
-        if (!Glfw.Init())
-            throw new InvalidOperationException("Failed to initialize GLFW");
-
-        Glfw.WindowHint(GlfwWindowHint.ClientApi, 0);
-        _window = Glfw.CreateWindow(new GlfwWindow.CreateInfo { Title = Title, Size = new int2(1600, 900) });
-        _renderer = new Renderer(_window, _frameStats, Validation, vsync: true) { ClearColor = new float4(0.11f, 0.12f, 0.14f, 1f) };
-        _imgui = new ImGuiLayer(_window, _renderer);
-        _style.LoadFonts();
-        DesignerStyle.UseLayout(1600, 900);
-        _hull = new HullRenderer(_renderer);
-        _overlay = new OverlayRenderer(_renderer);
+        _hull = new HullRenderer(Renderer);
         _lighting = new SceneLighting
         {
             SunDirection = Vector3.Normalize(new Vector3(0.45f, 0.8f, 0.35f)),
@@ -153,69 +138,16 @@ public sealed class DesignerApp : IDisposable
             _camera.Pitch = view[1] * Math.PI / 180.0;
             _camera.Distance = view[2];
         }
-
-        _window.OnKey += OnKey;
-
-        if (script is not null)
-            _script = new InputScript(script, ScriptKey);
     }
 
-    private readonly InputScript? _script;
-
-    private void ScriptKey(string name)
+    protected override void Tick()
     {
-        var ctrl = name.StartsWith("ctrl+", StringComparison.Ordinal);
-        var key = (ctrl ? name[5..] : name) switch
-        {
-            "tab" => GlfwKey.Tab,
-            "delete" => GlfwKey.Delete,
-            "1" => GlfwKey.Number1,
-            "2" => GlfwKey.Number2,
-            "3" => GlfwKey.Number3,
-            "z" => GlfwKey.Z,
-            "y" => GlfwKey.Y,
-            "d" => GlfwKey.D,
-            "f" => GlfwKey.F,
-            "w" => GlfwKey.W,
-            "e" => GlfwKey.E,
-            "r" => GlfwKey.R,
-            _ => GlfwKey.Unknown,
-        };
-
-        HandleKey(key, ctrl);
+        Commit();
+        PollBake();
     }
 
-    public void Run()
+    protected override void OnExit()
     {
-        var last = Stopwatch.GetTimestamp();
-
-        while (!_window.ShouldClose)
-        {
-            Glfw.PollEvents();
-
-            var size = _window.FramebufferSize;
-            if (size.X == 0 || size.Y == 0)
-            {
-                Glfw.WaitEvents();
-                continue;
-            }
-
-            var now = Stopwatch.GetTimestamp();
-            var frameMs = (float)Stopwatch.GetElapsedTime(last, now).TotalMilliseconds;
-            last = now;
-
-            Commit();
-            PollBake();
-            BuildUi();
-            Draw();
-
-            _frameStats.Frame.Record(frameMs);
-            _frames++;
-
-            if (_closeAfterFrames > 0 && _frames >= _closeAfterFrames && !_baker.Busy)
-                _window.ShouldClose = true;
-        }
-
         if (_saveOnExit is not null)
             Save(_saveOnExit);
     }
@@ -497,27 +429,23 @@ public sealed class DesignerApp : IDisposable
 
     private static float Linear(uint srgb) => MathF.Pow(srgb / 255f, 2.2f);
 
-    private void BuildUi()
+    protected override void BeforeUi(ImGuiIOPtr io)
     {
-        _imgui.NewFrame(_script is null ? null : _script.Inject);
-
-        if (_script is { Quit: true })
-            _window.ShouldClose = true;
-
-        var io = ImGui.GetIO();
-        var output = _renderer.OutputExtent;
-        var viewport = new Vector2(output.Width, output.Height);
-        _camera.Step(Math.Min(io.DeltaTime, 0.1));
-        UpdateCamera(io, viewport.Y);
         _panels.PlaceAt = _camera.Target;
-        _style.Begin(io.DisplaySize.Y, _window.ContentScale.X);
+    }
+
+    protected override void DrawMenuBar()
+    {
         _tabs.Clear();
 
         foreach (var d in _docs)
             _tabs.Add(new DocumentTab(d.Key, d.Title, d.Session.Modified, d.Component is not null));
 
         _bar.Draw(_tabs, _active.Key);
-        DesignerStyle.DockSpace();
+    }
+
+    protected override void DrawPanels(ImGuiIOPtr io)
+    {
         _panels.Draw(_session, _stats, _meshEdit);
         _viewOverlay.Draw(_session, _meshEdit, _camera);
         var workspace = _active.Component;
@@ -533,16 +461,17 @@ public sealed class DesignerApp : IDisposable
         {
             _prefabPanel.Draw(_session);
         }
+    }
 
-        _style.End();
-
+    protected override void AfterPanels(ImGuiIOPtr io)
+    {
         if (_prefabPanel.OpenRequest is { } open)
             OpenComponentCopy(open);
 
         if (_prefabPanel.RefreshRequest)
             RefreshLibrary();
 
-        workspace?.Step(Math.Clamp(io.DeltaTime, 0.0, 1.0 / 30.0));
+        _active.Component?.Step(Math.Clamp(io.DeltaTime, 0.0, 1.0 / 30.0));
         HandleFiles();
 
         if (_bar.SelectedKey >= 0 && _docs.Find(d => d.Key == _bar.SelectedKey) is { } picked)
@@ -550,56 +479,22 @@ public sealed class DesignerApp : IDisposable
 
         if (_bar.CloseKey >= 0)
             CloseDocument(_bar.CloseKey);
+    }
 
-        workspace = _active.Component;
-
-        var viewProj = _camera.ViewProjection(viewport.X / Math.Max(1f, viewport.Y));
+    protected override void UpdateViewport(ImGuiIOPtr io, Vector2 viewport, in Matrix4x4 viewProj, bool mouseFree)
+    {
+        var workspace = _active.Component;
         var cut = _panels.Cutaway;
         _hull.SetCutaway(cut.Enabled ? cut.Axis : -1, cut.Offset, cut.Flip);
-        _overlay.Begin(_camera.Position);
         var used = !_tool.Dragging && (workspace is not null
-            ? workspace.Update(_session, _camera, viewport, viewProj, !io.WantCaptureMouse, _overlay)
-            : _prefabPanel.Update(_session, _camera, viewport, viewProj, !io.WantCaptureMouse, _session.Snap.StepMetres, _overlay));
-        var strokeUsedMouse = !used && !_tool.Dragging && workspace is null && _panels.Strokes.Update(_session, _camera, viewport, viewProj, !io.WantCaptureMouse, _overlay);
-        _tool.Update(_session, _meshEdit, _camera, viewport, viewProj, !io.WantCaptureMouse && !strokeUsedMouse && !used, _overlay);
-        _imgui.EndFrame();
+            ? workspace.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay)
+            : _prefabPanel.Update(_session, _camera, viewport, viewProj, mouseFree, _session.Snap.StepMetres, _overlay));
+        var strokeUsedMouse = !used && !_tool.Dragging && workspace is null && _panels.Strokes.Update(_session, _camera, viewport, viewProj, mouseFree, _overlay);
+        _tool.Update(_session, _meshEdit, _camera, viewport, viewProj, mouseFree && !strokeUsedMouse && !used, _overlay);
     }
 
-    private void UpdateCamera(ImGuiIOPtr io, float viewportHeight)
-    {
-        if (io.WantCaptureMouse || _tool.Dragging)
-            return;
-
-        var delta = io.MouseDelta;
-        var panning = io.MouseDown[2] || (io.MouseDown[1] && io.KeyShift);
-
-        if (panning)
-            _camera.Pan(delta.X, delta.Y, viewportHeight);
-        else if (io.MouseDown[1])
-            _camera.Orbit(delta.X, delta.Y);
-
-        if (io.MouseWheel != 0f)
-            _camera.Zoom(io.MouseWheel);
-    }
-
-    private void Draw()
-    {
-        if (!_renderer.BeginFrame(out var commands))
-            return;
-
-        var extent = _renderer.Extent;
-        var output = _renderer.OutputExtent;
-        var viewProj = _camera.ViewProjection(output.Width / (float)output.Height);
-
-        _renderer.BeginOpaquePass(commands);
-        _hull.Record(commands, _renderer.FrameIndex, extent, viewProj, _camera.Position, _lighting);
-        _renderer.EndOpaquePass(commands);
-        _renderer.BeginWaterPass(commands);
-        _overlay.Record(commands, _renderer.FrameIndex, extent, viewProj);
-        _renderer.BeginUiPass(commands);
-        _imgui.Draw(commands);
-        _renderer.EndFrame();
-    }
+    protected override void RecordScene(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj) =>
+        _hull.Record(commands, frameIndex, extent, viewProj, _camera.Position, _lighting);
 
     private void HandleFiles()
     {
@@ -754,18 +649,7 @@ public sealed class DesignerApp : IDisposable
         _camera.Frame(centre, radius);
     }
 
-    private void OnKey(GlfwWindow window, GlfwKey key, int scancode, GlfwKeyAction action, GlfwModifier mods)
-    {
-        if (action != GlfwKeyAction.Press && !(action == GlfwKeyAction.Repeat && (mods & GlfwModifier.Control) != 0))
-            return;
-
-        if (_imgui.WantCaptureKeyboard)
-            return;
-
-        HandleKey(key, (mods & GlfwModifier.Control) != 0);
-    }
-
-    private void HandleKey(GlfwKey key, bool ctrl)
+    protected override void HandleKey(GlfwKey key, bool ctrl)
     {
         if (ctrl && key == GlfwKey.W)
             _bar.AskClose(_active.Key);
@@ -801,20 +685,17 @@ public sealed class DesignerApp : IDisposable
             _meshEdit.Selection.Mode = key == GlfwKey.Number1 ? Mesh.MeshSelectMode.Vertex : key == GlfwKey.Number2 ? Mesh.MeshSelectMode.Edge : Mesh.MeshSelectMode.Face;
     }
 
-    public void Dispose()
+    protected override void StopWork()
     {
-        _window.OnKey -= OnKey;
         _baker.Wait();
         _surfaceBuilder.Wait();
         _surfaceBuilder.Dispose();
-        _renderer.WaitIdle();
+        _files.Dispose();
+    }
+
+    protected override void DisposeGpu()
+    {
         _baker.Dispose();
         _hull.Dispose();
-        _overlay.Dispose();
-        _imgui.Dispose();
-        _renderer.Dispose();
-        _window.Dispose();
-        _files.Dispose();
-        Glfw.Terminate();
     }
 }

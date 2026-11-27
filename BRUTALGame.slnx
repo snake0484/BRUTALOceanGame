@@ -3,6 +3,8 @@
     <Project Path="src/Chemistry/Chemistry.csproj" />
     <Project Path="src/Crafting/Crafting.csproj" />
     <Project Path="src/Debug/Debug.csproj" />
+    <Project Path="src/DesignKit/DesignKit.csproj" />
+    <Project Path="src/DesignKit.Ui/DesignKit.Ui.csproj" />
     <Project Path="src/Designer/Designer.csproj" />
     <Project Path="src/Designer.App/Designer.App.csproj" />
     <Project Path="src/Designer.Ui/Designer.Ui.csproj" />
