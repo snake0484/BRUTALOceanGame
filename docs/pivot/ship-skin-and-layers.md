@@ -51,9 +51,14 @@ into the grid or collision. Plan BODY format 4 stores the brushes and strokes.
 User direction: hallways are like pipes, a route of nodes with an area that must fit humanoids, and an adjustable
 profile; any angle, each hallway with its own gravity (a ship may have several), stairs where expected; cut as a room.
 
-- **Data** (`Ships/Interior`, plan BODY format 6, flag 4 after the brushes): per hallway an id, nodes (1/1024 m), a
-  closed profile (X across, Y up from the floor, 3-32 points), a gravity rotation (15° snap; down = it applied to -Y)
-  and a stair material.
+- **Data** (`Ships/Interior`, plan BODY format 8; 6 and 7 load converted): the plan's profiles (name, library source,
+  closed outline X across, Y up from the floor, 3-32 points) and per hallway an id, nodes (1/1024 m) joined by runs,
+  the profile it uses, a gravity rotation (15° snap; down = it applied to -Y) and a stair material.
+- **Networks and profiles (2026-11-27):** three or more runs at a node make a junction; each run there reaches past the
+  node by half the profile's width so the runs overlap into one space, two runs are mitred, a free end is square.
+  Profiles live in the Profiles tab: the plan's own copies (one change reshapes every hallway using it) and the library
+  on disk, `Documents/BRUTALGame/Profiles/**/*.bprofile` (JSON, folders as categories). Importing copies a file into
+  the plan and records its path; a later change to the file only shows as "the library has changed" until Reimport.
 - **Clearance:** a person needs 0.8 m wide by 1.9 m tall clear above the floor; every further 0.8 m of clear width lets
   one more pass at once. Measured on the profile as the widest span round the floor's middle that stays clear up to
   1.9 m (2 mm slack for the grid). Too small is a plan Error.
@@ -65,11 +70,12 @@ profile; any angle, each hallway with its own gravity (a ship may have several),
   layered hull (own wall stack) and Subtract otherwise; stairs come after every cut (Panel role on a layered hull, so the
   room cut does not remove them). Their meshes follow the plan's in the mesh table; they feed the bake and the exact
   surface like plan solids.
-- **Designer:** the Interior panel (ship tabs) lists hallways; New hallway drops a level 4 m run at the camera target
-  with a 1.2 × 2.2 m rounded profile. The profile editor takes presets (rectangle, rounded, octagon, arch at a width
-  and height), then drag points (0.05 m snap), double-click an edge to add one, right-click to remove; it shows one
-  0.8 × 1.9 m lane per person abreast. Gravity: yaw, pitch, roll steps, or select a node and turn the rings (E). Nodes
-  move with the arrows (W); each run reads level, ramp, stairs or shaft. `--demo-hallway` (layered hull) and
+- **Designer:** Add > Hallway drops a level 4 m run at the camera target with the plan's first profile (a 1.2 × 2.2 m
+  rounded one if there is none). The Interior panel shows the selected hallway's profile choice, clearance, gravity,
+  stair material and runs. The Profiles tab's editor takes presets (rectangle, rounded, octagon, arch at a width and
+  height), then drag points (0.05 m snap), double-click an edge to add one, right-click to remove; it shows one
+  0.8 × 1.9 m lane per person abreast. In the view: select a node; the bar beside it adds a node (extends or branches),
+  deletes the node or the hallway; the marker mid-run splits it; arrows (W) move it, rings (E) turn gravity. `--demo-hallway` (layered hull) and
   `--demo-hallway-plain` (solid block) show one.
 - **Interior view** (top bar, or I): the hull is drawn see-through (both sides of every face, blended, no depth
   writes, stronger edge on) and locked: hull panels greyed, no solid picking, gizmos, strokes or hull keys. Hallways,
@@ -95,6 +101,14 @@ materials.
 - **Designer:** the Windows panel (ship tabs): Place window, then click the hull (a live outline shows where); list;
   shape, size, cut depth, pane thickness, turn, material (glazings first), Move (click the hull again), Delete. The
   outline is drawn on the hull. `--demo-windows`: a rounded side window, a porthole and one curving over the cylinder.
+
+## Add menu and context bars (2026-11-27)
+
+New things come from the top bar's Add menu (box, wedge, cylinder; hallway and window on a ship; parts and a pipe on a
+component), and the actions on a selection sit in a bar beside it in the view: solids (duplicate, add/subtract,
+delete), hallway and pipe nodes (add a node or branch, delete), windows (move, delete), placed components (open a
+copy, delete), parts (delete). One bar shows at a time; the panels keep properties. Interior, Profiles and Windows dock
+with Solids and Components (lower left).
 
 ## Cutaway bar (2026-11-27)
 

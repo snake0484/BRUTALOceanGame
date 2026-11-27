@@ -9,43 +9,28 @@ using static BrutalGame.Ships.HullSurface;
 namespace BrutalGame.Designer.Ui;
 
 /// <summary>
-/// The Interior panel and view tool: hallways, walkable spaces cut out of the hull along a path of nodes. The panel lists
-/// them and edits the selected one: its profile (presets, then drag points in the 2D editor; double-click an edge to add a
-/// point, right-click a point to remove it), the clear space a person needs and how many fit abreast, its gravity, stair
-/// material and path. In the view, click a node to select it, drag the arrows to move it, and in rotate mode (E) turn the
-/// hallway's gravity on the rings.
+/// The Interior panel and view tool for hallways: walkable spaces cut out of the hull along a network of nodes. The panel
+/// shows the selected hallway's properties: its profile (from the Profiles tab), clearance, gravity, stair material and
+/// runs. In the view: click a node to select it and drag the arrows (W) or turn gravity on the rings (E); the bar beside
+/// it adds a node (from an end it extends, from the middle it branches into a junction) or deletes; the diamond in the
+/// middle of each run of the selected hallway splits it with a new node.
 /// </summary>
 public sealed class InteriorPanel
 {
-    private const double Units = HullSolid.PositionUnitsPerMetre;
-    private const double ProfileSnap = 0.05;
-    private const float PointPixels = 8f;
     private const float NodePixels = 10f;
+    private const double NewRunMetres = 3.0;
 
     private static readonly string[] Axes = ["Yaw", "Pitch", "Roll"];
     private static readonly uint PathColour = OverlayRenderer.Rgba(90, 220, 220, 150);
     private static readonly uint SelectedColour = OverlayRenderer.Rgba(140, 255, 255, 255);
     private static readonly uint NodeColour = OverlayRenderer.Rgba(235, 235, 235);
     private static readonly uint PickedColour = OverlayRenderer.Rgba(255, 230, 120);
+    private static readonly uint SplitColour = OverlayRenderer.Rgba(140, 255, 255, 180);
     private static readonly uint GravityColour = OverlayRenderer.Rgba(255, 150, 60);
-    private static readonly ImColor8 Grid = new(255, 255, 255, 18);
-    private static readonly ImColor8 FloorLine = new(255, 255, 255, 90);
-    private static readonly ImColor8 OutlineColour = new(140, 255, 255, 255);
-    private static readonly ImColor8 Point = new(235, 235, 235, 255);
-    private static readonly ImColor8 PointHot = new(255, 230, 120, 255);
-    private static readonly ImColor8 PersonFill = new(110, 220, 120, 40);
-    private static readonly ImColor8 PersonLine = new(110, 220, 120, 200);
-    private static readonly ImColor8 TooSmall = new(255, 90, 80, 220);
 
     private readonly HullMaterialCatalog _catalog;
     private readonly TransformGizmo _gizmo = new();
-    private float _width = (float)InteriorCommands.DefaultWidth;
-    private float _height = (float)InteriorCommands.DefaultHeight;
     private string _message = "";
-
-    // Profile editor: a live copy while a point is dragged; committed (one undo step) on release.
-    private List<ProfilePoint>? _draft;
-    private int _dragPoint = -1;
 
     public InteriorPanel(HullMaterialCatalog catalog) => _catalog = catalog;
 
@@ -55,33 +40,34 @@ public sealed class InteriorPanel
     /// <summary>The view gizmo's mode (W move, E turns gravity).</summary>
     public GizmoMode Mode;
 
-    /// <summary>Clears the selection (another tab opened).</summary>
-    public void Reset() => (Selected, SelectedNode, _draft, _dragPoint) = (0, -1, null, -1);
+    /// <summary>Set for one frame when "Edit profile" asks the Profiles tab to show this profile.</summary>
+    public int EditProfileRequest { get; private set; } = -1;
 
-    public void Draw(DesignSession session, double3 placeAt)
+    public void Reset() => (Selected, SelectedNode) = (0, -1);
+
+    /// <summary>Add menu: a level hallway at <paramref name="at"/>, 4 m long, selected with its far node.</summary>
+    public void AddHallway(DesignSession session, Vector3d at)
     {
-        // Docks with Properties the first time (layouts saved before interiors existed have no place for it).
-        ImGui.SetNextWindowDockID(new ImGuiID(ShipLayout.EditDock), ImGuiCond.FirstUseEver);
+        var material = _catalog.All.Count > 0 ? _catalog.All[0].Id : default;
+        Selected = InteriorCommands.AddHallway(session, at, Add(at, new Vector3d(0, 0, 4)), material);
+        SelectedNode = Selected != 0 ? 1 : -1;
+        _message = Selected == 0 ? InteriorCommands.LastError : "Drag its nodes in the view; the bar beside a node adds more.";
+    }
+
+    public void Draw(DesignSession session)
+    {
+        EditProfileRequest = -1;
+        ImGui.SetNextWindowDockID(new ImGuiID(ShipLayout.InteriorDock), ImGuiCond.FirstUseEver);
 
         if (ImGui.Begin("Interior"u8))
         {
-            ImGui.TextWrapped($"Hallways are walkable spaces cut out of the hull. A person needs {HallwayGeometry.MinClearWidth:F1} m wide by {HallwayGeometry.MinClearHeight:F1} m tall clear; each further {HallwayGeometry.LaneWidth:F1} m of width lets one more pass at once.");
-
-            if (ImGui.Button("New hallway"u8))
-            {
-                var at = new Vector3d(placeAt.X, placeAt.Y, placeAt.Z);
-                var material = _catalog.All.Count > 0 ? _catalog.All[0].Id : default;
-                Selected = InteriorCommands.AddHallway(session, at, Add(at, new Vector3d(0, 0, 4)), material);
-                SelectedNode = Selected != 0 ? 1 : -1;
-                _message = Selected == 0 ? InteriorCommands.LastError : "Drag its nodes in the view; shape it below.";
-            }
-
-            DrawList(session);
+            ImGui.TextWrapped($"Hallways are walkable spaces cut out of the hull (Add > Hallway). A person needs {HallwayGeometry.MinClearWidth:F1} m wide by {HallwayGeometry.MinClearHeight:F1} m tall clear; each further {HallwayGeometry.LaneWidth:F1} m of width lets one more pass at once.");
             var interior = session.Doc.Interior;
+            DrawList(interior);
             var index = interior?.IndexOf(Selected) ?? -1;
 
             if (index >= 0)
-                DrawHallway(session, interior!.Hallways[index]);
+                DrawHallway(session, interior!, interior!.Hallways[index]);
 
             if (_message.Length > 0)
                 ImGui.TextWrapped($"{_message}");
@@ -90,12 +76,11 @@ public sealed class InteriorPanel
         ImGui.End();
     }
 
-    private void DrawList(DesignSession session)
+    private void DrawList(HullInterior? interior)
     {
-        var interior = session.Doc.Interior;
         ImGui.SeparatorText("Hallways"u8);
 
-        if (interior is null || interior.IsEmpty)
+        if (interior is null || interior.Hallways.Count == 0)
         {
             ImGui.TextDisabled("None yet."u8);
             return;
@@ -103,46 +88,49 @@ public sealed class InteriorPanel
 
         foreach (var h in interior.Hallways)
         {
-            var clear = HallwayGeometry.Measure(h.Profile);
+            var profile = interior.ProfileOf(h);
+            var clear = profile is null ? default : HallwayGeometry.Measure(profile.Points);
             var label = clear.Fits ? $"{clear.People} abreast" : "too small";
+            var junctions = Enumerable.Range(0, h.Nodes.Count).Count(n => h.Degree(n) >= 3);
 
-            if (ImGui.Selectable($"#{h.Id}  {h.Length():F1} m, {label}##hall{h.Id}", h.Id == Selected, ImGuiSelectableFlags.None, default))
-                (Selected, SelectedNode, _draft) = (h.Id, -1, null);
+            if (ImGui.Selectable($"#{h.Id}  {h.Length():F1} m, {label}{(junctions > 0 ? $", {junctions} junction{(junctions == 1 ? "" : "s")}" : "")}##hall{h.Id}", h.Id == Selected, ImGuiSelectableFlags.None, default))
+                (Selected, SelectedNode) = (h.Id, -1);
         }
     }
 
-    private void DrawHallway(DesignSession session, HullHallway hallway)
+    private void DrawHallway(DesignSession session, HullInterior interior, HullHallway hallway)
     {
         ImGui.SeparatorText($"Hallway #{hallway.Id}");
-        var profile = _draft ?? hallway.Profile;
-        var clear = HallwayGeometry.Measure(profile);
 
-        if (clear.Fits)
-            ImGui.Text($"Clear {clear.Width:F2} x {Math.Min(clear.Height, 9.99):F2} m: {clear.People} {(clear.People == 1 ? "person" : "people")} abreast");
-        else
-            ImGui.TextColored(new float4(1f, 0.45f, 0.35f, 1f), $"Too small: clear {clear.Width:F2} x {clear.Height:F2} m, needs {HallwayGeometry.MinClearWidth:F1} x {HallwayGeometry.MinClearHeight:F1} m");
+        // Profile: one of the plan's, shaped in the Profiles tab.
+        var current = hallway.Profile < interior.Profiles.Count ? interior.Profiles[hallway.Profile].Name : "?";
+        DesignerStyle.ItemWidth(220f);
 
-        // Profile: presets, then the editor.
-        ImGui.SeparatorText("Profile"u8);
-        DesignerStyle.ItemWidth(90f);
-        ImGui.InputFloat("Width m"u8, ref _width, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None);
-        ImGui.SameLine();
-        DesignerStyle.ItemWidth(90f);
-        ImGui.InputFloat("Height m"u8, ref _height, 0f, 0f, "%.2f"u8, ImGuiInputTextFlags.None);
-        _width = Math.Clamp(_width, 0.2f, 16f);
-        _height = Math.Clamp(_height, 0.2f, 16f);
-
-        for (var p = 0; p < HallwayGeometry.PresetNames.Length; p++)
+        if (ImGui.BeginCombo("Profile"u8, $"{current}", ImGuiComboFlags.None))
         {
-            if (p > 0)
-                ImGui.SameLine();
+            for (var i = 0; i < interior.Profiles.Count; i++)
+            {
+                if (ImGui.Selectable($"{interior.Profiles[i].Name}##pick{i}", i == hallway.Profile, ImGuiSelectableFlags.None, default) && i != hallway.Profile)
+                    InteriorCommands.SetHallwayProfile(session, hallway.Id, i);
+            }
 
-            if (ImGui.Button($"{HallwayGeometry.PresetNames[p]}##preset{p}"))
-                Commit(session, hallway.Id, HallwayGeometry.Preset((HallwayPreset)p, _width, _height));
+            ImGui.EndCombo();
         }
 
-        ProfileEditor(session, hallway, profile, clear);
-        ImGui.TextDisabled("Drag points; double-click an edge to add one, right-click a point to remove it."u8);
+        ImGui.SameLine();
+
+        if (ImGui.Button("Edit profile"u8))
+            EditProfileRequest = hallway.Profile;
+
+        if (interior.ProfileOf(hallway) is { } profile)
+        {
+            var clear = HallwayGeometry.Measure(profile.Points);
+
+            if (clear.Fits)
+                ImGui.Text($"Clear {clear.Width:F2} x {Math.Min(clear.Height, 9.99):F2} m: {clear.People} {(clear.People == 1 ? "person" : "people")} abreast");
+            else
+                ImGui.TextColored(new float4(1f, 0.45f, 0.35f, 1f), $"Too small: clear {clear.Width:F2} x {clear.Height:F2} m, needs {HallwayGeometry.MinClearWidth:F1} x {HallwayGeometry.MinClearHeight:F1} m");
+        }
 
         // Gravity.
         ImGui.SeparatorText("Gravity"u8);
@@ -177,238 +165,97 @@ public sealed class InteriorPanel
         if (MaterialCombo("Stairs##hallmat"u8, ref material))
             InteriorCommands.SetMaterial(session, hallway.Id, _catalog.All[material].Id);
 
-        DrawPath(session, hallway, down);
+        // Runs.
+        ImGui.SeparatorText("Runs"u8);
+
+        for (var r = 0; r < hallway.Runs.Count; r++)
+        {
+            var (a, b) = hallway.Runs[r];
+            var length = Sub(hallway.Node(b), hallway.Node(a)).Length();
+            var slope = HallwayGeometry.Slope(hallway.Node(a), hallway.Node(b), down);
+            var text = HallwayGeometry.Kind(slope) switch
+            {
+                RunKind.Level => "level",
+                RunKind.Ramp => $"ramp {slope:F0} deg",
+                RunKind.Stairs => $"stairs {slope:F0} deg",
+                _ => $"shaft {slope:F0} deg: too steep for stairs (needs a ladder)",
+            };
+
+            if (HallwayGeometry.Kind(slope) == RunKind.Shaft)
+                ImGui.TextColored(new float4(1f, 0.7f, 0.35f, 1f), $"{a}-{b}: {length:F2} m, {text}");
+            else
+                ImGui.TextDisabled($"{a}-{b}: {length:F2} m, {text}");
+        }
     }
 
-    private void DrawPath(DesignSession session, HullHallway hallway, Vector3d down)
+    // ---- the bar beside the selected node ----
+
+    public void DrawContext(DesignSession session, OrbitCamera camera, Vector2 viewport)
     {
-        ImGui.SeparatorText("Path"u8);
+        var interior = session.Doc.Interior;
+        var index = interior?.IndexOf(Selected) ?? -1;
 
-        for (var i = 0; i < hallway.Nodes.Count; i++)
+        if (index < 0 || SelectedNode < 0 || SelectedNode >= interior!.Hallways[index].Nodes.Count || _gizmo.Dragging)
+            return;
+
+        var hallway = interior.Hallways[index];
+
+        if (!ContextBar.Begin("hallway", camera, hallway.Node(SelectedNode), viewport))
+            return;
+
+        var end = hallway.Degree(SelectedNode) <= 1;
+
+        if (ContextBar.Button(end ? "+ Node" : "+ Branch", end ? "Extend the hallway from this node" : "Branch from this node (a junction)"))
         {
-            var n = hallway.Node(i);
-
-            if (ImGui.Selectable($"{i}: {n.X:F2}, {n.Y:F2}, {n.Z:F2}##hnode{i}", i == SelectedNode, ImGuiSelectableFlags.None, default))
-                SelectedNode = i;
-
-            if (i + 1 < hallway.Nodes.Count)
-            {
-                var slope = HallwayGeometry.Slope(n, hallway.Node(i + 1), down);
-                var kind = HallwayGeometry.Kind(slope);
-                var text = kind switch
-                {
-                    RunKind.Level => "level",
-                    RunKind.Ramp => $"ramp {slope:F0} deg",
-                    RunKind.Stairs => $"stairs {slope:F0} deg",
-                    _ => $"shaft {slope:F0} deg: too steep for stairs (needs a ladder)",
-                };
-
-                if (kind == RunKind.Shaft)
-                    ImGui.TextColored(new float4(1f, 0.7f, 0.35f, 1f), $"   {Sub(hallway.Node(i + 1), n).Length():F2} m, {text}");
-                else
-                    ImGui.TextDisabled($"   {Sub(hallway.Node(i + 1), n).Length():F2} m, {text}");
-            }
+            var node = InteriorCommands.AddNode(session, hallway.Id, SelectedNode, NewNodeAt(hallway, SelectedNode, NewRunMetres));
+            SelectedNode = node >= 0 ? node : SelectedNode;
         }
 
-        var node = SelectedNode;
-        ImGui.BeginDisabled(node < 0 || node >= hallway.Nodes.Count || hallway.Nodes.Count >= HullHallway.MaxNodes);
-
-        if (ImGui.Button("Add node after"u8))
+        if (ContextBar.Button("Delete node", "Remove this node (a node between two runs joins them)"))
         {
-            var a = hallway.Node(node);
-            var b = node + 1 < hallway.Nodes.Count ? Scale(Add(a, hallway.Node(node + 1)), 0.5) : Add(a, Scale(Normalise(Sub(a, hallway.Node(Math.Max(node - 1, 0))), new Vector3d(0, 0, 1)), 3.0));
-            InteriorCommands.SetHallway(session, hallway.Id, h => h.Nodes.Insert(node + 1, ComponentCommands.Quantise(b)));
-            SelectedNode = node + 1;
+            var count = hallway.Nodes.Count;
+            InteriorCommands.RemoveNode(session, hallway.Id, SelectedNode);
+            SelectedNode = count <= 2 ? -1 : Math.Max(0, SelectedNode - 1);
+
+            if (count <= 2)
+                Selected = 0;
         }
 
-        ImGui.EndDisabled();
-        ImGui.SameLine();
-        ImGui.BeginDisabled(node < 0 || node >= hallway.Nodes.Count || hallway.Nodes.Count <= HullHallway.MinNodes);
-
-        if (ImGui.Button("Delete node"u8))
-        {
-            InteriorCommands.SetHallway(session, hallway.Id, h => h.Nodes.RemoveAt(node));
-            SelectedNode = Math.Max(0, node - 1);
-        }
-
-        ImGui.EndDisabled();
-        ImGui.SameLine();
-
-        if (ImGui.Button("Delete hallway"u8))
+        if (ContextBar.Button("Delete hallway", "Remove the whole hallway"))
         {
             InteriorCommands.RemoveHallway(session, hallway.Id);
             Reset();
         }
+
+        ContextBar.End();
     }
 
-    // ---- profile editor ----
-
-    private void ProfileEditor(DesignSession session, HullHallway hallway, List<ProfilePoint> profile, Clearance clear)
+    /// <summary>
+    /// Where a new node off <paramref name="node"/> goes: on from an end, straight on; from a node with more runs, square
+    /// to its first run, level against the hallway's gravity.
+    /// </summary>
+    private static Vector3d NewNodeAt(HullHallway hallway, int node, double length)
     {
-        var size = new float2(Px(320f), Px(260f));
-        var origin = ImGui.GetCursorScreenPos();
-        ImGui.InvisibleButton("##profile"u8, size, ImGuiButtonFlags.MouseButtonLeft | ImGuiButtonFlags.MouseButtonRight);
-        var hovered = ImGui.IsItemHovered();
-        var list = ImGui.GetWindowDrawList();
-        list.AddRectFilled(origin, new float2(origin.X + size.X, origin.Y + size.Y), new ImColor8(0, 0, 0, 90));
+        var at = hallway.Node(node);
+        var runs = hallway.Runs.Where(r => r.A == node || r.B == node).ToList();
 
-        // Fit the outline (and a person) with a margin, one scale on both axes.
-        double x0 = -0.5, x1 = 0.5, y1 = HallwayGeometry.MinClearHeight;
+        if (runs.Count == 0)
+            return Add(at, new Vector3d(0, 0, length));
 
-        foreach (var p in profile)
-        {
-            (x0, x1) = (Math.Min(x0, p.X / Units), Math.Max(x1, p.X / Units));
-            y1 = Math.Max(y1, p.Y / Units);
-        }
+        var other = runs[0].A == node ? runs[0].B : runs[0].A;
+        var away = Normalise(Sub(at, hallway.Node(other)), new Vector3d(0, 0, 1));
 
-        const double margin = 0.35;
-        x0 -= margin;
-        x1 += margin;
-        var y0 = -margin;
-        y1 += margin;
-        var scale = Math.Min(size.X / (x1 - x0), size.Y / (y1 - y0));
-        var cx = (x0 + x1) * 0.5;
-        var cy = (y0 + y1) * 0.5;
-        float2 ToScreen(double x, double y) => new((float)(origin.X + size.X * 0.5 + (x - cx) * scale), (float)(origin.Y + size.Y * 0.5 - (y - cy) * scale));
-        (double X, double Y) ToWorld(float2 s) => (cx + (s.X - origin.X - size.X * 0.5) / scale, cy - (s.Y - origin.Y - size.Y * 0.5) / scale);
+        if (runs.Count == 1)
+            return Add(at, Scale(away, length));
 
-        for (var g = Math.Ceiling(x0 / 0.5) * 0.5; g <= x1; g += 0.5)
-            list.AddLine(ToScreen(g, y0), ToScreen(g, y1), Grid);
-
-        for (var g = Math.Ceiling(y0 / 0.5) * 0.5; g <= y1; g += 0.5)
-            list.AddLine(ToScreen(x0, g), ToScreen(x1, g), Grid);
-
-        list.AddLine(ToScreen(x0, 0), ToScreen(x1, 0), FloorLine, 1.5f);
-
-        // People abreast: one 0.8 × 1.9 lane each, centred on the floor; a red one when not even one fits.
-        var (lo, hi) = HallwayGeometry.FloorSpan(profile);
-        var mid = (lo + hi) * 0.5;
-        var people = Math.Max(clear.People, 1);
-
-        for (var i = 0; i < people; i++)
-        {
-            var left = mid - people * HallwayGeometry.LaneWidth * 0.5 + i * HallwayGeometry.LaneWidth;
-            var a = ToScreen(left + 0.04, HallwayGeometry.MinClearHeight);
-            var b = ToScreen(left + HallwayGeometry.LaneWidth - 0.04, 0.0);
-
-            if (clear.Fits)
-            {
-                list.AddRectFilled(a, b, PersonFill);
-                list.AddRect(a, b, PersonLine, 0f, default, 1f);
-            }
-            else
-            {
-                list.AddRect(a, b, TooSmall, 0f, default, 1.5f);
-            }
-        }
-
-        var mouse = ImGui.GetIO().MousePos;
-        var hot = -1;
-        var best = Px(PointPixels);
-
-        for (var j = 0; j < profile.Count; j++)
-        {
-            var s = ToScreen(profile[j].X / Units, profile[j].Y / Units);
-            var distance = MathF.Sqrt((s.X - mouse.X) * (s.X - mouse.X) + (s.Y - mouse.Y) * (s.Y - mouse.Y));
-
-            if (hovered && distance < best)
-            {
-                best = distance;
-                hot = j;
-            }
-        }
-
-        if (_dragPoint >= 0)
-            hot = _dragPoint;
-
-        for (var j = 0; j < profile.Count; j++)
-        {
-            var a = profile[j];
-            var b = profile[(j + 1) % profile.Count];
-            list.AddLine(ToScreen(a.X / Units, a.Y / Units), ToScreen(b.X / Units, b.Y / Units), OutlineColour, 2f);
-        }
-
-        for (var j = 0; j < profile.Count; j++)
-        {
-            var s = ToScreen(profile[j].X / Units, profile[j].Y / Units);
-            var r = Px(j == hot ? 5f : 3.5f);
-            list.AddRectFilled(new float2(s.X - r, s.Y - r), new float2(s.X + r, s.Y + r), j == hot ? PointHot : Point);
-        }
-
-        // Dragging a point: a live copy, committed on release.
-        if (_dragPoint < 0 && hovered && hot >= 0 && ImGui.IsMouseClicked(ImGuiMouseButton.Left, false))
-        {
-            _dragPoint = hot;
-            _draft = new List<ProfilePoint>(hallway.Profile);
-        }
-
-        if (_dragPoint >= 0 && _draft is not null)
-        {
-            var (x, y) = ToWorld(mouse);
-            _draft[_dragPoint] = new ProfilePoint(Snap(x), Snap(y));
-
-            if (!ImGui.IsMouseDown(ImGuiMouseButton.Left))
-            {
-                var done = _draft;
-                (_draft, _dragPoint) = (null, -1);
-                Commit(session, hallway.Id, done);
-            }
-
-            return;
-        }
-
-        if (hovered && hot >= 0 && ImGui.IsMouseClicked(ImGuiMouseButton.Right, false))
-        {
-            if (profile.Count > HullHallway.MinProfilePoints)
-            {
-                var fewer = new List<ProfilePoint>(profile);
-                fewer.RemoveAt(hot);
-                Commit(session, hallway.Id, fewer);
-            }
-
-            return;
-        }
-
-        if (hovered && hot < 0 && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left) && profile.Count < HullHallway.MaxProfilePoints)
-        {
-            // The nearest edge gets a new point under the mouse.
-            var edge = -1;
-            var near = Px(PointPixels);
-
-            for (var j = 0; j < profile.Count; j++)
-            {
-                var a = ToScreen(profile[j].X / Units, profile[j].Y / Units);
-                var b = ToScreen(profile[(j + 1) % profile.Count].X / Units, profile[(j + 1) % profile.Count].Y / Units);
-                var d = GizmoMath.SegmentDistance(new Vector2(mouse.X, mouse.Y), new Vector2(a.X, a.Y), new Vector2(b.X, b.Y));
-
-                if (d < near)
-                {
-                    near = d;
-                    edge = j;
-                }
-            }
-
-            if (edge >= 0)
-            {
-                var (x, y) = ToWorld(mouse);
-                var more = new List<ProfilePoint>(profile);
-                more.Insert(edge + 1, new ProfilePoint(Snap(x), Snap(y)));
-                Commit(session, hallway.Id, more);
-            }
-        }
+        var up = Scale(HallwayGeometry.Down(hallway.Gravity), -1);
+        var side = Normalise(Cross(away, up), new Vector3d(1, 0, 0));
+        return Add(at, Scale(side, length));
     }
-
-    private void Commit(DesignSession session, uint id, IReadOnlyList<ProfilePoint> profile)
-    {
-        if (!InteriorCommands.SetProfile(session, id, profile))
-            _message = InteriorCommands.LastError;
-    }
-
-    private static int Snap(double metres) => (int)Math.Round(Math.Round(metres / ProfileSnap) * ProfileSnap * Units);
 
     // ---- view ----
 
-    /// <summary>Draws every hallway (path, nodes, the profile at each node, gravity on the selected one); picks and moves nodes, turns gravity. True when it used the mouse.</summary>
+    /// <summary>Draws every hallway; picks nodes, splits runs, moves nodes and turns gravity. True when it used the mouse.</summary>
     public bool Update(DesignSession session, OrbitCamera camera, Vector2 viewport, in Matrix4x4 viewProj, bool mouseFree, double step, OverlayRenderer overlay)
     {
         var interior = session.Doc.Interior;
@@ -421,29 +268,57 @@ public sealed class InteriorPanel
         var clicked = ImGui.IsMouseClicked(ImGuiMouseButton.Left, false);
         var hoverHall = 0u;
         var hoverNode = -1;
+        var hoverRun = -1;
         var best = NodePixels;
 
         foreach (var h in interior.Hallways)
         {
             var selected = h.Id == Selected;
             var down = HallwayGeometry.Down(h.Gravity);
+            var profile = interior.ProfileOf(h);
+
+            for (var r = 0; r < h.Runs.Count; r++)
+            {
+                var (a, b) = h.Runs[r];
+
+                if (a >= h.Nodes.Count || b >= h.Nodes.Count)
+                    continue;
+
+                var pa = h.Node(a);
+                var pb = h.Node(b);
+                var size = Math.Max(0.03, camera.Depth(pa) * 0.006);
+                overlay.Ribbon(pa, pb, size * (selected ? 0.6 : 0.4), selected ? SelectedColour : PathColour);
+
+                if (!selected)
+                    continue;
+
+                // The split handle in the middle of the run.
+                var mid = Scale(Add(pa, pb), 0.5);
+                overlay.Cube(mid, size * 0.8, SplitColour);
+
+                if (camera.Project(mid, viewProj, viewport, out var pixel) && Vector2.Distance(pixel, mouse) < best)
+                {
+                    best = Vector2.Distance(pixel, mouse);
+                    (hoverHall, hoverNode, hoverRun) = (h.Id, -1, r);
+                }
+            }
 
             for (var i = 0; i < h.Nodes.Count; i++)
             {
                 var n = h.Node(i);
                 var size = Math.Max(0.03, camera.Depth(n) * 0.006);
 
-                if (i + 1 < h.Nodes.Count)
-                    overlay.Ribbon(n, h.Node(i + 1), size * (selected ? 0.6 : 0.4), selected ? SelectedColour : PathColour);
+                if (profile is not null)
+                    Outline(overlay, h, profile.Points, i, down, selected ? SelectedColour : PathColour);
 
-                Outline(overlay, h, i, down, selected ? SelectedColour : PathColour);
                 var picked = selected && i == SelectedNode;
-                overlay.Cube(n, picked ? size * 1.6 : size, picked ? PickedColour : NodeColour);
+                var junction = h.Degree(i) >= 3;
+                overlay.Cube(n, picked ? size * 1.6 : junction ? size * 1.3 : size, picked ? PickedColour : NodeColour);
 
                 if (camera.Project(n, viewProj, viewport, out var pixel) && Vector2.Distance(pixel, mouse) < best)
                 {
                     best = Vector2.Distance(pixel, mouse);
-                    (hoverHall, hoverNode) = (h.Id, i);
+                    (hoverHall, hoverNode, hoverRun) = (h.Id, i, -1);
                 }
             }
         }
@@ -483,9 +358,16 @@ public sealed class InteriorPanel
         if (!mouseFree || !clicked)
             return false;
 
+        if (hoverRun >= 0)
+        {
+            var node = InteriorCommands.SplitRun(session, hoverHall, hoverRun);
+            (Selected, SelectedNode) = (hoverHall, node);
+            return true;
+        }
+
         if (hoverNode >= 0)
         {
-            (Selected, SelectedNode, _draft) = (hoverHall, hoverNode, null);
+            (Selected, SelectedNode) = (hoverHall, hoverNode);
             return true;
         }
 
@@ -493,23 +375,29 @@ public sealed class InteriorPanel
         return false;
     }
 
-    /// <summary>The profile drawn at node <paramref name="i"/>, square to its run (the run out of it; the last node uses the run in).</summary>
-    private static void Outline(OverlayRenderer overlay, HullHallway h, int i, Vector3d down, uint colour)
+    /// <summary>The profile drawn at node <paramref name="i"/>, square to a run there.</summary>
+    private static void Outline(OverlayRenderer overlay, HullHallway h, List<ProfilePoint> profile, int i, Vector3d down, uint colour)
     {
-        if (h.Nodes.Count < 2 || h.Profile.Count < 3)
+        if (profile.Count < 3)
             return;
 
-        var s = Math.Min(i, h.Nodes.Count - 2);
-        var along = Normalise(Sub(h.Node(s + 1), h.Node(s)), new Vector3d(0, 0, 1));
+        var run = h.Runs.FindIndex(r => r.A == i || r.B == i);
+
+        if (run < 0)
+            return;
+
+        var (a, b) = h.Runs[run];
+        var along = Normalise(Sub(h.Node(b), h.Node(a)), new Vector3d(0, 0, 1));
         var (across, up) = HallwayGeometry.Frame(along, down, h.Gravity);
         var n = h.Node(i);
         var faint = OverlayRenderer.WithAlpha(colour, 120);
+        const double k = HullSolid.MetresPerPositionUnit;
 
-        for (var j = 0; j < h.Profile.Count; j++)
+        for (var j = 0; j < profile.Count; j++)
         {
-            var a = h.Profile[j];
-            var b = h.Profile[(j + 1) % h.Profile.Count];
-            overlay.Line(Add(n, Add(Scale(across, a.X / Units), Scale(up, a.Y / Units))), Add(n, Add(Scale(across, b.X / Units), Scale(up, b.Y / Units))), faint);
+            var p = profile[j];
+            var q = profile[(j + 1) % profile.Count];
+            overlay.Line(Add(n, Add(Scale(across, p.X * k), Scale(up, p.Y * k))), Add(n, Add(Scale(across, q.X * k), Scale(up, q.Y * k))), faint);
         }
     }
 
@@ -558,6 +446,4 @@ public sealed class InteriorPanel
 
         return changed;
     }
-
-    private static float Px(float v) => MathF.Round(v * ImGui.GetFontSize() / DesignerStyle.BodySize);
 }

@@ -128,23 +128,10 @@ public sealed class DesignerPanels
             if (stats.Message.Length > 0)
                 ImGui.TextWrapped($"{stats.Message}");
 
-            ImGui.SeparatorText("Add solid"u8);
+            ImGui.SeparatorText("New solids (Add menu)"u8);
             ImGui.Checkbox("Subtract"u8, ref _newSubtract);
             ImGui.SameLine();
             MaterialCombo("Material##new"u8, ref _newMaterial);
-
-            if (ImGui.Button("Box"u8))
-                AddSolid(session, SolidShape.Box);
-
-            ImGui.SameLine();
-
-            if (ImGui.Button("Wedge"u8))
-                AddSolid(session, SolidShape.Wedge);
-
-            ImGui.SameLine();
-
-            if (ImGui.Button("Cylinder"u8))
-                AddSolid(session, SolidShape.Cylinder);
 
             ImGui.SeparatorText("Snap"u8);
             ImGui.Checkbox("Grid"u8, ref session.Snap.Enabled);
@@ -194,7 +181,8 @@ public sealed class DesignerPanels
         ImGui.End();
     }
 
-    private void AddSolid(DesignSession session, SolidShape shape)
+    /// <summary>Add menu: a solid at the camera target with the new-solid settings, selected.</summary>
+    public void AddSolid(DesignSession session, SolidShape shape)
     {
         // A ship's new solid is 4 m; a component's housing pieces are much smaller.
         var size = Workspace == Workspace.Component ? 0.25f : 4f;
@@ -322,19 +310,6 @@ public sealed class DesignerPanels
 
             ImGui.Separator();
 
-            if (ImGui.Button("Add/Subtract"u8))
-                HullCommands.ToggleOp(session, id);
-
-            ImGui.SameLine();
-
-            if (ImGui.Button("Duplicate"u8))
-                HullCommands.Duplicate(session, id);
-
-            ImGui.SameLine();
-
-            if (ImGui.Button("Delete"u8))
-                HullCommands.DeleteSelected(session);
-
             if (ImGui.Button("Earlier"u8))
                 HullCommands.Move(session, id, -1);
 
@@ -353,6 +328,27 @@ public sealed class DesignerPanels
         }
 
         ImGui.End();
+    }
+
+    /// <summary>The bar beside the selected solid in the view: duplicate, add/subtract, delete.</summary>
+    public void DrawContext(DesignSession session, MeshEditState meshEdit, OrbitCamera camera, System.Numerics.Vector2 viewport)
+    {
+        if (Locked || meshEdit.Enabled || !session.TryGetSolid(session.Selection.Primary, out var solid))
+            return;
+
+        if (!ContextBar.Begin("solid", camera, new Vector3d(solid.PositionX, solid.PositionY, solid.PositionZ), viewport))
+            return;
+
+        if (ContextBar.Button("Duplicate", "Copy the selected solids (Ctrl+D)"))
+            HullCommands.Duplicate(session, solid.Id);
+
+        if (ContextBar.Button(solid.Op == SolidOp.Subtract ? "Make add" : "Make subtract", "Switch the solid between adding and cutting"))
+            HullCommands.ToggleOp(session, solid.Id);
+
+        if (ContextBar.Button("Delete", "Remove the selected solids (Del)"))
+            HullCommands.DeleteSelected(session);
+
+        ContextBar.End();
     }
 
     private void DrawStats(DesignSession session, DesignStats stats)

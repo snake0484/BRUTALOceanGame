@@ -79,13 +79,7 @@ public static class ComponentCommands
             data.Parts.RemoveAt(data.IndexOfPart(id));
 
             foreach (var pipe in data.Pipes)
-            {
-                if (pipe.From.Part == id)
-                    pipe.From = PipeEnd.Open;
-
-                if (pipe.To.Part == id)
-                    pipe.To = PipeEnd.Open;
-            }
+                pipe.Ports.RemoveAll(p => p.End.Part == id);
         });
         return true;
     }
@@ -108,12 +102,12 @@ public static class ComponentCommands
         var id = session.Doc.AllocateId();
         Change(session, (s, data) =>
         {
-            var pipe = new PipeRoute { Id = id, From = from, To = to, OuterMm = outerMm, InnerMm = innerMm, Material = s.EnsureMaterial(material) };
+            var points = new List<(int, int, int)>(nodes.Count);
 
             foreach (var n in nodes)
-                pipe.Nodes.Add(Quantise(n));
+                points.Add(Quantise(n));
 
-            data.Pipes.Add(pipe);
+            data.Pipes.Add(PipeRoute.Between(id, from, to, points, outerMm, innerMm, s.EnsureMaterial(material)));
         });
         return id;
     }
@@ -133,6 +127,95 @@ public static class ComponentCommands
             return false;
 
         Change(session, (s, data) => data.Pipes[data.IndexOfPipe(id)].Material = s.EnsureMaterial(material));
+        return true;
+    }
+
+    /// <summary>
+    /// A new node at <paramref name="at"/> joined to node <paramref name="from"/> by a run the size of one already there:
+    /// from an end it extends the pipe, from a node mid-pipe it branches (a tee). Returns the new node's index, or -1.
+    /// </summary>
+    public static int AddPipeNode(DesignSession session, uint id, int from, Vector3d at)
+    {
+        var index = Data(session).IndexOfPipe(id);
+
+        if (index < 0 || from < 0 || from >= Data(session).Pipes[index].Nodes.Count)
+            return -1;
+
+        var pipe = Data(session).Pipes[index];
+
+        if (pipe.Nodes.Count >= PipeRoute.MaxNodes || pipe.Runs.Count >= PipeRoute.MaxRuns)
+        {
+            LastError = "The pipe has the most nodes it can hold";
+            return -1;
+        }
+
+        var node = pipe.Nodes.Count;
+        Change(session, (_, data) =>
+        {
+            var p = data.Pipes[data.IndexOfPipe(id)];
+            var near = p.RunAt(from);
+            var (outer, inner) = near >= 0 ? (p.Runs[near].OuterMm, p.Runs[near].InnerMm) : (p.OuterMm, p.InnerMm);
+            p.Nodes.Add(Quantise(at));
+            p.Runs.Add(new PipeRun((byte)from, (byte)node, outer, inner));
+        });
+        return node;
+    }
+
+    /// <summary>Splits run <paramref name="run"/> at its middle with a new node (selected next). Returns its index, or -1.</summary>
+    public static int SplitPipeRun(DesignSession session, uint id, int run)
+    {
+        var index = Data(session).IndexOfPipe(id);
+
+        if (index < 0 || run < 0 || run >= Data(session).Pipes[index].Runs.Count || Data(session).Pipes[index].Nodes.Count >= PipeRoute.MaxNodes)
+            return -1;
+
+        var node = Data(session).Pipes[index].Nodes.Count;
+        Change(session, (_, data) =>
+        {
+            var p = data.Pipes[data.IndexOfPipe(id)];
+            var r = p.Runs[run];
+            p.Nodes.Add(Quantise(Scale(Add(p.Node(r.A), p.Node(r.B)), 0.5)));
+            p.Runs[run] = r with { B = (byte)node };
+            p.Runs.Add(r with { A = (byte)node });
+        });
+        return node;
+    }
+
+    /// <summary>Removes a node (a node between two runs is dissolved); a pipe left with fewer than two nodes goes too.</summary>
+    public static bool RemovePipeNode(DesignSession session, uint id, int node)
+    {
+        var index = Data(session).IndexOfPipe(id);
+
+        if (index < 0 || node < 0 || node >= Data(session).Pipes[index].Nodes.Count)
+            return false;
+
+        if (Data(session).Pipes[index].Nodes.Count <= 2)
+            return RemovePipe(session, id);
+
+        Change(session, (_, data) => data.Pipes[data.IndexOfPipe(id)].RemoveNode(node));
+        return true;
+    }
+
+    /// <summary>One run's diameters (mm); new runs from it take the same.</summary>
+    public static bool SetPipeRun(DesignSession session, uint id, int run, ushort outerMm, ushort innerMm)
+    {
+        if (innerMm == 0 || innerMm >= outerMm)
+        {
+            LastError = "The inner diameter must be below the outer";
+            return false;
+        }
+
+        var index = Data(session).IndexOfPipe(id);
+
+        if (index < 0 || run < 0 || run >= Data(session).Pipes[index].Runs.Count)
+            return false;
+
+        Change(session, (_, data) =>
+        {
+            var p = data.Pipes[data.IndexOfPipe(id)];
+            p.Runs[run] = p.Runs[run] with { OuterMm = outerMm, InnerMm = innerMm };
+            (p.OuterMm, p.InnerMm) = (outerMm, innerMm);
+        });
         return true;
     }
 
@@ -259,26 +342,60 @@ public static class ComponentCommands
 
         foreach (var pipe in data.Pipes)
         {
-            if ((pipe.From.Part == part && pipe.From.Port == port && !pipe.From.IsOpen) || (pipe.To.Part == part && pipe.To.Port == port && !pipe.To.IsOpen))
+            if (pipe.NodeOn(part, port) >= 0)
                 return true;
         }
 
         return false;
     }
 
-    /// <summary>Moves every pipe end that sits on a port onto that port's current position.</summary>
+    /// <summary>How close a free pipe end must come to a free flow port to attach to it.</summary>
+    public const double AttachMetres = 0.03;
+
+    /// <summary>
+    /// Moves every pipe node that sits on a port onto that port's current position, and attaches a free end (a node on one
+    /// run, on no port) that has come within <see cref="AttachMetres"/> of a free flow port.
+    /// </summary>
     public static void FollowPorts(ComponentData data)
     {
+        var links = ComponentModel.Links(data);
+
         foreach (var pipe in data.Pipes)
         {
-            if (pipe.Nodes.Count < 2)
-                continue;
+            pipe.Ports.RemoveAll(p => p.Node >= pipe.Nodes.Count || !Port(data, p.End, out _));
 
-            if (!pipe.From.IsOpen && Port(data, pipe.From, out var start))
-                pipe.Nodes[0] = Quantise(start);
+            foreach (var (node, end) in pipe.Ports)
+            {
+                if (Port(data, end, out var at))
+                    pipe.Nodes[node] = Quantise(at);
+            }
 
-            if (!pipe.To.IsOpen && Port(data, pipe.To, out var end))
-                pipe.Nodes[^1] = Quantise(end);
+            foreach (var node in pipe.OpenEnds().ToList())
+            {
+                var p = pipe.Node(node);
+
+                foreach (var part in data.Parts)
+                {
+                    var ports = PartGeometry.Ports(part);
+
+                    for (var i = 0; i < ports.Length; i++)
+                    {
+                        if (ports[i].Kind != PortKind.Flow || Taken(data, links, part.Id, i, 0))
+                            continue;
+
+                        var at = PartGeometry.PortAt(part, i).Position;
+
+                        if (Sub(at, p).Length() < AttachMetres)
+                        {
+                            pipe.Ports.Add(((byte)node, new PipeEnd(part.Id, (byte)i)));
+                            pipe.Nodes[node] = Quantise(at);
+                            goto attached;
+                        }
+                    }
+                }
+
+                attached:;
+            }
         }
     }
 

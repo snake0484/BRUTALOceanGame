@@ -1,30 +1,61 @@
 using System.Buffers.Binary;
+using System.Text;
 
 namespace BrutalGame.Ships.Interior;
 
 /// <summary>
-/// A hallway: a walkable space swept along a path of nodes, with a cross-section profile and its own gravity direction.
-/// Like a pipe, it is a route of nodes; unlike a pipe it is empty space: it is cut out of the hull as a room (a layered
-/// hull gives it its own wall stack), and runs too steep to walk up get stairs. Positions are 1/1024 m in ship space;
-/// the profile is 1/1024 m across (X) and up from the floor (Y = 0 is the floor). Treated as immutable once in a plan.
+/// A cross-section outline for hallways: X across, Y up from the floor (1/1024 m; Y = 0 is the floor), 3-32 points. The
+/// plan keeps its own copy: <see cref="Source"/> names the library file it came from, but a change to that file reaches
+/// the plan only when the profile is reimported on purpose.
+/// </summary>
+public sealed class HullProfile
+{
+    public const int MinPoints = 3;
+    public const int MaxPoints = 32;
+    public const int MaxNameBytes = 64;
+    public const int MaxSourceBytes = 255;
+
+    /// <summary>Largest coordinate (16 m).</summary>
+    public const int MaxUnits = 16 * HullSolid.PositionUnitsPerMetre;
+
+    public string Name = "";
+
+    /// <summary>The library file (relative to the profile library) it was imported from or saved to; empty if made here.</summary>
+    public string Source = "";
+
+    public readonly List<ProfilePoint> Points = new();
+
+    public HullProfile Clone()
+    {
+        var copy = new HullProfile { Name = Name, Source = Source };
+        copy.Points.AddRange(Points);
+        return copy;
+    }
+
+    public bool SameShape(HullProfile other) => Points.SequenceEqual(other.Points);
+}
+
+/// <summary>
+/// A hallway: a walkable space swept along a network of nodes, like a pipe: nodes joined by runs, and three or more runs at
+/// a node make a junction (one walkable space). It uses one of the plan's profiles and has its own gravity. It is cut out
+/// of the hull as a room (a layered hull gives it its own wall stack), and runs too steep to walk up get stairs.
+/// Positions are 1/1024 m in ship space. Treated as immutable once in a plan.
 /// </summary>
 public sealed class HullHallway
 {
-    public const int MinNodes = 2;
     public const int MaxNodes = 64;
-    public const int MinProfilePoints = 3;
-    public const int MaxProfilePoints = 32;
-
-    /// <summary>Largest profile coordinate (16 m).</summary>
-    public const int MaxProfileUnits = 16 * HullSolid.PositionUnitsPerMetre;
+    public const int MaxRuns = 96;
 
     public uint Id;
 
-    /// <summary>The path, 1/1024 m in ship space.</summary>
+    /// <summary>The nodes, 1/1024 m in ship space.</summary>
     public readonly List<(int X, int Y, int Z)> Nodes = new();
 
-    /// <summary>The cross-section: a closed outline, X across, Y up from the floor (1/1024 m).</summary>
-    public readonly List<ProfilePoint> Profile = new();
+    /// <summary>Runs between nodes (indices into <see cref="Nodes"/>).</summary>
+    public readonly List<(byte A, byte B)> Runs = new();
+
+    /// <summary>Index of the plan profile it uses.</summary>
+    public byte Profile;
 
     /// <summary>Gravity as a 15 degree snap rotation: down is this rotation applied to -Y (identity: ship down).</summary>
     public uint Gravity = SolidRotation.Identity;
@@ -34,39 +65,74 @@ public sealed class HullHallway
 
     public Vector3d Node(int i) => new(Nodes[i].X * HullSolid.MetresPerPositionUnit, Nodes[i].Y * HullSolid.MetresPerPositionUnit, Nodes[i].Z * HullSolid.MetresPerPositionUnit);
 
-    public HullHallway Clone()
-    {
-        var copy = new HullHallway { Id = Id, Gravity = Gravity, Material = Material };
-        copy.Nodes.AddRange(Nodes);
-        copy.Profile.AddRange(Profile);
-        return copy;
-    }
+    public int Degree(int node) => Runs.Count(r => r.A == node || r.B == node);
 
-    public double Length()
+    public double Length() => Runs.Sum(r => HullSurface.Sub(Node(r.B), Node(r.A)).Length());
+
+    /// <summary>A straight chain through <paramref name="nodes"/>.</summary>
+    public void Chain(IEnumerable<(int X, int Y, int Z)> nodes)
     {
-        var length = 0.0;
+        Nodes.Clear();
+        Runs.Clear();
+        Nodes.AddRange(nodes);
 
         for (var i = 0; i + 1 < Nodes.Count; i++)
-            length += HullSurface.Sub(Node(i + 1), Node(i)).Length();
+            Runs.Add(((byte)i, (byte)(i + 1)));
+    }
 
-        return length;
+    /// <summary>Removes node <paramref name="node"/> and its runs; a node between exactly two runs is dissolved, its neighbours joined.</summary>
+    public void RemoveNode(int node)
+    {
+        var touching = Runs.Where(r => r.A == node || r.B == node).ToList();
+
+        if (touching.Count == 2)
+        {
+            var a = touching[0].A == node ? touching[0].B : touching[0].A;
+            var b = touching[1].A == node ? touching[1].B : touching[1].A;
+            Runs.Add((a, b));
+        }
+
+        Runs.RemoveAll(r => r.A == node || r.B == node);
+        Nodes.RemoveAt(node);
+
+        for (var i = 0; i < Runs.Count; i++)
+        {
+            var (a, b) = Runs[i];
+            Runs[i] = ((byte)(a > node ? a - 1 : a), (byte)(b > node ? b - 1 : b));
+        }
+    }
+
+    public HullHallway Clone()
+    {
+        var copy = new HullHallway { Id = Id, Gravity = Gravity, Material = Material, Profile = Profile };
+        copy.Nodes.AddRange(Nodes);
+        copy.Runs.AddRange(Runs);
+        return copy;
     }
 }
 
-/// <summary>The plan's interior spaces: hallways (rooms stay ordinary Room-role solids).</summary>
+/// <summary>The plan's interior spaces: its profiles and hallways (rooms stay ordinary Room-role solids).</summary>
 public sealed class HullInterior
 {
     public const int MaxHallways = 255;
+    public const int MaxProfiles = 64;
 
+    public readonly List<HullProfile> Profiles = new();
     public readonly List<HullHallway> Hallways = new();
 
-    public bool IsEmpty => Hallways.Count == 0;
+    public bool IsEmpty => Hallways.Count == 0 && Profiles.Count == 0;
 
     public int IndexOf(uint id) => Hallways.FindIndex(h => h.Id == id);
+
+    /// <summary>The profile a hallway uses (null when its index is out of range).</summary>
+    public HullProfile? ProfileOf(HullHallway hallway) => hallway.Profile < Profiles.Count ? Profiles[hallway.Profile] : null;
 
     public HullInterior Clone()
     {
         var copy = new HullInterior();
+
+        foreach (var p in Profiles)
+            copy.Profiles.Add(p.Clone());
 
         foreach (var h in Hallways)
             copy.Hallways.Add(h.Clone());
@@ -75,14 +141,39 @@ public sealed class HullInterior
     }
 
     /// <summary>
-    /// <c>u8 count</c>, then per hallway <c>u32 id, u32 gravity, u8 material, u8 profileCount, u8 nodeCount</c>, the profile
-    /// (i32 X, Y each) and the nodes (i32 X, Y, Z each).
+    /// <c>u8 profile count</c>, per profile <c>u8 name length, name (UTF-8), u8 source length, source, u8 point count,
+    /// i32 X, Y</c> per point; then <c>u8 hallway count</c>, per hallway <c>u32 id, u32 gravity, u8 material, u8 profile,
+    /// u8 node count, u8 run count</c>, i32 X, Y, Z per node, u8 A, B per run. (BODY formats 6 and 7 held one inline
+    /// profile and a line of nodes per hallway; <see cref="Read"/> converts them.)
     /// </summary>
     public byte[] ToBytes()
     {
-        var size = 1 + Hallways.Sum(h => 11 + h.Profile.Count * 8 + h.Nodes.Count * 12);
+        var names = Profiles.Select(p => Clip(p.Name, HullProfile.MaxNameBytes)).ToList();
+        var sources = Profiles.Select(p => Clip(p.Source, HullProfile.MaxSourceBytes)).ToList();
+        var size = 1 + Profiles.Select((p, i) => 3 + names[i].Length + sources[i].Length + p.Points.Count * 8).Sum()
+            + 1 + Hallways.Sum(h => 12 + h.Nodes.Count * 12 + h.Runs.Count * 2);
         var b = new byte[size];
         var o = 0;
+        b[o++] = (byte)Profiles.Count;
+
+        for (var i = 0; i < Profiles.Count; i++)
+        {
+            b[o++] = (byte)names[i].Length;
+            names[i].CopyTo(b, o);
+            o += names[i].Length;
+            b[o++] = (byte)sources[i].Length;
+            sources[i].CopyTo(b, o);
+            o += sources[i].Length;
+            b[o++] = (byte)Profiles[i].Points.Count;
+
+            foreach (var p in Profiles[i].Points)
+            {
+                BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(o), p.X);
+                BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(o + 4), p.Y);
+                o += 8;
+            }
+        }
+
         b[o++] = (byte)Hallways.Count;
 
         foreach (var h in Hallways)
@@ -90,16 +181,10 @@ public sealed class HullInterior
             BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(o), h.Id);
             BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(o + 4), h.Gravity);
             b[o + 8] = h.Material;
-            b[o + 9] = (byte)h.Profile.Count;
+            b[o + 9] = h.Profile;
             b[o + 10] = (byte)h.Nodes.Count;
-            o += 11;
-
-            foreach (var p in h.Profile)
-            {
-                BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(o), p.X);
-                BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(o + 4), p.Y);
-                o += 8;
-            }
+            b[o + 11] = (byte)h.Runs.Count;
+            o += 12;
 
             foreach (var (x, y, z) in h.Nodes)
             {
@@ -108,12 +193,110 @@ public sealed class HullInterior
                 BinaryPrimitives.WriteInt32LittleEndian(b.AsSpan(o + 8), z);
                 o += 12;
             }
+
+            foreach (var (a, c) in h.Runs)
+            {
+                b[o++] = a;
+                b[o++] = c;
+            }
         }
 
         return b;
     }
 
-    public static HullInterior? Read(ReadOnlySpan<byte> s, out int consumed)
+    private static byte[] Clip(string text, int max)
+    {
+        var bytes = Encoding.UTF8.GetBytes(text);
+        return bytes.Length <= max ? bytes : bytes[..max];
+    }
+
+    /// <summary>Reads the block at the start of <paramref name="s"/>; <paramref name="legacy"/>: the BODY format 6 and 7 layout.</summary>
+    public static HullInterior? Read(ReadOnlySpan<byte> s, out int consumed, bool legacy = false)
+    {
+        consumed = 0;
+        var interior = new HullInterior();
+        var o = 0;
+
+        if (legacy)
+            return ReadLegacy(s, out consumed);
+
+        if (s.Length < 1)
+            return null;
+
+        int profiles = s[o++];
+
+        if (profiles > MaxProfiles)
+            return null;
+
+        for (var i = 0; i < profiles; i++)
+        {
+            var p = new HullProfile();
+
+            if (!Text(s, ref o, out p.Name) || !Text(s, ref o, out p.Source) || s.Length < o + 1)
+                return null;
+
+            int points = s[o++];
+
+            if (points > HullProfile.MaxPoints || s.Length < o + points * 8)
+                return null;
+
+            for (var j = 0; j < points; j++, o += 8)
+                p.Points.Add(new ProfilePoint(BinaryPrimitives.ReadInt32LittleEndian(s[o..]), BinaryPrimitives.ReadInt32LittleEndian(s[(o + 4)..])));
+
+            interior.Profiles.Add(p);
+        }
+
+        if (s.Length < o + 1)
+            return null;
+
+        int count = s[o++];
+
+        for (var i = 0; i < count; i++)
+        {
+            if (s.Length < o + 12)
+                return null;
+
+            var h = new HullHallway
+            {
+                Id = BinaryPrimitives.ReadUInt32LittleEndian(s[o..]),
+                Gravity = BinaryPrimitives.ReadUInt32LittleEndian(s[(o + 4)..]),
+                Material = s[o + 8],
+                Profile = s[o + 9],
+            };
+            int nodes = s[o + 10], runs = s[o + 11];
+            o += 12;
+
+            if (nodes > HullHallway.MaxNodes || runs > HullHallway.MaxRuns || s.Length < o + nodes * 12 + runs * 2)
+                return null;
+
+            for (var j = 0; j < nodes; j++, o += 12)
+                h.Nodes.Add((BinaryPrimitives.ReadInt32LittleEndian(s[o..]), BinaryPrimitives.ReadInt32LittleEndian(s[(o + 4)..]), BinaryPrimitives.ReadInt32LittleEndian(s[(o + 8)..])));
+
+            for (var j = 0; j < runs; j++, o += 2)
+                h.Runs.Add((s[o], s[o + 1]));
+
+            interior.Hallways.Add(h);
+        }
+
+        consumed = o;
+        return interior;
+    }
+
+    private static bool Text(ReadOnlySpan<byte> s, ref int o, out string text)
+    {
+        text = "";
+
+        if (s.Length < o + 1 || s.Length < o + 1 + s[o])
+            return false;
+
+        int length = s[o++];
+        text = Encoding.UTF8.GetString(s.Slice(o, length));
+        o += length;
+        return true;
+    }
+
+    /// <summary>Formats 6 and 7: per hallway an inline profile and a line of nodes. Same outlines become one plan profile.</summary>
+    private static HullInterior? ReadLegacy(ReadOnlySpan<byte> s, out int consumed)
     {
         consumed = 0;
 
@@ -134,18 +317,33 @@ public sealed class HullInterior
                 Gravity = BinaryPrimitives.ReadUInt32LittleEndian(s[(o + 4)..]),
                 Material = s[o + 8],
             };
-            int profile = s[o + 9], nodes = s[o + 10];
+            int points = s[o + 9], nodes = s[o + 10];
             o += 11;
 
-            if (profile > HullHallway.MaxProfilePoints || nodes > HullHallway.MaxNodes || s.Length < o + profile * 8 + nodes * 12)
+            if (points > HullProfile.MaxPoints || nodes > HullHallway.MaxNodes || s.Length < o + points * 8 + nodes * 12)
                 return null;
 
-            for (var j = 0; j < profile; j++, o += 8)
-                h.Profile.Add(new ProfilePoint(BinaryPrimitives.ReadInt32LittleEndian(s[o..]), BinaryPrimitives.ReadInt32LittleEndian(s[(o + 4)..])));
+            var profile = new HullProfile();
+
+            for (var j = 0; j < points; j++, o += 8)
+                profile.Points.Add(new ProfilePoint(BinaryPrimitives.ReadInt32LittleEndian(s[o..]), BinaryPrimitives.ReadInt32LittleEndian(s[(o + 4)..])));
+
+            var line = new List<(int, int, int)>();
 
             for (var j = 0; j < nodes; j++, o += 12)
-                h.Nodes.Add((BinaryPrimitives.ReadInt32LittleEndian(s[o..]), BinaryPrimitives.ReadInt32LittleEndian(s[(o + 4)..]), BinaryPrimitives.ReadInt32LittleEndian(s[(o + 8)..])));
+                line.Add((BinaryPrimitives.ReadInt32LittleEndian(s[o..]), BinaryPrimitives.ReadInt32LittleEndian(s[(o + 4)..]), BinaryPrimitives.ReadInt32LittleEndian(s[(o + 8)..])));
 
+            h.Chain(line);
+            var same = interior.Profiles.FindIndex(p => p.SameShape(profile));
+
+            if (same < 0)
+            {
+                profile.Name = $"Profile {interior.Profiles.Count + 1}";
+                same = interior.Profiles.Count;
+                interior.Profiles.Add(profile);
+            }
+
+            h.Profile = (byte)same;
             interior.Hallways.Add(h);
         }
 

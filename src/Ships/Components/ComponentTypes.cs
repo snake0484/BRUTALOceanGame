@@ -65,50 +65,162 @@ public readonly record struct PipeEnd(uint Part, byte Port)
     public static readonly PipeEnd Open = new(0, 0);
 }
 
-/// <summary>
-/// A pipe: a run of straight lengths through its nodes (1/1024 m; the first and last are its ends), an outer and an inner
-/// diameter (mm) and a material. Its pressure rating is Barlow's 2·σ_y·t / D_o with t the wall, (outer − inner) / 2.
-/// </summary>
-public sealed class PipeRoute
+/// <summary>One straight run of a pipe between two of its nodes, with its own outer and inner diameter (mm).</summary>
+public readonly record struct PipeRun(byte A, byte B, ushort OuterMm, ushort InnerMm)
 {
-    public const int MaxNodes = 64;
-
-    public uint Id;
-    public PipeEnd From = PipeEnd.Open;
-    public PipeEnd To = PipeEnd.Open;
-    public ushort OuterMm = 20;
-    public ushort InnerMm = 16;
-    public byte Material;
-    public readonly List<(int X, int Y, int Z)> Nodes = new();
-
     public double OuterMetres => OuterMm / 1000.0;
 
     public double InnerMetres => InnerMm / 1000.0;
 
     public double WallMetres => (OuterMm - InnerMm) / 2000.0;
 
+    /// <summary>Burst pressure (Pa) for a material of yield <paramref name="yieldMpa"/>: Barlow's 2·σ_y·t / D_o.</summary>
+    public double Rating(double yieldMpa) => OuterMm > 0 ? 2.0 * yieldMpa * 1e6 * WallMetres / OuterMetres : 0.0;
+
+    public int Other(int node) => node == A ? B : A;
+}
+
+/// <summary>
+/// A pipe: nodes (1/1024 m) joined by runs, each run straight with its own diameters; three or more runs meeting at a node
+/// make a junction (a tee: the whole pipe is one gas space). A node may sit on a part's port (<see cref="Ports"/>); a
+/// node at the end of one run with no port is an open inlet the ship or the test bench feeds. Its rating is its weakest
+/// run's (Barlow's 2·σ_y·t / D_o, t the wall).
+/// </summary>
+public sealed class PipeRoute
+{
+    public const int MaxNodes = 64;
+    public const int MaxRuns = 96;
+
+    public uint Id;
+    public byte Material;
+
+    /// <summary>The diameters new runs get.</summary>
+    public ushort OuterMm = 20;
+    public ushort InnerMm = 16;
+
+    public readonly List<(int X, int Y, int Z)> Nodes = new();
+    public readonly List<PipeRun> Runs = new();
+
+    /// <summary>Nodes that sit on a part's port.</summary>
+    public readonly List<(byte Node, PipeEnd End)> Ports = new();
+
     public Vector3d Node(int i) => new(Nodes[i].X * HullSolid.MetresPerPositionUnit, Nodes[i].Y * HullSolid.MetresPerPositionUnit, Nodes[i].Z * HullSolid.MetresPerPositionUnit);
 
-    public double Length
+    /// <summary>What node <paramref name="node"/> sits on (open when none).</summary>
+    public PipeEnd EndAt(int node)
     {
-        get
+        foreach (var (n, end) in Ports)
         {
-            var length = 0.0;
+            if (n == node)
+                return end;
+        }
 
-            for (var i = 1; i < Nodes.Count; i++)
-                length += HullSurface.Sub(Node(i), Node(i - 1)).Length();
+        return PipeEnd.Open;
+    }
 
-            return length;
+    /// <summary>The node on a part's port, or -1.</summary>
+    public int NodeOn(uint part, int port)
+    {
+        foreach (var (n, end) in Ports)
+        {
+            if (end.Part == part && end.Port == port)
+                return n;
+        }
+
+        return -1;
+    }
+
+    public int Degree(int node)
+    {
+        var degree = 0;
+
+        foreach (var run in Runs)
+        {
+            if (run.A == node)
+                degree++;
+
+            if (run.B == node)
+                degree++;
+        }
+
+        return degree;
+    }
+
+    /// <summary>Open inlets: nodes at the end of one run that sit on no port.</summary>
+    public IEnumerable<int> OpenEnds()
+    {
+        for (var i = 0; i < Nodes.Count; i++)
+        {
+            if (Degree(i) == 1 && EndAt(i).IsOpen)
+                yield return i;
         }
     }
 
-    /// <summary>Burst pressure (Pa) for a material of yield <paramref name="yieldMpa"/>: 2·σ_y·t / D_o.</summary>
-    public double Rating(double yieldMpa) => OuterMm > 0 ? 2.0 * yieldMpa * 1e6 * WallMetres / OuterMetres : 0.0;
+    /// <summary>The run touching node <paramref name="node"/> (the first, for a junction), or -1.</summary>
+    public int RunAt(int node) => Runs.FindIndex(r => r.A == node || r.B == node);
+
+    public double RunLength(PipeRun run) => HullSurface.Sub(Node(run.B), Node(run.A)).Length();
+
+    public double Length => Runs.Sum(RunLength);
+
+    /// <summary>The weakest run's burst pressure (Pa).</summary>
+    public double Rating(double yieldMpa) => Runs.Count == 0 ? 0.0 : Runs.Min(r => r.Rating(yieldMpa));
+
+    /// <summary>Bore volume: π r_i² × length over every run.</summary>
+    public double BoreVolume => Runs.Sum(r => Math.PI * r.InnerMetres * r.InnerMetres * 0.25 * RunLength(r));
+
+    /// <summary>A two-node pipe from <paramref name="from"/> to <paramref name="to"/> (each a port or open).</summary>
+    public static PipeRoute Between(uint id, PipeEnd from, PipeEnd to, IReadOnlyList<(int X, int Y, int Z)> nodes, ushort outerMm, ushort innerMm, byte material)
+    {
+        var pipe = new PipeRoute { Id = id, OuterMm = outerMm, InnerMm = innerMm, Material = material };
+        pipe.Nodes.AddRange(nodes);
+
+        for (var i = 0; i + 1 < nodes.Count; i++)
+            pipe.Runs.Add(new PipeRun((byte)i, (byte)(i + 1), outerMm, innerMm));
+
+        if (!from.IsOpen)
+            pipe.Ports.Add((0, from));
+
+        if (!to.IsOpen && nodes.Count > 0)
+            pipe.Ports.Add(((byte)(nodes.Count - 1), to));
+
+        return pipe;
+    }
+
+    /// <summary>Removes node <paramref name="node"/> and its runs; a node between exactly two runs is dissolved, its neighbours joined.</summary>
+    public void RemoveNode(int node)
+    {
+        var touching = Runs.Where(r => r.A == node || r.B == node).ToList();
+
+        if (touching.Count == 2)
+        {
+            var (a, b) = (touching[0].Other(node), touching[1].Other(node));
+            Runs.Add(new PipeRun((byte)a, (byte)b, touching[0].OuterMm, touching[0].InnerMm));
+        }
+
+        Runs.RemoveAll(r => r.A == node || r.B == node);
+        Ports.RemoveAll(p => p.Node == node);
+        Nodes.RemoveAt(node);
+
+        for (var i = 0; i < Runs.Count; i++)
+        {
+            var run = Runs[i];
+            Runs[i] = run with { A = (byte)(run.A > node ? run.A - 1 : run.A), B = (byte)(run.B > node ? run.B - 1 : run.B) };
+        }
+
+        for (var i = 0; i < Ports.Count; i++)
+        {
+            var (n, end) = Ports[i];
+            Ports[i] = ((byte)(n > node ? n - 1 : n), end);
+        }
+    }
 
     public PipeRoute Clone()
     {
-        var copy = new PipeRoute { Id = Id, From = From, To = To, OuterMm = OuterMm, InnerMm = InnerMm, Material = Material };
+        var copy = new PipeRoute { Id = Id, OuterMm = OuterMm, InnerMm = InnerMm, Material = Material };
         copy.Nodes.AddRange(Nodes);
+        copy.Runs.AddRange(Runs);
+        copy.Ports.AddRange(Ports);
         return copy;
     }
 }
@@ -166,13 +278,14 @@ public sealed class ComponentData
 
     /// <summary>
     /// u16 part count; per part u32 id, u8 kind, u8 material, i32 x, y, z, u32 rotation, i32 × 6 parameters (46 B).
-    /// u16 pipe count; per pipe u32 id, u32 from part, u8 from port, u32 to part, u8 to port, u16 outer, u16 inner,
-    /// u8 material, u8 node count, i32 × 3 per node. u16 placement count; per placement u32 id, u64 prefab, i32 x, y, z,
-    /// u32 rotation (28 B).
+    /// u16 pipe count; per pipe u32 id, u8 material, u16 outer, u16 inner (for new runs), u8 node, run and port counts,
+    /// i32 × 3 per node, per run u8 a, u8 b, u16 outer, u16 inner, per port u8 node, u32 part, u8 port. u16 placement
+    /// count; per placement u32 id, u64 prefab, i32 x, y, z, u32 rotation (28 B). Plan BODY formats before 8 held two-ended
+    /// pipes (<see cref="Read"/> with legacy pipes converts them).
     /// </summary>
     public byte[] ToBytes()
     {
-        var size = 2 + Parts.Count * 46 + 2 + Pipes.Sum(p => 20 + p.Nodes.Count * 12) + 2 + Placements.Count * 28;
+        var size = 2 + Parts.Count * 46 + 2 + Pipes.Sum(p => 12 + p.Nodes.Count * 12 + p.Runs.Count * 6 + p.Ports.Count * 6) + 2 + Placements.Count * 28;
         var b = new byte[size];
         var o = 0;
         U16(b, ref o, (ushort)Parts.Count);
@@ -196,20 +309,33 @@ public sealed class ComponentData
         foreach (var p in Pipes)
         {
             U32(b, ref o, p.Id);
-            U32(b, ref o, p.From.Part);
-            b[o++] = p.From.Port;
-            U32(b, ref o, p.To.Part);
-            b[o++] = p.To.Port;
+            b[o++] = p.Material;
             U16(b, ref o, p.OuterMm);
             U16(b, ref o, p.InnerMm);
-            b[o++] = p.Material;
             b[o++] = (byte)p.Nodes.Count;
+            b[o++] = (byte)p.Runs.Count;
+            b[o++] = (byte)p.Ports.Count;
 
             foreach (var (x, y, z) in p.Nodes)
             {
                 I32(b, ref o, x);
                 I32(b, ref o, y);
                 I32(b, ref o, z);
+            }
+
+            foreach (var run in p.Runs)
+            {
+                b[o++] = run.A;
+                b[o++] = run.B;
+                U16(b, ref o, run.OuterMm);
+                U16(b, ref o, run.InnerMm);
+            }
+
+            foreach (var (node, end) in p.Ports)
+            {
+                b[o++] = node;
+                U32(b, ref o, end.Part);
+                b[o++] = end.Port;
             }
         }
 
@@ -229,8 +355,8 @@ public sealed class ComponentData
         return b;
     }
 
-    /// <summary>Reads the block at the start of <paramref name="s"/>, structurally checked; null on failure.</summary>
-    public static ComponentData? Read(ReadOnlySpan<byte> s, out int consumed)
+    /// <summary>Reads the block at the start of <paramref name="s"/>, structurally checked; null on failure. <paramref name="legacyPipes"/>: the two-ended layout of BODY formats 5 to 7.</summary>
+    public static ComponentData? Read(ReadOnlySpan<byte> s, out int consumed, bool legacyPipes = false)
     {
         consumed = 0;
         var data = new ComponentData();
@@ -258,25 +384,10 @@ public sealed class ComponentData
 
         for (var i = 0; i < pipes; i++)
         {
-            if (s.Length < o + 20)
+            var p = legacyPipes ? LegacyPipe(s, ref o) : Pipe(s, ref o);
+
+            if (p is null)
                 return null;
-
-            var p = new PipeRoute { Id = R32(s, ref o) };
-            var fromPart = R32(s, ref o);
-            p.From = new PipeEnd(fromPart, s[o++]);
-            var toPart = R32(s, ref o);
-            p.To = new PipeEnd(toPart, s[o++]);
-            p.OuterMm = BinaryPrimitives.ReadUInt16LittleEndian(s[o..]);
-            p.InnerMm = BinaryPrimitives.ReadUInt16LittleEndian(s[(o + 2)..]);
-            o += 4;
-            p.Material = s[o++];
-            int nodes = s[o++];
-
-            if (nodes > PipeRoute.MaxNodes || s.Length < o + nodes * 12)
-                return null;
-
-            for (var k = 0; k < nodes; k++)
-                p.Nodes.Add((RI(s, ref o), RI(s, ref o), RI(s, ref o)));
 
             data.Pipes.Add(p);
         }
@@ -298,6 +409,65 @@ public sealed class ComponentData
 
         consumed = o;
         return data;
+    }
+
+    private static PipeRoute? Pipe(ReadOnlySpan<byte> s, ref int o)
+    {
+        if (s.Length < o + 12)
+            return null;
+
+        var p = new PipeRoute { Id = R32(s, ref o), Material = s[o++] };
+        p.OuterMm = BinaryPrimitives.ReadUInt16LittleEndian(s[o..]);
+        p.InnerMm = BinaryPrimitives.ReadUInt16LittleEndian(s[(o + 2)..]);
+        o += 4;
+        int nodes = s[o++], runs = s[o++], ports = s[o++];
+
+        if (nodes > PipeRoute.MaxNodes || runs > PipeRoute.MaxRuns || ports > nodes || s.Length < o + nodes * 12 + runs * 6 + ports * 6)
+            return null;
+
+        for (var k = 0; k < nodes; k++)
+            p.Nodes.Add((RI(s, ref o), RI(s, ref o), RI(s, ref o)));
+
+        for (var k = 0; k < runs; k++)
+        {
+            p.Runs.Add(new PipeRun(s[o], s[o + 1], BinaryPrimitives.ReadUInt16LittleEndian(s[(o + 2)..]), BinaryPrimitives.ReadUInt16LittleEndian(s[(o + 4)..])));
+            o += 6;
+        }
+
+        for (var k = 0; k < ports; k++)
+        {
+            var node = s[o++];
+            var part = R32(s, ref o);
+            p.Ports.Add((node, new PipeEnd(part, s[o++])));
+        }
+
+        return p;
+    }
+
+    /// <summary>Formats 5 to 7: u32 id, from part and port, to part and port, u16 outer, inner, u8 material, nodes in a line.</summary>
+    private static PipeRoute? LegacyPipe(ReadOnlySpan<byte> s, ref int o)
+    {
+        if (s.Length < o + 20)
+            return null;
+
+        var id = R32(s, ref o);
+        var from = new PipeEnd(R32(s, ref o), s[o++]);
+        var to = new PipeEnd(R32(s, ref o), s[o++]);
+        var outer = BinaryPrimitives.ReadUInt16LittleEndian(s[o..]);
+        var inner = BinaryPrimitives.ReadUInt16LittleEndian(s[(o + 2)..]);
+        o += 4;
+        var material = s[o++];
+        int count = s[o++];
+
+        if (count > PipeRoute.MaxNodes || s.Length < o + count * 12)
+            return null;
+
+        var nodes = new List<(int, int, int)>(count);
+
+        for (var k = 0; k < count; k++)
+            nodes.Add((RI(s, ref o), RI(s, ref o), RI(s, ref o)));
+
+        return PipeRoute.Between(id, from, to, nodes, outer, inner, material);
     }
 
     private static void U16(byte[] b, ref int o, ushort v)

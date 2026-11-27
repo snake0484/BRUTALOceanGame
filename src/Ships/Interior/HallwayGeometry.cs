@@ -136,7 +136,7 @@ public static class HallwayGeometry
     /// </summary>
     public static Clearance Measure(IReadOnlyList<ProfilePoint> profile)
     {
-        if (profile.Count < HullHallway.MinProfilePoints || Area2(profile) == 0)
+        if (profile.Count < HullProfile.MinPoints || Area2(profile) == 0)
             return default;
 
         const double k = HullSolid.MetresPerPositionUnit;
@@ -271,11 +271,13 @@ public static class HallwayGeometry
         {
             var hallway = interior.Hallways[h];
 
-            if (hallway.Nodes.Count < HullHallway.MinNodes || hallway.Profile.Count < HullHallway.MinProfilePoints || Area2(hallway.Profile) == 0)
+            var profile = interior.ProfileOf(hallway)?.Points;
+
+            if (profile is null || hallway.Runs.Count == 0 || profile.Count < HullProfile.MinPoints || Area2(profile) == 0)
                 continue;
 
-            Cuts(hallway, h, layered, meshBase, result);
-            Stairs(hallway, h, layered, stairs, stairMeshes, out var shafts);
+            Cuts(hallway, profile, h, layered, meshBase, result);
+            Stairs(hallway, profile, h, layered, stairs, stairMeshes, out var shafts);
             result.Shafts += shafts;
         }
 
@@ -291,14 +293,18 @@ public static class HallwayGeometry
         return result;
     }
 
-    private static void Cuts(HullHallway hallway, int index, bool layered, int meshBase, Expansion result)
+    private static void Cuts(HullHallway hallway, List<ProfilePoint> outline, int index, bool layered, int meshBase, Expansion result)
     {
         const double k = HullSolid.MetresPerPositionUnit;
         var down = Down(hallway.Gravity);
-        var profile = new (double X, double Y)[hallway.Profile.Count];
+        var profile = new (double X, double Y)[outline.Count];
+        var reach = 0.0;
 
         for (var j = 0; j < profile.Length; j++)
-            profile[j] = (hallway.Profile[j].X * k, hallway.Profile[j].Y * k);
+        {
+            profile[j] = (outline[j].X * k, outline[j].Y * k);
+            reach = Math.Max(reach, Math.Abs(profile[j].X));
+        }
 
         var template = new HullSolid
         {
@@ -309,12 +315,14 @@ public static class HallwayGeometry
             Rotation = SolidRotation.Identity,
         };
         var piece = 0;
-        var nodes = hallway.Nodes.Count;
 
-        for (var s = 0; s + 1 < nodes; s++)
+        foreach (var (na, nb) in hallway.Runs)
         {
-            var a = hallway.Node(s);
-            var b = hallway.Node(s + 1);
+            if (na >= hallway.Nodes.Count || nb >= hallway.Nodes.Count)
+                continue;
+
+            var a = hallway.Node(na);
+            var b = hallway.Node(nb);
             var along = Sub(b, a);
             var length = along.Length();
 
@@ -323,8 +331,15 @@ public static class HallwayGeometry
 
             along = Scale(along, 1.0 / length);
             var (across, up) = Frame(along, down, hallway.Gravity);
-            var startPlane = s > 0 ? Mitre(hallway, s, along) : along;
-            var endPlane = s + 2 < nodes ? Mitre(hallway, s + 1, along) : along;
+
+            // Joints: mitred where exactly two runs meet; at a junction each run reaches past the node by half the
+            // profile's width so the runs overlap into one space; a free end is square.
+            var (startPlane, startReach) = Joint(hallway, na, nb, along, reach);
+            var (endPlane, endReach) = Joint(hallway, nb, na, Scale(along, -1), reach);
+            endPlane = Scale(endPlane, -1);
+            a = Sub(a, Scale(along, startReach));
+            b = Add(b, Scale(along, endReach));
+            length += startReach + endReach;
             var pieces = Math.Max(1, (int)Math.Ceiling(length / MaxPieceMetres));
 
             for (var p = 0; p < pieces; p++)
@@ -348,16 +363,38 @@ public static class HallwayGeometry
         }
     }
 
-    /// <summary>The joint plane at node <paramref name="node"/>: halfway between the runs in and out, unless the turn is too sharp to mitre.</summary>
-    private static Vector3d Mitre(HullHallway hallway, int node, Vector3d along)
+    /// <summary>
+    /// The joint where a run leaves <paramref name="node"/> along <paramref name="away"/> (towards <paramref name="far"/>):
+    /// the plane's normal (pointing along the run) and how far the run reaches back past the node. Two runs: the plane
+    /// halfway between them (square if the turn is too sharp to mitre). A junction: square, reaching back half the
+    /// profile's width. A free end: square, no reach.
+    /// </summary>
+    private static (Vector3d Plane, double Reach) Joint(HullHallway hallway, int node, int far, Vector3d away, double reach)
     {
-        var inDir = Normalise(Sub(hallway.Node(node), hallway.Node(node - 1)), along);
-        var outDir = Normalise(Sub(hallway.Node(node + 1), hallway.Node(node)), along);
+        var degree = hallway.Degree(node);
 
-        if (Dot(inDir, outDir) < -0.5)
-            return along;
+        if (degree >= 3)
+            return (away, reach);
 
-        return Normalise(Add(inDir, outDir), along);
+        if (degree != 2)
+            return (away, 0.0);
+
+        foreach (var (a, b) in hallway.Runs)
+        {
+            var other = a == node ? b : b == node ? a : -1;
+
+            if (other < 0 || other == far)
+                continue;
+
+            var inDir = Normalise(Sub(hallway.Node(node), hallway.Node(other)), away);
+
+            if (Dot(inDir, away) < -0.5)
+                return (away, 0.0);
+
+            return (Normalise(Add(inDir, away), away), 0.0);
+        }
+
+        return (away, 0.0);
     }
 
     /// <summary>The profile at <paramref name="centre"/> in the run's frame, slid along the run onto the plane with normal <paramref name="plane"/>.</summary>
@@ -432,12 +469,12 @@ public static class HallwayGeometry
     }
 
     /// <summary>Steps on every run between ramp and shaft steepness: one convex block per step, sitting on the run's floor.</summary>
-    private static void Stairs(HullHallway hallway, int index, bool layered, List<HullSolid> output, List<HullMesh> meshes, out int shafts)
+    private static void Stairs(HullHallway hallway, List<ProfilePoint> profile, int index, bool layered, List<HullSolid> output, List<HullMesh> meshes, out int shafts)
     {
         shafts = 0;
         var down = Down(hallway.Gravity);
         var up0 = Scale(down, -1);
-        var (lo, hi) = FloorSpan(hallway.Profile);
+        var (lo, hi) = FloorSpan(profile);
 
         if (hi - lo < 1e-3)
             return;
@@ -452,10 +489,13 @@ public static class HallwayGeometry
         };
         var step = 0;
 
-        for (var s = 0; s + 1 < hallway.Nodes.Count; s++)
+        foreach (var (na, nb) in hallway.Runs)
         {
-            var a = hallway.Node(s);
-            var b = hallway.Node(s + 1);
+            if (na >= hallway.Nodes.Count || nb >= hallway.Nodes.Count)
+                continue;
+
+            var a = hallway.Node(na);
+            var b = hallway.Node(nb);
             var kind = Kind(Slope(a, b, down));
 
             if (kind == RunKind.Shaft)

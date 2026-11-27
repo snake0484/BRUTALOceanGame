@@ -11,6 +11,9 @@ public static class ShipLayout
     /// <summary>The top-right dock node the edit panels share.</summary>
     public const uint EditDock = 0x00000005;
 
+    /// <summary>The lower-left dock node the interior panels (Interior, Profiles, Windows) share with Solids and Components.</summary>
+    public const uint InteriorDock = 0x00000008;
+
     public static string Seed(int w, int h)
     {
         var left = Math.Min(440, w / 4);
@@ -25,6 +28,15 @@ public static class ShipLayout
 
             [Window][Components]
             DockId=0x00000008,1
+
+            [Window][Interior]
+            DockId=0x00000008,2
+
+            [Window][Profiles]
+            DockId=0x00000008,3
+
+            [Window][Windows]
+            DockId=0x00000008,4
 
             [Window][Properties]
             DockId=0x00000005,0

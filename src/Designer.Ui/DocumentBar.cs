@@ -2,6 +2,9 @@ using Brutal.ImGuiApi;
 
 namespace BrutalGame.Designer.Ui;
 
+/// <summary>What the Add menu makes.</summary>
+public enum AddKind { None, Box, Wedge, Cylinder, Hallway, Window, Chamber, Nozzle, Injector, Igniter, Pipe }
+
 /// <summary>One open plan as the tab bar shows it. <see cref="Key"/> stays the same while the tab lives.</summary>
 public readonly record struct DocumentTab(int Key, string Title, bool Modified, bool Component);
 
@@ -23,6 +26,12 @@ public sealed class DocumentBar
 
     /// <summary>The interior view: the hull see-through and locked, so what is inside can be reached and edited.</summary>
     public bool InteriorView;
+
+    /// <summary>The open tab is a component (its Add menu offers parts and pipes; a ship's, hallways and windows).</summary>
+    public bool ComponentTab;
+
+    /// <summary>The Add menu's pick this frame.</summary>
+    public AddKind Add { get; private set; }
 
     /// <summary>The File menu's pick this frame.</summary>
     public FileRequest Request { get; private set; }
@@ -55,6 +64,7 @@ public sealed class DocumentBar
     public void Draw(IReadOnlyList<DocumentTab> tabs, int activeKey)
     {
         Request = FileRequest.None;
+        Add = AddKind.None;
         SelectedKey = -1;
         CloseKey = -1;
         _tabs.Clear();
@@ -66,6 +76,7 @@ public sealed class DocumentBar
         if (ImGui.BeginMainMenuBar())
         {
             DrawFileMenu(activeKey);
+            DrawAddMenu();
             ImGui.Separator();
             ModeItem("Move"u8, "W"u8, GizmoMode.Move);
             ModeItem("Rotate"u8, "E"u8, GizmoMode.Rotate);
@@ -111,6 +122,42 @@ public sealed class DocumentBar
             AskClose(activeKey);
 
         ImGui.EndMenu();
+    }
+
+    private void DrawAddMenu()
+    {
+        if (!ImGui.BeginMenu("Add"u8))
+            return;
+
+        // Solids change the hull, which the interior view keeps locked.
+        ImGui.BeginDisabled(InteriorView);
+        Item("Box"u8, AddKind.Box);
+        Item("Wedge"u8, AddKind.Wedge);
+        Item("Cylinder"u8, AddKind.Cylinder);
+        ImGui.EndDisabled();
+        ImGui.Separator();
+
+        if (ComponentTab)
+        {
+            Item("Burn chamber"u8, AddKind.Chamber);
+            Item("Nozzle"u8, AddKind.Nozzle);
+            Item("Injector"u8, AddKind.Injector);
+            Item("Igniter"u8, AddKind.Igniter);
+            Item("Pipe"u8, AddKind.Pipe);
+        }
+        else
+        {
+            Item("Hallway"u8, AddKind.Hallway);
+            Item("Window (click the hull)"u8, AddKind.Window);
+        }
+
+        ImGui.EndMenu();
+
+        void Item(ReadOnlySpan<byte> label, AddKind kind)
+        {
+            if (ImGui.MenuItem(label))
+                Add = kind;
+        }
     }
 
     private void ModeItem(ReadOnlySpan<byte> label, ReadOnlySpan<byte> key, GizmoMode mode)

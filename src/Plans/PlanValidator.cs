@@ -187,12 +187,13 @@ public static class PlanValidator
         {
             var element = new ElementRef(ElementKind.Route, pipe.Id);
 
-            if (pipe.Nodes.Count is < 2 or > PipeRoute.MaxNodes || pipe.InnerMm == 0 || pipe.InnerMm >= pipe.OuterMm)
+            if (pipe.Nodes.Count is < 2 or > PipeRoute.MaxNodes || pipe.Runs.Count is 0 or > PipeRoute.MaxRuns
+                || pipe.Runs.Any(run => run.A == run.B || run.A >= pipe.Nodes.Count || run.B >= pipe.Nodes.Count || run.InnerMm == 0 || run.InnerMm >= run.OuterMm))
                 log.Add(Severity.Error, IssueCode.PipeShape, element, pipe.Nodes.Count);
 
-            foreach (var end in new[] { pipe.From, pipe.To })
+            foreach (var (node, end) in pipe.Ports)
             {
-                if (!end.IsOpen && (!parts.TryGetValue(end.Part, out var part) || end.Port >= PartGeometry.Ports(part).Length))
+                if (node >= pipe.Nodes.Count || end.IsOpen || !parts.TryGetValue(end.Part, out var part) || end.Port >= PartGeometry.Ports(part).Length)
                     log.Add(Severity.Error, IssueCode.PipeEnd, element, (int)end.Part);
             }
 
@@ -218,15 +219,35 @@ public static class PlanValidator
         if (interior is null)
             return;
 
-        if (interior.Hallways.Count > HullInterior.MaxHallways)
+        if (interior.Hallways.Count > HullInterior.MaxHallways || interior.Profiles.Count > HullInterior.MaxProfiles)
             log.Add(Severity.Error, IssueCode.HallwayCount, default, interior.Hallways.Count);
+
+        // Profiles: a real outline in range with its floor at Y = 0. The value is the profile's index.
+        var badProfiles = new HashSet<int>();
+
+        for (var i = 0; i < interior.Profiles.Count; i++)
+        {
+            var points = interior.Profiles[i].Points;
+
+            if (points.Count is < HullProfile.MinPoints or > HullProfile.MaxPoints || HallwayGeometry.Area2(points) == 0
+                || points.Any(p => Math.Abs(p.X) > HullProfile.MaxUnits || Math.Abs(p.Y) > HullProfile.MaxUnits))
+            {
+                log.Add(Severity.Error, IssueCode.HallwayShape, default, i);
+                badProfiles.Add(i);
+            }
+            else if (points.Min(p => p.Y) != 0)
+            {
+                log.Add(Severity.Warning, IssueCode.HallwayFloor, default, i);
+            }
+        }
 
         foreach (var hallway in interior.Hallways)
         {
             var element = new ElementRef(ElementKind.Route, hallway.Id);
 
-            if (hallway.Nodes.Count is < HullHallway.MinNodes or > HullHallway.MaxNodes || hallway.Profile.Count is < HullHallway.MinProfilePoints or > HullHallway.MaxProfilePoints
-                || hallway.Profile.Any(p => Math.Abs(p.X) > HullHallway.MaxProfileUnits || Math.Abs(p.Y) > HullHallway.MaxProfileUnits) || HallwayGeometry.Area2(hallway.Profile) == 0
+            if (hallway.Nodes.Count is < 2 or > HullHallway.MaxNodes || hallway.Runs.Count is 0 or > HullHallway.MaxRuns
+                || hallway.Runs.Any(r => r.A == r.B || r.A >= hallway.Nodes.Count || r.B >= hallway.Nodes.Count)
+                || hallway.Profile >= interior.Profiles.Count || badProfiles.Contains(hallway.Profile)
                 || Enumerable.Range(0, hallway.Nodes.Count).Any(i => hallway.Node(i).Length() > PlanLimits.MaxReachMetres)
                 || !SolidRotation.IsValid(hallway.Gravity))
             {
@@ -234,10 +255,7 @@ public static class PlanValidator
                 continue;
             }
 
-            if (hallway.Profile.Min(p => p.Y) != 0)
-                log.Add(Severity.Warning, IssueCode.HallwayFloor, element, hallway.Profile.Min(p => p.Y));
-
-            var clearance = HallwayGeometry.Measure(hallway.Profile);
+            var clearance = HallwayGeometry.Measure(interior.Profiles[hallway.Profile].Points);
 
             if (!clearance.Fits)
                 log.Add(Severity.Error, IssueCode.HallwayTooSmall, element, (int)Math.Round(clearance.Width * 1000));
@@ -247,10 +265,12 @@ public static class PlanValidator
 
             var down = HallwayGeometry.Down(hallway.Gravity);
 
-            for (var s = 0; s + 1 < hallway.Nodes.Count; s++)
+            for (var r = 0; r < hallway.Runs.Count; r++)
             {
-                if (HallwayGeometry.Kind(HallwayGeometry.Slope(hallway.Node(s), hallway.Node(s + 1), down)) == RunKind.Shaft)
-                    log.Add(Severity.Warning, IssueCode.HallwayShaft, element, s);
+                var (a, b) = hallway.Runs[r];
+
+                if (HallwayGeometry.Kind(HallwayGeometry.Slope(hallway.Node(a), hallway.Node(b), down)) == RunKind.Shaft)
+                    log.Add(Severity.Warning, IssueCode.HallwayShaft, element, r);
             }
         }
     }

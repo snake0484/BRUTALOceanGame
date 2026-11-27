@@ -49,14 +49,16 @@ public sealed class WindowsPanel
 
     public void Draw(DesignSession session)
     {
-        ImGui.SetNextWindowDockID(new ImGuiID(ShipLayout.EditDock), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowDockID(new ImGuiID(ShipLayout.InteriorDock), ImGuiCond.FirstUseEver);
 
         if (ImGui.Begin("Windows"u8))
         {
             ImGui.TextWrapped("A window cuts through the hull to the space behind it; its pane takes the hull's shape."u8);
 
-            if (Toggle("Place window (click the hull)"u8, _placing == Placing.New))
-                _placing = _placing == Placing.New ? Placing.None : Placing.New;
+            if (_placing == Placing.New)
+                ImGui.TextColored(new Brutal.Numerics.float4(0.6f, 1f, 0.7f, 1f), "Click the hull to place a window (Esc stops)."u8);
+            else
+                ImGui.TextDisabled("Add > Window, then click the hull."u8);
 
             DrawList(session);
             var set = session.Doc.Windows;
@@ -174,16 +176,35 @@ public sealed class WindowsPanel
         if (_catalog.TryGet(_catalog.All[material].Id, out var m))
             ImGui.TextDisabled($"{m.DensityKgM3} kg/m3, strength {m.YieldMpa} MPa{(m.Transparent ? "" : ", not see-through")}");
 
-        if (Toggle("Move (click the hull)"u8, _placing == Placing.Move))
-            _placing = _placing == Placing.Move ? Placing.None : Placing.Move;
+    }
 
-        ImGui.SameLine();
+    /// <summary>Add menu: the next clicks on the hull place windows.</summary>
+    public void StartPlacing() => _placing = Placing.New;
 
-        if (ImGui.Button("Delete window"u8))
+    /// <summary>The bar beside the selected window in the view: move it (click the hull), delete.</summary>
+    public void DrawContext(DesignSession session, OrbitCamera camera, Vector2 viewport)
+    {
+        var set = session.Doc.Windows;
+        var index = set?.IndexOf(Selected) ?? -1;
+
+        if (index < 0 || _placing != Placing.None || _surface is null)
+            return;
+
+        var window = set!.Windows[index];
+
+        if (!ContextBar.Begin("window", camera, WindowGeometry.Centre(window, _surface), viewport))
+            return;
+
+        if (ContextBar.Button("Move", "Click the hull to move the window there"))
+            _placing = Placing.Move;
+
+        if (ContextBar.Button("Delete", "Remove this window"))
         {
             WindowCommands.RemoveWindow(session, window.Id);
             Selected = 0;
         }
+
+        ContextBar.End();
     }
 
     private static bool Shape(ref WindowShape shape, out bool changed)
@@ -234,6 +255,9 @@ public sealed class WindowsPanel
                     (best, hover) = (Vector2.Distance(pixel, mouse), w.Id);
             }
         }
+
+        if (_placing != Placing.None && ImGui.IsKeyPressed(ImGuiKey.Escape, false))
+            _placing = Placing.None;
 
         if (_placing != Placing.None && mouseFree)
         {

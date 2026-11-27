@@ -39,11 +39,15 @@ public sealed class PrefabPanel
     /// <summary>Set when the user asks for the library to be read again.</summary>
     public bool RefreshRequest { get; private set; }
 
-    public void Draw(DesignSession session)
+    /// <summary>Clears the one-frame requests (before the panels draw).</summary>
+    public void BeginFrame()
     {
         OpenRequest = null;
         RefreshRequest = false;
+    }
 
+    public void Draw(DesignSession session)
+    {
         if (ImGui.Begin("Components"u8))
         {
             ImGui.TextDisabled("Drag a component into the view to place it."u8);
@@ -143,15 +147,33 @@ public sealed class PrefabPanel
             var shape = _shape(held);
             ImGui.Text($"Parts and pipes {shape.PartsMassKg:F1} kg; cuts a {(shape.Max.X - shape.Min.X):F2} x {(shape.Max.Y - shape.Min.Y):F2} x {(shape.Max.Z - shape.Min.Z):F2} m bay");
 
-            if (ImGui.Button("Open a copy in the component editor"u8))
-                OpenRequest = held;
         }
+    }
 
-        if (ImGui.Button("Remove"u8))
+    /// <summary>The bar beside the selected placement in the view: open a copy in the component editor, delete.</summary>
+    public void DrawContext(DesignSession session, OrbitCamera camera, Vector2 viewport)
+    {
+        var data = session.Doc.Components;
+        var index = data?.IndexOfPlacement(Selected) ?? -1;
+
+        if (index < 0 || _gizmo.Dragging)
+            return;
+
+        var placement = data!.Placements[index];
+
+        if (!ContextBar.Begin("placement", camera, placement.Position, viewport))
+            return;
+
+        if (session.Doc.Prefabs.TryGetValue(placement.Prefab, out var held) && ContextBar.Button("Open a copy", "Open a copy in a component tab (saving it makes a new prefab)"))
+            OpenRequest = held;
+
+        if (ContextBar.Button("Delete", "Remove this placed component"))
         {
             ComponentCommands.RemovePlacement(session, placement.Id);
             Selected = 0;
         }
+
+        ContextBar.End();
     }
 
     /// <summary>

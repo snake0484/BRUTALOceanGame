@@ -69,6 +69,9 @@ public sealed class ComponentWorkspace
 
     public uint SelectedPart;
     public uint SelectedPipe;
+
+    /// <summary>The run of the selected pipe whose size the panel edits.</summary>
+    public int SelectedRun = -1;
     public int SelectedNode = -1;
 
     /// <summary>The parts' and pipes' surfaces (component metres) for the exact-surface build; rebuilt when the plan changes.</summary>
@@ -122,11 +125,10 @@ public sealed class ComponentWorkspace
 
         var pipe = data.Pipes[index];
         var node = SelectedNode;
-        var pinned = (node == 0 && !pipe.From.IsOpen) || (node == pipe.Nodes.Count - 1 && !pipe.To.IsOpen);
 
-        if (node >= 0 && node < pipe.Nodes.Count && !pinned && pipe.Nodes.Count > 2)
+        if (node >= 0 && node < pipe.Nodes.Count && pipe.Nodes.Count > 2)
         {
-            ComponentCommands.SetPipe(session, pipe.Id, p => p.Nodes.RemoveAt(node));
+            ComponentCommands.RemovePipeNode(session, pipe.Id, node);
             SelectedNode = Math.Max(0, node - 1);
         }
         else
@@ -136,6 +138,21 @@ public sealed class ComponentWorkspace
         }
 
         return true;
+    }
+
+    /// <summary>Add menu: a part of <paramref name="kind"/>, laid out in a row beside the others, selected.</summary>
+    public void AddPart(DesignSession session, PartKind kind)
+    {
+        var count = session.Doc.Components?.Parts.Count ?? 0;
+        SelectedPart = ComponentCommands.AddPart(session, kind, DefaultMaterial(kind), new Vector3d(0.6 * (count % 4), 0, 0.6 * (count / 4)));
+        (SelectedPipe, SelectedNode) = (0, -1);
+    }
+
+    /// <summary>Add menu: an open two-node pipe at <paramref name="at"/> (drag a free end onto a port to attach it).</summary>
+    public void AddPipe(DesignSession session, Vector3d at)
+    {
+        SelectedPipe = ComponentCommands.AddPipe(session, PipeEnd.Open, PipeEnd.Open, [at, Add(at, new Vector3d(0, 0, 0.3))], 40, 32, DefaultMaterial(PartKind.Injector));
+        (SelectedPart, SelectedNode) = (0, 1);
     }
 
     // ---- panels ----
@@ -151,26 +168,10 @@ public sealed class ComponentWorkspace
         if (ImGui.Begin("Parts"u8))
         {
             var data = session.Doc.Components;
-            ImGui.SeparatorText("Add part"u8);
-
-            for (var k = 0; k < PartGeometry.KindNames.Length; k++)
-            {
-                if (k > 0)
-                    ImGui.SameLine();
-
-                if (ImGui.Button($"{PartGeometry.KindNames[k]}"))
-                {
-                    var kind = (PartKind)k;
-                    var count = data?.Parts.Count ?? 0;
-                    SelectedPart = ComponentCommands.AddPart(session, kind, DefaultMaterial(kind), new Vector3d(0.6 * (count % 4), 0, 0.6 * (count / 4)));
-                    SelectedPipe = 0;
-                }
-            }
-
             ImGui.SeparatorText("Parts"u8);
 
             if (data is null || data.Parts.Count == 0)
-                ImGui.TextDisabled("No parts yet. Parts snap together port to port when moved close."u8);
+                ImGui.TextDisabled("No parts yet (Add > part). Parts snap together port to port when moved close."u8);
 
             if (data is not null)
             {
@@ -297,7 +298,7 @@ public sealed class ComponentWorkspace
 
         for (var i = 0; i < ports.Length; i++)
         {
-            var piped = data.Pipes.Any(pp => (pp.From.Part == part.Id && pp.From.Port == i) || (pp.To.Part == part.Id && pp.To.Port == i));
+            var piped = data.Pipes.Any(pp => pp.NodeOn(part.Id, i) >= 0);
             var joined = ComponentModel.Partner(links, part.Id, i, out var other, out var otherPort);
             var state = joined ? $"on #{other} {PartGeometry.Ports(data.Parts[data.IndexOfPart(other)])[otherPort].Name}" : piped ? "piped" : "free";
             ImGui.BulletText($"{ports[i].Name}: {state}");
@@ -316,11 +317,6 @@ public sealed class ComponentWorkspace
             }
         }
 
-        if (ImGui.Button("Delete part"u8))
-        {
-            ComponentCommands.RemovePart(session, part.Id);
-            SelectedPart = 0;
-        }
     }
 
     private void DrawSelectedPipe(DesignSession session, ComponentData data)
@@ -332,9 +328,15 @@ public sealed class ComponentWorkspace
 
         var pipe = data.Pipes[index];
 
+        if (SelectedNode >= 0 && SelectedNode < pipe.Nodes.Count && pipe.RunAt(SelectedNode) is var at and >= 0 && (SelectedRun < 0 || SelectedRun >= pipe.Runs.Count))
+            SelectedRun = at;
+
+        SelectedRun = Math.Min(SelectedRun, pipe.Runs.Count - 1);
+        var run = SelectedRun >= 0 ? pipe.Runs[SelectedRun] : default;
+
         if (_draft.Part != pipe.Id + 0x80000000u || _draft.Version != session.Version)
         {
-            _draft = new Draft { Part = pipe.Id + 0x80000000u, Version = session.Version, Outer = pipe.OuterMm, Inner = pipe.InnerMm };
+            _draft = new Draft { Part = pipe.Id + 0x80000000u, Version = session.Version, Outer = run.OuterMm, Inner = run.InnerMm };
 
             if (SelectedNode >= 0 && SelectedNode < pipe.Nodes.Count)
             {
@@ -343,97 +345,162 @@ public sealed class ComponentWorkspace
             }
         }
 
-        ImGui.SeparatorText($"Pipe #{pipe.Id}");
+        var junctions = Enumerable.Range(0, pipe.Nodes.Count).Count(n => pipe.Degree(n) >= 3);
+        ImGui.SeparatorText($"Pipe #{pipe.Id}: {pipe.Runs.Count} run{(pipe.Runs.Count == 1 ? "" : "s")}{(junctions > 0 ? $", {junctions} junction{(junctions == 1 ? "" : "s")}" : "")}");
         var material = CatalogIndex(session.Doc, pipe.Material);
 
         if (MaterialCombo("Material##pipe"u8, ref material))
             ComponentCommands.SetPipeMaterial(session, pipe.Id, _catalog.All[material].Id);
 
-        DesignerStyle.ItemWidth(110f);
-        ImGui.InputInt("Outer diameter (mm)"u8, ref _draft.Outer, 0, 0, ImGuiInputTextFlags.None);
-        var sized = ImGui.IsItemDeactivatedAfterEdit();
-        DesignerStyle.ItemWidth(110f);
-        ImGui.InputInt("Inner diameter (mm)"u8, ref _draft.Inner, 0, 0, ImGuiInputTextFlags.None);
-        sized |= ImGui.IsItemDeactivatedAfterEdit();
+        var yield = Yield(session.Doc, pipe.Material);
+        ImGui.Text($"Yield {yield} MPa: the pipe bursts above {pipe.Rating(yield) / 1e5:F0} bar (its weakest run)");
 
-        if (sized)
+        // Runs: pick one to size it.
+        for (var i = 0; i < pipe.Runs.Count; i++)
         {
-            var outer = (ushort)Math.Clamp(_draft.Outer, 2, 2000);
-            var inner = (ushort)Math.Clamp(_draft.Inner, 1, outer - 1);
-            ComponentCommands.SetPipe(session, pipe.Id, p => (p.OuterMm, p.InnerMm) = (outer, inner));
+            var r = pipe.Runs[i];
+
+            if (ImGui.Selectable($"run {r.A}-{r.B}: {r.OuterMm}/{r.InnerMm} mm, {pipe.RunLength(r):F2} m, {r.Rating(yield) / 1e5:F0} bar##run{i}", i == SelectedRun, ImGuiSelectableFlags.None, default))
+            {
+                SelectedRun = i;
+                _draft.Version = -1;
+            }
         }
 
-        var yield = Yield(session.Doc, pipe.Material);
-        var rating = pipe.Rating(yield);
-        ImGui.Text($"Wall {pipe.WallMetres * 1000:F1} mm, yield {yield} MPa: bursts above {rating / 1e5:F0} bar");
-        ImGui.Text($"From: {End(data, pipe.From)}   To: {End(data, pipe.To)}");
-        ImGui.Text("Nodes (click a node in the view to drag it)"u8);
+        if (SelectedRun >= 0)
+        {
+            DesignerStyle.ItemWidth(110f);
+            ImGui.InputInt("Outer diameter (mm)"u8, ref _draft.Outer, 0, 0, ImGuiInputTextFlags.None);
+            var sized = ImGui.IsItemDeactivatedAfterEdit();
+            DesignerStyle.ItemWidth(110f);
+            ImGui.InputInt("Inner diameter (mm)"u8, ref _draft.Inner, 0, 0, ImGuiInputTextFlags.None);
+            sized |= ImGui.IsItemDeactivatedAfterEdit();
+
+            if (sized)
+            {
+                var outer = (ushort)Math.Clamp(_draft.Outer, 2, 2000);
+                var inner = (ushort)Math.Clamp(_draft.Inner, 1, outer - 1);
+                ComponentCommands.SetPipeRun(session, pipe.Id, SelectedRun, outer, inner);
+            }
+
+            ImGui.TextDisabled($"Wall {run.WallMetres * 1000:F1} mm");
+        }
+
+        // Nodes: what each sits on.
+        ImGui.Text("Nodes (click one in the view; the bar beside it adds or deletes)"u8);
 
         for (var i = 0; i < pipe.Nodes.Count; i++)
         {
             var n = pipe.Node(i);
+            var end = pipe.EndAt(i);
+            var what = !end.IsOpen ? End(data, end) : pipe.Degree(i) == 1 ? "open inlet" : pipe.Degree(i) >= 3 ? "junction" : "";
 
-            if (ImGui.Selectable($"{i}: {n.X:F3}, {n.Y:F3}, {n.Z:F3}##node{i}", i == SelectedNode, ImGuiSelectableFlags.None, default))
+            if (ImGui.Selectable($"{i}: {n.X:F3}, {n.Y:F3}, {n.Z:F3}  {what}##node{i}", i == SelectedNode, ImGuiSelectableFlags.None, default))
             {
                 SelectedNode = i;
+                SelectedRun = pipe.RunAt(i);
                 _draft.Version = -1;
             }
         }
 
         if (SelectedNode >= 0 && SelectedNode < pipe.Nodes.Count)
         {
-            var pinned = (SelectedNode == 0 && !pipe.From.IsOpen) || (SelectedNode == pipe.Nodes.Count - 1 && !pipe.To.IsOpen);
-
-            if (!pinned)
+            if (pipe.EndAt(SelectedNode).IsOpen)
             {
                 var moved = Coord("X##n"u8, ref _draft.NodeX) | Coord("Y##n"u8, ref _draft.NodeY) | Coord("Z##n"u8, ref _draft.NodeZ);
 
                 if (moved)
                 {
                     var node = SelectedNode;
-                    var at = ComponentCommands.Quantise(new Vector3d(_draft.NodeX, _draft.NodeY, _draft.NodeZ));
-                    ComponentCommands.SetPipe(session, pipe.Id, p => p.Nodes[node] = at);
+                    var to = ComponentCommands.Quantise(new Vector3d(_draft.NodeX, _draft.NodeY, _draft.NodeZ));
+                    ComponentCommands.SetPipe(session, pipe.Id, p => p.Nodes[node] = to);
                 }
             }
             else
             {
-                ImGui.TextDisabled("This end sits on a port and moves with it."u8);
+                ImGui.TextDisabled("This node sits on a port and moves with it."u8);
             }
+        }
+    }
 
-            ImGui.BeginDisabled(pipe.Nodes.Count >= PipeRoute.MaxNodes);
+    /// <summary>The bar beside the selected part or pipe node: add a node (extend from an end, branch from the middle), delete.</summary>
+    public void DrawContext(DesignSession session, OrbitCamera camera, Vector2 viewport)
+    {
+        var data = session.Doc.Components;
 
-            if (ImGui.Button("Add node after"u8))
+        if (data is null || _gizmo.Dragging)
+            return;
+
+        var part = data.IndexOfPart(SelectedPart);
+
+        if (part >= 0)
+        {
+            if (!ContextBar.Begin("part", camera, data.Parts[part].Position, viewport))
+                return;
+
+            if (ContextBar.Button("Delete part", "Remove this part (pipes on it come loose)"))
             {
-                var node = SelectedNode;
-                var a = pipe.Node(node);
-                var b = node + 1 < pipe.Nodes.Count ? pipe.Node(node + 1) : Add(a, new Vector3d(0, 0, 0.2));
-                var mid = ComponentCommands.Quantise(node + 1 < pipe.Nodes.Count ? Scale(Add(a, b), 0.5) : b);
-
-                // Appending past a port end would move the end off its port: insert before it instead.
-                var at = node + 1 < pipe.Nodes.Count ? node + 1 : pipe.To.IsOpen ? node + 1 : node;
-                ComponentCommands.SetPipe(session, pipe.Id, p => p.Nodes.Insert(at, mid));
-                SelectedNode = at;
+                ComponentCommands.RemovePart(session, SelectedPart);
+                SelectedPart = 0;
             }
 
-            ImGui.EndDisabled();
-            ImGui.SameLine();
-            ImGui.BeginDisabled(pinned || pipe.Nodes.Count <= 2);
-
-            if (ImGui.Button("Delete node"u8))
-            {
-                var node = SelectedNode;
-                ComponentCommands.SetPipe(session, pipe.Id, p => p.Nodes.RemoveAt(node));
-                SelectedNode = Math.Max(0, node - 1);
-            }
-
-            ImGui.EndDisabled();
+            ContextBar.End();
+            return;
         }
 
-        if (ImGui.Button("Delete pipe"u8))
+        var index = data.IndexOfPipe(SelectedPipe);
+
+        if (index < 0 || SelectedNode < 0 || SelectedNode >= data.Pipes[index].Nodes.Count)
+            return;
+
+        var pipe = data.Pipes[index];
+
+        if (!ContextBar.Begin("pipe", camera, pipe.Node(SelectedNode), viewport))
+            return;
+
+        var end = pipe.Degree(SelectedNode) <= 1;
+
+        if (ContextBar.Button(end ? "+ Node" : "+ Branch", end ? "Extend the pipe from this node" : "Branch from this node (a tee)"))
+        {
+            var node = ComponentCommands.AddPipeNode(session, pipe.Id, SelectedNode, NewNodeAt(pipe, SelectedNode, 0.3));
+            (SelectedNode, SelectedRun) = node >= 0 ? (node, -1) : (SelectedNode, SelectedRun);
+        }
+
+        if (ContextBar.Button("Delete node", "Remove this node (a node between two runs joins them)"))
+        {
+            var count = pipe.Nodes.Count;
+            ComponentCommands.RemovePipeNode(session, pipe.Id, SelectedNode);
+            (SelectedNode, SelectedRun) = (count <= 2 ? -1 : Math.Max(0, SelectedNode - 1), -1);
+
+            if (count <= 2)
+                SelectedPipe = 0;
+        }
+
+        if (ContextBar.Button("Delete pipe", "Remove the whole pipe"))
         {
             ComponentCommands.RemovePipe(session, pipe.Id);
-            SelectedPipe = 0;
+            (SelectedPipe, SelectedNode, SelectedRun) = (0, -1, -1);
         }
+
+        ContextBar.End();
+    }
+
+    /// <summary>Where a new node off <paramref name="node"/> goes: straight on from an end, square to the first run from a node with more.</summary>
+    private static Vector3d NewNodeAt(PipeRoute pipe, int node, double length)
+    {
+        var at = pipe.Node(node);
+        var runIndex = pipe.RunAt(node);
+
+        if (runIndex < 0)
+            return Add(at, new Vector3d(0, 0, length));
+
+        var away = Normalise(Sub(at, pipe.Node(pipe.Runs[runIndex].Other(node))), new Vector3d(0, 0, 1));
+
+        if (pipe.Degree(node) == 1)
+            return Add(at, Scale(away, length));
+
+        var side = Normalise(Cross(away, Math.Abs(away.Y) < 0.9 ? new Vector3d(0, 1, 0) : new Vector3d(1, 0, 0)), new Vector3d(1, 0, 0));
+        return Add(at, Scale(side, length));
     }
 
     // ---- test bench ----
@@ -473,16 +540,13 @@ public sealed class ComponentWorkspace
 
         foreach (var pipe in data.Pipes)
         {
-            foreach (var (end, atEnd) in new[] { (pipe.From, false), (pipe.To, true) })
+            foreach (var node in pipe.OpenEnds())
             {
-                if (!end.IsOpen)
-                    continue;
-
                 any = true;
-                var supply = SupplyFor(data, pipe, atEnd);
+                var supply = SupplyFor(data, pipe, node);
                 var mixture = Math.Max(0, _chemistry.Mixtures.FindIndex(m => m.Key == supply.Mixture));
-                ImGui.PushID((int)(pipe.Id * 2 + (atEnd ? 1 : 0)));
-                ImGui.Text($"Pipe #{pipe.Id} {(atEnd ? "end" : "start")}");
+                ImGui.PushID((int)(pipe.Id * 64 + node));
+                ImGui.Text($"Pipe #{pipe.Id} inlet at node {node}");
                 DesignerStyle.ItemWidth(110f);
 
                 if (Combo("##mix"u8, ref mixture, _chemistry.Mixtures.Select(m => m.Name).ToArray()))
@@ -580,18 +644,16 @@ public sealed class ComponentWorkspace
 
     private static float Px(float v) => MathF.Round(v * ImGui.GetFontSize() / DesignerStyle.BodySize);
 
-    private Supply SupplyFor(ComponentData data, PipeRoute pipe, bool atEnd)
+    private Supply SupplyFor(ComponentData data, PipeRoute pipe, int node)
     {
-        var supply = _supplies.Find(s => s.Pipe == pipe.Id && s.AtEnd == atEnd);
+        var supply = _supplies.Find(s => s.Pipe == pipe.Id && s.Node == node);
 
         if (supply is not null)
             return supply;
 
-        // A pipe from an oxidiser injector defaults to oxygen, anything else to methane.
-        var fed = pipe.From.IsOpen ? pipe.To : pipe.From;
-        var index = data.IndexOfPart(fed.Part);
-        var oxidiser = index >= 0 && data.Parts[index].Kind == PartKind.Injector && data.Parts[index].P3 == (int)InjectorFeed.Oxidiser;
-        supply = new Supply { Pipe = pipe.Id, AtEnd = atEnd, Mixture = oxidiser ? "mix.oxygen" : "mix.methane" };
+        // A pipe feeding an oxidiser injector defaults to oxygen, anything else to methane.
+        var oxidiser = pipe.Ports.Any(p => data.IndexOfPart(p.End.Part) is var index and >= 0 && data.Parts[index].Kind == PartKind.Injector && data.Parts[index].P3 == (int)InjectorFeed.Oxidiser);
+        supply = new Supply { Pipe = pipe.Id, Node = node, Mixture = oxidiser ? "mix.oxygen" : "mix.methane" };
         _supplies.Add(supply);
         return supply;
     }
@@ -600,11 +662,8 @@ public sealed class ComponentWorkspace
     {
         foreach (var pipe in data.Pipes)
         {
-            if (pipe.From.IsOpen)
-                SupplyFor(data, pipe, false);
-
-            if (pipe.To.IsOpen)
-                SupplyFor(data, pipe, true);
+            foreach (var node in pipe.OpenEnds())
+                SupplyFor(data, pipe, node);
         }
 
         _model = ComponentModel.Compile(data, _chemistry, m => Yield(session.Doc, m), _supplies, _seaLevel ? 101325 : 0);
@@ -675,10 +734,32 @@ public sealed class ComponentWorkspace
 
         var hoverPipe = 0u;
         var hoverNode = -1;
+        var hoverRun = -1;
         var best = HandlePixels;
 
         foreach (var pipe in data.Pipes)
         {
+            if (pipe.Id == SelectedPipe)
+            {
+                // The split handle in the middle of each run of the selected pipe.
+                for (var r = 0; r < pipe.Runs.Count; r++)
+                {
+                    var run = pipe.Runs[r];
+
+                    if (run.A >= pipe.Nodes.Count || run.B >= pipe.Nodes.Count)
+                        continue;
+
+                    var mid = Scale(Add(pipe.Node(run.A), pipe.Node(run.B)), 0.5);
+                    overlay.Cube(mid, PortHalf * 0.8, OverlayRenderer.WithAlpha(SelectedColour, 170));
+
+                    if (camera.Project(mid, viewProj, viewport, out var pixel) && Vector2.Distance(pixel, mouse) < best)
+                    {
+                        best = Vector2.Distance(pixel, mouse);
+                        (hoverPipe, hoverNode, hoverRun) = (pipe.Id, -1, r);
+                    }
+                }
+            }
+
             for (var i = 0; i < pipe.Nodes.Count; i++)
             {
                 var n = pipe.Node(i);
@@ -688,7 +769,7 @@ public sealed class ComponentWorkspace
                 if (camera.Project(n, viewProj, viewport, out var pixel) && Vector2.Distance(pixel, mouse) < best)
                 {
                     best = Vector2.Distance(pixel, mouse);
-                    (hoverPipe, hoverNode) = (pipe.Id, i);
+                    (hoverPipe, hoverNode, hoverRun) = (pipe.Id, i, -1);
                 }
             }
         }
@@ -699,9 +780,16 @@ public sealed class ComponentWorkspace
         if (used || !mouseFree || !clicked)
             return used;
 
+        if (hoverRun >= 0)
+        {
+            var node = ComponentCommands.SplitPipeRun(session, hoverPipe, hoverRun);
+            (SelectedPipe, SelectedNode, SelectedPart, SelectedRun) = (hoverPipe, node, 0, -1);
+            return true;
+        }
+
         if (hoverNode >= 0)
         {
-            (SelectedPipe, SelectedNode, SelectedPart) = (hoverPipe, hoverNode, 0);
+            (SelectedPipe, SelectedNode, SelectedPart, SelectedRun) = (hoverPipe, hoverNode, 0, -1);
             return true;
         }
 
@@ -736,9 +824,9 @@ public sealed class ComponentWorkspace
         if (pipe >= 0 && SelectedNode >= 0 && SelectedNode < data.Pipes[pipe].Nodes.Count)
         {
             var route = data.Pipes[pipe];
-            var pinned = (SelectedNode == 0 && !route.From.IsOpen) || (SelectedNode == route.Nodes.Count - 1 && !route.To.IsOpen);
 
-            if (pinned)
+            // A node on a port moves with the port.
+            if (!route.EndAt(SelectedNode).IsOpen)
                 return false;
 
             var node = SelectedNode;

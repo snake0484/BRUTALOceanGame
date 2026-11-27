@@ -127,7 +127,7 @@ public static class SampleHulls
     {
         LayeredHull(session, armour, alloy, titanium);
         var id = InteriorCommands.AddHallway(session, new Vector3d(-2.5, 0.9, -4.5), new Vector3d(-2.5, 0.9, 1.5), alloy);
-        InteriorCommands.SetHallway(session, id, h => h.Nodes.Add(ComponentCommands.Quantise(new Vector3d(1.5, 2.9, 1.5))));
+        InteriorCommands.AddNode(session, id, 1, new Vector3d(1.5, 2.9, 1.5));
     }
 
     /// <summary>The box-and-cylinder hull with windows: a rounded one in the port side, a porthole in the front, and one curving over the cylinder's top.</summary>
@@ -146,7 +146,7 @@ public static class SampleHulls
         const int h = HullSolid.HalfUnitsPerMetre;
         HullCommands.AddSolid(session, SolidShape.Box, SolidOp.Add, 0, 3 * m, 0, 5 * h, 3 * h, 7 * h, SolidRotation.Identity, alloy);
         var id = InteriorCommands.AddHallway(session, new Vector3d(-2.5, 0.9, -4.5), new Vector3d(-2.5, 0.9, 1.5), alloy);
-        InteriorCommands.SetHallway(session, id, hall => hall.Nodes.Add(ComponentCommands.Quantise(new Vector3d(1.5, 2.9, 1.5))));
+        InteriorCommands.AddNode(session, id, 1, new Vector3d(1.5, 2.9, 1.5));
     }
 
     private static int FaceAlong(HullMesh mesh, int axis, int sign)

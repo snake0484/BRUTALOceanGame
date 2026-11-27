@@ -65,6 +65,26 @@ public static class PlanCanonical
         foreach (var hash in doc.Prefabs.Keys.Where(h => !used.Contains(h)).ToList())
             doc.Prefabs.Remove(hash);
 
+        // A prefab read from an older format re-encodes to new bytes: its key (and the placements') follow them.
+        foreach (var (key, prefab) in doc.Prefabs.ToList())
+        {
+            var hash = PlanFormat.HashBody(prefab).Value;
+
+            if (hash == key)
+                continue;
+
+            doc.Prefabs.Remove(key);
+            doc.Prefabs[hash] = prefab;
+
+            for (var i = 0; i < doc.Components!.Placements.Count; i++)
+            {
+                var placement = doc.Components.Placements[i];
+
+                if (placement.Prefab == key)
+                    doc.Components.Placements[i] = placement with { Prefab = hash };
+            }
+        }
+
         CompactMaterials(doc);
         CompactMeshes(doc);
         CanonicaliseLayers(doc.Layers);
@@ -245,6 +265,8 @@ public static class PlanCanonical
         {
             foreach (var hallway in doc.Interior.Hallways)
                 hallway.Material = Keep(hallway.Material);
+
+            // Profiles no hallway uses stay (they are the plan's own library); nothing to remap.
         }
 
         // Window (pane) materials too.

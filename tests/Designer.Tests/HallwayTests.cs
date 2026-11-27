@@ -9,14 +9,14 @@ public class HallwayTests
 {
     private static readonly DefId Alloy = DefId.FromName("mat.hull.alloy");
 
-    private static HullHallway Hallway(double width, double height, params (double X, double Y, double Z)[] nodes)
+    /// <summary>A hallway along <paramref name="nodes"/> using a new <paramref name="width"/> × <paramref name="height"/> rectangle profile of <paramref name="interior"/>.</summary>
+    private static HullHallway Hallway(HullInterior interior, double width, double height, params (double X, double Y, double Z)[] nodes)
     {
-        var h = new HullHallway { Id = 7 };
-        h.Profile.AddRange(HallwayGeometry.Preset(HallwayPreset.Rectangle, width, height));
-
-        foreach (var (x, y, z) in nodes)
-            h.Nodes.Add(((int)Math.Round(x * 1024), (int)Math.Round(y * 1024), (int)Math.Round(z * 1024)));
-
+        var profile = new HullProfile { Name = $"{width} x {height}" };
+        profile.Points.AddRange(HallwayGeometry.Preset(HallwayPreset.Rectangle, width, height));
+        interior.Profiles.Add(profile);
+        var h = new HullHallway { Id = 7, Profile = (byte)(interior.Profiles.Count - 1) };
+        h.Chain(nodes.Select(n => ((int)Math.Round(n.X * 1024), (int)Math.Round(n.Y * 1024), (int)Math.Round(n.Z * 1024))));
         return h;
     }
 
@@ -49,7 +49,7 @@ public class HallwayTests
     public void Expansion_IsClosedPrisms_CutAsRooms()
     {
         var interior = new HullInterior();
-        interior.Hallways.Add(Hallway(1.2, 2.2, (0, 0, 0), (0, 0, 6), (5, 0, 6)));
+        interior.Hallways.Add(Hallway(interior, 1.2, 2.2, (0, 0, 0), (0, 0, 6), (5, 0, 6)));
 
         var plain = HallwayGeometry.Expand(interior, layered: false, meshBase: 3);
         Assert.Equal(2, plain.Solids.Count);
@@ -66,7 +66,7 @@ public class HallwayTests
     {
         // 3 m up over 4 m: 37 degrees, stairs of 17 risers (3 / 0.18).
         var interior = new HullInterior();
-        interior.Hallways.Add(Hallway(1.2, 2.2, (0, 0, 0), (0, 3, 4)));
+        interior.Hallways.Add(Hallway(interior, 1.2, 2.2, (0, 0, 0), (0, 3, 4)));
         var stairs = HallwayGeometry.Expand(interior, layered: false, meshBase: 0);
 
         var steps = stairs.Solids.Where(s => s.Op == SolidOp.Add).ToList();
@@ -78,7 +78,7 @@ public class HallwayTests
         var firstStair = stairs.Solids.FindIndex(s => s.Op == SolidOp.Add);
         Assert.DoesNotContain(stairs.Solids.Skip(firstStair), s => s.Op == SolidOp.Subtract);
 
-        interior.Hallways[0] = Hallway(1.2, 2.2, (0, 0, 0), (0, 6, 0));
+        interior.Hallways[0] = Hallway(interior, 1.2, 2.2, (0, 0, 0), (0, 6, 0));
         var shaft = HallwayGeometry.Expand(interior, layered: false, meshBase: 0);
         Assert.Equal(1, shaft.Shafts);
         Assert.DoesNotContain(shaft.Solids, s => s.Op == SolidOp.Add);
@@ -99,11 +99,11 @@ public class HallwayTests
         var doc = new PlanDocument();
         doc.Materials.Add(Alloy);
         doc.Interior = new HullInterior();
-        doc.Interior.Hallways.Add(Hallway(1.2, 2.2, (0, 0, 0), (0, 0, 6)));
-        doc.Interior.Hallways.Add(Hallway(0.6, 2.2, (2, 0, 0), (2, 0, 6)));
+        doc.Interior.Hallways.Add(Hallway(doc.Interior, 1.2, 2.2, (0, 0, 0), (0, 0, 6)));
+        doc.Interior.Hallways.Add(Hallway(doc.Interior, 0.6, 2.2, (2, 0, 0), (2, 0, 6)));
         doc.Interior.Hallways[1].Id = 8;
 
-        Assert.Equal(PlanFormat.InteriorFormat, PlanFormat.FormatOf(doc));
+        Assert.Equal(PlanFormat.RouteFormat, PlanFormat.FormatOf(doc));
         var bytes = PlanFormat.Encode(doc);
         Assert.True(PlanFormat.TryDecode(bytes, out var back, out var error), error.ToString());
         Assert.Equal(PlanFormat.HashBody(doc), PlanFormat.HashBody(back));
@@ -123,11 +123,11 @@ public class HallwayTests
         Assert.NotEqual(0u, id);
 
         var raised = HallwayGeometry.Preset(HallwayPreset.Octagon, 1.0, 2.0).Select(p => p with { Y = p.Y + 500 }).ToList();
-        Assert.True(InteriorCommands.SetProfile(session, id, raised));
-        Assert.Equal(0, session.Doc.Interior!.Hallways[0].Profile.Min(p => p.Y));
+        Assert.True(InteriorCommands.SetProfilePoints(session, 0, raised));
+        Assert.Equal(0, session.Doc.Interior!.Profiles[0].Points.Min(p => p.Y));
 
         session.UndoLast();
-        Assert.Equal(HallwayGeometry.Preset(HallwayPreset.Rounded, InteriorCommands.DefaultWidth, InteriorCommands.DefaultHeight), session.Doc.Interior!.Hallways[0].Profile);
+        Assert.Equal(HallwayGeometry.Preset(HallwayPreset.Rounded, InteriorCommands.DefaultWidth, InteriorCommands.DefaultHeight), session.Doc.Interior!.Profiles[0].Points);
         session.UndoLast();
         Assert.Null(session.Doc.Interior);
     }

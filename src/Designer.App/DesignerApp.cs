@@ -36,6 +36,7 @@ public sealed class DesignerApp : DesignApp
     private readonly PrefabPanel _prefabPanel;
     private readonly InteriorPanel _interiorPanel;
     private readonly WindowsPanel _windowsPanel;
+    private readonly ProfilesPanel _profilesPanel;
     private readonly Dictionary<ulong, PrefabShape> _shapes = new();
     private readonly List<Document> _docs = new();
     private readonly List<DocumentTab> _tabs = new();
@@ -94,6 +95,7 @@ public sealed class DesignerApp : DesignApp
         _prefabPanel = new PrefabPanel(_library, Shape);
         _interiorPanel = new InteriorPanel(_catalog);
         _windowsPanel = new WindowsPanel(_catalog);
+        _profilesPanel = new ProfilesPanel(new ProfileLibrary(ProfileLibrary.DefaultFolder));
         _saveOnExit = saveOnExit;
         _baker = new HullBaker(WorkerBudget.Background);
         _surfaceBuilder = new HullSurfaceBuilder(WorkerBudget.Background);
@@ -322,6 +324,7 @@ public sealed class DesignerApp : DesignApp
         _prefabPanel.Selected = 0;
         _interiorPanel.Reset();
         _windowsPanel.Reset();
+        _profilesPanel.Reset();
         _seenVersion = -1;
         _bar.Show(document.Key);
 
@@ -463,6 +466,7 @@ public sealed class DesignerApp : DesignApp
         foreach (var d in _docs)
             _tabs.Add(new DocumentTab(d.Key, d.Title, d.Session.Modified, d.Component is not null));
 
+        _bar.ComponentTab = _active.Component is not null;
         _bar.Draw(_tabs, _active.Key);
     }
 
@@ -483,18 +487,68 @@ public sealed class DesignerApp : DesignApp
         var workspace = _active.Component;
         _tool.Mode = _bar.Mode;
         _prefabPanel.Mode = _bar.Mode;
+        _prefabPanel.BeginFrame();
+        var viewport = ViewportSize;
 
         if (workspace is not null)
         {
             workspace.Mode = _bar.Mode;
             workspace.DrawPanels(_session);
+            workspace.DrawContext(_session, _camera, viewport);
         }
         else
         {
             _prefabPanel.Draw(_session);
             _interiorPanel.Mode = _bar.Mode;
-            _interiorPanel.Draw(_session, _panels.PlaceAt);
+            _interiorPanel.Draw(_session);
+
+            if (_interiorPanel.EditProfileRequest >= 0)
+                (_profilesPanel.Selected, _profilesPanel.Focus) = (_interiorPanel.EditProfileRequest, true);
+
+            _profilesPanel.Draw(_session);
             _windowsPanel.Draw(_session);
+            _interiorPanel.DrawContext(_session, _camera, viewport);
+            _windowsPanel.DrawContext(_session, _camera, viewport);
+            _prefabPanel.DrawContext(_session, _camera, viewport);
+        }
+
+        // One bar at a time: a picked node, window, placement or part outranks the selected solid.
+        var other = workspace is not null
+            ? workspace.SelectedPart != 0 || workspace.SelectedNode >= 0
+            : _interiorPanel.SelectedNode >= 0 || _windowsPanel.Selected != 0 || _prefabPanel.Selected != 0;
+
+        if (!other)
+            _panels.DrawContext(_session, _meshEdit, _camera, viewport);
+    }
+
+    /// <summary>The Add menu: new things go at the camera target (windows wait for a click on the hull).</summary>
+    private void HandleAdd()
+    {
+        var at = new Vector3d(_camera.Target.X, _camera.Target.Y, _camera.Target.Z);
+
+        switch (_bar.Add)
+        {
+            case AddKind.Box:
+                _panels.AddSolid(_session, SolidShape.Box);
+                break;
+            case AddKind.Wedge:
+                _panels.AddSolid(_session, SolidShape.Wedge);
+                break;
+            case AddKind.Cylinder:
+                _panels.AddSolid(_session, SolidShape.Cylinder);
+                break;
+            case AddKind.Hallway:
+                _interiorPanel.AddHallway(_session, at);
+                break;
+            case AddKind.Window:
+                _windowsPanel.StartPlacing();
+                break;
+            case AddKind.Chamber or AddKind.Nozzle or AddKind.Injector or AddKind.Igniter when _active.Component is { } component:
+                component.AddPart(_session, _bar.Add switch { AddKind.Chamber => PartKind.Chamber, AddKind.Nozzle => PartKind.Nozzle, AddKind.Injector => PartKind.Injector, _ => PartKind.Igniter });
+                break;
+            case AddKind.Pipe when _active.Component is { } component:
+                component.AddPipe(_session, at);
+                break;
         }
     }
 
@@ -507,6 +561,7 @@ public sealed class DesignerApp : DesignApp
             RefreshLibrary();
 
         _active.Component?.Step(Math.Clamp(io.DeltaTime, 0.0, 1.0 / 30.0));
+        HandleAdd();
         HandleFiles();
 
         if (_bar.SelectedKey >= 0 && _docs.Find(d => d.Key == _bar.SelectedKey) is { } picked)
@@ -815,6 +870,7 @@ public sealed class DesignerApp : DesignApp
         _surfaceBuilder.Wait();
         _surfaceBuilder.Dispose();
         _files.Dispose();
+        _profilesPanel.Dispose();
     }
 
     protected override void DisposeGpu()
