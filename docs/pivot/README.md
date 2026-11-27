@@ -255,7 +255,7 @@ Measured (Release, RTX 4090; `--surf-edge --weather-offset 676`, 20 minutes, the
 - Coast update on the main thread (`UpdateCost`): 2.5 µs a frame at rest, 1.3 µs mean flying at 30 m/s (2.0 and 0.9 before: the per-tile carriers are read every frame).
 
 Left:
-- **Weak band.** Where two tiles' carriers differ, the breakers in the 540 m band are two half-strength trains. A narrower band, or one tile's carrier carried across the band, are the options; not decided.
+- **Weak band.** Where two tiles' carriers differ, the breakers in the 540 m band are two half-strength trains. User decision 2026-11-27: keep the cross-fade (a narrower band or one tile's carrier carried across were the alternatives).
 - The swash's per-slot timing and heights were seen in bursts, not judged in motion by eye.
 
 ### Carry-overs from M2 (2026-11-26)
