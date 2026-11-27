@@ -6,7 +6,6 @@ using Brutal.Numerics;
 using BrutalGame.Terrain;
 using BrutalGame.Water.Coast;
 using BrutalGame.Water.Ocean;
-using BrutalGame.Weather;
 
 namespace BrutalGame.Sim.Tests;
 
@@ -171,35 +170,52 @@ public class SimBoundaryTests(Xunit.Abstractions.ITestOutputHelper output)
         Assert.True(float.IsFinite(sim.Ocean.SampleHeight(sim.Bubble.ToPlanet(new Vector3(300f, 0f, 0f)), sim.Clock.TickIndex)));
     }
 
-    /// <summary>The swell's wind is a function of the tick alone: two sims with the same weather agree, whatever a client's camera does.</summary>
+    /// <summary>The sea's wind is a function of the tick alone: two sims with the same seed agree, whatever a client's camera does.</summary>
     [Fact]
-    public void SwellWind_IsTickQuantisedAndCameraIndependent()
+    public void SeaWind_IsEpochQuantisedAndCameraIndependent()
     {
-        var climate = new WeatherClimate();
-        using var a = new SimWorld(seed: 1, workerThreads: 1, new WeatherField(climate)) { WeatherTimeOffset = 3600.0 };
-        using var b = new SimWorld(seed: 1, workerThreads: 1, new WeatherField(climate)) { WeatherTimeOffset = 3600.0 };
+        using var a = new SimWorld(seed: 1, workerThreads: 1, weather: true) { WeatherTimeOffset = 3600.0 };
+        using var b = new SimWorld(seed: 1, workerThreads: 1, weather: true) { WeatherTimeOffset = 3600.0 };
         var swell = new SwellParams { WindSpeed = 3f, SwellHeight = 1f, SwellPeriod = 12f };
         a.SetSwell(swell);
         b.SetSwell(swell);
-        var sent = a.Ocean.Swell.Wind;
+        var sent = a.SpawnWind;
 
-        for (var i = 0; i < 3 * SimWorld.WindInterval; i++)
+        for (var i = 0; i < 30; i++)
         {
-            var before = a.SeaWind;
             a.Tick();
             b.Tick();
-
-            if (i % SimWorld.WindInterval != 0)
-                Assert.Equal(before, a.SeaWind);
+            Assert.Equal(sent, a.SpawnWind);
         }
 
-        Assert.Equal(a.SeaWind, b.SeaWind);
+        Assert.Equal(a.SpawnWind, b.SpawnWind);
         Assert.Equal(a.Ocean.Swell.Wind, b.Ocean.Swell.Wind);
-        Assert.NotEqual(Vector2.Zero, a.SeaWind);
-        Assert.True(sent.WindSpeed > 0f);
+        Assert.NotNull(sent);
+        Assert.True(sent.Value.Speed > 0);
+        Assert.Equal(sent.Value.WindSpeed, a.Ocean.Swell.Wind.WindSpeed);
         var offshore = a.Bubble.ToPlanet(new Vector3(400f, 0f, -400f));
         Assert.Equal(a.Ocean.SampleHeight(offshore, a.Clock.TickIndex), b.Ocean.SampleHeight(offshore, b.Clock.TickIndex));
         Assert.NotEqual(0f, a.Ocean.SampleHeight(offshore, a.Clock.TickIndex));
+    }
+
+    /// <summary>Tiles have their own winds, and a tile's wind moves between epochs as the weather does.</summary>
+    [Fact]
+    public void SeaWind_DiffersByTileAndEpoch()
+    {
+        using var sim = new SimWorld(seed: 1, workerThreads: 1, weather: true);
+        var winds = sim.SeaWinds;
+        var tiles = new HashSet<SeaWindKey>();
+        var epochs = new HashSet<SeaWindKey>();
+
+        for (var t = 0; t < sim.Ocean.Tiles.Count; t += 97)
+            tiles.Add(winds.At(t, 60));
+
+        for (var e = 0L; e < 120; e += 4)
+            epochs.Add(winds.At(sim.SpawnTile, e));
+
+        Assert.True(tiles.Count > 5, $"{tiles.Count} distinct tile winds");
+        Assert.True(epochs.Count > 2, $"{epochs.Count} distinct winds over two hours");
+        Assert.Equal(winds.At(sim.SpawnTile, 17), new SeaWindSchedule(sim.Weather, sim.Ocean.Tiles).At(sim.SpawnTile, 17));
     }
 
     /// <summary>An edit <paramref name="below"/> m under the generated ground at a point of the bubble's plane (x out to sea).</summary>

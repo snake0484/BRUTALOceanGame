@@ -157,7 +157,7 @@ public sealed partial class GameApp : IDisposable
         _benchFaces = benchFaces;
         _surfBeach = surfBeach;
         var weatherField = new WeatherField(new WeatherClimate());
-        _sim = new SimWorld(seed: menu?.Seed ?? 1, WorkerBudget.Tick, weatherField, kind: planetKind, kindSeed: kindSeed) { DriveWind = weather, WeatherTimeOffset = weatherOffset * 60.0 };
+        _sim = new SimWorld(seed: menu?.Seed ?? 1, WorkerBudget.Tick, weather, kind: planetKind, kindSeed: kindSeed) { WeatherTimeOffset = weatherOffset * 60.0 };
 
         ref readonly var planet = ref _sim.Celestial[_sim.PlanetIndex];
         _planetFrame = planet.Surface;
