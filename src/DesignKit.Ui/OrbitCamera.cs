@@ -6,7 +6,8 @@ using BrutalGame.Frames;
 namespace BrutalGame.DesignKit.Ui;
 
 /// <summary>
-/// Orbit camera about a target in double precision (Y up): right drag orbits, middle drag (or Shift + right) pans, the
+/// Orbit camera about a target in double precision (<see cref="Up"/>, Y by default; a planet tool sets the local
+/// vertical at its target each frame): right drag orbits, middle drag (or Shift + right) pans, the
 /// wheel zooms. The view has no translation; draws go at (point − <see cref="Position"/>) in double. Infinite reverse-Z.
 /// The distance range is the host's (a ship: 1 m to 2 km; a planet: metres above the ground to several radii).
 /// </summary>
@@ -29,12 +30,43 @@ public sealed class OrbitCamera
     public float FovY = 50f * MathF.PI / 180f;
     public float Near = 0.05f;
 
+    /// <summary>The unit up yaw turns about and pitch rises toward; yaw 0 looks back along the axis nearest +Z across it.</summary>
+    public double3 Up = double3.UnitY;
+
     /// <summary>Unit vector from the target to the camera.</summary>
-    public double3 Back => new(Math.Cos(Pitch) * Math.Sin(Yaw), Math.Sin(Pitch), Math.Cos(Pitch) * Math.Cos(Yaw));
+    public double3 Back
+    {
+        get
+        {
+            Basis(out var east, out var north);
+            return east * (Math.Cos(Pitch) * Math.Sin(Yaw)) + Up * Math.Sin(Pitch) + north * (Math.Cos(Pitch) * Math.Cos(Yaw));
+        }
+    }
 
     public double3 Position => Target + Back * Distance;
 
-    public doubleQuat Rotation => CameraProjection.LookRotation(-Back, double3.UnitY, new double3(Math.Cos(Yaw), 0.0, -Math.Sin(Yaw)));
+    public doubleQuat Rotation
+    {
+        get
+        {
+            Basis(out var east, out var north);
+            return CameraProjection.LookRotation(-Back, Up, east * Math.Cos(Yaw) - north * Math.Sin(Yaw));
+        }
+    }
+
+    /// <summary>Y up gives X and Z exactly (the ship designer's axes); any other up, +Z made perpendicular to it (X near the poles).</summary>
+    private void Basis(out double3 east, out double3 north)
+    {
+        if (Up == double3.UnitY)
+        {
+            (east, north) = (double3.UnitX, double3.UnitZ);
+            return;
+        }
+
+        var axis = Math.Abs(Up.Z) < 0.99 ? double3.UnitZ : double3.UnitX;
+        north = double3.Normalize(axis - Up * double3.Dot(axis, Up));
+        east = double3.Cross(Up, north);
+    }
 
     public Matrix4x4 ViewProjection(float aspect) => CameraProjection.View(Rotation) * CameraProjection.Projection(FovY, aspect, Near);
 

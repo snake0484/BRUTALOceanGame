@@ -170,6 +170,11 @@ public abstract class DesignApp : IDisposable
     {
     }
 
+    /// <summary>Before the scene passes, outside any render pass: uploads and compute (culling) the scene needs.</summary>
+    protected virtual void RecordBeforeScene(CommandBuffer commands, int frameIndex, in Matrix4x4 viewProj)
+    {
+    }
+
     /// <summary>The scene, in the opaque pass.</summary>
     protected abstract void RecordScene(CommandBuffer commands, int frameIndex, VkExtent2D extent, in Matrix4x4 viewProj);
 
@@ -235,6 +240,7 @@ public abstract class DesignApp : IDisposable
         var output = Renderer.OutputExtent;
         var viewProj = Camera.ViewProjection(output.Width / (float)Math.Max(1u, output.Height));
 
+        RecordBeforeScene(commands, Renderer.FrameIndex, viewProj);
         Renderer.BeginOpaquePass(commands);
         RecordScene(commands, Renderer.FrameIndex, extent, viewProj);
         Renderer.EndOpaquePass(commands);

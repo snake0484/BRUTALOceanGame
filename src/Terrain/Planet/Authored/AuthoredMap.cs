@@ -381,6 +381,44 @@ public sealed class AuthoredMap
         return copy;
     }
 
+    /// <summary>Copies the 32² vertices tile (tx, ty) of a face starts (clipped at the face edge, zeros beyond) into <paramref name="codes"/>.</summary>
+    public void ReadTile(int face, int tx, int ty, Span<short> codes)
+    {
+        codes.Clear();
+
+        if (_faces[face] is not { } f)
+            return;
+
+        for (var j = 0; j < Tile && ty * Tile + j <= Res; j++)
+        {
+            for (var i = 0; i < Tile && tx * Tile + i <= Res; i++)
+                codes[j * Tile + i] = f[(ty * Tile + j) * Side + tx * Tile + i];
+        }
+    }
+
+    /// <summary>Writes a tile's vertices as they are (no twins: a tile restored from <see cref="ReadTile"/> on every face restores the map).</summary>
+    public void WriteTile(int face, int tx, int ty, ReadOnlySpan<short> codes)
+    {
+        if (_frozen)
+            throw new InvalidOperationException($"Authored map {Name} is frozen; clone it to edit");
+
+        var f = _faces[face];
+
+        if (f is null)
+        {
+            if (!codes.ContainsAnyExcept((short)0))
+                return;
+
+            _faces[face] = f = new short[Side * Side];
+        }
+
+        for (var j = 0; j < Tile && ty * Tile + j <= Res; j++)
+        {
+            for (var i = 0; i < Tile && tx * Tile + i <= Res; i++)
+                f[(ty * Tile + j) * Side + tx * Tile + i] = codes[j * Tile + i];
+        }
+    }
+
     /// <summary>Drops faces that hold only zeros, so an erased map is empty again.</summary>
     public void Compact()
     {

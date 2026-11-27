@@ -12,6 +12,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\PlanetDesigner\PlanetDesigner.csproj" />
+    <ProjectReference Include="..\DesignKit.Ui\DesignKit.Ui.csproj" />
     <ProjectReference Include="..\Game\Game.csproj" />
   </ItemGroup>
 </Project>

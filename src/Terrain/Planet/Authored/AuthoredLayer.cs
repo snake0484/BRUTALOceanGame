@@ -105,7 +105,11 @@ public sealed class AuthoredLayer
         var maps = new List<AuthoredMapBinding>(Maps.Count);
 
         foreach (var m in Maps)
-            maps.Add(m with { Map = m.Map.Clone().Freeze() });
+        {
+            var map = m.Map.Clone();
+            map.Compact();
+            maps.Add(m with { Map = map.Freeze() });
+        }
 
         return new AuthoredLayer
         {

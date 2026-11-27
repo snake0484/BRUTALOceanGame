@@ -3,6 +3,7 @@
     <RootNamespace>BrutalGame.PlanetDesigner</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="..\DesignKit\DesignKit.csproj" />
     <ProjectReference Include="..\Terrain\Terrain.csproj" />
   </ItemGroup>
 </Project>

@@ -1,6 +1,7 @@
 using System.Numerics;
 using Brutal.ImGuiApi;
 using Brutal.Numerics;
+using BrutalGame.DesignKit.Ui;
 using BrutalGame.Terrain;
 
 namespace BrutalGame.PlanetDesigner.App;
@@ -13,24 +14,26 @@ public enum PlanetTool : byte
 }
 
 /// <summary>
-/// The planet designer's tools and panels (planet-designer-brief.md §6): the height brush (raise, lower, level, erase
-/// with radius, height and strength), sites (click to place, drag to move, core, blend and height in the panel) and the
-/// selected site's marker. Overlays are ImGui draw-list lines projected from the body frame. A drag or stroke is one
-/// undo step; the terrain refreshes when it ends.
+/// The planet designer's tools and panel (planet-designer-brief.md §6): the height brush (raise, lower, level, erase with
+/// radius, height and strength), sites (Shift + click places, drag moves, core, blend and height in the panel) and the
+/// selected site's marker. Rings draw in the kit's 3D overlay, labels in ImGui. A stroke or drag is one undo step; the
+/// terrain refreshes when it ends.
 /// </summary>
 public sealed class PlanetTools
 {
     private const float DabSpacing = 0.25f;
-    private const int RingPoints = 64;
+    private const int RingPoints = 96;
+    private const double RingLift = 3.0;
 
-    private static readonly ImColor8 BrushColour = new(255, 170, 60, 230);
-    private static readonly ImColor8 CoreColour = new(90, 230, 200, 230);
-    private static readonly ImColor8 BlendColour = new(90, 230, 200, 110);
-    private static readonly ImColor8 SelectedColour = new(255, 255, 255, 255);
+    private static readonly uint BrushColour = OverlayRenderer.Rgba(255, 170, 60);
+    private static readonly uint CoreColour = OverlayRenderer.Rgba(90, 230, 200);
+    private static readonly uint BlendColour = OverlayRenderer.Rgba(90, 230, 200, 120);
+    private static readonly uint SelectedColour = OverlayRenderer.Rgba(255, 255, 255);
     private static readonly ImColor8 LabelColour = new(255, 255, 255, 230);
 
     private static readonly string[] ToolNames = ["Look", "Paint height", "Sites"];
     private static readonly string[] BrushNames = ["Raise", "Lower", "Level", "Erase"];
+    private static readonly string[] MarkerTypes = ["city", "outpost"];
 
     private readonly PlanetDesignSession _session;
     private readonly ImInputString _markerName = new(48, "New settlement"u8);
@@ -38,7 +41,6 @@ public sealed class PlanetTools
     private float _radiusKm = 8f;
     private float _metres = 200f;
     private float _strength = 0.5f;
-    private bool _stroking;
     private double3 _lastDab;
     private string? _selected;
     private bool _dragging;
@@ -47,8 +49,6 @@ public sealed class PlanetTools
     private string? _draftFor;
     private float _core, _blend, _height;
 
-    private static readonly string[] MarkerTypes = ["city", "outpost"];
-
     public PlanetTools(PlanetDesignSession session) => _session = session;
 
     public PlanetTool Tool;
@@ -56,43 +56,25 @@ public sealed class PlanetTools
     /// <summary>The surface point under the cursor this frame, if any.</summary>
     public double3? Hover;
 
+    /// <summary>A stroke or a site drag owns the left mouse.</summary>
+    public bool Busy => _session.Stroking || _dragging;
+
     /// <summary>Per frame with the cursor's surface point (null off the body) and whether the mouse is over the 3D view.</summary>
-    public void Update(PlanetSurface surface, double3? hit, bool mouseFree)
+    public void Update(double radius, double3? hit, bool mouseFree)
     {
         Hover = hit;
-        var radius = surface.Radius;
 
-        switch (Tool)
-        {
-            case PlanetTool.Paint:
-                Paint(hit, mouseFree, radius);
-                break;
-            case PlanetTool.Site:
-                Sites(hit, mouseFree, radius);
-                break;
-        }
-
-        var io = ImGui.GetIO();
-
-        if (!io.WantCaptureKeyboard && io.KeyCtrl && !_stroking && !_dragging)
-        {
-            if (ImGui.IsKeyPressed(ImGuiKey.Z, false))
-                _session.Undo();
-            else if (ImGui.IsKeyPressed(ImGuiKey.Y, false))
-                _session.Redo();
-            else if (ImGui.IsKeyPressed(ImGuiKey.S, false))
-                _session.Save();
-        }
+        if (Tool == PlanetTool.Paint)
+            Paint(hit, mouseFree, radius);
+        else if (Tool == PlanetTool.Site)
+            Sites(hit, mouseFree, radius);
     }
 
     private void Paint(double3? hit, bool mouseFree, double radius)
     {
-        var down = ImGui.IsMouseDown(ImGuiMouseButton.Left);
-
-        if (_stroking && !down)
+        if (_session.Stroking && !ImGui.IsMouseDown(ImGuiMouseButton.Left))
         {
             _session.EndStroke();
-            _stroking = false;
             return;
         }
 
@@ -101,13 +83,12 @@ public sealed class PlanetTools
 
         var d = double3.Normalize(h);
 
-        if (!_stroking)
+        if (!_session.Stroking)
         {
             if (!mouseFree || !ImGui.IsMouseClicked(ImGuiMouseButton.Left, false))
                 return;
 
             _session.BeginStroke();
-            _stroking = true;
             Dab(d);
             return;
         }
@@ -140,9 +121,8 @@ public sealed class PlanetTools
             if (!ImGui.IsMouseDown(ImGuiMouseButton.Left))
             {
                 _dragging = false;
-                var s = Site(_selected!);
 
-                if (s is { } site && double3.Dot(_dragTo, double3.Normalize(site.Position)) < 1.0 - 1e-14)
+                if (Site(_selected!) is { } site && double3.Dot(_dragTo, double3.Normalize(site.Position)) < 1.0 - 1e-14)
                     _session.SetSite(site.Id, _dragTo, site.CoreM, site.BlendM, _session.SiteHeight(_dragTo));
             }
 
@@ -158,17 +138,12 @@ public sealed class PlanetTools
         {
             if ((double3.Normalize(s.Position) - d).Length() * radius < s.CoreM)
             {
-                _selected = s.Id;
-                _dragging = true;
-                _dragTo = d;
+                (_selected, _dragging, _dragTo) = (s.Id, true, d);
                 return;
             }
         }
 
-        if (ImGui.GetIO().KeyShift)
-            _selected = _session.AddSite(d);
-        else
-            _selected = null;
+        _selected = ImGui.GetIO().KeyShift ? _session.AddSite(d) : null;
     }
 
     private AuthoredSite? Site(string id)
@@ -182,18 +157,18 @@ public sealed class PlanetTools
         return null;
     }
 
-    public void DrawPanel(string body, float refreshMs, int pendingJobs)
+    public void DrawPanel(string body, float refreshMs, (float Ms, int Leaves) replace, int pendingJobs)
     {
-        if (!ImGui.Begin("Planet designer"u8))
+        if (!ImGui.Begin("Planet"u8))
         {
             ImGui.End();
             return;
         }
 
         var layer = _session.Layer;
-        ImGui.Text($"Body {body}  kind {layer.Kind}  seed {layer.Seed}");
-        ImGui.Text($"Version {layer.Version}{(_session.Dirty ? " (unsaved)" : "")}  hash {layer.Hash():X16}");
-        ImGui.Text($"{layer.Sites.Count} sites, {layer.Markers.Count} markers; refresh {refreshMs:F0} ms, {pendingJobs} jobs");
+        ImGui.Text($"Body {body}  kind {layer.Kind}");
+        ImGui.Text($"Version {layer.Version}{(_session.Modified ? " (unsaved)" : "")}  {layer.Sites.Count} sites, {layer.Markers.Count} markers");
+        ImGui.Text($"Refresh {refreshMs:F0} ms + bounds {replace.Ms:F0} ms, {replace.Leaves} leaves; {pendingJobs} jobs");
 
         if (ImGui.Button("Save (Ctrl+S)"u8))
             _session.Save();
@@ -220,87 +195,83 @@ public sealed class PlanetTools
         }
 
         if (Tool == PlanetTool.Paint)
-        {
-            for (var i = 0; i < BrushNames.Length; i++)
-            {
-                if (ImGui.RadioButton(BrushNames[i], _brush == i))
-                    _brush = i;
-
-                if (i < BrushNames.Length - 1)
-                    ImGui.SameLine();
-            }
-
-            ImGui.SliderFloat("Radius km"u8, ref _radiusKm, 0.5f, 200f, "%.1f"u8, ImGuiSliderFlags.Logarithmic);
-            ImGui.SliderFloat(_brush == 2 ? "Level to m"u8 : "Height m"u8, ref _metres, _brush == 2 ? -1500f : 1f, 1500f, "%.0f"u8);
-            ImGui.SliderFloat("Strength"u8, ref _strength, 0.05f, 1f, "%.2f"u8);
-            ImGui.TextWrapped("Left drag paints. Right drag pans, middle drag orbits, wheel zooms."u8);
-        }
-
-        if (Tool == PlanetTool.Site)
-        {
-            ImGui.TextWrapped("Shift + click places a site; click a site to select, drag to move."u8);
-
-            if (_selected is not null && Site(_selected) is { } s)
-            {
-                ImGui.Separator();
-                ImGui.Text($"{s.Id} (since v{s.Since})");
-                // The widgets edit a draft; it commits when one is released, so a drag is one undo step.
-                if (_draftFor != s.Id || !ImGui.IsAnyItemActive())
-                    (_draftFor, _core, _blend, _height) = (s.Id, s.CoreM, s.BlendM, s.HeightM);
-
-                ImGui.SliderFloat("Core m"u8, ref _core, 20f, 3000f, "%.0f"u8, ImGuiSliderFlags.Logarithmic);
-                var commit = ImGui.IsItemDeactivatedAfterEdit();
-                ImGui.SliderFloat("Blend m"u8, ref _blend, 10f, 3000f, "%.0f"u8, ImGuiSliderFlags.Logarithmic);
-                commit |= ImGui.IsItemDeactivatedAfterEdit();
-                ImGui.InputFloat("Height m"u8, ref _height, 0.5f, 5f, "%.1f"u8, ImGuiInputTextFlags.None);
-                commit |= ImGui.IsItemDeactivatedAfterEdit();
-                var core = _core;
-                var blend = _blend;
-
-                if (commit)
-                    _session.SetSite(s.Id, double3.Normalize(s.Position), _core, _blend, _height);
-
-                if (ImGui.Button("Ground height"u8))
-                    _session.SetSite(s.Id, double3.Normalize(s.Position), core, blend, _session.SiteHeight(double3.Normalize(s.Position)));
-
-                ImGui.SameLine();
-
-                if (ImGui.Button("Delete site"u8))
-                {
-                    foreach (var m in _session.Layer.Markers.ToArray())
-                    {
-                        if (m.Site == s.Id)
-                            _session.DeleteMarker(m.Id);
-                    }
-
-                    _session.DeleteSite(s.Id);
-                    _selected = null;
-                }
-
-                MarkerPanel(s.Id);
-            }
-        }
+            BrushPanel();
+        else if (Tool == PlanetTool.Site)
+            SitePanel();
 
         ImGui.End();
+    }
+
+    private void BrushPanel()
+    {
+        for (var i = 0; i < BrushNames.Length; i++)
+        {
+            if (ImGui.RadioButton(BrushNames[i], _brush == i))
+                _brush = i;
+
+            if (i < BrushNames.Length - 1)
+                ImGui.SameLine();
+        }
+
+        ImGui.SliderFloat("Radius km"u8, ref _radiusKm, 2f, 200f, "%.1f"u8, ImGuiSliderFlags.Logarithmic);
+        ImGui.SliderFloat(_brush == 2 ? "Level to m"u8 : "Height m"u8, ref _metres, _brush == 2 ? -1500f : 1f, 1500f, "%.0f"u8);
+        ImGui.SliderFloat("Strength"u8, ref _strength, 0.05f, 1f, "%.2f"u8);
+        ImGui.TextWrapped("Left drag paints. Right drag orbits, middle drag pans, wheel zooms. 1 2 3 pick the tool."u8);
+    }
+
+    private void SitePanel()
+    {
+        ImGui.TextWrapped("Shift + click places a site; click a site to select it, drag to move it."u8);
+
+        if (_selected is null || Site(_selected) is not { } s)
+            return;
+
+        ImGui.Separator();
+        ImGui.Text($"{s.Id} (since v{s.Since})");
+
+        // The widgets edit a draft that commits when one is released, so a drag is one undo step.
+        if (_draftFor != s.Id || !ImGui.IsAnyItemActive())
+            (_draftFor, _core, _blend, _height) = (s.Id, s.CoreM, s.BlendM, s.HeightM);
+
+        ImGui.SliderFloat("Core m"u8, ref _core, 20f, 3000f, "%.0f"u8, ImGuiSliderFlags.Logarithmic);
+        var commit = ImGui.IsItemDeactivatedAfterEdit();
+        ImGui.SliderFloat("Blend m"u8, ref _blend, 10f, 3000f, "%.0f"u8, ImGuiSliderFlags.Logarithmic);
+        commit |= ImGui.IsItemDeactivatedAfterEdit();
+        ImGui.InputFloat("Height m"u8, ref _height, 0.5f, 5f, "%.1f"u8, ImGuiInputTextFlags.None);
+        commit |= ImGui.IsItemDeactivatedAfterEdit();
+        var d = double3.Normalize(s.Position);
+
+        if (commit)
+            _session.SetSite(s.Id, d, _core, _blend, _height);
+
+        if (ImGui.Button("Ground height"u8))
+            _session.SetSite(s.Id, d, s.CoreM, s.BlendM, _session.SiteHeight(d));
+
+        ImGui.SameLine();
+
+        if (ImGui.Button("Delete site"u8))
+        {
+            _session.DeleteSite(s.Id);
+            _selected = null;
+            return;
+        }
+
+        MarkerPanel(s.Id);
     }
 
     private void MarkerPanel(string site)
     {
         ImGui.Separator();
-        AuthoredMarker? marker = null;
 
         foreach (var m in _session.Layer.Markers)
         {
-            if (m.Site == site)
-                marker = m;
-        }
+            if (m.Site != site)
+                continue;
 
-        if (marker is { } existing)
-        {
-            ImGui.Text($"Marker: {existing.Type} \"{existing.Name}\"");
+            ImGui.Text($"Marker: {m.Type} \"{m.Name}\"");
 
             if (ImGui.Button("Remove marker"u8))
-                _session.DeleteMarker(existing.Id);
+                _session.DeleteMarker(m.Id);
 
             return;
         }
@@ -319,56 +290,48 @@ public sealed class PlanetTools
             _session.AddMarker(MarkerTypes[_markerType], _markerName.ToString(), site);
     }
 
-    /// <summary>Brush ring, site rings and marker labels over the 3D view.</summary>
-    public void DrawOverlay(PlanetCameraRig rig, PlanetSurface surface, Vector2 viewport)
+    /// <summary>Brush ring and site rings in the 3D overlay (lying on the current ground), marker labels over the view.</summary>
+    public void DrawOverlay(OverlayRenderer overlay, OrbitCamera camera, in Matrix4x4 viewProj, Vector2 viewport, PlanetSurface surface)
     {
-        var list = ImGui.GetBackgroundDrawList(ImGui.GetMainViewport());
-        var radius = surface.Radius;
+        var width = camera.Distance * 0.003;
 
         if (Tool == PlanetTool.Paint && Hover is { } h)
-            Ring(list, rig, surface, double3.Normalize(h), _radiusKm * 1000.0, BrushColour, viewport);
+            Ring(overlay, surface, double3.Normalize(h), _radiusKm * 1000.0, width, BrushColour);
+
+        var list = ImGui.GetBackgroundDrawList(ImGui.GetMainViewport());
 
         foreach (var s in _session.Layer.Sites)
         {
             var d = _dragging && s.Id == _selected ? _dragTo : double3.Normalize(s.Position);
-            var selected = s.Id == _selected;
-            Ring(list, rig, surface, d, s.CoreM, selected ? SelectedColour : CoreColour, viewport);
-            Ring(list, rig, surface, d, s.CoreM + s.BlendM, BlendColour, viewport);
+            Ring(overlay, surface, d, s.CoreM, width, s.Id == _selected ? SelectedColour : CoreColour);
+            Ring(overlay, surface, d, s.CoreM + s.BlendM, width * 0.6, BlendColour);
 
             foreach (var m in _session.Layer.Markers)
             {
-                if (m.Site == s.Id && rig.Project(d * (radius + s.HeightM + 20.0), viewport, out var at))
+                if (m.Site == s.Id && camera.Project(d * (surface.Radius + s.HeightM + RingLift), viewProj, viewport, out var at))
                     list.AddText(new float2(at.X + 6f, at.Y - 6f), LabelColour, $"{m.Name} ({m.Type})");
             }
         }
     }
 
-    private static void Ring(ImDrawListPtr list, PlanetCameraRig rig, PlanetSurface surface, double3 centre, double metres, ImColor8 colour, Vector2 viewport)
+    private static void Ring(OverlayRenderer overlay, PlanetSurface surface, double3 centre, double metres, double width, uint colour)
     {
         var axis = Math.Abs(centre.Y) < 0.99 ? double3.UnitY : double3.UnitX;
         var east = double3.Normalize(double3.Cross(axis, centre));
         var north = double3.Cross(centre, east);
         var angle = metres / surface.Radius;
-        var have = false;
-        var previous = default(Vector2);
+        var previous = default(double3);
 
         for (var k = 0; k <= RingPoints; k++)
         {
             var (s, c) = Math.SinCos(2.0 * Math.PI * k / RingPoints);
             var d = double3.Normalize(centre + (east * c + north * s) * angle);
-            var p = d * (surface.Radius + Math.Max(surface.Height(d.X, d.Y, d.Z), surface.SeaHeight) + 2.0);
+            var p = d * (surface.Radius + Math.Max(surface.Height(d.X, d.Y, d.Z), surface.SeaHeight) + RingLift);
 
-            if (!rig.Project(p, viewport, out var at))
-            {
-                have = false;
-                continue;
-            }
+            if (k > 0)
+                overlay.Ribbon(previous, p, width, colour);
 
-            if (have)
-                list.AddLine(new float2(previous.X, previous.Y), new float2(at.X, at.Y), colour, 2f);
-
-            previous = at;
-            have = true;
+            previous = p;
         }
     }
 }

@@ -33,7 +33,7 @@ public sealed class PlanetDesignSessionTests : IDisposable
 
         session.Undo();
         Assert.Equal(empty, session.Shape.Write());
-        Assert.True(session.Shape.IsEmpty);
+        Assert.False(session.Snapshot().ChangesTerrain);
         session.Redo();
         Assert.Equal(painted, session.Shape.Write());
     }
@@ -68,7 +68,7 @@ public sealed class PlanetDesignSessionTests : IDisposable
         session.EndStroke();
         session.Save();
         Assert.Equal(1, session.Layer.Version);
-        Assert.False(session.Dirty);
+        Assert.False(session.Modified);
 
         session.Save();
         Assert.Equal(1, session.Layer.Version);

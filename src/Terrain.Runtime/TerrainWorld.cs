@@ -258,21 +258,24 @@ public sealed class TerrainWorld : IDisposable
     /// <summary>Nothing left to do: the selection is current and every desired leaf is loaded and ready.</summary>
     public bool Settled { get; private set; }
 
+    /// <summary>The last <see cref="ReplaceGenerator"/> as applied: bounds rebuild ms and leaves marked to regenerate.</summary>
+    public (float Ms, int Leaves) LastReplace { get; private set; }
+
     /// <summary>
     /// Swaps a body's generator (the planet designer changed its authored layer): at the next <see cref="Update"/> with
     /// nothing in flight its bounds rebuild, edits are kept, and on the focus body every loaded leaf within
     /// <paramref name="angle"/> (rad) of unit <paramref name="direction"/> regenerates in place. A second call before then
-    /// widens the region to the whole body.
+    /// grows the region to cover both (the whole body for another body).
     /// </summary>
-    /// <summary>The last <see cref="ReplaceGenerator"/> as applied: bounds rebuild ms and leaves marked to regenerate.</summary>
-    public (float Ms, int Leaves) LastReplace { get; private set; }
-
     public void ReplaceGenerator(int body, PlanetGenerator generator, double3 direction, double angle)
     {
-        if (_replacement is { } pending && (pending.Body != body || pending.Direction != direction))
-            angle = Math.PI;
+        if (_replacement is { } pending)
+        {
+            var between = Math.Acos(Math.Clamp(double3.Dot(pending.Direction, direction), -1.0, 1.0));
+            (direction, angle) = pending.Body != body ? (direction, Math.PI) : (pending.Direction, Math.Max(pending.Angle, between + angle));
+        }
 
-        _replacement = (body, generator, direction, Math.Max(angle, _replacement?.Angle ?? 0.0));
+        _replacement = (body, generator, direction, Math.Min(angle, Math.PI));
     }
 
     private void Replace()
